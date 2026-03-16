@@ -84,10 +84,18 @@ intents: list of strings — which data sources are needed.
                 or discusses its code / capabilities / improvements.
   - portfolio : user asks about their stock portfolio, share prices, positions, P&L, dividends,
                 trading alerts, or any bourse / finance / portefeuille topic.
+  - weather   : user asks about weather conditions — current, today, tomorrow, or upcoming days.
+                Use instead of "web" for any météo / weather / temperature / wind / rain / sun / cloud question.
 
   Multiple intents allowed.
   Default rule: if the message is a greeting, update, chitchat, or nothing matches clearly
   → use ["memory"].
+
+weather_location: string or null
+  City or place name to look up. Use only when "weather" is in intents.
+  Extract ONLY the location name — no weather words, no question words, no department numbers.
+  Examples: "Paris", "Saint-Sulpice-la-Pointe", "Lyon", "New York"
+  If no location is mentioned (follow-up question), set to null.
 
 gmail_query: string or null
   Gmail search query (Gmail syntax). Use only when "gmail" is in intents.
@@ -141,7 +149,7 @@ conversation_type: string
 User message: {message}
 
 Respond with valid JSON only. No explanation, no markdown, no code fences.
-Example: {{"intents": ["gmail", "web"], "gmail_query": "newer_than:7d", "calendar_days": null, "use_reasoning": false, "memory_scope": "auto", "conversation_type": "question"}}"""
+Example: {{"intents": ["gmail", "web"], "weather_location": null, "gmail_query": "newer_than:7d", "calendar_days": null, "use_reasoning": false, "memory_scope": "auto", "conversation_type": "question"}}"""
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────
@@ -151,6 +159,7 @@ class RouterResult:
     use_memory:       bool
     use_rag:          bool
     use_web:          bool
+    use_weather:      bool
     use_gmail:        bool
     use_calendar:     bool
     use_briefing:     bool
@@ -159,6 +168,7 @@ class RouterResult:
     use_reasoning:    bool
     gmail_query:      str
     calendar_days:    int
+    weather_location: str = field(default="")
     memory_scope:     str = field(default="auto")
     conversation_type: str = field(default="conversational")
 
@@ -272,9 +282,10 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
     if not intents:
         intents = ["memory"]
 
-    gmail_query:   str  = parsed.get("gmail_query") or ""
-    calendar_days: int  = int(parsed.get("calendar_days") or 7)
-    use_reasoning: bool = bool(parsed.get("use_reasoning", False))
+    gmail_query:      str  = parsed.get("gmail_query") or ""
+    calendar_days:    int  = int(parsed.get("calendar_days") or 7)
+    weather_location: str  = parsed.get("weather_location") or ""
+    use_reasoning:    bool = bool(parsed.get("use_reasoning", False))
 
     calendar_days = max(1, min(calendar_days, 90))
 
@@ -291,6 +302,7 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
         use_memory        = "memory"    in intents,
         use_rag           = "rag"       in intents,
         use_web           = "web"       in intents,
+        use_weather       = "weather"   in intents,
         use_gmail         = "gmail"     in intents and google_available,
         use_calendar      = "calendar"  in intents and google_available,
         use_briefing      = "briefing"  in intents,
@@ -299,13 +311,14 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
         use_reasoning     = use_reasoning,
         gmail_query       = gmail_query,
         calendar_days     = calendar_days,
+        weather_location  = weather_location,
         memory_scope      = memory_scope,
         conversation_type = conversation_type,
     )
 
     logger.info(
-        "LLM router [%s]: intents=%s gmail_query=%r calendar_days=%d use_reasoning=%s use_portfolio=%s memory_scope=%s conv_type=%s",
-        ROUTER_MODEL, intents, gmail_query, calendar_days, use_reasoning, result.use_portfolio,
+        "LLM router [%s]: intents=%s weather_location=%r gmail_query=%r calendar_days=%d use_reasoning=%s memory_scope=%s conv_type=%s",
+        ROUTER_MODEL, intents, weather_location, gmail_query, calendar_days, use_reasoning,
         memory_scope, conversation_type,
     )
     return result

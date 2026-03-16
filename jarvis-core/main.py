@@ -152,6 +152,7 @@ from config import (
     ROUTER_API_URL,
     ROUTER_MODEL,
     SELF_MEMORY_PATH,
+    USER_CITIES,
     USER_CODES,
     USER_TRADING,
     USERS,
@@ -743,27 +744,28 @@ _WEATHER_CODES = {
 
 def _is_weather_query(query: str) -> bool:
     keywords = [
-        "météo",
-        "meteo",
-        "weather",
-        "température",
-        "temperature",
-        "pluie",
-        "rain",
-        "vent",
-        "wind",
-        "forecast",
-        "prévision",
+        "météo", "meteo", "weather", "forecast", "prévision",
+        "température", "temperature", "degrés", "degré",
+        "pluie", "rain", "neige", "snow", "grêle",
+        "vent", "wind", "rafale",
+        "soleil", "sun", "nuage", "nuageux", "nuageuse", "couvert",
+        "ensoleillé", "ensoleillée", "orage", "brouillard", "brume",
+        "humidité", "précipitation",
     ]
     q = query.lower()
     return any(k in q for k in keywords)
 
 
+# DEPRECATED: location extraction is now handled by the LLM router (weather_location field).
+# Kept as fallback for the embedding router path only.
 def _extract_location(query: str) -> str:
     stop = {
         # weather terms
         "météo", "meteo", "weather", "forecast", "prévision", "prévisions",
         "température", "temperature", "temps", "climat",
+        "pluie", "vent", "neige", "soleil", "nuage", "nuageux", "nuageuse",
+        "orage", "brouillard", "brume", "humidité", "degrés", "degré",
+        "mini", "maxi", "minimum", "maximum", "min", "max",
         # time words
         "aujourd'hui", "today", "demain", "tomorrow", "semaine", "week",
         "matin", "soir", "après-midi", "nuit", "maintenant", "now",
@@ -772,12 +774,19 @@ def _extract_location(query: str) -> str:
         "quelle", "quel", "quels", "quelles", "comment", "est-ce", "est",
         "qu'est", "que", "quoi",
         # filler / prepositions
-        "à", "a", "de", "du", "pour", "en", "sur", "le", "la", "les",
-        "il", "y", "va", "fait", "aura", "t", "avoir",
-        # request verbs
-        "donne", "dis", "montre", "cherche",
+        "à", "a", "de", "du", "pour", "en", "sur", "le", "la", "les", "dans",
+        "il", "y", "va", "fait", "aura", "t", "avoir", "au", "aux",
+        # politeness / request words
+        "merci", "svp", "stp", "bonjour", "bonsoir", "s'il", "vous", "plaît",
+        "moi", "dis", "donne", "montre", "cherche", "dites",
+        "?", "!", ".",
     }
-    words = [w for w in query.split() if w.lower() not in stop]
+    # strip punctuation from each token, skip pure numbers (dept codes etc.)
+    words = []
+    for w in query.split():
+        clean = w.strip("?!.,;:")
+        if clean.lower() not in stop and not clean.isdigit():
+            words.append(clean)
     return " ".join(words).strip()
 
 
@@ -1517,21 +1526,25 @@ async def chat(req: ChatRequest):
         llm_result = await llm_route(req.message, google_available=is_google_available())
 
     if llm_result:
-        use_memory    = llm_result.use_memory
-        use_rag       = llm_result.use_rag
-        use_web_auto  = llm_result.use_web
-        use_gmail     = llm_result.use_gmail
-        use_calendar  = llm_result.use_calendar
-        use_briefing  = llm_result.use_briefing
-        use_self      = llm_result.use_self
-        use_portfolio = llm_result.use_portfolio
-        _llm_gmail_query = llm_result.gmail_query
-        _llm_cal_days    = llm_result.calendar_days
+        use_memory        = llm_result.use_memory
+        use_rag           = llm_result.use_rag
+        use_web_auto      = llm_result.use_web
+        use_weather_auto  = llm_result.use_weather
+        use_gmail         = llm_result.use_gmail
+        use_calendar      = llm_result.use_calendar
+        use_briefing      = llm_result.use_briefing
+        use_self          = llm_result.use_self
+        use_portfolio     = llm_result.use_portfolio
+        _llm_gmail_query      = llm_result.gmail_query
+        _llm_cal_days         = llm_result.calendar_days
+        _llm_weather_location = llm_result.weather_location
     else:
         use_memory, use_rag, use_web_auto, use_gmail, use_calendar, use_briefing, use_self, use_portfolio = \
             await asyncio.to_thread(semantic_route_query, req.message)
-        _llm_gmail_query = None
-        _llm_cal_days    = None
+        use_weather_auto      = False
+        _llm_gmail_query      = None
+        _llm_cal_days         = None
+        _llm_weather_location = ""
 
     # ── Model / tier selection ──
     use_model, _use_api_url, _use_api_key, _use_timeout = select_model(
@@ -1601,12 +1614,16 @@ async def chat(req: ChatRequest):
             req.message, use_gmail, use_calendar
         )
 
+    # Weather: LLM router provides a clean location; fall back to user's city from profile
+    _weather_query = _llm_weather_location or USER_CITIES.get(user_code, "Paris")
+
     rag_chunks, memory_chunks, web_results, gmail_results, calendar_results = await asyncio.gather(
         # RAG — skip for conversational messages
         search_documents(req.message) if (req.use_rag or use_rag) and not _is_conversational else _empty(),
         # Memory — only when router flagged it
         asyncio.to_thread(search_memory, user_code, req.message, 5, _memory_scope) if HAS_MEMORY and use_memory else _empty(),
-        # Web search
+        # Web/weather search — weather intent takes priority and bypasses generic web search
+        search_weather(_weather_query) if use_weather_auto else
         search_web(optimize_web_query(req.message)) if (req.use_web or use_web_auto) else _empty(),
         # Gmail
         asyncio.to_thread(fetch_gmail_messages, gmail_query) if use_gmail else _empty(),

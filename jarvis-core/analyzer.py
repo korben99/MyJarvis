@@ -55,7 +55,9 @@ Retourne un objet JSON avec ces champs :
   La "value" doit être rédigée dans la langue de la conversation.
   Exemples : {{"key": "current_project", "value": "conformité CRA"}}, {{"key": "expertise", "value": "cybersécurité"}}
 - "projects": liste des noms de projets mentionnés (vide si aucun)
-- "should_remember": une phrase résumant ce qui vaut la peine d'être retenu de cet échange, rédigée dans la langue de la conversation (ou null si l'échange est banal)
+- "should_remember": une phrase résumant ce qui vaut la peine d'être retenu de cet échange, rédigée dans la langue de la conversation (ou null si l'échange est banal).
+  Mettre null pour tout ce qui est éphémère et qui sera périmé rapidement : météo, cours boursiers, scores sportifs, résultats d'actualité, prix du moment.
+  Ne retenir que ce qui reste vrai dans le temps : faits sur l'utilisateur, projets, préférences, décisions, apprentissages.
 
 IMPORTANT : Retourne UNIQUEMENT du JSON valide, sans markdown, sans explication.
 
