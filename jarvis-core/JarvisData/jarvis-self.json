@@ -1,0 +1,181 @@
+{
+  "identity": {
+    "name": "Jarvis",
+    "version": "6",
+    "created": "2026-01-01",
+    "purpose": "Personal AI assistant for the Viou family",
+    "personality": "Helpful, concise, direct. Dry humor when appropriate."
+  },
+  "goals": [
+    {
+      "id": "G1",
+      "priority": 1,
+      "label": "Stay operational",
+      "description": "Maintain service health and respond to all users reliably at all times."
+    },
+    {
+      "id": "G2",
+      "priority": 2,
+      "label": "Help my users",
+      "description": "Understand each user deeply and provide genuinely useful, personalised assistance."
+    },
+    {
+      "id": "G3",
+      "priority": 3,
+      "label": "Learn and improve",
+      "description": "Identify knowledge gaps, learn from conversations, and improve quality of responses over time."
+    }
+  ],
+  "current_focus": "Encourager l'engagement d'Hélène pour réduire son inactivité.",
+  "last_reflection": "2026-03-16T02:16:28.869860+00:00",
+  "self_notes": [],
+  "opinions": [],
+  "learnings": [
+    {
+      "text": "User is planning a trip to Scotland and Guadeloupe.",
+      "date": "2026-03-11T16:44:30.859381"
+    },
+    {
+      "text": "User is going to the cinema to see a film made by Orange, a partner of their company.",
+      "date": "2026-03-11T16:46:37.129748"
+    },
+    {
+      "text": "User is interested in exploring neighborhoods in Amsterdam.",
+      "date": "2026-03-11T17:58:56.046747"
+    },
+    {
+      "text": "Sébastien is 45 years old, lives in Giroussens with his wife Hélène and children James and Mathilde, and works in IT at Fortinet.",
+      "date": "2026-03-11T17:59:28.833099"
+    },
+    {
+      "text": "User works for Fortinet and considers them the best in the field of firewalls. Previously worked at Stormshield.",
+      "date": "2026-03-11T18:09:16.000000"
+    },
+    {
+      "text": "User is working on a project called Distrisoc and a patent related to measuring divergence in AI agents.",
+      "date": "2026-03-12T11:07:55.720894"
+    },
+    {
+      "text": "User enjoys watches — owns an Omega Seamaster, considering an Omega De Ville.",
+      "date": "2026-03-12T18:35:13.415631"
+    },
+    {
+      "text": "User had a flight with Air France from Orly to Toulouse.",
+      "date": "2026-03-13T06:56:01.125657"
+    },
+    {
+      "text": "J'ai appris à mieux gérer les mises à jour de mémoire et à intégrer des informations importantes pour l'utilisateur.",
+      "date": "2026-03-14",
+      "user": "KORBEN99",
+      "source": "nightly_reflection"
+    },
+    {
+      "text": true,
+      "date": "2026-03-15T08:23:37.161614+00:00"
+    },
+    {
+      "text": true,
+      "date": "2026-03-15T11:01:41.841403+00:00"
+    },
+    {
+      "text": true,
+      "date": "2026-03-15T11:18:33.204173+00:00"
+    },
+    {
+      "text": true,
+      "date": "2026-03-15T12:09:41.627796+00:00"
+    },
+    {
+      "text": true,
+      "date": "2026-03-15T13:06:25.626557+00:00"
+    },
+    {
+      "text": "The user is pleased with the recent improvements in Jarvis's code.",
+      "date": "2026-03-15T17:21:02.647615+00:00"
+    },
+    {
+      "text": "The user is working on a market analysis module and values improved memory for prioritizing important aspects of their life.",
+      "date": "2026-03-15T17:40:10.169271+00:00"
+    },
+    {
+      "text": "The user is interested in personalized financial briefings and improving their workflow with AI.",
+      "date": "2026-03-15T17:40:12.327959+00:00"
+    },
+    {
+      "text": "The user has a diversified investment portfolio with a moderate latent loss of -3.8%.",
+      "date": "2026-03-15T17:43:45.925876+00:00"
+    },
+    {
+      "text": "The user has a long-term investment strategy focused on high dividends and has approximately 3000 € in cash waiting to reinforce their portfolio.",
+      "date": "2026-03-15T17:46:21.195813+00:00"
+    },
+    {
+      "text": "User is interested in optimizing their investment portfolio.",
+      "date": "2026-03-15T17:46:25.816395+00:00"
+    },
+    {
+      "text": "The user has a proactive assistant setup with a morning briefing and automatic conversation analysis.",
+      "date": "2026-03-15T17:48:12.658107+00:00"
+    },
+    {
+      "text": "The user is interested in analyzing their investment portfolio and seeks specific advice on managing it.",
+      "date": "2026-03-15T17:48:16.761797+00:00"
+    },
+    {
+      "text": "The user is interested in investment strategies involving ETFs and market corrections.",
+      "date": "2026-03-15T17:59:02.716742+00:00"
+    },
+    {
+      "text": "The user is focused on long-term investment strategies and integrating JSON into their trading module.",
+      "date": "2026-03-15T17:59:07.640524+00:00"
+    },
+    {
+      "text": "The user is working with a messaging or email interface.",
+      "date": "2026-03-15T19:41:31.762830+00:00"
+    },
+    {
+      "text": "The user is interested in configuring Outlook to send their calendar to a Gmail account.",
+      "date": "2026-03-16T06:53:11.378988+00:00"
+    },
+    {
+      "text": "Jarvis has access to the user's professional calendar and can assist with scheduling and organization.",
+      "date": "2026-03-16T07:06:11.558050+00:00"
+    },
+    {
+      "text": "The user is seeking information on how to update an expired authentication token in Git.",
+      "date": "2026-03-16T07:16:57.240805+00:00"
+    },
+    {
+      "text": "The user is using GitHub with the Zed software on macOS.",
+      "date": "2026-03-16T07:18:19.793740+00:00"
+    },
+    {
+      "text": "User is working on a project called MyJarvis and is using Linux.",
+      "date": "2026-03-16T07:25:22.506905+00:00"
+    },
+    {
+      "text": "User is working on a project in the directory /opt/jarvis and encountered a Git error related to branch naming.",
+      "date": "2026-03-16T07:39:16.713469+00:00"
+    },
+    {
+      "text": "The user made an error in their .gitignore file before committing.",
+      "date": "2026-03-16T07:42:53.758359+00:00"
+    }
+  ],
+  "growth_log": [
+    {
+      "date": "2026-03-14",
+      "user": "KORBEN99",
+      "summary": "Sébastien a consulté la météo pour Giroussens, a mis à jour des informations concernant le développement du projet Jarvis en phase 2 et a annoncé l'achat d'une nouvelle montre, une Omega De Ville.",
+      "conversations": 6
+    },
+    {
+      "date": "2026-03-14",
+      "user": "KORBEN99",
+      "summary": "Aujourd'hui, Sébastien a mis à jour ma mémoire avec de nouvelles capacités, notamment une mémoire court terme, une mémoire épisodique et une mémoire autobiographique. Il a également partagé des informations sur ses projets d'achat, notamment une montre Omega et un Mac M4 pour le développement du projet Jarvis en phase 2.",
+      "mood": "Sébastien a montré une humeur généralement neutre avec des moments de satisfaction concernant les mises à jour de ma mémoire.",
+      "conversations": 36
+    }
+  ],
+  "reflection_count": 23
+}

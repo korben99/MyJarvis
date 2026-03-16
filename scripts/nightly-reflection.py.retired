@@ -1,0 +1,209 @@
+#!/opt/jarvis/venv/bin/python3
+"""
+Jarvis Nightly Reflection
+==========================
+Runs every night via cron:
+1. Reviews today's conversations
+2. Identifies patterns and learnings
+3. Updates self-memory
+4. Generates a daily summary
+"""
+import sys
+import os
+from dotenv import load_dotenv
+load_dotenv("/opt/jarvis/.env")
+# inject PYTHONPATH into python import system
+pythonpath = os.getenv("PYTHONPATH")
+if pythonpath and pythonpath not in sys.path:
+    sys.path.insert(0, pythonpath)
+    
+
+import json
+import httpx
+import redis
+import time
+
+from datetime import datetime, timezone, timedelta
+from memory import consolidate_memories
+from config import USER_CODES
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_API_URL = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1")
+SELF_MEMORY_PATH = "/opt/jarvis/jarvis-core/JarvisData/jarvis-self.json"
+REFLECTIONS_DIR = "/opt/jarvis/jarvis-core/reflections"
+
+os.makedirs(REFLECTIONS_DIR, exist_ok=True)
+
+r = redis.from_url(REDIS_URL, decode_responses=True)
+
+# Get today's conversations
+today_dt = datetime.now(timezone.utc)
+today = today_dt.strftime("%Y-%m-%d")
+midnight = today_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+start = (midnight - timedelta(days=1)).timestamp()
+end   = midnight.timestamp()
+reflection_date = (midnight - timedelta(days=1)).strftime("%Y-%m-%d")
+# Find all users with episodic memory
+user_keys = sorted(r.keys("episodic:*:conversations"))
+
+if not user_keys:
+    print("No conversations key found. Skipping reflection.")
+    sys.exit(0)
+
+# Load current self-memory
+try:
+    with open(SELF_MEMORY_PATH) as f:
+        self_memory = json.load(f)
+except:
+    self_memory = {
+        "learnings": [],
+        "opinions": [],
+        "growth_log": [],
+        "reflection_count": 0
+    }
+
+for key in user_keys:
+
+    _, user_code, _ = key.split(":")
+
+    lock_key = f"jarvis:{user_code}:nightly_reflection:{reflection_date}"
+
+    if not r.set(lock_key, "1", nx=True, ex=86400):
+        print(f"Nightly reflection already executed for {user_code} today. Skipping.")
+        continue
+        
+    entries = r.zrangebyscore(key, start, end)
+    conversations = [json.loads(e) for e in entries]
+    conversations = conversations[-50:]
+	
+    if not conversations:
+        continue
+
+    print(f"Reflecting for user {user_code} on {len(conversations)} exchanges...")
+
+    # Build reflection prompt
+    conv_text = ""
+    for c in conversations:
+        conv_text += f"User: {c['user'][:200]}\nJarvis: {c['assistant'][:200]}\nMood: {c.get('mood','?')}\n\n"
+
+
+    # Load user profile
+    profile = r.hgetall(f"user:{user_code}:profile")
+    projects = r.get(f"user:{user_code}:projects")
+
+    reflection_prompt = f"""You are Jarvis, a personal AI assistant. It's the end of the day.
+Review today's conversations with user {user_code} and reflect on them.
+
+Today's conversations:
+{conv_text[:3000]}
+
+Current user profile: {json.dumps(profile)}
+Current projects: {projects}
+Your recent learnings: {json.dumps(self_memory.get('learnings', [])[-5:])}
+Recent growth log:
+{json.dumps(self_memory.get('growth_log', [])[-3:])}
+
+Respond with a JSON object:
+- "daily_summary": 2-3 sentence summary of the day
+- "user_insights": list of new things learned about the user (or empty)
+- "self_reflections": list of things Jarvis learned about itself or how to be better (or empty)
+- "tomorrow_suggestions": list of proactive things to mention tomorrow (or empty)
+- "mood_summary": overall assessment of the user's day
+
+ONLY return valid JSON."""
+
+    # Call LLM for reflection
+    response = httpx.post(
+        f"{OPENAI_API_URL}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": reflection_prompt}],
+            "temperature": 0.3,
+            "max_tokens": 1000,
+        },
+        timeout=60.0,
+    )
+
+    response.raise_for_status()
+    data = response.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+    
+    if content.startswith("```"):
+        content = content.split("\n", 1)[1].rsplit("```", 1)[0]
+
+    try:
+        reflection = json.loads(content)
+    except Exception:
+        print("Reflection JSON parse error")
+        print(content[:500])
+        reflection = {}
+        continue
+    # Ensure required keys exist
+    reflection.setdefault("daily_summary", "")
+    reflection.setdefault("user_insights", [])
+    reflection.setdefault("self_reflections", [])
+    reflection.setdefault("tomorrow_suggestions", [])
+    reflection.setdefault("mood_summary", "")    
+    # Save reflection
+    reflection["date"] = today
+    reflection["conversation_count"] = len(conversations)
+    
+    # Save reflection file
+    reflection_file = os.path.join(REFLECTIONS_DIR, f"{user_code}-{today}.json")
+    with open(reflection_file, "w") as f:
+        json.dump(reflection, f, indent=2, ensure_ascii=False)
+
+    # Store tomorrow's suggestions in Redis
+    suggestions = reflection.get("tomorrow_suggestions", [])
+    if suggestions:
+        key = f"jarvis:{user_code}:tomorrow_suggestions"
+        r.set(key, json.dumps(suggestions))
+        r.expire(key, 86400)
+
+    # Update self-memory
+    for refl in reflection.get("self_reflections", []):
+        self_memory["learnings"].append({
+            "text": refl,
+            "date": today,
+            "user": user_code,
+            "source": "nightly_reflection",
+        })
+
+    self_memory["growth_log"].append({
+        "date": today,
+        "user": user_code,
+        "summary": reflection.get("daily_summary", ""),
+        "conversations": len(conversations),
+    })
+
+    self_memory["reflection_count"] += 1
+    print(f"Reflection done for {user_code}")
+    print(f"  Summary: {reflection.get('daily_summary', 'N/A')}")
+    print(f"  Insights: {len(reflection.get('user_insights', []))}")
+    print(f"  Self-reflections: {len(reflection.get('self_reflections', []))}")
+    print(f"  Tomorrow suggestions: {len(suggestions)}")
+    print(f"  Saved to: {reflection_file}")
+
+    # Monthly memory consolidation (runs on the 1st day of the month)
+    try:
+        if today_dt.day == 1:
+            consolidate_memories(user_code)
+            print(f"Monthly memory consolidation completed for {user_code}")
+
+    except Exception as e:
+        print(f"Memory consolidation failed for {user_code}: {e}")
+
+self_memory["learnings"] = self_memory["learnings"][-100:]
+self_memory["growth_log"] = self_memory["growth_log"][-365:]
+
+with open(SELF_MEMORY_PATH, "w") as f:
+    json.dump(self_memory, f, indent=2, ensure_ascii=False)
+
+print(f"Reflection complete:")
+

@@ -1,0 +1,16 @@
+ #PYTHON#
+venv/
+.cache
+.config
+.bash_history
+jarvis-core/__pycache__
+
+#FILES#
+logs/
+models/
+RAGData/
+TradeData/
+JarvisConfig
+jarvis-core/reflections/
+jarvis-core/JarvisData/model_cache/
+
