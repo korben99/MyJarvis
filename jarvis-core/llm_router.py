@@ -64,8 +64,11 @@ intents: list of strings — which data sources are needed.
                 Jarvis should already know about them. Also use for greetings, social messages,
                 updates, thanks, or any conversational message with no specific data need.
   - rag       : user explicitly asks about their own documents, files, notes, or knowledge base.
-  - web       : user asks about current events, news, live prices, weather, or anything requiring
-                up-to-date information from the internet.
+  - web       : user EXPLICITLY asks to search the internet, OR asks about clearly time-sensitive
+                data that cannot come from training data: today's weather, today's stock price,
+                a specific live score, breaking news, or a very recent event.
+                Do NOT use for general questions, open-ended curiosity, incomplete sentences,
+                or messages that could be answered from knowledge. When in doubt → "memory".
   - gmail     : user asks about emails, inbox, messages, or a specific sender / subject.
   - calendar  : user asks about their agenda, appointments, schedule, or upcoming events.
   - briefing  : user explicitly asks for their morning briefing or daily summary.

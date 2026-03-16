@@ -196,7 +196,7 @@ GOOGLE_CHAR_BUDGET = int(
 # ROUTER VAR
 ROUTER_MEMORY_THRESHOLD = 0.35
 ROUTER_RAG_THRESHOLD = 0.38
-ROUTER_WEB_THRESHOLD = 0.40
+ROUTER_WEB_THRESHOLD = 0.52
 ROUTER_GMAIL_THRESHOLD = 0.38
 ROUTER_CALENDAR_THRESHOLD = 0.38
 ROUTER_BRIEFING_THRESHOLD = 0.55
@@ -222,12 +222,16 @@ INTENT_EXAMPLES_FR = {
         "regarde mes notes",
     ],
     "web": [
-        "les infos",
-        "ce qu'il se passe en ce moment",
-        "la bourse",
-        "que ce passe-t-il",
-        "information récente",
         "cherche sur internet",
+        "recherche sur le web",
+        "googles les dernières nouvelles sur",
+        "quelles sont les actualités du jour",
+        "trouve moi les dernières infos sur",
+        "quel est le cours de la bourse aujourd'hui",
+        "quelle est l'actualité en ce moment",
+        "les dernières nouvelles",
+        "qu'est ce qui se passe dans l'actualité",
+        "cherche en ligne",
     ],
     "gmail": [
         "regarde mes emails",
@@ -635,8 +639,9 @@ def semantic_route_query(message: str):
 
     logger.info(
         "routing: memory=%s rag=%s web=%s gmail=%s calendar=%s briefing=%s self=%s portfolio=%s | "
-        "scores gmail=%.3f calendar=%.3f briefing=%.3f self=%.3f portfolio=%.3f",
+        "scores memory=%.3f rag=%.3f web=%.3f gmail=%.3f calendar=%.3f briefing=%.3f self=%.3f portfolio=%.3f",
         use_memory, use_rag, use_web, use_gmail, use_calendar, use_briefing, use_self, use_portfolio,
+        scores.get("memory", 0), scores.get("rag", 0), scores.get("web", 0),
         scores.get("gmail", 0), scores.get("calendar", 0), scores.get("briefing", 0),
         scores.get("self", 0), scores.get("portfolio", 0),
     )

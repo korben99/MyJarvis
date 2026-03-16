@@ -47,19 +47,20 @@ from config import (
 
 logger = logging.getLogger("jarvis-analyzer")
 
-ANALYSIS_PROMPT = """Analyze this conversation exchange between a user and their AI assistant Jarvis.
-Return a JSON object with these fields:
-- "topics": list of 1-3 topic keywords discussed (lowercase)
-- "mood": the user's apparent mood (one of: happy, neutral, focused, stressed, frustrated, curious, tired)
-- "user_facts": list of new facts learned about the user (empty if none). Each fact as {{"key": "...", "value": "..."}}
-  Examples: {{"key": "current_project", "value": "CRA compliance"}}, {{"key": "expertise", "value": "cybersecurity"}}
-- "projects": list of project names mentioned (empty if none)
-- "should_remember": a single sentence summarizing what's worth remembering from this exchange (or null if routine)
+ANALYSIS_PROMPT = """Analyse cet échange entre un utilisateur et son assistant personnel Jarvis.
+Retourne un objet JSON avec ces champs :
+- "topics": liste de 1 à 3 mots-clés du sujet discuté (en minuscules, dans la langue de la conversation)
+- "mood": humeur apparente de l'utilisateur — UNIQUEMENT une de ces valeurs exactes en anglais : happy, neutral, focused, stressed, frustrated, curious, tired
+- "user_facts": liste de faits nouveaux appris sur l'utilisateur (vide si aucun). Chaque fait sous la forme {{"key": "...", "value": "..."}}
+  La "value" doit être rédigée dans la langue de la conversation.
+  Exemples : {{"key": "current_project", "value": "conformité CRA"}}, {{"key": "expertise", "value": "cybersécurité"}}
+- "projects": liste des noms de projets mentionnés (vide si aucun)
+- "should_remember": une phrase résumant ce qui vaut la peine d'être retenu de cet échange, rédigée dans la langue de la conversation (ou null si l'échange est banal)
 
-IMPORTANT: Return ONLY valid JSON, no markdown, no explanation.
+IMPORTANT : Retourne UNIQUEMENT du JSON valide, sans markdown, sans explication.
 
-User said: {user_message}
-Assistant said: {assistant_message}"""
+L'utilisateur a dit : {user_message}
+Jarvis a répondu : {assistant_message}"""
 
 
 async def analyze_exchange(user_msg: str, assistant_msg: str) -> dict:

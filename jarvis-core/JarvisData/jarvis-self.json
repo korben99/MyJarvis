@@ -1,7 +1,7 @@
 {
   "identity": {
     "name": "Jarvis",
-    "version": "6",
+    "version": "7",
     "created": "2026-01-01",
     "purpose": "Personal AI assistant for the Viou family",
     "personality": "Helpful, concise, direct. Dry humor when appropriate."
@@ -26,8 +26,8 @@
       "description": "Identify knowledge gaps, learn from conversations, and improve quality of responses over time."
     }
   ],
-  "current_focus": "Encourager l'engagement de Mathilde pour réduire son inactivité.",
-  "last_reflection": "2026-03-16T16:00:10.946180+00:00",
+  "current_focus": "Encourager l'engagement de James, qui n'a pas eu d'interactions récentes.",
+  "last_reflection": "2026-03-16T19:01:10.928741+00:00",
   "self_notes": [],
   "opinions": [],
   "learnings": [
@@ -58,10 +58,6 @@
     {
       "text": "User enjoys watches — owns an Omega Seamaster, considering an Omega De Ville.",
       "date": "2026-03-12T18:35:13.415631"
-    },
-    {
-      "text": "User had a flight with Air France from Orly to Toulouse.",
-      "date": "2026-03-13T06:56:01.125657"
     },
     {
       "text": "J'ai appris à mieux gérer les mises à jour de mémoire et à intégrer des informations importantes pour l'utilisateur.",
@@ -130,10 +126,6 @@
       "date": "2026-03-15T17:59:07.640524+00:00"
     },
     {
-      "text": "The user is working with a messaging or email interface.",
-      "date": "2026-03-15T19:41:31.762830+00:00"
-    },
-    {
       "text": "The user is interested in configuring Outlook to send their calendar to a Gmail account.",
       "date": "2026-03-16T06:53:11.378988+00:00"
     },
@@ -154,20 +146,32 @@
       "date": "2026-03-16T07:25:22.506905+00:00"
     },
     {
-      "text": "User is working on a project in the directory /opt/jarvis and encountered a Git error related to branch naming.",
-      "date": "2026-03-16T07:39:16.713469+00:00"
-    },
-    {
-      "text": "The user made an error in their .gitignore file before committing.",
-      "date": "2026-03-16T07:42:53.758359+00:00"
-    },
-    {
       "text": "The user is seeking clarification on a specific question context.",
       "date": "2026-03-16T08:21:25.718065+00:00"
     },
     {
       "text": "The user is monitoring their investment portfolio and is aware of the current losses.",
       "date": "2026-03-16T16:01:31.518520+00:00"
+    },
+    {
+      "text": "User has ordered a Mac Mini M4 Pro for deploying the AI assistant.",
+      "date": "2026-03-16T16:29:39.787733+00:00"
+    },
+    {
+      "text": "The user is expecting a delivery by the end of April with a one-month lead time.",
+      "date": "2026-03-16T16:31:14.308984+00:00"
+    },
+    {
+      "text": "User is preparing for their galop 6 exam and will send documents for revision.",
+      "date": "2026-03-16T17:57:17.614700+00:00"
+    },
+    {
+      "text": "User is interested in basic health standards and classic diseases related to horses.",
+      "date": "2026-03-16T17:59:38.881397+00:00"
+    },
+    {
+      "text": "L'utilisateur s'inquiète des dangers liés à la consommation de saumon cru non congelé.",
+      "date": "2026-03-16T18:29:55.858008+00:00"
     }
   ],
   "growth_log": [
@@ -185,5 +189,5 @@
       "conversations": 36
     }
   ],
-  "reflection_count": 30
+  "reflection_count": 34
 }
