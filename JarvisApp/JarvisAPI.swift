@@ -4,6 +4,7 @@
 
 import Foundation
 import Combine
+import UIKit
 
 @MainActor
 class JarvisAPI: ObservableObject {
@@ -81,10 +82,14 @@ class JarvisAPI: ObservableObject {
 
     // MARK: - Text Chat (Streaming SSE)
 
-    func sendMessage(_ text: String, voiceMode: Bool = false) async {
-        guard !text.isEmpty else { return }
+    func sendMessage(_ text: String, image: UIImage? = nil, voiceMode: Bool = false) async {
+        guard !text.isEmpty || image != nil else { return }
 
-        messages.append(ChatMessage(role: .user, content: text))
+        // Compress image to JPEG base64 (≤ 1 MB target via 0.7 quality)
+        let imageData = image?.jpegData(compressionQuality: 0.7)
+        let imageBase64 = imageData.map { $0.base64EncodedString() }
+
+        messages.append(ChatMessage(role: .user, content: text, imageData: imageData))
         let assistantMessage = ChatMessage(role: .assistant, content: "", isStreaming: true)
         messages.append(assistantMessage)
         let assistantID = assistantMessage.id
@@ -112,8 +117,10 @@ class JarvisAPI: ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONEncoder().encode(
-            ChatRequest(message: text, session_id: sessionID, user_code: UserDefaults.standard.string(forKey: "userCode"), model: nil, stream: true,
-                        voice_mode: voiceMode)
+            ChatRequest(message: text, session_id: sessionID,
+                        user_code: UserDefaults.standard.string(forKey: "userCode"),
+                        model: nil, stream: true, voice_mode: voiceMode,
+                        image_base64: imageBase64)
         )
 
         do {

@@ -3,11 +3,15 @@
 
 import SwiftUI
 import Combine
+import PhotosUI
+import UIKit
 
 struct ChatView: View {
     @EnvironmentObject var api: JarvisAPI
     @State private var inputText = ""
     @State private var showSettings = false
+    @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var selectedImage: UIImage?
     @FocusState private var isInputFocused: Bool
 
     var body: some View {
@@ -82,40 +86,87 @@ struct ChatView: View {
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .safeAreaInset(edge: .bottom) {
-                HStack(spacing: 10) {
-                    TextField("Message à Jarvis...", text: $inputText, axis: .vertical)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 16))
-                        .foregroundColor(.white)
+                VStack(spacing: 0) {
+                    // Image preview strip
+                    if let img = selectedImage {
+                        HStack {
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 64, height: 64)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                                .overlay(alignment: .topTrailing) {
+                                    Button { selectedImage = nil; selectedPhotoItem = nil } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundColor(.white)
+                                            .background(Color.black.opacity(0.5), in: Circle())
+                                    }
+                                    .offset(x: 6, y: -6)
+                                }
+                            Spacer()
+                        }
                         .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(Color.jarvisCard)
-                        .clipShape(RoundedRectangle(cornerRadius: 20))
-                        .lineLimit(1...5)
-                        .focused($isInputFocused)
-                        .onSubmit { send() }
-
-                    Button(action: send) {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 32))
-                            .foregroundColor(inputText.isEmpty || api.isProcessing
-                                ? .gray.opacity(0.3) : .jarvisBlue)
+                        .padding(.top, 8)
                     }
-                    .disabled(inputText.isEmpty || api.isProcessing)
+
+                    HStack(spacing: 10) {
+                        // Photo picker button
+                        PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                            Image(systemName: "photo")
+                                .font(.system(size: 22))
+                                .foregroundColor(api.isProcessing ? .gray.opacity(0.3) : .gray)
+                        }
+                        .disabled(api.isProcessing)
+                        .onChange(of: selectedPhotoItem) { _, item in
+                            Task {
+                                if let data = try? await item?.loadTransferable(type: Data.self),
+                                   let ui = UIImage(data: data) {
+                                    selectedImage = ui
+                                }
+                            }
+                        }
+
+                        TextField("Message à Jarvis...", text: $inputText, axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 16))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(Color.jarvisCard)
+                            .clipShape(RoundedRectangle(cornerRadius: 20))
+                            .lineLimit(1...5)
+                            .focused($isInputFocused)
+                            .onSubmit { send() }
+
+                        Button(action: send) {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.system(size: 32))
+                                .foregroundColor(canSend ? .jarvisBlue : .gray.opacity(0.3))
+                        }
+                        .disabled(!canSend)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
                 .background(Color.jarvisBgDeep)
             }
         }
 
     }
 
+    private var canSend: Bool {
+        (!inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || selectedImage != nil)
+            && !api.isProcessing
+    }
+
     private func send() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard canSend else { return }
+        let image = selectedImage
         inputText = ""
-        Task { await api.sendMessage(text) }
+        selectedImage = nil
+        selectedPhotoItem = nil
+        Task { await api.sendMessage(text, image: image) }
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
@@ -144,15 +195,26 @@ struct MessageBubble: View {
             }
 
             VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
-                Text(message.content + (message.isStreaming ? " ●" : ""))
-                    .font(.system(size: 15))
-                    .foregroundColor(isUser ? .white : .white.opacity(0.9))
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(isUser
-                        ? Color.jarvisBlue.opacity(0.2)
-                        : Color.jarvisCard)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                    .textSelection(.enabled)
+                // Image thumbnail (user messages only)
+                if let data = message.imageData, let ui = UIImage(data: data) {
+                    Image(uiImage: ui)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(maxWidth: 200, maxHeight: 200)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                }
+
+                if !message.content.isEmpty || message.isStreaming {
+                    Text(message.content + (message.isStreaming ? " ●" : ""))
+                        .font(.system(size: 15))
+                        .foregroundColor(isUser ? .white : .white.opacity(0.9))
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .background(isUser
+                            ? Color.jarvisBlue.opacity(0.2)
+                            : Color.jarvisCard)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .textSelection(.enabled)
+                }
 
                 Text(timeString)
                     .font(.system(size: 10, design: .monospaced))

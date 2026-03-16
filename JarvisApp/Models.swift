@@ -10,6 +10,7 @@ struct ChatMessage: Identifiable, Equatable {
     let id = UUID()
     let role: Role
     var content: String
+    var imageData: Data?        // thumbnail shown in the user bubble (not persisted to server)
     let timestamp: Date
     var isStreaming: Bool
 
@@ -17,9 +18,10 @@ struct ChatMessage: Identifiable, Equatable {
         case user, assistant, system
     }
 
-    init(role: Role, content: String, isStreaming: Bool = false) {
+    init(role: Role, content: String, imageData: Data? = nil, isStreaming: Bool = false) {
         self.role = role
         self.content = content
+        self.imageData = imageData
         self.timestamp = Date()
         self.isStreaming = isStreaming
     }
@@ -44,6 +46,7 @@ struct ChatRequest: Codable {
     let model: String?
     let stream: Bool
     let voice_mode: Bool
+    let image_base64: String?
 }
 
 struct StreamChunk: Codable {

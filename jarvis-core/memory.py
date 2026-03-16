@@ -45,6 +45,8 @@ from sentence_transformers import SentenceTransformer
 from config import (
     ANALYSIS_MODEL,
     AUTOBIO_IMPORTANCE_THRESHOLD,
+    CHAT_LOG_TTL,
+    CHAT_MAX_MESSAGES,
     EMBED_MODEL_NAME,
     ENABLE_ANALYSIS,
     IMPORTANCE_THRESHOLD,
@@ -176,17 +178,20 @@ def update_emotional_state(updates: dict):
 # ══════════════════════════════════════════════════
 
 
+_CHAT_LOG_TTL = CHAT_LOG_TTL  # configured in config.py (default 90 days)
+
+
 def append_conversation_message(
     user_code: str, session_id: str, role: str, content: str
 ):
-    MESSAGE_MAX = 200
     r = get_redis()
     key = f"chat:{user_code}:{session_id}"
 
     entry = {"role": role, "content": content, "ts": time.time()}
 
     r.rpush(key, json.dumps(entry))
-    r.ltrim(key, -MESSAGE_MAX, -1)
+    r.ltrim(key, -CHAT_MAX_MESSAGES, -1)
+    r.expire(key, _CHAT_LOG_TTL)  # sliding TTL — resets on every message
 
 
 def get_conversation(user_code: str, session_id: str):

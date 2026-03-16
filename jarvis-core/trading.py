@@ -462,7 +462,7 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
                         {"role": "user",   "content": _ALERT_USER.format(portfolio="\n".join(lines))},
                     ],
                     "response_format": {"type": "json_object"},
-                    "max_tokens": 200,
+                    "max_completion_tokens": 200,
                     "temperature": 0,
                 },
             )
@@ -636,7 +636,7 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
                     "model": REASONING_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
                     "response_format": {"type": "json_object"},
-                    "max_tokens": 1000,
+                    "max_completion_tokens": 1000,
                     "temperature": 0.2,
                 },
             )

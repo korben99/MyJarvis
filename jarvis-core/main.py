@@ -126,6 +126,7 @@ from config import (
     BRIEFING_TIMEZONE,
     EMBED_MODEL_NAME,
     ENABLE_ANALYSIS,
+    IOS_MAX_MESSAGES,
     OPENAI_API_KEY,
     OPENAI_API_URL,
     PRIMARY_MODEL,
@@ -148,6 +149,7 @@ from config import (
     ROUTER_MODEL,
     SELF_MEMORY_PATH,
     USER_CODES,
+    USER_TRADING,
     USERS,
 )
 from memory import (
@@ -517,7 +519,7 @@ async def lifespan(app: FastAPI):
 
         # Trading surveillance: hourly price check + alert evaluation
         async def _run_trade_checks():
-            await run_trade_check(list(USER_CODES.keys()))
+            await run_trade_check(USER_TRADING)
 
         scheduler.add_job(
             _run_trade_checks,
@@ -562,7 +564,8 @@ class ChatRequest(BaseModel):
     voice_mode: bool = False
     use_rag: bool = True
     use_web: bool = False
-    image_parts: list = []   # OpenAI image_url part dicts forwarded from the proxy
+    image_parts: list = []           # OpenAI image_url part dicts forwarded from the proxy
+    image_base64: Optional[str] = None  # base64 JPEG/PNG sent directly by the iOS app
 
 
 # =============================
@@ -1568,6 +1571,12 @@ async def chat(req: ChatRequest):
     # ── Model / tier selection ──
     use_model, _use_api_url, _use_api_key, _use_timeout = select_model(req.model)
 
+    # ── Vision: convert iOS base64 image into standard image_part ────────
+    if req.image_base64:
+        req.image_parts = [
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{req.image_base64}"}}
+        ] + req.image_parts
+
     # ── Vision: describe images (two-stage pipeline) ──────────────────────
     image_description = ""
     if req.image_parts:
@@ -1853,11 +1862,13 @@ async def chat(req: ChatRequest):
 
 
 @app.get("/users/{user_code}/history/{session_id}")
-async def get_history(session_id: str, user_code: str):
+async def get_history(session_id: str, user_code: str, limit: int = IOS_MAX_MESSAGES):
     if user_code not in USER_CODES:
         raise HTTPException(403)
-    logger.info(f"History request user={user_code} session={session_id}")
-    return get_conversation(user_code, session_id)
+    logger.info(f"History request user={user_code} session={session_id} limit={limit}")
+    key = f"chat:{user_code}:{session_id}"
+    entries = REDIS_CLIENT.lrange(key, -limit, -1)
+    return [json.loads(e) for e in entries]
 
 
 @app.get("/search")
@@ -1874,9 +1885,9 @@ async def web(q: str, max_results: int = 3):
 
 @app.delete("/conversations/{user_code}/{session_id}")
 async def clear(user_code: str, session_id: str):
-    r = REDIS_CLIENT
-    key = f"chat:{user_code}:{session_id}"
-    r.delete(key)
+    if user_code not in USER_CODES:
+        raise HTTPException(404, "Unknown user")
+    REDIS_CLIENT.delete(f"chat:{user_code}:{session_id}")
     return {"status": "cleared", "session_id": session_id}
 
 
@@ -2047,7 +2058,7 @@ async def portfolio_analysis(user_code: str, authorization: str = Header(default
                         {"role": "system", "content": "Tu es Jarvis, conseiller financier personnel. Analyse le portefeuille boursier de l'utilisateur de façon factuelle et constructive."},
                         {"role": "user",   "content": f"Analyse ce portefeuille et donne tes observations :\n\n{summary}"},
                     ],
-                    "max_tokens": 600,
+                    "max_completion_tokens": 600,
                     "temperature": 0.4,
                 },
             )

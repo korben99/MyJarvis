@@ -70,6 +70,11 @@ BRIEFING_TIMEZONE = os.getenv("BRIEFING_TIMEZONE", "Europe/Paris")
 # ── Proto-self reflection loop ─────────────────────────────────────────────
 REFLECTION_INTERVAL_HOURS = int(os.getenv("REFLECTION_INTERVAL_HOURS", "6"))
 
+# ── Conversation storage limits ───────────────────────────────────────────
+CHAT_MAX_MESSAGES = int(os.getenv("CHAT_MAX_MESSAGES", "100"))   # server-side Redis LTRIM cap
+IOS_MAX_MESSAGES  = int(os.getenv("IOS_MAX_MESSAGES",  "50"))    # messages returned to iOS app
+CHAT_LOG_TTL      = int(os.getenv("CHAT_LOG_TTL_DAYS", "90")) * 86400  # raw log expiry (seconds)
+
 # ── Memory thresholds ─────────────────────────────────────────────────────
 IMPORTANCE_THRESHOLD              = 0.35
 RECALL_MEMORY_SIMILARITY_THRESHOLD = 0.7
@@ -108,3 +113,6 @@ USER_EMAILS: dict[str, str] = {code: u.get("mail", "") for code, u in USERS.item
 
 # code → city for weather
 USER_CITIES: dict[str, str] = {code: u.get("city", "Paris") for code, u in USERS.items()}
+
+# codes with trading enabled
+USER_TRADING: list[str] = [code for code, u in USERS.items() if u.get("trading", False)]
