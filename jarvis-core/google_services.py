@@ -335,34 +335,39 @@ def fetch_calendar_events(days: int = 7) -> list[dict]:
         time_min = now.isoformat()
         time_max = (now + timedelta(days=days)).isoformat()
 
-        resp = (
-            service.events()
-            .list(
-                calendarId=GOOGLE_CALENDAR_ID,
-                timeMin=time_min,
-                timeMax=time_max,
-                maxResults=_CALENDAR_MAX_RESULTS,
-                singleEvents=True,
-                orderBy="startTime",
-            )
-            .execute()
-        )
+        # Fetch all calendars the account has access to
+        cal_list = service.calendarList().list().execute()
+        calendar_ids = [c["id"] for c in cal_list.get("items", [])] or [GOOGLE_CALENDAR_ID]
 
         results = []
-        for event in resp.get("items", []):
-            start = event.get("start", {})
-            end = event.get("end", {})
-            results.append({
-                "summary": event.get("summary", "(sans titre)"),
-                "start": start.get("dateTime", start.get("date", "")),
-                "end": end.get("dateTime", end.get("date", "")),
-                "location": event.get("location", ""),
-                "description": (event.get("description") or "")[:200],
-                "all_day": "dateTime" not in start,
-            })
+        for cal_id in calendar_ids:
+            resp = (
+                service.events()
+                .list(
+                    calendarId=cal_id,
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    maxResults=_CALENDAR_MAX_RESULTS,
+                    singleEvents=True,
+                    orderBy="startTime",
+                )
+                .execute()
+            )
+            for event in resp.get("items", []):
+                start = event.get("start", {})
+                end = event.get("end", {})
+                results.append({
+                    "summary": event.get("summary", "(sans titre)"),
+                    "start": start.get("dateTime", start.get("date", "")),
+                    "end": end.get("dateTime", end.get("date", "")),
+                    "location": event.get("location", ""),
+                    "description": (event.get("description") or "")[:200],
+                    "all_day": "dateTime" not in start,
+                })
 
+        results.sort(key=lambda e: e["start"])
         _cache_set(cache_key, results, _CALENDAR_CACHE_TTL)
-        logger.info("Calendar: %d events for next %d days", len(results), days)
+        logger.info("Calendar: %d events for next %d days (across %d calendars)", len(results), days, len(calendar_ids))
         return results
 
     except HttpError as exc:
