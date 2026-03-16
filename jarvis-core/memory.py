@@ -43,6 +43,8 @@ from qdrant_client.models import PointIdsList
 from sentence_transformers import SentenceTransformer
 
 from config import (
+    ANALYSIS_API_KEY,
+    ANALYSIS_API_URL,
     ANALYSIS_MODEL,
     AUTOBIO_IMPORTANCE_THRESHOLD,
     CHAT_LOG_TTL,
@@ -772,9 +774,9 @@ Retourne une seule phrase en français décrivant un fait stable sur l'utilisate
 """
 
         resp = httpx.post(
-            f"{OPENAI_API_URL}/chat/completions",
+            f"{ANALYSIS_API_URL}/chat/completions",
             headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Authorization": f"Bearer {ANALYSIS_API_KEY}",
                 "Content-Type": "application/json",
             },
             json={

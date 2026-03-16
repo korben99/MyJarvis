@@ -9,7 +9,7 @@ Data flow:
        - import_csv_to_redis()  : parses the most recent CSV (mtime-gated, skips if unchanged)
        - fetch_live_prices()    : yfinance per ISIN → current price + intraday %
        - update_prices_in_redis(): writes prices back into position hashes
-       - evaluate_alerts()      : REASONING_MODEL decides if an alert is worth sending
+       - evaluate_alerts()      : PRIMARY_MODEL decides if an alert is worth sending
   3. Fired alerts are stored as pending in Redis and injected into the next /chat response.
 
 Redis layout:
@@ -46,12 +46,11 @@ import redis as redis_lib
 
 from config import (
     BRIEFING_TIMEZONE,
-    OPENAI_API_KEY,
-    OPENAI_API_URL,
-    REASONING_API_KEY,
-    REASONING_API_URL,
-    REASONING_MODEL,
+    PRIMARY_API_KEY,
+    PRIMARY_API_URL,
+    PRIMARY_MODEL,
     REDIS_URL,
+    no_think_suffix,
 )
 
 logger = logging.getLogger("jarvis-trading")
@@ -409,7 +408,7 @@ Si alert=false, message doit être une chaîne vide."""
 
 async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
     """
-    Ask REASONING_MODEL whether an alert should be fired.
+    Ask PRIMARY_MODEL whether an alert should be fired.
     Rate-limits per position: same position won't alert twice within 4 h.
     Returns (should_alert, message).
     """
@@ -453,16 +452,16 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(
-                f"{REASONING_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {REASONING_API_KEY or OPENAI_API_KEY}"},
+                f"{PRIMARY_API_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
                 json={
-                    "model": REASONING_MODEL,
+                    "model": PRIMARY_MODEL,
                     "messages": [
-                        {"role": "system", "content": _ALERT_SYSTEM},
+                        {"role": "system", "content": _ALERT_SYSTEM + no_think_suffix(PRIMARY_MODEL)},
                         {"role": "user",   "content": _ALERT_USER.format(portfolio="\n".join(lines))},
                     ],
                     "response_format": {"type": "json_object"},
-                    "max_completion_tokens": 200,
+                    "max_tokens": 200,
                     "temperature": 0,
                 },
             )
@@ -585,7 +584,7 @@ def auto_set_thresholds(user_code: str) -> int:
 
 async def suggest_thresholds_llm(user_code: str) -> dict:
     """
-    Ask REASONING_MODEL to suggest threshold_high / threshold_low for every position.
+    Ask PRIMARY_MODEL to suggest threshold_high / threshold_low for every position.
     Writes suggestions directly into Redis, overwriting any existing values.
     Returns {isin: {threshold_high, threshold_low, rationale}}.
     """
@@ -630,13 +629,13 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
-                f"{REASONING_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {REASONING_API_KEY or OPENAI_API_KEY}"},
+                f"{PRIMARY_API_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
                 json={
-                    "model": REASONING_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "model": PRIMARY_MODEL,
+                    "messages": [{"role": "user", "content": prompt + no_think_suffix(PRIMARY_MODEL)}],
                     "response_format": {"type": "json_object"},
-                    "max_completion_tokens": 1000,
+                    "max_tokens": 1000,
                     "temperature": 0.2,
                 },
             )

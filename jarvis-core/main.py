@@ -129,7 +129,10 @@ from config import (
     IOS_MAX_MESSAGES,
     OPENAI_API_KEY,
     OPENAI_API_URL,
+    PRIMARY_API_KEY,
+    PRIMARY_API_URL,
     PRIMARY_MODEL,
+    PRIMARY_TIMEOUT,
     QDRANT_COLLECTION,
     QDRANT_MEMORY_COLLECTION,
     QDRANT_URL,
@@ -151,6 +154,8 @@ from config import (
     USER_CODES,
     USER_TRADING,
     USERS,
+    no_think_suffix,
+    tokens_param,
 )
 from memory import (
     add_self_learning,
@@ -580,23 +585,25 @@ def openai_headers() -> dict:
 
 def select_model(
     req_model: "str | None",
+    use_reasoning: bool = False,
 ) -> tuple[str, str, str, float]:
     """
     Single decision point for LLM tier selection.
 
     Returns (model_name, api_url, api_key, timeout_seconds).
 
-    Two cases only:
-    1. Explicit model override in the request  →  honour as-is
-    2. Everything else                         →  REASONING_MODEL
-
-    use_reasoning from the router does NOT select a different model;
-    it injects chain-of-thought instructions into the system prompt instead.
+    Priority:
+    1. Explicit model override in the request  →  honour as-is (PRIMARY credentials)
+    2. Router flagged use_reasoning=True        →  REASONING_MODEL (cloud, complex only)
+    3. Everything else                          →  PRIMARY_MODEL (local Qwen / gpt-4o-mini)
     """
     if req_model:
-        return req_model, OPENAI_API_URL, OPENAI_API_KEY, 30.0
+        return req_model, PRIMARY_API_URL, PRIMARY_API_KEY, PRIMARY_TIMEOUT
 
-    return REASONING_MODEL, REASONING_API_URL, REASONING_API_KEY, REASONING_TIMEOUT
+    if use_reasoning:
+        return REASONING_MODEL, REASONING_API_URL, REASONING_API_KEY, REASONING_TIMEOUT
+
+    return PRIMARY_MODEL, PRIMARY_API_URL, PRIMARY_API_KEY, PRIMARY_TIMEOUT
 
 
 def trim_chunks(chunks, char_budget, text_key="text", max_item_chars=800):
@@ -1371,12 +1378,12 @@ async def _build_google_queries_llm(
     try:
         async with httpx.AsyncClient(timeout=8) as client:
             resp = await client.post(
-                f"{OPENAI_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                f"{PRIMARY_API_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
                 json={
                     "model": PRIMARY_MODEL,
                     "messages": [
-                        {"role": "user", "content": _GOOGLE_QUERY_PROMPT.format(message=message)}
+                        {"role": "user", "content": _GOOGLE_QUERY_PROMPT.format(message=message) + no_think_suffix(PRIMARY_MODEL)}
                     ],
                     "response_format": {"type": "json_object"},
                     "max_tokens": 80,
@@ -1569,7 +1576,9 @@ async def chat(req: ChatRequest):
         _llm_cal_days    = None
 
     # ── Model / tier selection ──
-    use_model, _use_api_url, _use_api_key, _use_timeout = select_model(req.model)
+    use_model, _use_api_url, _use_api_key, _use_timeout = select_model(
+        req.model, use_reasoning=bool(llm_result and llm_result.use_reasoning)
+    )
 
     # ── Vision: convert iOS base64 image into standard image_part ────────
     if req.image_base64:
@@ -2046,19 +2055,18 @@ async def portfolio_analysis(user_code: str, authorization: str = Header(default
     if not summary:
         raise HTTPException(404, "No portfolio data — import a CSV first")
 
-    from config import REASONING_API_KEY as _R_KEY, REASONING_API_URL as _R_URL, REASONING_MODEL as _R_MODEL
     try:
         async with httpx.AsyncClient(timeout=40) as client:
             resp = await client.post(
-                f"{_R_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {_R_KEY or OPENAI_API_KEY}"},
+                f"{PRIMARY_API_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
                 json={
-                    "model": _R_MODEL,
+                    "model": PRIMARY_MODEL,
                     "messages": [
-                        {"role": "system", "content": "Tu es Jarvis, conseiller financier personnel. Analyse le portefeuille boursier de l'utilisateur de façon factuelle et constructive."},
+                        {"role": "system", "content": "Tu es Jarvis, conseiller financier personnel. Analyse le portefeuille boursier de l'utilisateur de façon factuelle et constructive." + no_think_suffix(PRIMARY_MODEL)},
                         {"role": "user",   "content": f"Analyse ce portefeuille et donne tes observations :\n\n{summary}"},
                     ],
-                    "max_completion_tokens": 600,
+                    "max_tokens": 600,
                     "temperature": 0.4,
                 },
             )

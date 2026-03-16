@@ -31,11 +31,11 @@ import redis as redis_lib
 import pytz
 
 from config import (
-    ANALYSIS_MODEL,
     BRIEFING_TIMEZONE,
-    OPENAI_API_KEY,
-    OPENAI_API_URL,
+    PRIMARY_API_KEY,
+    PRIMARY_API_URL,
     PRIMARY_MODEL,
+    no_think_suffix,
     REDIS_URL,
     USER_CITIES,
     USER_CODES,
@@ -382,12 +382,12 @@ async def _assemble_with_llm(
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                f"{OPENAI_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                f"{PRIMARY_API_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
                 json={
                     "model": PRIMARY_MODEL,
                     "messages": [
-                        {"role": "system", "content": _BRIEFING_SYSTEM.format(user_name=user_name)},
+                        {"role": "system", "content": _BRIEFING_SYSTEM.format(user_name=user_name) + no_think_suffix(PRIMARY_MODEL)},
                         {"role": "user", "content": prompt},
                     ],
                     "response_format": {"type": "json_object"},

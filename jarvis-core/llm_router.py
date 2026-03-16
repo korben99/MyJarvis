@@ -36,6 +36,7 @@ from config import (
     ROUTER_API_KEY,
     ROUTER_MODEL,
     ROUTER_TIMEOUT,
+    no_think_suffix,
 )
 
 logger = logging.getLogger("jarvis-llm-router")
@@ -71,8 +72,11 @@ intents: list of strings — which data sources are needed.
   - self      : user EXPLICITLY asks Jarvis about its own internal state — its goals, current
                 focus, what it is thinking, or how it feels right now.
                 ONLY fire for direct introspective questions such as:
-                  "what are your goals", "quel est ton focus", "comment tu vas",
-                  "à quoi tu penses en ce moment", "what is your current objective"
+                  "what are your goals", "quel est ton focus", "comment te sens-tu en ce moment",
+                  "à quoi tu penses en ce moment", "what is your current objective",
+                  "quel est ton état émotionnel", "qu'est-ce que tu ressens"
+                Do NOT fire for casual social greetings like "comment tu vas", "ça va ?",
+                "how are you" — these are chitchat → use ["memory"] instead.
                 Do NOT fire when the user merely mentions Jarvis, addresses it, compliments it,
                 or discusses its code / capabilities / improvements.
   - portfolio : user asks about their stock portfolio, share prices, positions, P&L, dividends,
@@ -99,10 +103,13 @@ calendar_days: integer or null
   Set to null if calendar not needed.
 
 use_reasoning: boolean
-  true  → query requires multi-step reasoning, deep analysis, long-form synthesis,
-           complex code generation, or nuanced judgment across multiple sources.
-  false → simple retrieval, factual lookup, short answer, data formatting (default).
-  When in doubt, use false.
+  Sends the query to a powerful cloud model. Use VERY sparingly — default is false.
+  true  ONLY for: medical/legal/regulatory analysis, hard multi-step logic puzzles,
+                  complex code debugging across many files, deep scientific reasoning,
+                  or tasks explicitly requiring expert-level nuanced judgment.
+  false for everything else: chat, questions, summaries, portfolio, tasks, translations,
+                  writing, coding assistance, explanations, data formatting, web lookup.
+  When in doubt → false. The local model is strong enough for standard requests.
 
 memory_scope: string
   Which memory layer to search. One of: "episodic", "autobiographical", "profile", "auto".
@@ -223,7 +230,7 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
                 json={
                     "model": ROUTER_MODEL,
                     "messages": [
-                        {"role": "system", "content": _ROUTER_SYSTEM},
+                        {"role": "system", "content": _ROUTER_SYSTEM + no_think_suffix(ROUTER_MODEL)},
                         {"role": "user",   "content": prompt},
                     ],
                     "temperature": 0,

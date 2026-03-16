@@ -38,10 +38,11 @@ import logging
 import httpx
 
 from config import (
+    ANALYSIS_API_KEY,
+    ANALYSIS_API_URL,
     ANALYSIS_MODEL,
     IMPORTANCE_THRESHOLD,
-    OPENAI_API_KEY,
-    OPENAI_API_URL,
+    no_think_suffix,
 )
 
 logger = logging.getLogger("jarvis-analyzer")
@@ -71,14 +72,15 @@ async def analyze_exchange(user_msg: str, assistant_msg: str) -> dict:
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                f"{OPENAI_API_URL}/chat/completions",
+                f"{ANALYSIS_API_URL}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Authorization": f"Bearer {ANALYSIS_API_KEY}",
                     "Content-Type": "application/json",
                 },
                 json={
                     "model": ANALYSIS_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": [{"role": "user", "content": prompt + no_think_suffix(ANALYSIS_MODEL)}],
+                    "response_format": {"type": "json_object"},
                     "temperature": 0.1,
                     "max_tokens": 500,
                 },

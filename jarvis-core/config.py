@@ -8,28 +8,37 @@ load_dotenv("/opt/jarvis/.env")
 
 logger = logging.getLogger("jarvis-config")
 
-# ── Core API (primary responder) ──────────────────────────────────────────
+# ── Shared OpenAI credentials (fallback for any tier not explicitly configured) ──
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_API_URL = os.getenv("OPENAI_API_URL", os.getenv("OPENAI_URL", "https://api.openai.com/v1"))
-PRIMARY_MODEL  = os.getenv("PRIMARY_MODEL", "gpt-4o-mini")
-ANALYSIS_MODEL = os.getenv("ANALYSIS_MODEL", "gpt-4o-mini")
 
 # ── Tier 1 — Router model (fast, cheap intent classifier) ─────────────────
-# Now:    GPT-4.1-nano  (uses OPENAI_API_KEY by default)
-# Future: Qwen2.5-7B   via mlx-lm  →  set ROUTER_API_URL + ROUTER_MODEL
-# Disable the LLM router entirely: set ROUTER_MODEL=""  (falls back to embedding router)
-# Use `or fallback` instead of the default= parameter so that an empty string
-# set by docker-compose (e.g. ROUTER_API_KEY=${ROUTER_API_KEY:-}) is treated
-# the same as "not set" and falls back to the primary credentials.
-ROUTER_API_URL = os.getenv("ROUTER_API_URL") or "https://api.openai.com/v1"
+# Now:    GPT-4.1-nano          → set nothing, uses OPENAI credentials
+# Future: Qwen3-7B via mlx-lm  → set ROUTER_API_URL + ROUTER_API_KEY + ROUTER_MODEL
+# Disable LLM router entirely:   set ROUTER_MODEL=""  (falls back to embedding router)
+ROUTER_API_URL = os.getenv("ROUTER_API_URL") or OPENAI_API_URL
 ROUTER_API_KEY = os.getenv("ROUTER_API_KEY") or OPENAI_API_KEY
 ROUTER_MODEL   = os.getenv("ROUTER_MODEL", "gpt-4.1-nano")   # empty string intentionally disables LLM router
 ROUTER_TIMEOUT = float(os.getenv("ROUTER_TIMEOUT") or "6")
 
-# ── Tier 2 — Reasoning model (handles ALL user responses) ────────────────
-# Now:    GPT-5.1       (uses OPENAI_API_KEY by default)
-# Future: Qwen2.5-32B  via mlx-lm  →  set REASONING_API_URL + REASONING_MODEL
-# Defaults to PRIMARY_MODEL so the system works out-of-the-box without configuration.
+# ── Tier 2 — Primary model (standard chat, trading, briefing, self-reflection) ──
+# Now:    GPT-4o-mini              → set nothing, uses OPENAI credentials
+# Future: Qwen3-30B-A3B via mlx-lm → set PRIMARY_API_URL + PRIMARY_API_KEY + PRIMARY_MODEL
+PRIMARY_MODEL   = os.getenv("PRIMARY_MODEL", "gpt-4o-mini")
+PRIMARY_API_URL = os.getenv("PRIMARY_API_URL") or OPENAI_API_URL
+PRIMARY_API_KEY = os.getenv("PRIMARY_API_KEY") or OPENAI_API_KEY
+PRIMARY_TIMEOUT = float(os.getenv("PRIMARY_TIMEOUT") or "60")
+
+# ── Tier 2b — Analysis model (mood extraction, memory consolidation) ─────
+# Now:    GPT-4o-mini              → defaults to PRIMARY credentials
+# Future: Qwen3-30B-A3B via mlx-lm → set ANALYSIS_API_URL + ANALYSIS_API_KEY + ANALYSIS_MODEL
+ANALYSIS_MODEL   = os.getenv("ANALYSIS_MODEL", "gpt-4o-mini")
+ANALYSIS_API_URL = os.getenv("ANALYSIS_API_URL") or PRIMARY_API_URL
+ANALYSIS_API_KEY = os.getenv("ANALYSIS_API_KEY") or PRIMARY_API_KEY
+
+# ── Tier 3 — Reasoning model (complex queries only, cloud-gated) ─────────
+# Now:    GPT-5.1 (cloud)   → set REASONING_MODEL + optionally REASONING_API_*
+# Only reached when the router sets use_reasoning=True.
 REASONING_MODEL   = os.getenv("REASONING_MODEL") or PRIMARY_MODEL
 REASONING_API_URL = os.getenv("REASONING_API_URL") or OPENAI_API_URL
 REASONING_API_KEY = os.getenv("REASONING_API_KEY") or OPENAI_API_KEY
@@ -42,6 +51,31 @@ VISION_MODEL   = os.getenv("VISION_MODEL") or ""
 VISION_API_URL = os.getenv("VISION_API_URL") or OPENAI_API_URL
 VISION_API_KEY = os.getenv("VISION_API_KEY") or OPENAI_API_KEY
 VISION_TIMEOUT = float(os.getenv("VISION_TIMEOUT") or "30")
+
+# ── Model compatibility helpers ───────────────────────────────────────────
+
+def is_qwen(model: str) -> bool:
+    """True for Qwen models served locally via mlx-lm or Ollama."""
+    return "qwen" in (model or "").lower()
+
+def tokens_param(model: str) -> str:
+    """
+    Return the correct token-limit parameter name for the model.
+    OpenAI o1/o3/gpt-5.x require 'max_completion_tokens'.
+    All others (gpt-4o, Qwen via mlx-lm, Gemini-compat, etc.) use 'max_tokens'.
+
+    Usage: json={..., **{tokens_param(REASONING_MODEL): 512}, ...}
+    """
+    _needs_completion = ("o1-", "o3-", "gpt-5", "gpt-4.5")
+    return "max_completion_tokens" if any(x in (model or "") for x in _needs_completion) else "max_tokens"
+
+def no_think_suffix(model: str) -> str:
+    """
+    Return '/no_think' suffix for Qwen3 models to disable chain-of-thought.
+    Required for JSON-output tasks (router, analyzer) — prevents <think> blocks
+    from breaking JSON parsing. Empty string for all other models.
+    """
+    return "\n/no_think" if is_qwen(model) else ""
 
 # ── Infrastructure ────────────────────────────────────────────────────────
 REDIS_URL              = os.getenv("REDIS_URL", "redis://redis:6379")

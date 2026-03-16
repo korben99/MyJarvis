@@ -30,7 +30,7 @@ services:
       - openwebui_data:/app/backend/data
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_API_BASE_URL=https://api.openai.com/v1
+      - OPENAI_API_BASE_URL=${OPENAI_API_URL:-https://api.openai.com/v1}
       - WEBUI_SECRET_KEY=jarvisopenwebui
       - ENABLE_API_KEYS=true
       - USER_PERMISSIONS_FEATURES_API_KEYS=true
@@ -38,7 +38,7 @@ services:
       - QDRANT_URI=http://qdrant:6333
       - RAG_EMBEDDING_ENGINE=
       - RAG_EMBEDDING_MODEL=paraphrase-multilingual-MiniLM-L12-v2
-      - DEFAULT_MODELS=gpt-4o-mini
+      - DEFAULT_MODELS=${PRIMARY_MODEL:-gpt-4o-mini}
     depends_on:
       - qdrant
       - redis
@@ -64,50 +64,78 @@ services:
       - ./jarvis-core/JarvisData:/app/data
       - ./TradeData:/app/trade_data
     environment:
+      # ── Shared OpenAI credentials ──────────────────────────────────────────
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_API_URL=https://api.openai.com/v1
-      - PRIMARY_MODEL=gpt-4o-mini
+      - OPENAI_API_URL=${OPENAI_API_URL:-https://api.openai.com/v1}
+
+      # ── Tier 1 — Router model ──────────────────────────────────────────────
+      - ROUTER_MODEL=${ROUTER_MODEL:-gpt-4.1-nano}
+      - ROUTER_API_URL=${ROUTER_API_URL:-}
+      - ROUTER_API_KEY=${ROUTER_API_KEY:-}
+      - ROUTER_TIMEOUT=${ROUTER_TIMEOUT:-6}
+
+      # ── Tier 2 — Primary model ─────────────────────────────────────────────
+      - PRIMARY_MODEL=${PRIMARY_MODEL:-gpt-4o-mini}
+      - PRIMARY_API_URL=${PRIMARY_API_URL:-}
+      - PRIMARY_API_KEY=${PRIMARY_API_KEY:-}
+      - PRIMARY_TIMEOUT=${PRIMARY_TIMEOUT:-60}
+
+      # ── Tier 2b — Analysis model ───────────────────────────────────────────
+      - ANALYSIS_MODEL=${ANALYSIS_MODEL:-}
+      - ANALYSIS_API_URL=${ANALYSIS_API_URL:-}
+      - ANALYSIS_API_KEY=${ANALYSIS_API_KEY:-}
+
+      # ── Tier 3 — Reasoning model (complex queries only) ────────────────────
+      - REASONING_MODEL=${REASONING_MODEL:-}
+      - REASONING_API_URL=${REASONING_API_URL:-}
+      - REASONING_API_KEY=${REASONING_API_KEY:-}
+      - REASONING_TIMEOUT=${REASONING_TIMEOUT:-90}
+
+      # ── Vision model ───────────────────────────────────────────────────────
+      - VISION_MODEL=${VISION_MODEL:-}
+      - VISION_API_URL=${VISION_API_URL:-}
+      - VISION_API_KEY=${VISION_API_KEY:-}
+      - VISION_TIMEOUT=${VISION_TIMEOUT:-30}
+
+      # ── Infrastructure (internal Docker network — do not override) ─────────
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-open-webui_knowledge}
+      - QDRANT_MEMORY_COLLECTION=${QDRANT_MEMORY_COLLECTION:-jarvis_memory}
+      - REDIS_URL=redis://redis:6379
+      - RAG_TOP_K=${RAG_TOP_K:-5}
+      - RAG_SCORE_THRESHOLD=${RAG_SCORE_THRESHOLD:-0.4}
+
+      # ── HuggingFace (embedding model download) ─────────────────────────────
       - HF_TOKEN=${HF_TOKEN}
       - HUGGINGFACEHUB_API_TOKEN=${HF_TOKEN}
-      - QDRANT_URL=http://qdrant:6333
-      - QDRANT_COLLECTION=open-webui_knowledge
-      - REDIS_URL=redis://redis:6379
-      - RAG_TOP_K=5
-      - RAG_SCORE_THRESHOLD=0.4
-      - ENABLE_ANALYSIS=true
-      - SELF_MEMORY_PATH=/app/data/jarvis-self.json
       - MODEL_CACHE_DIR=/app/data/model_cache
+
+      # ── Google Services ────────────────────────────────────────────────────
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_REFRESH_TOKEN=${GOOGLE_REFRESH_TOKEN}
       - GOOGLE_CALENDAR_ID=${GOOGLE_CALENDAR_ID:-primary}
-      # ── Tier 1: Router model (GPT-4.1-nano now → Qwen2.5-7B via mlx-lm later) ──
-      # Disable LLM router entirely: ROUTER_MODEL=  (falls back to embedding router)
-      - ROUTER_API_URL=${ROUTER_API_URL:-https://api.openai.com/v1}
-      - ROUTER_API_KEY=${ROUTER_API_KEY:-}
-      - ROUTER_MODEL=${ROUTER_MODEL:-gpt-4.1-nano}
-      - ROUTER_TIMEOUT=${ROUTER_TIMEOUT:-6}
-      # ── Tier 2: Reasoning model (GPT-5.1 now → Qwen2.5-32B via mlx-lm later) ──
-      # Disable: leave REASONING_MODEL empty
-      - REASONING_API_URL=${REASONING_API_URL:-https://api.openai.com/v1}
-      - REASONING_API_KEY=${REASONING_API_KEY:-}
-      - REASONING_MODEL=${REASONING_MODEL:-}
-      - REASONING_TIMEOUT=${REASONING_TIMEOUT:-90}
-      # ── Option : Vision model (GPT-5.1 now → Qwen2.5-7V via mlx-lm later) ──
-      - VISION_MODEL=${VISION_MODEL:-}
-      # Legacy Ollama router vars (kept for backward compat, superseded by ROUTER_* above)
-      - LLM_ROUTER_URL=${LLM_ROUTER_URL:-}
-      - LLM_ROUTER_MODEL=${LLM_ROUTER_MODEL:-qwen2.5:7b}
-      # Morning briefing
+
+      # ── Features ───────────────────────────────────────────────────────────
+      - ENABLE_ANALYSIS=${ENABLE_ANALYSIS:-true}
+      - SELF_MEMORY_PATH=/app/data/jarvis-self.json
       - BRIEFING_ENABLED=${BRIEFING_ENABLED:-true}
       - BRIEFING_TIME=${BRIEFING_TIME:-07:30}
       - BRIEFING_TIMEZONE=${BRIEFING_TIMEZONE:-Europe/Paris}
       - REFLECTION_INTERVAL_HOURS=${REFLECTION_INTERVAL_HOURS:-6}
+
+      # ── Conversation limits ─────────────────────────────────────────────────
+      - CHAT_MAX_MESSAGES=${CHAT_MAX_MESSAGES:-100}
+      - IOS_MAX_MESSAGES=${IOS_MAX_MESSAGES:-50}
+      - CHAT_LOG_TTL_DAYS=${CHAT_LOG_TTL_DAYS:-90}
+
+      # ── Trading ────────────────────────────────────────────────────────────
       - TRADE_DATA_DIR=/app/trade_data
+
     depends_on:
       - qdrant
       - redis
-      
+
 volumes:
   qdrant_data:
   redis_data:

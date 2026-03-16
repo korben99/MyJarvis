@@ -44,7 +44,10 @@ from config import (
     GOOGLE_CALENDAR_ID,
     OPENAI_API_KEY,
     OPENAI_API_URL,
+    PRIMARY_API_KEY,
+    PRIMARY_API_URL,
     PRIMARY_MODEL,
+    no_think_suffix,
     QDRANT_URL,
     REDIS_URL,
     SELF_MEMORY_PATH,
@@ -335,12 +338,12 @@ async def _call_reflection_llm(context: dict) -> dict | None:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                f"{OPENAI_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                f"{PRIMARY_API_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
                 json={
                     "model": PRIMARY_MODEL,
                     "messages": [
-                        {"role": "system", "content": _REFLECTION_SYSTEM},
+                        {"role": "system", "content": _REFLECTION_SYSTEM + no_think_suffix(PRIMARY_MODEL)},
                         {"role": "user",   "content": prompt},
                     ],
                     "response_format": {"type": "json_object"},
@@ -513,12 +516,12 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
-                f"{OPENAI_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                f"{PRIMARY_API_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
                 json={
                     "model": PRIMARY_MODEL,
                     "messages": [
-                        {"role": "system", "content": _NIGHTLY_SYSTEM},
+                        {"role": "system", "content": _NIGHTLY_SYSTEM + no_think_suffix(PRIMARY_MODEL)},
                         {"role": "user",   "content": prompt},
                     ],
                     "response_format": {"type": "json_object"},
