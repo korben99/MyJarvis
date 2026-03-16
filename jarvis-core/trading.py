@@ -336,6 +336,32 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
             fi = obj.fast_info
             price = fi.last_price or fi.previous_close or 0.0
             change_pct = round(float(getattr(fi, "regular_market_change_percent", 0.0) or 0.0), 2)
+
+            # Sanity check: compare against last Boursorama CSV price.
+            # A deviation > 15% vs the last CSV import is suspicious (likely wrong ticker).
+            # > 30% almost certainly means we resolved the wrong security — invalidate and skip.
+            pos_key_check = _pos_key(user_code, isin)
+            try:
+                csv_price = float(r.hget(pos_key_check, "last_price_csv") or 0)
+                if csv_price > 0 and price > 0:
+                    deviation_pct = abs(price - csv_price) / csv_price * 100
+                    if deviation_pct > 30:
+                        logger.error(
+                            "TICKER MISMATCH: %s (%s) yfinance=%.2f vs CSV=%.2f (%.1f%% deviation) "
+                            "— ticker likely maps to wrong security, clearing cache",
+                            ticker, isin, price, csv_price, deviation_pct,
+                        )
+                        r.hdel(pos_key_check, "yahoo_ticker")
+                        continue  # skip this price, will re-resolve next run
+                    elif deviation_pct > 15:
+                        logger.warning(
+                            "PRICE DRIFT: %s (%s) yfinance=%.2f vs CSV=%.2f (%.1f%% deviation) "
+                            "— verify ticker is still correct",
+                            ticker, isin, price, csv_price, deviation_pct,
+                        )
+            except (TypeError, ValueError):
+                pass  # no CSV price yet — skip validation
+
             entry = {"price": round(float(price), 4), "intraday_var_pct": change_pct}
             results[isin] = entry
             r.setex(_price_cache_key(isin), PRICE_CACHE_TTL, json.dumps(entry))

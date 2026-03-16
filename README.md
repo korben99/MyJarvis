@@ -32,7 +32,7 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
          │                │
 ┌────────▼──────┐  ┌──────▼──────────┐
 │  Qdrant       │  │  Redis          │
-│  (port 6333)  │  │  (port 6333)    │
+│  (port 6333)  │  │  (port 6379)    │
 │  Vector DB    │  │  Session cache  │
 │  RAG + Memory │  │  Working mem.   │
 └───────────────┘  └─────────────────┘

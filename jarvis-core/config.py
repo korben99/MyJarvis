@@ -32,7 +32,7 @@ PRIMARY_TIMEOUT = float(os.getenv("PRIMARY_TIMEOUT") or "60")
 # ── Tier 2b — Analysis model (mood extraction, memory consolidation) ─────
 # Now:    GPT-4o-mini              → defaults to PRIMARY credentials
 # Future: Qwen3-30B-A3B via mlx-lm → set ANALYSIS_API_URL + ANALYSIS_API_KEY + ANALYSIS_MODEL
-ANALYSIS_MODEL   = os.getenv("ANALYSIS_MODEL", "gpt-4o-mini")
+ANALYSIS_MODEL   = os.getenv("ANALYSIS_MODEL") or PRIMARY_MODEL
 ANALYSIS_API_URL = os.getenv("ANALYSIS_API_URL") or PRIMARY_API_URL
 ANALYSIS_API_KEY = os.getenv("ANALYSIS_API_KEY") or PRIMARY_API_KEY
 
@@ -47,7 +47,7 @@ REASONING_TIMEOUT = float(os.getenv("REASONING_TIMEOUT") or "90")
 # ── Vision model (image description — first stage of two-stage pipeline) ──
 # Set to a vision-capable model (Qwen2.5-VL, gpt-4o, gpt-5.1, …).
 # Leave empty to disable image support (images will be ignored with a warning).
-VISION_MODEL   = os.getenv("VISION_MODEL") or ""
+VISION_MODEL   = os.getenv("VISION_MODEL") or PRIMARY_MODEL
 VISION_API_URL = os.getenv("VISION_API_URL") or OPENAI_API_URL
 VISION_API_KEY = os.getenv("VISION_API_KEY") or OPENAI_API_KEY
 VISION_TIMEOUT = float(os.getenv("VISION_TIMEOUT") or "30")
