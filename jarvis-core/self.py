@@ -42,8 +42,6 @@ import pytz
 
 from config import (
     GOOGLE_CALENDAR_ID,
-    OPENAI_API_KEY,
-    OPENAI_API_URL,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
@@ -177,17 +175,17 @@ def _check_service_health() -> dict:
     except Exception:
         health["qdrant"] = "unreachable"
 
-    # OpenAI (lightweight models list call)
+    # Primary LLM (lightweight models list call)
     try:
         import httpx as _httpx
         r = _httpx.get(
-            f"{OPENAI_API_URL}/models",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            f"{PRIMARY_API_URL}/models",
+            headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
             timeout=5,
         )
-        health["openai"] = "ok" if r.status_code == 200 else f"http_{r.status_code}"
+        health["llm"] = "ok" if r.status_code == 200 else f"http_{r.status_code}"
     except Exception:
-        health["openai"] = "unreachable"
+        health["llm"] = "unreachable"
 
     return health
 

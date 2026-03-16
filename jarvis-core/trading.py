@@ -60,21 +60,6 @@ PRICE_CACHE_TTL = 55 * 60  # 55 minutes
 _ALERT_MIN_INTERVAL_HOURS = 4  # Don't re-alert same position within 4 h
 _ALERT_QUEUE_TTL = 86400       # Pending alerts expire after 24 h
 
-# ── Known ISIN → Yahoo Finance ticker ─────────────────────────────────────
-# Covers the user's current portfolio.  Add new lines when you buy a new stock.
-# Euronext Paris: .PA  |  Euronext Brussels: .BR  |  US: no suffix
-_ISIN_TICKER_MAP: dict[str, str] = {
-    "FR0000120578": "SAN.PA",    # Sanofi
-    "FR0010667147": "COFA.PA",   # Coface
-    "FR0011871110": "PANX.PA",   # Amundi PEA Nasdaq-100 UCITS ETF
-    "FR0000053225": "MMT.PA",    # M6 Metropole Television
-    "FR0000120628": "CS.PA",     # AXA
-    "FR0000124141": "VIE.PA",    # Veolia
-    "BE0003470755": "SOLB.BR",   # Solvay (Brussels)
-    "FR0000125338": "CAP.PA",    # Capgemini
-    "IE0002XZSHO1": "WSRP.PA",   # iShares MSCI World Swap PEA ETF
-}
-
 
 # ── Redis helpers ──────────────────────────────────────────────────────────
 
@@ -214,30 +199,101 @@ def import_csv_to_redis(user_code: str) -> int:
 
 # ── Yahoo Finance price fetch ──────────────────────────────────────────────
 
-def _resolve_ticker(isin: str, r: redis_lib.Redis, pos_key: str) -> str | None:
+def _resolve_ticker(isin: str, r: redis_lib.Redis, pos_key: str, name: str = "") -> str | None:
     """
     Resolve ISIN → Yahoo Finance ticker.
-    Priority: Redis cache → static map → yfinance search (and cache result).
+    Priority:
+      1. Redis cache
+      2. yfinance Search(isin)
+      3. yfinance Search(name)
+      4. LLM fallback (PRIMARY_MODEL) — last resort when yfinance yields nothing
+    Result is cached in Redis. Cache is cleared by fetch_live_prices on failure.
     """
     cached = r.hget(pos_key, "yahoo_ticker")
     if cached:
         return cached
 
-    ticker = _ISIN_TICKER_MAP.get(isin)
-    if not ticker:
+    ticker = None
+
+    # 1. ISIN search
+    try:
+        import yfinance as yf
+        results = yf.Search(isin, max_results=1)
+        quotes = results.quotes
+        if quotes:
+            ticker = quotes[0].get("symbol")
+            logger.info("Resolved ticker %s → %s (via ISIN search)", isin, ticker)
+    except Exception as exc:
+        logger.warning("yfinance ISIN lookup failed for %s: %s", isin, exc)
+
+    # 2. Name search
+    if not ticker and name:
         try:
             import yfinance as yf
-            results = yf.Search(isin, max_results=1)
+            results = yf.Search(name, max_results=1)
             quotes = results.quotes
             if quotes:
                 ticker = quotes[0].get("symbol")
+                logger.info("Resolved ticker %s → %s (via name search '%s')", isin, ticker, name)
         except Exception as exc:
-            logger.warning("yfinance ISIN lookup failed for %s: %s", isin, exc)
+            logger.warning("yfinance name lookup failed for '%s': %s", name, exc)
+
+    # 3. LLM fallback
+    if not ticker:
+        logger.warning(
+            "TICKER NOT FOUND via yfinance for ISIN=%s name='%s' — trying LLM fallback",
+            isin, name,
+        )
+        ticker = _resolve_ticker_llm(isin, name)
+        if ticker:
+            logger.info("Resolved ticker %s → %s (via LLM fallback)", isin, ticker)
+        else:
+            logger.error(
+                "TICKER UNRESOLVABLE: ISIN=%s name='%s' — position will be skipped until manually set via PUT /portfolio/position",
+                isin, name,
+            )
 
     if ticker:
         r.hset(pos_key, "yahoo_ticker", ticker)
-        logger.debug("Resolved %s → %s", isin, ticker)
     return ticker
+
+
+def _resolve_ticker_llm(isin: str, name: str) -> str | None:
+    """
+    Ask PRIMARY_MODEL to guess the Yahoo Finance ticker for an ISIN + name.
+    Synchronous, called only when yfinance search yields nothing.
+    Returns the ticker string or None if the LLM can't determine it.
+    """
+    import asyncio
+    prompt = (
+        f"What is the Yahoo Finance ticker symbol for this security?\n"
+        f"ISIN: {isin}\n"
+        f"Name: {name}\n\n"
+        f"Reply with the ticker symbol only (e.g. 'SAN.PA', 'AAPL', 'IWDA.AS'). "
+        f"If you are not confident, reply with 'UNKNOWN'."
+    )
+    try:
+        async def _call():
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"{PRIMARY_API_URL}/chat/completions",
+                    headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
+                    json={
+                        "model": PRIMARY_MODEL,
+                        "messages": [{"role": "user", "content": prompt + no_think_suffix(PRIMARY_MODEL)}],
+                        "max_tokens": 20,
+                        "temperature": 0,
+                    },
+                )
+            return resp.json()["choices"][0]["message"]["content"].strip()
+
+        raw = asyncio.run(_call())
+        if raw and raw.upper() != "UNKNOWN" and " " not in raw and len(raw) <= 12:
+            return raw
+        logger.warning("LLM ticker resolution returned unusable value '%s' for %s", raw, isin)
+    except Exception as exc:
+        logger.warning("LLM ticker fallback failed for %s: %s", isin, exc)
+    return None
 
 
 def fetch_live_prices(user_code: str) -> dict[str, dict]:
@@ -268,7 +324,9 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
                 continue
             except json.JSONDecodeError:
                 pass
-        ticker = _resolve_ticker(isin, r, _pos_key(user_code, isin))
+        pos_key = _pos_key(user_code, isin)
+        name = r.hget(pos_key, "name") or ""
+        ticker = _resolve_ticker(isin, r, pos_key, name)
         if ticker:
             to_fetch.append((isin, ticker))
 
@@ -284,6 +342,8 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
             logger.debug("Price %s: %.4f (%+.2f%%)", ticker, price, change_pct)
         except Exception as exc:
             logger.warning("Price fetch failed for %s (%s): %s", ticker, isin, exc)
+            # Clear cached ticker so next run retries resolution
+            r.hdel(_pos_key(user_code, isin), "yahoo_ticker")
 
     return results
 
@@ -551,7 +611,7 @@ def auto_set_thresholds(user_code: str) -> int:
         if pos.get("threshold_high") or pos.get("threshold_low"):
             continue
 
-        ticker_sym = _resolve_ticker(isin, r, key)
+        ticker_sym = _resolve_ticker(isin, r, key, pos.get("name", ""))
         if not ticker_sym:
             continue
 
@@ -633,7 +693,10 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
                 headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
                 json={
                     "model": PRIMARY_MODEL,
-                    "messages": [{"role": "user", "content": prompt + no_think_suffix(PRIMARY_MODEL)}],
+                    "messages": [
+                        {"role": "system", "content": "Tu es un assistant de gestion de portefeuille boursier." + no_think_suffix(PRIMARY_MODEL)},
+                        {"role": "user", "content": prompt},
+                    ],
                     "response_format": {"type": "json_object"},
                     "max_tokens": 1000,
                     "temperature": 0.2,

@@ -148,6 +148,7 @@ from config import (
     VISION_TIMEOUT,
     REDIS_URL,
     REFLECTION_INTERVAL_HOURS,
+    ROUTER_API_KEY,
     ROUTER_API_URL,
     ROUTER_MODEL,
     SELF_MEMORY_PATH,
@@ -205,54 +206,6 @@ ROUTER_PORTFOLIO_THRESHOLD = 0.40
 # ── Lazy-loaded Users and embedding ──
 EMBED_MODEL = None
 INTENT_EMBEDDINGS = {}
-INTENT_EXAMPLES_EN = {
-    "memory": [
-        "what did we talk about before",
-        "remember what I told you",
-        "my preferences",
-        "my projects",
-        "things you know about me",
-    ],
-    "rag": [
-        "search my documents",
-        "look inside my files",
-        "find information in documents",
-        "document analysis",
-        "information from my reports",
-    ],
-    "web": [
-        "latest news",
-        "current events",
-        "market price today",
-        "what happened today",
-        "recent information online",
-    ],
-    "portfolio": [
-        "my stock portfolio",
-        "my shares",
-        "stock price",
-        "my investments",
-        "portfolio performance",
-        "dividends",
-        "trading alert",
-        "profit loss on my stocks",
-        "how is my portfolio doing",
-    ],
-    "gmail": [
-        "check my emails",
-        "do I have new messages",
-        "search my inbox",
-        "unread emails",
-        "emails from",
-    ],
-    "calendar": [
-        "my agenda",
-        "upcoming appointments",
-        "what do I have today",
-        "my schedule this week",
-        "events this month",
-    ],
-}
 INTENT_EXAMPLES_FR = {
     "memory": [
         "on a parlé avant",
@@ -746,10 +699,10 @@ async def search_documents(query: str, top_k: int = RAG_TOP_K) -> list[dict]:
                     {"text": text[:1500], "source": source, "score": hit.score}
                 )
 
-        logger.info(f"RAG: {len(chunks)} relevant chunks for: {query[:50]}")
+        logger.info("RAG: %d relevant chunks for: %s", len(chunks), query[:50])
         return chunks
     except Exception as e:
-        logger.warning(f"RAG search failed: {e}")
+        logger.warning("RAG search failed: %s", e)
         return []
 
 
@@ -1169,7 +1122,7 @@ async def describe_images(image_parts: list, text_prompt: str) -> str:
                 json={
                     "model": VISION_MODEL,
                     "messages": vision_messages,
-                    "max_completion_tokens": 600,
+                    tokens_param(VISION_MODEL): 600,
                     "stream": False,
                 },
             )
@@ -1240,12 +1193,12 @@ async def post_analysis(
             add_self_learning(analysis["memory_summary"])
 
         logger.info(
-            f"Analysis: mood={mood}, topics={analysis.get('topics')}, "
-            f"facts={len(analysis.get('user_facts', []))}"
+            "Analysis: mood=%s, topics=%s, facts=%d",
+            mood, analysis.get("topics"), len(analysis.get("user_facts", []))
         )
 
     except Exception as e:
-        logger.error(f"Post-analysis error: {e}")
+        logger.error("Post-analysis error: %s", e)
 
 
 # ==================================
@@ -1500,8 +1453,8 @@ async def self_reflect_now():
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    if not OPENAI_API_KEY:
-        raise HTTPException(503, "OPENAI_API_KEY not set")
+    if not PRIMARY_API_KEY:
+        raise HTTPException(503, "No LLM API key configured")
 
     user_code = req.user_code
 
@@ -1526,8 +1479,8 @@ async def chat(req: ChatRequest):
     if any(kw in _msg_lower for kw in _OPENWEBUI_KEYWORDS):
         logger.debug("Open WebUI system message detected — bypassing Jarvis pipeline")
         _owui_model = ROUTER_MODEL or PRIMARY_MODEL
-        _owui_api_url = ROUTER_API_URL if ROUTER_MODEL else OPENAI_API_URL
-        _owui_api_key = OPENAI_API_KEY
+        _owui_api_url = ROUTER_API_URL if ROUTER_MODEL else PRIMARY_API_URL
+        _owui_api_key = ROUTER_API_KEY if ROUTER_MODEL else PRIMARY_API_KEY
         async def _passthrough():
             async for chunk in stream_openai(
                 [{"role": "user", "content": req.message}],

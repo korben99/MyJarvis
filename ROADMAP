@@ -1,0 +1,32 @@
+  Roadmap — Next 3 Milestones
+
+  1. Autocoding — Jarvis edits its own prompts
+
+  What: Add a refine_prompt action to the self-reflection catalog. After flagging a knowledge gap N times, Jarvis proposes a
+  targeted improvement to one of its own prompt templates (router rules, analysis prompt, briefing structure) and writes it to a
+  prompts/ override directory that takes precedence over the hardcoded strings. A human-approval flag gates the write.
+  Why it matters: Closes the feedback loop between poor answers and the instructions that caused them. The router use_reasoning
+  false-positive pattern and the self intent confusion you fixed manually would be correctable autonomously.
+  Entry point: self.py action catalog + a prompts/overrides.json loader in each module.
+
+  2. Full Self-Improvement Loop
+
+  What: Wire the nightly review's tomorrow_suggestions into the morning briefing ("I noticed you often ask about X on Mondays —
+  should I pre-fetch that?"), and let Jarvis propose user preference updates (update_user_profile) directly from the nightly review
+  instead of waiting for a conversation. Add a self_score metric (response quality 1-5, rated by the LLM itself post-analysis)
+  tracked in Redis — reflection cycles use it to detect degradation trends.
+  Why it matters: Currently Jarvis learns facts passively from conversations. This makes learning active and proactive — it notices
+  patterns and acts on them between sessions.
+  Entry point: self.py nightly review → add proposed_profile_updates field; briefing.py → inject tomorrow_suggestions; analyzer.py →
+   add self_score field.
+
+  3. JarvisApp Push Notifications
+
+  What: Add APNs (Apple Push Notification service) delivery to main.py. Store device tokens in Redis (apns:token:{user_code}),
+  registered at app launch via a new POST /apns/register endpoint. Trade alerts, briefing delivery, and self-reflection
+  send_notification actions all get an APNs path alongside (or replacing) the Gmail path. Notifications deep-link into the relevant
+  conversation session.
+  Why it matters: Currently Jarvis can only push to Gmail. Push notifications make trading alerts and proactive suggestions
+  actionable in seconds instead of minutes, and eliminate the Gmail round-trip.
+  Entry point: main.py new /apns/register endpoint; trading.py push_pending_alert + APNs call; self.py _action_send_notification +
+  APNs fallback; JarvisAPI.swift device token registration on launch.

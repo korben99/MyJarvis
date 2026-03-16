@@ -53,9 +53,6 @@ from config import (
     ENABLE_ANALYSIS,
     IMPORTANCE_THRESHOLD,
     NOVELTY_THRESHOLD,
-    OPENAI_API_KEY,
-    OPENAI_API_URL,
-    PRIMARY_MODEL,
     QDRANT_COLLECTION,
     QDRANT_MEMORY_COLLECTION,
     QDRANT_URL,
@@ -224,7 +221,7 @@ def get_user_profile(user_code: str) -> dict:
 def update_user_profile(user_code: str, key: str, value: str):
     r = get_redis()
     r.hset(f"user:{user_code}:profile", key, value)
-    logger.info(f"User {user_code} profile updated: {key} = {value}")
+    logger.info("User %s profile updated: %s = %s", user_code, key, value)
 
 
 """Get list of user's active projects."""
@@ -386,7 +383,7 @@ def compute_memory_novelty(user_code: str, text: str, limit: int = 5):
         return max(0, min(1, novelty))
 
     except Exception as e:
-        logger.error(f"Novelty computation failed: {e}")
+        logger.error("Novelty computation failed: %s", e)
         return 0.5
 
 
@@ -409,7 +406,7 @@ def store_memory_vector(user_code: str, entry: dict):
 
         if not text.strip():
             return
-        logger.info(f"Vector memory candidate: {text[:80]}")
+        logger.info("Vector memory candidate: %s", text[:80])
         novelty = compute_memory_novelty(user_code, text)
         if novelty < NOVELTY_THRESHOLD:
             return
@@ -437,7 +434,7 @@ def store_memory_vector(user_code: str, entry: dict):
         )
 
     except Exception as e:
-        logger.error(f"Vector memory store failed: {e}")
+        logger.error("Vector memory store failed: %s", e)
 
 
 def store_autobiographical_event(user_code: str, summary: str, importance: float):
@@ -467,10 +464,10 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
             ],
         )
 
-        logger.info(f"Autobiographical memory stored: {summary}")
+        logger.info("Autobiographical memory stored: %s", summary)
 
     except Exception as e:
-        logger.error(f"Autobiographical memory failed: {e}")
+        logger.error("Autobiographical memory failed: %s", e)
 
 
 def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str = "auto"):
@@ -541,7 +538,7 @@ def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str 
         return memories[:limit]
 
     except Exception as e:
-        logger.error(f"Memory search failed: {e}")
+        logger.error("Memory search failed: %s", e)
         return []
 
 
@@ -663,7 +660,7 @@ def get_user_timeline(user_code: str, limit: int = 20):
         return timeline
 
     except Exception as e:
-        logger.error(f"Timeline retrieval failed: {e}")
+        logger.error("Timeline retrieval failed: %s", e)
         return []
 
 
@@ -798,10 +795,10 @@ Retourne une seule phrase en français décrivant un fait stable sur l'utilisate
             points_selector=PointIdsList(points=point_ids),
         )
 
-        logger.info(f"[{user_code}] Memory consolidation created: {summary} ({len(point_ids)} episodic points deleted)")
+        logger.info("[%s] Memory consolidation: %s (%d episodic points deleted)", user_code, summary, len(point_ids))
 
     except Exception as e:
-        logger.error(f"Memory consolidation failed for {user_code}: {e}")
+        logger.error("Memory consolidation failed for %s: %s", user_code, e)
 
 
 def consolidate_memories(user_code: str = None, max_items: int = 20):
@@ -821,4 +818,4 @@ def consolidate_memories(user_code: str = None, max_items: int = 20):
             _consolidate_user_memories(uc, max_items)
 
     except Exception as e:
-        logger.error(f"Global memory consolidation failed: {e}")
+        logger.error("Global memory consolidation failed: %s", e)

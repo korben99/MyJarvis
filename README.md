@@ -32,7 +32,7 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
          │                │
 ┌────────▼──────┐  ┌──────▼──────────┐
 │  Qdrant       │  │  Redis          │
-│  (port 6333)  │  │  (port 6379)    │
+│  (port 6333)  │  │  (port 6333)    │
 │  Vector DB    │  │  Session cache  │
 │  RAG + Memory │  │  Working mem.   │
 └───────────────┘  └─────────────────┘
@@ -47,10 +47,48 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
 | **Qdrant** | Docker, port 6333 | Vector DB for RAG document search and episodic memory |
 | **Redis** | Docker, port 6379 | Working memory, session context, conversation cache |
 
-### Two-Tier LLM Architecture
+### Four-Tier LLM Architecture
 
-- **Tier 1 — Router:** Fast intent classifier (`gpt-4.1-nano` by default, future: local Qwen2.5-7B). Determines which tools and context sources to activate, classifies the message type, and hints which memory layer to search.
-- **Tier 2 — Reasoning:** Full response generation (`gpt-5.1` by default). Receives aggregated context (memory + RAG + web + Google).
+Jarvis routes every request through a layered model stack. Each tier has its own API endpoint so you can run some tiers locally (Qwen via mlx-lm) and others on the cloud.
+
+```
+Tier 1 — ROUTER      Fast intent classifier, JSON only
+         Default: gpt-4.1-nano  →  future: Qwen3-7B (local)
+
+Tier 2 — PRIMARY     All standard responses: chat, questions, summaries,
+         Default: gpt-4o-mini      trading alerts, self-reflection, briefing
+                              →  future: Qwen3-30B-A3B (local)
+
+Tier 2b — ANALYSIS   Post-exchange conversation analysis (fact/mood extraction)
+          Default: same as PRIMARY  →  future: Qwen3-30B-A3B (local)
+
+Tier 3 — REASONING   Complex queries only: medical/legal/regulatory analysis,
+         Default: gpt-5.1          hard multi-step logic, deep scientific reasoning
+                              →  stays cloud (OpenAI / Anthropic)
+```
+
+**Routing logic:**
+- The router sets `use_reasoning: true` very sparingly (see criteria below).
+- When `use_reasoning=false` (the vast majority of requests), `PRIMARY_MODEL` handles the response.
+- When `use_reasoning=true`, `REASONING_MODEL` is used instead.
+- `ANALYSIS_MODEL` runs asynchronously after every exchange — it never blocks the response.
+
+**`use_reasoning` criteria** — only set to `true` for:
+- Medical / legal / regulatory document analysis
+- Hard multi-step logic puzzles
+- Complex code debugging across many files
+- Deep scientific reasoning
+- Tasks explicitly requiring expert-level nuanced judgment
+
+Everything else (chat, questions, summaries, portfolio, translations, writing, coding assistance, web lookups) stays on `PRIMARY_MODEL`. When in doubt → `false`.
+
+**Qwen migration readiness:**
+All tiers have independent `API_URL` / `API_KEY` variables, so you can move each tier to a local mlx-lm server independently:
+```
+ROUTER_API_URL=http://mac-mini.local:8080/v1   # point router at local Qwen3-7B
+PRIMARY_API_URL=http://mac-mini.local:8080/v1  # point primary at local Qwen3-30B-A3B
+```
+`no_think_suffix()` in `config.py` appends `/no_think` to system prompts for Qwen3 models to suppress `<think>` blocks, which would break JSON parsing.
 
 #### Router Output Fields
 
@@ -61,7 +99,7 @@ The router returns a structured JSON decision consumed by the chat pipeline:
 | `intents` | `memory`, `rag`, `web`, `gmail`, `calendar`, `briefing`, `self`, `portfolio` | Which data sources to activate |
 | `gmail_query` | Gmail search string or null | Pre-built query passed directly to Gmail API |
 | `calendar_days` | integer (1–90) or null | Days ahead to fetch from Calendar |
-| `use_reasoning` | boolean | Route to Tier-2 reasoning model when true |
+| `use_reasoning` | boolean | Route to Tier-3 reasoning model when true |
 | `memory_scope` | `episodic`, `autobiographical`, `profile`, `auto` | Which Qdrant memory layer to search |
 | `conversation_type` | `conversational`, `task`, `question` | Message classification — RAG is skipped for `conversational` |
 
@@ -121,8 +159,8 @@ User message
     → if conversation_type=conversational: skip RAG
     → Parallel context gathering (memory[scope] + RAG + web + Google + self + portfolio)
     → Pending trade alerts injected if any are queued
-    → Tier 2 LLM (full context → streaming response)
-    → Conversation analyzer (extract facts, mood, topics, ESS importance score)
+    → Tier 2 PRIMARY or Tier 3 REASONING (full context → streaming response)
+    → Conversation analyzer / ANALYSIS_MODEL (extract facts, mood, topics, ESS)
     → Memory storage: ESS > 0.35 → Qdrant episodic | ESS > 0.60 → autobiographical
 ```
 
@@ -198,38 +236,66 @@ docker compose down
 
 All variables go in `/opt/jarvis/.env`.
 
-### LLM / OpenAI
+### Shared OpenAI credentials
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENAI_API_KEY` | — | OpenAI API key (required) |
-| `OPENAI_API_URL` | `https://api.openai.com/v1` | API base URL (override for local LLM) |
-| `PRIMARY_MODEL` | `gpt-4o-mini` | Fallback model when tier models are unset |
-| `ANALYSIS_MODEL` | `gpt-4o-mini` | Conversation analysis |
-| `ROUTER_MODEL` | `gpt-4.1-nano` | Intent classification (Tier 1). Set to empty string to disable LLM router and fall back to embedding router. |
-| `ROUTER_API_URL` | `https://api.openai.com/v1` | API base URL for the router model (override to point at a local Qwen2.5-7B) |
-| `ROUTER_API_KEY` | *(OPENAI_API_KEY)* | API key for the router model (defaults to main key) |
-| `ROUTER_TIMEOUT` | `6` | Router call timeout in seconds |
-| `REASONING_MODEL` | *(PRIMARY_MODEL)* | Full reasoning model (Tier 2). Set to empty to fall back to PRIMARY_MODEL. |
-| `REASONING_API_URL` | *(OPENAI_API_URL)* | API base URL for the reasoning model (override to point at a local Qwen2.5-32B) |
+| `OPENAI_API_KEY` | — | Shared API key (fallback for any tier not explicitly configured) |
+| `OPENAI_API_URL` | `https://api.openai.com/v1` | Shared base URL (fallback) |
+
+### Tier 1 — Router model
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ROUTER_MODEL` | `gpt-4.1-nano` | Intent classifier. Set to empty to disable and use embedding router. |
+| `ROUTER_API_URL` | *(OPENAI_API_URL)* | Override to point at a local Qwen3-7B via mlx-lm |
+| `ROUTER_API_KEY` | *(OPENAI_API_KEY)* | API key for the router (mlx-lm ignores auth but requires a value) |
+| `ROUTER_TIMEOUT` | `6` | Timeout in seconds (short — fast model only) |
+
+### Tier 2 — Primary model
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PRIMARY_MODEL` | `gpt-4o-mini` | Handles all standard responses: chat, trading, briefing, self-reflection |
+| `PRIMARY_API_URL` | *(OPENAI_API_URL)* | Override to point at a local Qwen3-30B-A3B |
+| `PRIMARY_API_KEY` | *(OPENAI_API_KEY)* | API key for the primary model |
+| `PRIMARY_TIMEOUT` | `60` | Timeout in seconds |
+
+### Tier 2b — Analysis model
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANALYSIS_MODEL` | *(PRIMARY_MODEL)* | Post-exchange fact/mood extraction. Defaults to PRIMARY if unset. |
+| `ANALYSIS_API_URL` | *(PRIMARY_API_URL)* | Override independently if needed |
+| `ANALYSIS_API_KEY` | *(PRIMARY_API_KEY)* | API key for the analysis model |
+
+### Tier 3 — Reasoning model
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REASONING_MODEL` | *(PRIMARY_MODEL)* | Complex queries only — used when router sets `use_reasoning=true` |
+| `REASONING_API_URL` | *(OPENAI_API_URL)* | Typically cloud (OpenAI / Anthropic) |
 | `REASONING_API_KEY` | *(OPENAI_API_KEY)* | API key for the reasoning model |
-| `REASONING_TIMEOUT` | `90` | Reasoning call timeout in seconds |
-| `VISION_MODEL` | *(empty — disabled)* | Vision model for image description (e.g. `gpt-4o`, `qwen2.5-vl-72b`). Leave empty to ignore images. |
-| `VISION_API_URL` | *(OPENAI_API_URL)* | API base URL for the vision model (override for a local Qwen2.5-VL) |
+| `REASONING_TIMEOUT` | `90` | Timeout in seconds (longer — deep reasoning) |
+
+### Vision model
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VISION_MODEL` | *(empty — disabled)* | First-stage image description (e.g. `gpt-4o-mini`, `qwen2.5-vl-72b`). Leave empty to ignore images. |
+| `VISION_API_URL` | *(OPENAI_API_URL)* | Override for a local Qwen2.5-VL |
 | `VISION_API_KEY` | *(OPENAI_API_KEY)* | API key for the vision model |
-| `VISION_TIMEOUT` | `30` | Vision call timeout in seconds |
-| `HF_TOKEN` | — | HuggingFace token (required to download the multilingual embedding model on first start) |
-| `ENABLE_ANALYSIS` | `true` | Enable post-response conversation analysis (fact/memory extraction) |
-| `SELF_MEMORY_PATH` | `/app/data/jarvis-self.json` | Path to Jarvis identity + reflection JSON file |
+| `VISION_TIMEOUT` | `30` | Timeout in seconds |
 
 ### Infrastructure
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REDIS_URL` | `redis://redis:6379` | Redis connection string |
-| `QDRANT_URL` | `http://localhost:6333` | Qdrant connection URL |
+| `QDRANT_URL` | `http://qdrant:6333` | Qdrant URL — hardcoded to Docker-internal network in compose |
+| `REDIS_URL` | `redis://redis:6379` | Redis URL — hardcoded to Docker-internal network in compose |
 | `QDRANT_COLLECTION` | `open-webui_knowledge` | Collection for RAG documents |
 | `QDRANT_MEMORY_COLLECTION` | `jarvis_memory` | Collection for episodic memory |
+| `HF_TOKEN` | — | HuggingFace token (required to download the multilingual embedding model on first start) |
 
 ### RAG
 
@@ -247,7 +313,7 @@ All variables go in `/opt/jarvis/.env`.
 | `GOOGLE_REFRESH_TOKEN` | Refresh token for persistent access |
 | `GOOGLE_CALENDAR_ID` | Calendar to read (e.g. `primary`) |
 
-### Scheduling
+### Scheduling & Features
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -255,6 +321,15 @@ All variables go in `/opt/jarvis/.env`.
 | `BRIEFING_TIME` | `07:30` | Briefing delivery time (HH:MM) |
 | `BRIEFING_TIMEZONE` | `Europe/Paris` | Timezone for scheduling |
 | `REFLECTION_INTERVAL_HOURS` | `6` | Hours between self-reflection cycles |
+| `ENABLE_ANALYSIS` | `true` | Enable post-response conversation analysis |
+
+### Conversation Limits
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CHAT_MAX_MESSAGES` | `100` | Maximum messages kept per session in Redis |
+| `IOS_MAX_MESSAGES` | `50` | Default history limit returned to iOS clients |
+| `CHAT_LOG_TTL_DAYS` | `90` | Days before inactive session logs are expired |
 
 ### Trading
 
@@ -264,15 +339,14 @@ All variables go in `/opt/jarvis/.env`.
 
 ### User Management
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `USERS_LIST` | `JarvisData/users_list.json` | Path to users file |
-
 Users are defined in `jarvis-core/JarvisData/users_list.json`. Each entry contains:
 - `code` — authentication code used in API calls
 - `name`, `email`, `city`, `timezone`
 - `language` — `fr` or `en`
 - `briefing_enabled` — boolean
+- `trading` — boolean — set to `true` to enable hourly portfolio surveillance for this user
+
+Only users with `"trading": true` participate in scheduled trade checks (CSV import, price fetch, alert evaluation). Users without this flag are never included, regardless of whether a CSV exists in `TradeData/`.
 
 ---
 
@@ -299,13 +373,15 @@ Base URL: `http://localhost:8000`
   "stream": true,
   "voice_mode": false,
   "use_rag": true,
-  "use_web": false
+  "use_web": false,
+  "image_base64": null
 }
 ```
 
 - `stream: true` — returns Server-Sent Events
 - `voice_mode: true` — concise 2-3 sentence responses optimized for TTS
 - `use_web: false` — disable DuckDuckGo search to reduce latency
+- `image_base64` — optional JPEG/PNG as a base64 string; processed by VISION_MODEL before the main response
 
 **`/v1/chat/completions`** accepts standard OpenAI format. Pass the user code as Bearer token:
 ```
@@ -395,11 +471,11 @@ The morning briefing aggregates: calendar events, unread emails, weather, news h
 | `yahoo_ticker` | Override the auto-resolved Yahoo Finance ticker |
 
 **Scheduled jobs:**
-- **Every hour** (weekdays 09:00–17:35 Paris): fetch live prices via yfinance, evaluate alert conditions with REASONING_MODEL. Fired alerts are queued in Redis and injected into the user's next chat message.
+- **Every hour** (weekdays 09:00–17:35 Paris): fetch live prices via yfinance, evaluate alert conditions with PRIMARY_MODEL. Fired alerts are queued in Redis and injected into the user's next chat message.
 - **Every hour (always)**: check `TradeData/` for a new CSV (mtime-gated); import automatically if a newer file is found.
 - **Morning briefing**: portfolio performance summary included as a section when positions are loaded.
 
-**Alert conditions** — REASONING_MODEL fires an alert only when at least one of these is true:
+**Alert conditions** — PRIMARY_MODEL fires an alert only when at least one of these is true:
 - A position's live price crossed its `threshold_high` or `threshold_low`
 - Intraday variation > ±3 % on an individual position
 - Total daily portfolio loss > 2 %
@@ -407,25 +483,51 @@ The morning briefing aggregates: calendar events, unread emails, weather, news h
 
 Rate limit: the same position cannot trigger a second alert within 4 hours. Queued alerts expire after 24 hours.
 
+#### Ticker Resolution
+
+Jarvis resolves ISIN → Yahoo Finance ticker dynamically at runtime — there is no hardcoded ticker list. When a new CSV is imported, each position goes through a four-step resolution pipeline:
+
+| Step | Method | Notes |
+|------|--------|-------|
+| 1 | Redis cache (`yahoo_ticker` field) | Instant — skips all lookups if already resolved |
+| 2 | `yf.Search(isin)` | Most reliable for standard securities |
+| 3 | `yf.Search(name)` | Fallback using the position name from the CSV |
+| 4 | LLM fallback (`PRIMARY_MODEL`) | Last resort — asks the model to identify the ticker |
+
+**Log levels during resolution:**
+- `INFO` — ticker resolved successfully (indicates which step found it)
+- `WARNING TICKER NOT FOUND via yfinance` — steps 2 and 3 both failed, LLM fallback is being attempted
+- `ERROR TICKER UNRESOLVABLE` — all four steps failed; position is skipped until you set the ticker manually
+
+**When a price fetch fails** (delisted/invalid ticker), the cached `yahoo_ticker` is automatically deleted from Redis so the next hourly run retries resolution from scratch rather than re-using a known-bad ticker.
+
+**Manual override** (always takes precedence — set once, cached permanently):
+```bash
+curl -X PUT http://localhost:8000/portfolio/position/KORBEN99/IE0002XZSHO1 \
+  -H "Authorization: Bearer KORBEN99" \
+  -H "Content-Type: application/json" \
+  -d '{"yahoo_ticker": "IWDA.AS"}'
+```
+
 ### Image Upload & Analysis
 
-Jarvis supports image attachments from Open WebUI using a **two-stage pipeline**:
+Jarvis supports image attachments using a **two-stage pipeline**:
 
 ```
 Image → VISION_MODEL (describe) → "=== IMAGE ANALYSÉE ===" context block
                                           ↓
-                         full pipeline → REASONING_MODEL (analyze with memory + RAG)
+                         full pipeline → PRIMARY/REASONING MODEL (analyze with memory + RAG)
 ```
 
 1. The vision model produces a detailed description of the image (max 600 tokens).
 2. That description is injected as a context block, alongside memory, RAG, emails, etc.
-3. The reasoning model then answers the user's question with full Jarvis context.
+3. The main model then answers the user's question with full Jarvis context.
 
-This decouples vision from reasoning — a local `Qwen2.5-VL-72B` can handle description while `gpt-5.1` handles analysis. Setting `VISION_MODEL` to the same model as `REASONING_MODEL` also works (two calls to the same model).
+This decouples vision from reasoning — a local `Qwen2.5-VL-72B` can handle description while `gpt-5.1` handles analysis. Setting `VISION_MODEL` to the same model as `PRIMARY_MODEL` also works (two calls to the same model).
 
 **If `VISION_MODEL` is not set**, images are silently ignored and only the text is processed.
 
-**Autonomous threshold management** — during its reflection cycles, Jarvis can update `threshold_high` / `threshold_low` on any position via the `update_trade_threshold` action in `self.py`. This happens when the reflection LLM judges that a threshold needs revision (e.g. price has drifted far from the current threshold, or a significant market move warrants adjusting the stop-loss). Thresholds set this way are treated identically to those set via the API or CSV auto-population.
+**Autonomous threshold management** — during its reflection cycles, Jarvis can update `threshold_high` / `threshold_low` on any position via the `update_trade_threshold` action in `self.py`.
 
 **Uploading a new CSV via curl:**
 ```bash
@@ -459,9 +561,9 @@ curl -X PUT http://localhost:8000/portfolio/position/KORBEN99/FR0000120578 \
 │   ├── briefing.py        # Morning briefing generation
 │   ├── google_services.py # Gmail + Calendar
 │   ├── trading.py         # Boursorama portfolio surveillance
-│   ├── llm_router.py      # Intent classification
-│   ├── analyzer.py        # Conversation analysis
-│   ├── config.py          # Configuration loader
+│   ├── llm_router.py      # Intent classification (Tier 1)
+│   ├── analyzer.py        # Conversation analysis (Tier 2b)
+│   ├── config.py          # Configuration loader + model helpers
 │   └── JarvisData/
 │       ├── users_list.json
 │       └── reflections/
