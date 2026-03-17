@@ -33,17 +33,19 @@
   "learnings": [
     {
       "text": "ajout de l'autocodage de mes prompts",
-      "date": "2026-03-17T10:18:49.876520+00:00"
+      "date": "2026-03-17T10:18:49.876520+00:00",
+      "source": "self_reflection"
     },
     {
-      "text": "Utilisateur a une présentation sur la sécurité de l'IA à la conférence Insomnihack.",
-      "date": "2026-03-17T11:29:35.352894+00:00"
+      "text": "L'utilisateur a écrit un article sur le durcissement des infrastructures critiques.",
+      "date": "2026-03-17T17:08:40.738803+00:00"
     }
   ],
   "growth_log": [
     {
       "date": "2026-03-15",
-      "user": "KORBEN99",
+      "user_code": "KORBEN99",
+      "user_name": "Sébastien",
       "summary": "Aujourd'hui, Sébastien a participé aux élections municipales et a réalisé un bon score de 85 points lors d'un tir contrôlé à 25 mètres. Il a également posé des questions sur la météo à Paris et sur ce que je sais de lui.",
       "mood": "Sébastien a passé une journée positive et engagée.",
       "conversations": 43

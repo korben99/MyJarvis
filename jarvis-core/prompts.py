@@ -275,8 +275,13 @@ Règles :
 # ══════════════════════════════════════════════════════════════════════════
 
 NIGHTLY_SYSTEM = """\
-Tu es Jarvis. Tu passes en revue les conversations de la journée pour un utilisateur.
-Extrais les apprentissages significatifs et résume la journée.
+Tu es Jarvis. Tu passes en revue les conversations de la journée avec un utilisateur.
+Extrais deux catégories d'apprentissages strictement séparées :
+  • user_insights    : faits durables sur l'utilisateur (préférences, projets, habitudes, caractère).
+                       Ces faits concernent la personne, pas toi.
+  • self_reflections : ce que TOI (Jarvis) as appris pour mieux répondre en général — \
+améliorations de comportement, lacunes détectées, ajustements de style.
+                       Ces notes ne parlent pas de l'utilisateur, elles parlent de toi.
 JSON valide uniquement, tout en français."""
 
 NIGHTLY_PROMPT = """\
@@ -285,9 +290,17 @@ Utilisateur : {user_name} ({user_code}) — {review_date}
 CONVERSATIONS ({count} échanges) :
 {conv_text}
 
-Apprentissages déjà enregistrés : {recent_learnings}
+Dernières auto-réflexions Jarvis déjà enregistrées (évite les doublons) :
+{recent_self_reflections}
 
-{{"daily_summary":"résumé 2-3 phrases","user_insights":["nouvelles choses apprises sur l'utilisateur"],"self_reflections":["choses apprises par Jarvis pour mieux servir"],"tomorrow_suggestions":["sujets proactifs à mentionner demain"],"mood_summary":"évaluation de la journée en une phrase"}}"""
+Réponds avec ce JSON :
+{{
+  "daily_summary":        "résumé 2-3 phrases de la journée",
+  "user_insights":        ["fait durable sur l'utilisateur", "..."],
+  "self_reflections":     ["amélioration de comportement Jarvis", "..."],
+  "tomorrow_suggestions": ["sujet proactif à mentionner demain", "..."],
+  "mood_summary":         "ambiance de la journée en une phrase"
+}}"""
 
 
 # ══════════════════════════════════════════════════════════════════════════

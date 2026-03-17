@@ -88,7 +88,7 @@ from google_services import (
     fetch_gmail_messages,
     is_google_available,
 )
-from llm_router import RouterResult, is_llm_router_available, llm_route
+from llm_router import RouterResult, llm_route
 from briefing import (
     BriefingResult,
     deliver_briefing,
@@ -102,9 +102,8 @@ from self import (
     get_reflection_log,
     handle_proposal_command,
     list_pending_proposals,
-    load_self,
-    run_nightly_review,
-    run_reflection,
+    run_nightly_interaction_review,
+    run_self_reflection,
 )
 from trading import (
     get_portfolio_summary_text,
@@ -162,7 +161,6 @@ from config import (
     tokens_param,
 )
 from memory import (
-    add_self_learning,
     append_conversation_message,
     build_memory_context,
     get_conversation,
@@ -196,6 +194,9 @@ WEB_CHAR_BUDGET = int(
 GOOGLE_CHAR_BUDGET = int(
     os.getenv("GOOGLE_CHAR_BUDGET", "3000")
 )  # Maximum char of Gmail/Calendar context to send in the prompt
+TOTAL_CONTEXT_BUDGET = int(
+    os.getenv("TOTAL_CONTEXT_BUDGET", "10000")
+)  # Hard ceiling across all context sources combined
 
 # ROUTER VAR
 ROUTER_MEMORY_THRESHOLD = 0.35
@@ -429,18 +430,18 @@ async def lifespan(app: FastAPI):
 
         # Proto-self: always active regardless of BRIEFING_ENABLED
         scheduler.add_job(
-            run_reflection,
+            run_self_reflection,
             trigger="interval",
             hours=REFLECTION_INTERVAL_HOURS,
             id="self_reflection",
             next_run_time=datetime.now(tz),   # also run once at startup
         )
         scheduler.add_job(
-            run_nightly_review,
+            run_nightly_interaction_review,
             trigger="cron",
             hour=23,
             minute=0,
-            id="nightly_review",
+            id="nightly_interaction_review",
         )
 
         # Morning briefing: conditional
@@ -499,7 +500,7 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     stream: bool = True
     voice_mode: bool = False
-    use_rag: bool = True
+    use_rag: bool = False  # router decides; set True to force RAG regardless
     use_web: bool = False
     image_parts: list = []           # OpenAI image_url part dicts forwarded from the proxy
     image_base64: Optional[str] = None  # base64 JPEG/PNG sent directly by the iOS app
@@ -1187,8 +1188,6 @@ async def post_analysis(
                     )
             update_user_projects(user_code, existing)
 
-        if analysis.get("should_remember") and analysis.get("memory_summary"):
-            add_self_learning(analysis["memory_summary"])
 
         logger.info(
             "Analysis: mood=%s, topics=%s, facts=%d",
@@ -1229,9 +1228,9 @@ async def status():
             "model": PRIMARY_MODEL,
         },
         "router": {
-            "status": "llm" if is_llm_router_available() else "embedding_fallback",
-            "model": ROUTER_MODEL or None,
-            "url": ROUTER_API_URL if ROUTER_MODEL else None,
+            "status": "llm",
+            "model": ROUTER_MODEL or PRIMARY_MODEL,
+            "url": ROUTER_API_URL if ROUTER_MODEL else PRIMARY_API_URL,
         },
         "reasoning": {
             "status": "online",
@@ -1402,7 +1401,7 @@ async def briefing_get(user_code: str, authorization: str = Header(default=None)
 @app.get("/self/state", tags=["self"])
 async def self_state():
     """Return Jarvis's current identity, goals, focus, and last reflection."""
-    data     = load_self()
+    data     = get_self_memory()
     last_ref = get_reflection_log(1)
     return {
         "identity":        data.get("identity", {}),
@@ -1424,7 +1423,7 @@ async def self_log(n: int = 10):
 @app.post("/self/reflect", tags=["self"])
 async def self_reflect_now():
     """Trigger an immediate reflection cycle (for testing / manual trigger)."""
-    result = await run_reflection()
+    result = await run_self_reflection()
     return result
 
 
@@ -1482,11 +1481,9 @@ async def chat(req: ChatRequest):
     if user_name:
         system_prompt += f"\n\nL'utilisateur avec qui tu parles s'appelle {user_name}."
 
-    # AGGREGATION MEMORY WEB RAG GOOGLE multithread
-    # Try LLM router first (Qwen via Ollama), fall back to embedding router
-    llm_result: RouterResult | None = None
-    if is_llm_router_available():
-        llm_result = await llm_route(req.message, google_available=is_google_available())
+    # LLM router — uses ROUTER_MODEL if set, PRIMARY_MODEL otherwise.
+    # Falls back to embedding router only on actual LLM failure (timeout / parse error).
+    llm_result = await llm_route(req.message, google_available=is_google_available())
 
     if llm_result:
         use_memory        = llm_result.use_memory
@@ -1607,22 +1604,38 @@ async def chat(req: ChatRequest):
     if user_name and HAS_MEMORY:
         update_user_profile(user_code, "name", user_name)
 
-    # INJECT CONTEXT IN PROMPT
+    # ── Context injection ────────────────────────────────────────────────────
+    # Priority order: background first, urgent/specific last.
+    # The LLM attends more strongly to content closest to the user message,
+    # so the most actionable context is injected last.
+    #
+    # 1. Web results       (reference material, lowest urgency)
+    # 2. RAG documents     (personal docs, reference)
+    # 3. Memory            (episodic background)
+    # 4. Calendar / Gmail  (scheduled facts, recent comms)
+    # 5. Portfolio         (current financial state)
+    # 6. Trade alerts      (urgent, actionable)
+    # 7. Self              (internal state — only on self-intent)
+    # 8. Image             (immediate — always last, about this exact message)
+    #
+    # A global cap (TOTAL_CONTEXT_BUDGET) truncates the assembled block if
+    # all sources fire simultaneously.
+
     context_parts = []
-    # Memory
-    if memory_chunks:
-        selected_memories = trim_chunks(memory_chunks, MEMORY_CHAR_BUDGET)
-        logger.info(
-            f"memory recall {len(selected_memories)}/{len(memory_chunks)} "
-            f"(budget={MEMORY_CHAR_BUDGET})"
-        )
-        if selected_memories:
-            context_parts.append("=== SOUVENIRS PERTINENTS ===")
-            context_parts.extend(selected_memories)
-    # RAG
+
+    # 1. WEB
+    if web_results:
+        web_selected = trim_chunks(web_results, WEB_CHAR_BUDGET, text_key="body")
+        if web_selected:
+            context_parts.append("=== RÉSULTATS WEB ===")
+            for i, body in enumerate(web_selected):
+                r = web_results[i]
+                context_parts.append(f"[{r['title']}]\n{body}\nSource: {r['url']}")
+        logger.info(f"web recall {len(web_selected)}/{len(web_results)} (budget={WEB_CHAR_BUDGET})")
+
+    # 2. RAG
     if rag_chunks:
         rag_selected_texts = trim_chunks(rag_chunks, RAG_CHAR_BUDGET)
-
         if rag_selected_texts:
             context_parts.append("=== DOCUMENTS PERSONNELS ===")
             selected_set = set(rag_selected_texts)
@@ -1630,28 +1643,29 @@ async def chat(req: ChatRequest):
                 text = chunk["text"][:800]
                 if text in selected_set:
                     context_parts.append(f"[Doc {chunk['source']} ({chunk['score']:.2f})]\n{text}")
+        logger.info(f"rag recall {len(rag_selected_texts)}/{len(rag_chunks)} (budget={RAG_CHAR_BUDGET})")
 
-        logger.info(
-            f"rag recall {len(rag_selected_texts)}/{len(rag_chunks)} "
-            f"(budget={RAG_CHAR_BUDGET})"
-        )
-    # WEB RESULT
-    if web_results:
-        web_selected = trim_chunks(web_results, WEB_CHAR_BUDGET, text_key="body")
+    # 3. MEMORY
+    if memory_chunks:
+        selected_memories = trim_chunks(memory_chunks, MEMORY_CHAR_BUDGET)
+        if selected_memories:
+            context_parts.append("=== SOUVENIRS PERTINENTS ===")
+            context_parts.extend(selected_memories)
+        logger.info(f"memory recall {len(selected_memories)}/{len(memory_chunks)} (budget={MEMORY_CHAR_BUDGET})")
 
-        if web_selected:
-            context_parts.append("=== RÉSULTATS WEB ===")
+    # 4a. CALENDAR
+    if calendar_results:
+        context_parts.append("=== AGENDA ===")
+        for evt in calendar_results:
+            line = f"{evt['start']} — {evt['summary']}"
+            if evt.get("location"):
+                line += f" ({evt['location']})"
+            if evt.get("all_day"):
+                line += " [journée entière]"
+            context_parts.append(line)
+        logger.info(f"calendar context: {len(calendar_results)} events injected")
 
-            for i, body in enumerate(web_selected):
-                r = web_results[i]
-                context_parts.append(f"[{r['title']}]\n{body}\nSource: {r['url']}")
-
-        logger.info(
-            f"web recall {len(web_selected)}/{len(web_results)} "
-            f"(budget={WEB_CHAR_BUDGET})"
-        )
-
-    # GMAIL CONTEXT
+    # 4b. GMAIL
     if gmail_results:
         context_parts.append("=== EMAILS REÇUS ===")
         total_chars = 0
@@ -1669,47 +1683,14 @@ async def chat(req: ChatRequest):
             injected += 1
         logger.info(f"gmail context: {injected}/{len(gmail_results)} messages injected ({total_chars} chars)")
 
-    # CALENDAR CONTEXT
-    if calendar_results:
-        label = "AGENDA"
-        context_parts.append(f"=== {label} ===")
-        for evt in calendar_results:
-            line = f"{evt['start']} — {evt['summary']}"
-            if evt.get("location"):
-                line += f" ({evt['location']})"
-            if evt.get("all_day"):
-                line += " [journée entière]"
-            context_parts.append(line)
-        logger.info(f"calendar context: {len(calendar_results)} events injected")
-
-    # SELF CONTEXT
-    if use_self:
-        self_data   = load_self()
-        focus       = self_data.get("current_focus", "")
-        last_ref    = get_reflection_log(1)
-        last_action = last_ref[0].get("action", "none") if last_ref else "none"
-        last_reason = last_ref[0].get("reason", "") if last_ref else ""
-        goals_text  = " | ".join(f"G{i+1}: {g['label']}" for i, g in enumerate(self_data.get("goals", [])))
-        pending_proposals = list_pending_proposals()
-        self_ctx    = (
-            f"=== TON ÉTAT INTERNE ===\n"
-            f"Objectifs : {goals_text}\n"
-            f"Focus actuel : {focus or 'pas encore défini'}\n"
-            f"Dernière action autonome : {last_action}"
-            + (f" — {last_reason}" if last_reason else "")
-            + (f"\nPropositions de prompt en attente : {len(pending_proposals)} — dis 'montre les propositions' pour voir" if pending_proposals else "")
-        )
-        context_parts.append(self_ctx)
-        logger.info("self context injected for %s", user_code)
-
-    # PORTFOLIO CONTEXT
+    # 5. PORTFOLIO
     if use_portfolio:
         portfolio_text = get_portfolio_summary_text(user_code)
         if portfolio_text:
             context_parts.append(portfolio_text)
             logger.info("portfolio context injected for %s", user_code)
 
-    # PENDING TRADE ALERTS (always checked — proactively surfaced on next message)
+    # 6. TRADE ALERTS (always checked — proactively surfaced on next message)
     try:
         pending_alerts = pop_pending_alerts(user_code)
         if pending_alerts:
@@ -1721,7 +1702,27 @@ async def chat(req: ChatRequest):
     except Exception as _exc:
         logger.warning("Could not fetch pending trade alerts: %s", _exc)
 
-    # Image description (vision two-stage pipeline)
+    # 7. SELF
+    if use_self:
+        self_data   = get_self_memory()
+        focus       = self_data.get("current_focus", "")
+        last_ref    = get_reflection_log(1)
+        last_action = last_ref[0].get("action", "none") if last_ref else "none"
+        last_reason = last_ref[0].get("reason", "") if last_ref else ""
+        goals_text  = " | ".join(f"G{i+1}: {g['label']}" for i, g in enumerate(self_data.get("goals", [])))
+        pending_proposals = list_pending_proposals()
+        self_ctx = (
+            f"=== TON ÉTAT INTERNE ===\n"
+            f"Objectifs : {goals_text}\n"
+            f"Focus actuel : {focus or 'pas encore défini'}\n"
+            f"Dernière action autonome : {last_action}"
+            + (f" — {last_reason}" if last_reason else "")
+            + (f"\nPropositions de prompt en attente : {len(pending_proposals)} — dis 'montre les propositions' pour voir" if pending_proposals else "")
+        )
+        context_parts.append(self_ctx)
+        logger.info("self context injected for %s", user_code)
+
+    # 8. IMAGE (always last — directly about this message)
     if image_description:
         context_parts.append(
             f"=== IMAGE ENVOYÉE PAR L'UTILISATEUR ===\n"
@@ -1733,9 +1734,16 @@ async def chat(req: ChatRequest):
         logger.info("Vision: image description injected into context")
 
     if context_parts:
+        assembled = "\n\n".join(context_parts)
+        if len(assembled) > TOTAL_CONTEXT_BUDGET:
+            assembled = assembled[:TOTAL_CONTEXT_BUDGET]
+            logger.warning(
+                "Context truncated to global budget (%d chars) — consider raising TOTAL_CONTEXT_BUDGET",
+                TOTAL_CONTEXT_BUDGET,
+            )
         system_prompt += (
             "\n\nUtilise le contexte suivant pour répondre. Cite les sources si pertinent.\n\n"
-            + "\n\n".join(context_parts)
+            + assembled
         )
         logger.info(
             f"context memory={len(memory_chunks)} rag={len(rag_chunks)} web={len(web_results)}"

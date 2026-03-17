@@ -32,6 +32,9 @@ from dataclasses import dataclass, field
 import httpx
 
 from config import (
+    PRIMARY_API_KEY,
+    PRIMARY_API_URL,
+    PRIMARY_MODEL,
     ROUTER_API_URL,
     ROUTER_API_KEY,
     ROUTER_MODEL,
@@ -41,10 +44,6 @@ from config import (
 
 logger = logging.getLogger("jarvis-llm-router")
 
-
-def is_llm_router_available() -> bool:
-    """True when a router model is configured (non-empty ROUTER_MODEL)."""
-    return bool(ROUTER_MODEL)
 
 
 # ── Prompts (from prompts.py) ─────────────────────────────────────────────
@@ -126,21 +125,22 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
     - OpenAI  (GPT-4.1-nano now)
     - mlx-lm  (Qwen2.5-7B later) — same endpoint, same request shape
     """
-    if not is_llm_router_available():
-        return None
+    api_url = ROUTER_API_URL if ROUTER_MODEL else PRIMARY_API_URL
+    api_key = ROUTER_API_KEY if ROUTER_MODEL else PRIMARY_API_KEY
+    model   = ROUTER_MODEL   if ROUTER_MODEL else PRIMARY_MODEL
 
     prompt = get_prompt("ROUTER_USER").format(message=message)
 
     try:
         async with httpx.AsyncClient(timeout=ROUTER_TIMEOUT) as client:
             resp = await client.post(
-                f"{ROUTER_API_URL}/chat/completions",
+                f"{api_url}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {ROUTER_API_KEY}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": ROUTER_MODEL,
+                    "model": model,
                     "messages": [
                         {"role": "system", "content": get_prompt("ROUTER_SYSTEM") + no_think_suffix(ROUTER_MODEL)},
                         {"role": "user",   "content": prompt},
@@ -217,7 +217,7 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
 
     logger.info(
         "LLM router [%s]: intents=%s weather_location=%r gmail_query=%r calendar_days=%d use_reasoning=%s memory_scope=%s conv_type=%s",
-        ROUTER_MODEL, intents, weather_location, gmail_query, calendar_days, use_reasoning,
+        model, intents, weather_location, gmail_query, calendar_days, use_reasoning,
         memory_scope, conversation_type,
     )
     return result

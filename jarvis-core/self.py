@@ -57,12 +57,12 @@ from config import (
     tokens_param,
     QDRANT_URL,
     REDIS_URL,
-    SELF_MEMORY_PATH,
     USER_CODES,
     USER_EMAILS,
     USERS,
 )
 from google_services import is_google_available, send_gmail_message
+from memory import atomic_json_write, get_self_memory, save_self_memory, self_memory_lock, store_autobiographical_event
 
 logger = logging.getLogger("jarvis-self")
 
@@ -95,40 +95,21 @@ def _qdrant() -> QdrantClient:
     return _qdrant_client
 
 
-# ══════════════════════════════════════════════════
-#  SELF STATE — read/write jarvis-self.json
-# ══════════════════════════════════════════════════
-
-def load_self() -> dict:
-    try:
-        with open(SELF_MEMORY_PATH, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as exc:
-        logger.error("Could not load jarvis-self.json: %s", type(exc).__name__)
-        return {}
-
-
-def _save_self(data: dict) -> None:
-    try:
-        with open(SELF_MEMORY_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as exc:
-        logger.error("Could not save jarvis-self.json: %s", type(exc).__name__)
-
 
 def get_goals() -> list[dict]:
-    return load_self().get("goals", [])
+    return get_self_memory().get("goals", [])
 
 
 def get_current_focus() -> str:
-    return load_self().get("current_focus", "")
+    return get_self_memory().get("current_focus", "")
 
 
 def _update_self_fields(**fields) -> None:
-    """Atomically update specific top-level fields in jarvis-self.json."""
-    data = load_self()
-    data.update(fields)
-    _save_self(data)
+    """Update specific top-level fields in jarvis-self.json under the shared lock."""
+    with self_memory_lock:
+        data = get_self_memory()
+        data.update(fields)
+        save_self_memory(data)
 
 
 # ══════════════════════════════════════════════════
@@ -253,7 +234,7 @@ def _get_knowledge_gaps(n: int = 5) -> list[str]:
 
 def gather_context() -> dict:
     """Assemble full context for the reflection prompt."""
-    self_data  = load_self()
+    self_data  = get_self_memory()
     health     = _check_service_health()
     activity   = _get_user_activity(24)
     gaps       = _get_knowledge_gaps(5)
@@ -340,14 +321,7 @@ def _action_store_insight(params: dict) -> str:
     if not user_code or not insight or user_code not in USER_CODES:
         return "store_insight: invalid params"
 
-    data = load_self()
-    data.setdefault("learnings", []).append({
-        "text":   insight,
-        "date":   datetime.now(timezone.utc).isoformat(),
-        "user":   user_code,
-        "source": "self_reflection",
-    })
-    _save_self(data)
+    store_autobiographical_event(user_code, insight, importance=0.8)
     logger.info("Self action: stored insight for %s", user_code)
     return f"stored insight for {user_code}"
 
@@ -412,14 +386,14 @@ def _action_update_self_note(params: dict) -> str:
     if not note:
         return "update_self_note: empty note"
 
-    data = load_self()
-    data.setdefault("self_notes", []).append({
-        "note": note,
-        "date": datetime.now(timezone.utc).isoformat(),
-    })
-    # Keep last 50 self-notes
-    data["self_notes"] = data["self_notes"][-50:]
-    _save_self(data)
+    with self_memory_lock:
+        data = get_self_memory()
+        data.setdefault("self_notes", []).append({
+            "note": note,
+            "date": datetime.now(timezone.utc).isoformat(),
+        })
+        data["self_notes"] = data["self_notes"][-50:]
+        save_self_memory(data)
     logger.info("Self action: self note written")
     return f"self note written: {note[:60]}"
 
@@ -451,8 +425,8 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
     for c in conversations[-50:]:
         conv_text += f"User: {c.get('user', '')[:200]}\nJarvis: {c.get('assistant', '')[:200]}\nMood: {c.get('mood', '?')}\n\n"
 
-    data = load_self()
-    recent_learnings = [l["text"] for l in data.get("learnings", [])[-5:]]
+    data = get_self_memory()
+    recent_self_reflections = [l["text"] for l in data.get("learnings", [])[-5:]]
 
     prompt = get_prompt("NIGHTLY_PROMPT").format(
         user_name=user_name,
@@ -460,7 +434,7 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
         review_date=review_date,
         count=len(conversations),
         conv_text=conv_text[:3000] or "(no conversation content)",
-        recent_learnings=json.dumps(recent_learnings, ensure_ascii=False),
+        recent_self_reflections=json.dumps(recent_self_reflections, ensure_ascii=False),
     )
 
     try:
@@ -485,29 +459,27 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
         return None
 
 
-async def run_nightly_review() -> None:
+async def run_nightly_interaction_review() -> None:
     """
     Nightly per-user conversation review. Called by APScheduler at 23:00.
-    Replaces the external nightly-reflection.py cron script.
 
     For each user with conversations yesterday:
-      - Calls LLM to extract insights, summary, tomorrow suggestions
+      - Calls LLM to extract user facts (→ autobiographical Qdrant) and
+        Jarvis self-improvement notes (→ jarvis-self.json learnings)
       - Stores tomorrow_suggestions in Redis (TTL 24h)
-      - Appends learnings and growth_log to jarvis-self.json
       - Triggers monthly memory consolidation on day 1
 
-    Idempotent: one lock per user per date (Redis key, TTL 25h).
+    Each user's write to jarvis-self.json is done under self_memory_lock
+    immediately after the LLM call — no data is held across await points.
+    Idempotent: Redis lock per user per date (TTL 25h).
     """
-    logger.info("=== Nightly review starting ===")
+    logger.info("=== Nightly interaction review starting ===")
     r = _redis()
     now = datetime.now(timezone.utc)
     yesterday = now - timedelta(days=1)
     review_date = yesterday.strftime("%Y-%m-%d")
     start_ts = yesterday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     end_ts   = yesterday.replace(hour=23, minute=59, second=59, microsecond=999999).timestamp()
-
-    data = load_self()
-    changed = False
 
     for user_code, user_name in USER_CODES.items():
         lock_key = f"jarvis:{user_code}:nightly_review:{review_date}"
@@ -537,28 +509,36 @@ async def run_nightly_review() -> None:
         if suggestions:
             r.setex(f"jarvis:{user_code}:tomorrow_suggestions", 86400, json.dumps(suggestions))
 
-        # Append learnings from self_reflections
-        for refl in review.get("self_reflections", []):
-            if refl:
-                data.setdefault("learnings", []).append({
-                    "text":   refl,
-                    "date":   review_date,
-                    "user":   user_code,
-                    "source": "nightly_review",
-                })
-                changed = True
+        # ── Facts about the user → autobiographical Qdrant (memory.py) ──────
+        for insight in review.get("user_insights", []):
+            if insight:
+                store_autobiographical_event(user_code, insight, importance=0.7)
 
-        # Append growth log entry
-        summary = review.get("daily_summary", "")
-        if summary:
-            data.setdefault("growth_log", []).append({
-                "date":          review_date,
-                "user":          user_code,
-                "summary":       summary,
-                "mood":          review.get("mood_summary", ""),
-                "conversations": len(conversations),
-            })
-            changed = True
+        # ── Jarvis self-improvement notes + diary → jarvis-self.json ─────────
+        # Lock here: no await is held while the lock is active.
+        summary      = review.get("daily_summary", "")
+        self_refls   = [r for r in review.get("self_reflections", []) if r]
+        if self_refls or summary:
+            with self_memory_lock:
+                data = get_self_memory()
+                for refl in self_refls:
+                    data.setdefault("learnings", []).append({
+                        "text":   refl,
+                        "date":   review_date,
+                        "source": "nightly_review",
+                    })
+                if summary:
+                    data.setdefault("growth_log", []).append({
+                        "date":          review_date,
+                        "user_code":     user_code,
+                        "user_name":     user_name,
+                        "summary":       summary,
+                        "mood":          review.get("mood_summary", ""),
+                        "conversations": len(conversations),
+                    })
+                data["learnings"]  = data.get("learnings",  [])[-100:]
+                data["growth_log"] = data.get("growth_log", [])[-365:]
+                save_self_memory(data)
 
         logger.info("Nightly review done for %s — %s", user_code, summary[:80])
 
@@ -571,13 +551,7 @@ async def run_nightly_review() -> None:
             except Exception as exc:
                 logger.warning("Monthly consolidation failed for %s: %s", user_code, type(exc).__name__)
 
-    if changed:
-        # Trim to sane limits before saving
-        data["learnings"]  = data.get("learnings",  [])[-100:]
-        data["growth_log"] = data.get("growth_log", [])[-365:]
-        _save_self(data)
-
-    logger.info("=== Nightly review complete ===")
+    logger.info("=== Nightly interaction review complete ===")
 
 
 def _action_check_health(params: dict) -> str:
@@ -660,9 +634,7 @@ def _load_proposals() -> list[dict]:
 
 
 def _save_proposals(proposals: list) -> None:
-    os.makedirs(PROMPT_DATA_DIR, exist_ok=True)
-    with open(_proposals_path(), "w", encoding="utf-8") as f:
-        json.dump(proposals, f, ensure_ascii=False, indent=2)
+    atomic_json_write(_proposals_path(), proposals)
 
 
 def _load_overrides() -> dict:
@@ -674,9 +646,7 @@ def _load_overrides() -> dict:
 
 
 def _save_overrides(overrides: dict) -> None:
-    os.makedirs(PROMPT_DATA_DIR, exist_ok=True)
-    with open(_overrides_path(), "w", encoding="utf-8") as f:
-        json.dump(overrides, f, ensure_ascii=False, indent=2)
+    atomic_json_write(_overrides_path(), overrides)
 
 
 def list_pending_proposals() -> list[dict]:
@@ -957,9 +927,10 @@ def _execute_action(action: str, params: dict) -> str:
 #  MAIN REFLECTION ENTRY POINT
 # ══════════════════════════════════════════════════
 
-async def run_reflection() -> dict:
+async def run_self_reflection() -> dict:
     """
-    Full reflection cycle. Called by APScheduler every REFLECTION_INTERVAL_HOURS.
+    Jarvis system self-reflection cycle. Called by APScheduler every REFLECTION_INTERVAL_HOURS.
+    Observes system health and user activity, decides one autonomous action, persists focus.
     Returns the reflection result dict.
     """
     logger.info("=== Jarvis self-reflection starting ===")
@@ -984,11 +955,12 @@ async def run_reflection() -> dict:
 
     # Persist focus + reflection metadata
     now_iso = datetime.now(timezone.utc).isoformat()
-    data = load_self()
-    data["current_focus"]   = focus
-    data["last_reflection"] = now_iso
-    data["reflection_count"] = data.get("reflection_count", 0) + 1
-    _save_self(data)
+    with self_memory_lock:
+        data = get_self_memory()
+        data["current_focus"]    = focus
+        data["last_reflection"]  = now_iso
+        data["reflection_count"] = data.get("reflection_count", 0) + 1
+        save_self_memory(data)
 
     log_entry = {
         "timestamp": now_iso,

@@ -105,7 +105,9 @@ async def analyze_exchange(user_msg: str, assistant_msg: str) -> dict:
             # LLM's own judgment is the primary signal: 0.4 alone clears
             # IMPORTANCE_THRESHOLD so any exchange the LLM deems worth
             # remembering is captured, even with no other signals.
-            if result.get("should_remember"):
+            # Only count the bonus when the LLM provided an actual summary
+            # sentence — a bare boolean true gives no usable memory_summary.
+            if isinstance(result.get("should_remember"), str) and result["should_remember"].strip():
                 importance += 0.40
 
             # Personal facts revealed by the user
