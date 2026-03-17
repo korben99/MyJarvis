@@ -47,22 +47,7 @@ from config import (
 
 logger = logging.getLogger("jarvis-analyzer")
 
-ANALYSIS_PROMPT = """Analyse cet échange entre un utilisateur et son assistant personnel Jarvis.
-Retourne un objet JSON avec ces champs :
-- "topics": liste de 1 à 3 mots-clés du sujet discuté (en minuscules, dans la langue de la conversation)
-- "mood": humeur apparente de l'utilisateur — UNIQUEMENT une de ces valeurs exactes en anglais : happy, neutral, focused, stressed, frustrated, curious, tired
-- "user_facts": liste de faits nouveaux appris sur l'utilisateur (vide si aucun). Chaque fait sous la forme {{"key": "...", "value": "..."}}
-  La "value" doit être rédigée dans la langue de la conversation.
-  Exemples : {{"key": "current_project", "value": "conformité CRA"}}, {{"key": "expertise", "value": "cybersécurité"}}
-- "projects": liste des noms de projets mentionnés (vide si aucun)
-- "should_remember": une phrase résumant ce qui vaut la peine d'être retenu de cet échange, rédigée dans la langue de la conversation (ou null si l'échange est banal).
-  Mettre null pour tout ce qui est éphémère et qui sera périmé rapidement : météo, cours boursiers, scores sportifs, résultats d'actualité, prix du moment.
-  Ne retenir que ce qui reste vrai dans le temps : faits sur l'utilisateur, projets, préférences, décisions, apprentissages.
-
-IMPORTANT : Retourne UNIQUEMENT du JSON valide, sans markdown, sans explication.
-
-L'utilisateur a dit : {user_message}
-Jarvis a répondu : {assistant_message}"""
+from prompts import ANALYSIS_PROMPT
 
 
 async def analyze_exchange(user_msg: str, assistant_msg: str) -> dict:

@@ -215,13 +215,32 @@ def get_user_profile(user_code: str) -> dict:
     return data or {}
 
 
-"""Add or update a user profile fact."""
-
-
-def update_user_profile(user_code: str, key: str, value: str):
+def update_user_profile(user_code: str, key: str, value: str | None):
+    """Add, update, or delete (value=None) a user profile fact."""
     r = get_redis()
-    r.hset(f"user:{user_code}:profile", key, value)
-    logger.info("User %s profile updated: %s = %s", user_code, key, value)
+    if value is None:
+        r.hdel(f"user:{user_code}:profile", key)
+        logger.info("User %s profile deleted: %s", user_code, key)
+    else:
+        r.hset(f"user:{user_code}:profile", key, value)
+        logger.info("User %s profile updated: %s = %s", user_code, key, value)
+
+
+def set_interest_weight(user_code: str, term: str, weight: float):
+    """
+    Set the importance weight for an interest term (0.0 = forgotten, 1.0 = normal, 2.0 = top).
+    Weight=0 effectively removes the term from briefing and news queries.
+    """
+    r = get_redis()
+    r.hset(f"user:{user_code}:interest_weights", term.lower(), str(weight))
+    logger.info("User %s interest weight: %s = %.1f", user_code, term, weight)
+
+
+def get_interest_weights(user_code: str) -> dict[str, float]:
+    """Return {term: weight} dict. Missing terms default to 1.0."""
+    r = get_redis()
+    raw = r.hgetall(f"user:{user_code}:interest_weights")
+    return {k: float(v) for k, v in raw.items()}
 
 
 """Get list of user's active projects."""

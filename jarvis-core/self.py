@@ -257,57 +257,7 @@ def gather_context() -> dict:
 #  LLM REFLECTION CALL
 # ══════════════════════════════════════════════════
 
-_REFLECTION_SYSTEM = """\
-Tu es Jarvis, un assistant personnel IA. Tu effectues ta boucle de réflexion autonome.
-Ton but est d'analyser ta situation actuelle et de décider d'une action concrète pour \
-mieux servir tes objectifs. Sois honnête, autocritique et pragmatique.
-Réponds toujours en JSON valide uniquement."""
-
-_REFLECTION_PROMPT = """\
-Date/heure actuelle : {timestamp}
-
-TON IDENTITÉ :
-{identity}
-
-TES OBJECTIFS (immuables, par priorité) :
-{goals}
-
-SANTÉ DU SYSTÈME :
-{health}
-
-ACTIVITÉ DES UTILISATEURS (dernières 24h) :
-{activity}
-
-LACUNES DE CONNAISSANCE (sujets où j'ai été faible) :
-{gaps}
-
-RÉFLEXION PRÉCÉDENTE :
-{last_reflection}
-
----
-En te basant sur tes objectifs et le contexte ci-dessus, décide :
-1. Quel est ton focus actuel ? (une phrase)
-2. Quelle action UNIQUE du catalogue vas-tu entreprendre et pourquoi ?
-
-CATALOGUE D'ACTIONS :
-- nothing                : aucune action nécessaire ce cycle (params: {{"reason": "..."}})
-- store_insight          : enregistrer un apprentissage important sur un utilisateur (params: {{"user_code": "...", "insight": "..."}})
-- flag_knowledge_gap     : noter un sujet que tu devrais mieux connaître (params: {{"topic": "...", "context": "..."}})
-- send_notification      : envoyer un email utile/pertinent à un utilisateur — UNIQUEMENT si vraiment utile (params: {{"user_code": "...", "subject": "...", "message": "..."}})
-- update_self_note       : écrire une observation personnelle sur toi-même (params: {{"note": "..."}})
-- consolidate_memory     : déclencher la compression mémoire pour un utilisateur actif (params: {{"user_code": "..."}})
-- check_health           : journaliser un bilan de santé détaillé (params: {{}})
-- update_trade_threshold : mettre à jour le seuil d'alerte haut/bas d'une position du portefeuille (params: {{"user_code": "...", "isin": "...", "threshold_high": 0.0, "threshold_low": 0.0}})
-
-Règles :
-- send_notification est réservé aux messages genuinement utiles (rappels, infos demandées). Ne jamais envoyer sans valeur claire.
-- update_trade_threshold : n'utilise cette action que si tu as une bonne raison de réviser un seuil (ex. cours très éloigné du seuil existant, forte variation récente). Fournis uniquement les champs à modifier (threshold_high ou threshold_low ou les deux). L'ISIN doit être exact.
-- Sois concis dans tous les champs texte.
-- Choisis "nothing" si aucune action significative n'est nécessaire.
-- Écris le focus, la reason, le subject et le message en français.
-
-Réponds en JSON uniquement :
-{{"focus": "...", "action": "...", "reason": "...", "params": {{...}}}}"""
+from prompts import REFLECTION_SYSTEM as _REFLECTION_SYSTEM, REFLECTION_PROMPT as _REFLECTION_PROMPT
 
 
 async def _call_reflection_llm(context: dict) -> dict | None:
@@ -468,29 +418,7 @@ def _action_consolidate_memory(params: dict) -> str:
 #  NIGHTLY REVIEW  (replaces nightly-reflection.py)
 # ══════════════════════════════════════════════════
 
-_NIGHTLY_SYSTEM = """\
-Tu es Jarvis, un assistant personnel IA. Tu passes en revue les conversations de la journée pour un utilisateur.
-Extrais les apprentissages significatifs et résume la journée. Réponds en JSON valide uniquement.
-Toutes les valeurs textuelles doivent être rédigées en français."""
-
-_NIGHTLY_PROMPT = """\
-Utilisateur : {user_name} ({user_code})
-Date analysée : {review_date}
-
-CONVERSATIONS DU JOUR ({count} échanges) :
-{conv_text}
-
-Apprentissages récents déjà enregistrés : {recent_learnings}
-
-Réponds en JSON :
-{{
-  "daily_summary": "résumé de la journée en 2-3 phrases",
-  "user_insights": ["nouvelles choses apprises sur l'utilisateur (liste vide si rien)"],
-  "self_reflections": ["choses apprises par Jarvis pour mieux servir (liste vide si rien)"],
-  "tomorrow_suggestions": ["sujets proactifs à mentionner demain (liste vide si rien)"],
-  "mood_summary": "évaluation de la journée de l'utilisateur en une phrase"
-}}
-Retourne uniquement du JSON valide, tout en français."""
+from prompts import NIGHTLY_SYSTEM as _NIGHTLY_SYSTEM, NIGHTLY_PROMPT as _NIGHTLY_PROMPT
 
 
 async def _nightly_review_user(user_code: str, user_name: str, conversations: list[dict], review_date: str) -> dict | None:

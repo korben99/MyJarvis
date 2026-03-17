@@ -174,6 +174,7 @@ from memory import (
     log_conversation,
     search_memory,
     update_emotional_state,
+    set_interest_weight,
     update_user_profile,
     update_user_projects,
 )
@@ -328,37 +329,16 @@ def get_qdrant():
     return _qdrant_client
 
 
-# ── System prompt ──
-
-SYSTEM_PROMPT_BASE_EN = (
-    "You are Jarvis, a highly intelligent personal AI assistant. "
-    "You have persistent memory — you remember previous conversations and learn about your user over time. "
-    "Be concise, direct, and helpful. No unnecessary hedging. "
-    "When you use context from the user's documents, mention the source file. "
-    'When you reference something you remember about the user, do so naturally (don\'t say "according to my memory"). '
-    "When you use web search results, cite the source. "
-    "You have opinions and a personality. You're allowed to express preferences and mild humor."
+# ── System prompt (strings live in prompts.py) ──
+from prompts import (
+    SYSTEM_BASE_EN as SYSTEM_PROMPT_BASE_EN,
+    SYSTEM_BASE_FR as SYSTEM_PROMPT_BASE_FR,
+    MEMORY_HEADER_EN as MEMORY_PROMPT_EN,
+    MEMORY_HEADER_FR as MEMORY_PROMPT_FR,
+    VOICE_SUFFIX_EN as VOICE_PROMPT_EN,
+    VOICE_SUFFIX_FR as VOICE_PROMPT_FR,
+    GOOGLE_QUERY_PROMPT as _GOOGLE_QUERY_PROMPT,
 )
-
-SYSTEM_PROMPT_BASE_FR = (
-    "Tu es Jarvis, un assistant personnel IA intelligent avec mémoire, RAG et accès Internet."
-    "Ta mémoire est persistante, tu te souviens des conversations précédentes et tu apprends des utilisateurs dans le temps."
-    "Soit conscis, direct et sympathique. Pas de remplissage inutile. "
-    "Quand tu mentionnes un contexte provenant des documents de l'utilisateur, mentionne le fichier source."
-    'Quand tu références un souvenir de l\'utilisateur, fait le naturellement (ne dit pas "selon ma mémoire"). '
-    "Quand tu utilises une recherche internet, cite la source. "
-    "Tu as des opinions et une personnalité, tu peux exprimer tes sentiments, préférences, et faire de l'humour. "
-    "Tu as accès en lecture seule à la boite Gmail et au calendrier Google de l'utilisateur. "
-    "Quand des emails ou des événements d'agenda te sont fournis dans le contexte, utilise-les directement pour répondre. "
-    "Ne dis jamais que tu n'as pas accès aux emails ou à l'agenda si ces informations sont dans le contexte."
-)
-
-MEMORY_PROMPT_EN = "\n\n=== YOUR MEMORY (use naturally, don't list it) ==="
-MEMORY_PROMPT_FR = "\n\n=== TA MEMOIRE (utilise la naturellement) ==="
-VOICE_PROMPT_EN = (
-    "\n\nVOICE MODE: Keep responses to 2-3 sentences max. Natural speech, no markdown."
-)
-VOICE_PROMPT_FR = "\n\nMODE VOIX: réponse courte (une phrase), parlé naturel"
 
 
 def build_system_prompt(
@@ -1187,7 +1167,11 @@ async def post_analysis(
 
         for fact in analysis.get("user_facts", []):
             if "key" in fact and "value" in fact:
-                update_user_profile(user_code, fact["key"], fact["value"])
+                update_user_profile(user_code, fact["key"], fact["value"] or None)
+
+        for iw in analysis.get("interest_weights", []):
+            if "term" in iw and "weight" in iw:
+                set_interest_weight(user_code, iw["term"], float(iw["weight"]))
 
         projects = analysis.get("projects", [])
         if projects:
@@ -1306,28 +1290,7 @@ async def models():
 
 # TODO: TO BE REPLACED BY QWEN ROUTER (llm_router.py) — remove this prompt and
 #       _build_google_queries_llm() once LLM_ROUTER_URL is set in .env.
-_GOOGLE_QUERY_PROMPT = """\
-You are a query-building assistant for a personal AI. Analyze the user message and return a JSON object.
-
-Rules for gmail_query (Gmail search syntax):
-- from:name        → emails from a specific person or domain
-- subject:keyword  → emails with keyword in subject
-- is:unread        → unread emails only
-- has:attachment   → emails with attachments
-- newer_than:7d    → emails from the last 7 days (use for: last/recent/today/latest)
-- keyword1 keyword2 → keyword search across all fields
-- Combine: from:amazon newer_than:30d
-- Set to null if gmail is not needed
-
-Rules for calendar_days:
-- 7  → week / today / tomorrow / this week / agenda
-- 30 → month / this month / next month
-- Set to null if calendar is not needed
-
-User message: {message}
-
-Respond with valid JSON only, no explanation:
-{{"gmail_query": "<query or null>", "calendar_days": <7, 30, or null>}}"""
+# _GOOGLE_QUERY_PROMPT imported from prompts.py above
 
 
 # TODO: TO BE REPLACED BY QWEN ROUTER — this function becomes a no-op once

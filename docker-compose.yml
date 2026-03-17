@@ -39,6 +39,7 @@ services:
       - RAG_EMBEDDING_ENGINE=
       - RAG_EMBEDDING_MODEL=paraphrase-multilingual-MiniLM-L12-v2
       - DEFAULT_MODELS=${PRIMARY_MODEL:-gpt-4o-mini}
+      - MAX_UPLOAD_SIZE=${MAX_UPLOAD_SIZE:-5242880}
     depends_on:
       - qdrant
       - redis
@@ -52,6 +53,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      - ./jarvis-core/prompts.py:/app/prompts.py
       - ./jarvis-core/main.py:/app/main.py
       - ./jarvis-core/memory.py:/app/memory.py
       - ./jarvis-core/analyzer.py:/app/analyzer.py

@@ -48,7 +48,7 @@ from google_services import (
     is_google_available,
     send_gmail_message,
 )
-from memory import get_user_profile, search_memory
+from memory import get_interest_weights, get_user_profile, search_memory
 from trading import get_portfolio_summary_text
 
 logger = logging.getLogger("jarvis-briefing")
@@ -163,17 +163,20 @@ def _get_user_interests(user_code: str) -> list[str]:
                 if len(w) > 2 and w not in _STOP_WORDS:
                     interests.append(words[0])
 
-    # Deduplicate, preserve order, cap at 6
+    # Deduplicate
     seen, unique = set(), []
     for item in interests:
         key = item.lower()
         if key not in seen:
             seen.add(key)
             unique.append(item)
-        if len(unique) >= 6:
-            break
 
-    return unique
+    # Apply interest weights: filter out weight=0, sort by weight desc, cap at 6
+    weights = get_interest_weights(user_code)
+    unique = [t for t in unique if weights.get(t.lower(), 1.0) > 0]
+    unique.sort(key=lambda t: weights.get(t.lower(), 1.0), reverse=True)
+
+    return unique[:6]
 
 
 def _get_active_projects(user_code: str) -> list[str]:
@@ -297,49 +300,7 @@ async def _fetch_news(interests: list[str]) -> list[str]:
 
 # ── LLM assembly ──────────────────────────────────────────────────────────
 
-_BRIEFING_SYSTEM = """\
-Tu es Jarvis, l'assistant personnel de {user_name}. Tu rédiges son briefing matinal.
-Sois chaleureux, direct et concis. Utilise le prénom de l'utilisateur naturellement.
-Pas de markdown excessif dans la version texte — elle sera lue à voix haute ou en chat.
-La version HTML peut être structurée avec des sections."""
-
-_BRIEFING_USER = """\
-Génère le briefing matinal de {user_name} pour le {date}.
-
-DONNÉES DISPONIBLES:
-
-AGENDA DU JOUR:
-{calendar}
-
-EMAILS NON LUS (dernières 24h):
-{gmail}
-
-MÉTÉO:
-{weather}
-
-ACTUALITÉS (centres d'intérêt: {interests}):
-{news}
-
-PROJETS / TÂCHES EN COURS:
-{projects}
-
-PORTEFEUILLE BOURSIER:
-{portfolio}
-
----
-Génère deux versions:
-
-1. VERSION TEXTE (clé "text"): briefing conversationnel naturel, 150-280 mots.
-   Structure: accroche météo → agenda → emails importants → actu pertinente → portefeuille (si données) → rappel projet.
-   Parle à la première personne de Jarvis ("J'ai regardé ton agenda...").
-   Pour le portefeuille: mentionne uniquement les mouvements notables (>1% intraday) ou alertes thresholds.
-   Si aucune donnée portefeuille disponible, omets cette section.
-
-2. VERSION HTML (clé "html"): même contenu, formaté en HTML email propre.
-   Utilise <h2> pour les sections, <ul> pour les listes, couleurs sobres inline.
-   Sections: Agenda, Emails importants, Météo & Actu, Portefeuille (si données), À ne pas oublier.
-
-Réponds en JSON uniquement: {{"text": "...", "html": "..."}}"""
+from prompts import BRIEFING_SYSTEM as _BRIEFING_SYSTEM, BRIEFING_USER as _BRIEFING_USER
 
 
 async def _assemble_with_llm(
@@ -405,60 +366,6 @@ async def _assemble_with_llm(
         return fallback, f"<p>{fallback}</p>"
 
 
-def _fetch_today_calendar() -> list[dict]:
-    """
-    Fetch today's full-day calendar events (midnight → midnight Paris time).
-    Avoids the fetch_calendar_events(1) issue of starting from 'now' which
-    misses morning events that already started.
-    """
-    from googleapiclient.errors import HttpError
-    from google_services import _get_calendar_service, _cache_get, _cache_set, _cache_key, _CALENDAR_CACHE_TTL
-    from config import GOOGLE_CALENDAR_ID
-
-    tz = pytz.timezone(BRIEFING_TIMEZONE)
-    now_local = datetime.now(tz)
-    start_of_day = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_day   = start_of_day + timedelta(days=1)
-
-    cache_key = _cache_key("calendar_today", start_of_day.strftime("%Y-%m-%d"))
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    try:
-        service = _get_calendar_service()
-        resp = (
-            service.events()
-            .list(
-                calendarId=GOOGLE_CALENDAR_ID,
-                timeMin=start_of_day.isoformat(),
-                timeMax=end_of_day.isoformat(),
-                maxResults=20,
-                singleEvents=True,
-                orderBy="startTime",
-            )
-            .execute()
-        )
-        results = []
-        for event in resp.get("items", []):
-            start = event.get("start", {})
-            end   = event.get("end", {})
-            results.append({
-                "summary":     event.get("summary", "(sans titre)"),
-                "start":       start.get("dateTime", start.get("date", "")),
-                "end":         end.get("dateTime", end.get("date", "")),
-                "location":    event.get("location", ""),
-                "description": (event.get("description") or "")[:200],
-                "all_day":     "dateTime" not in start,
-            })
-        _cache_set(cache_key, results, _CALENDAR_CACHE_TTL)
-        logger.info("Today calendar: %d events", len(results))
-        return results
-    except Exception as exc:
-        logger.warning("Today calendar fetch failed: %s", type(exc).__name__)
-        return []
-
-
 # ── Main entry point ──────────────────────────────────────────────────────
 
 async def gather_briefing(user_code: str) -> BriefingResult:
@@ -475,8 +382,9 @@ async def gather_briefing(user_code: str) -> BriefingResult:
     projects = _get_active_projects(user_code)
     logger.info("Briefing interests for %s: %s", user_code, interests)
 
-    # Parallel data gathering — calendar uses today-scoped fetch (midnight→midnight)
-    calendar_task  = asyncio.to_thread(_fetch_today_calendar) if is_google_available() else asyncio.sleep(0, result=[])
+    # Parallel data gathering — date= gives midnight→midnight fetch across all calendars
+    today = datetime.now(pytz.timezone(BRIEFING_TIMEZONE)).date()
+    calendar_task  = asyncio.to_thread(fetch_calendar_events, 1, today) if is_google_available() else asyncio.sleep(0, result=[])
     gmail_task     = asyncio.to_thread(fetch_gmail_messages, "is:unread newer_than:1d", 5) if is_google_available() else asyncio.sleep(0, result=[])
     weather_task   = _fetch_weather(city)
     news_task      = _fetch_news(interests)

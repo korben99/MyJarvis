@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import threading
+from datetime import date as date_type
 from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 
@@ -33,7 +34,10 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+import pytz
+
 from config import (
+    BRIEFING_TIMEZONE,
     GOOGLE_CALENDAR_ID,
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
@@ -312,28 +316,40 @@ def fetch_gmail_messages(query: str, max_results: int = _GMAIL_MAX_RESULTS) -> l
 #  CALENDAR
 # ══════════════════════════════════════════════════
 
-def fetch_calendar_events(days: int = 7) -> list[dict]:
+def fetch_calendar_events(days: int = 7, date: date_type | None = None) -> list[dict]:
     """
-    Fetch upcoming events for the next `days` days.
-    days=7  → weekly view
-    days=30 → monthly view
-    Clamped to [1, 90]. Results cached in Redis for _CALENDAR_CACHE_TTL seconds.
+    Fetch calendar events across all calendars.
+
+    date=None  → from now to now+days (rolling window, default)
+    date=<date>→ full day midnight-to-midnight in BRIEFING_TIMEZONE (used by briefing)
+    Results cached in Redis for _CALENDAR_CACHE_TTL seconds.
     """
     if not is_google_available():
         return []
 
-    days = max(1, min(days, 90))
-    cache_key = _cache_key("calendar", str(days))
+    if date is not None:
+        cache_key = _cache_key("calendar_today", date.strftime("%Y-%m-%d"))
+    else:
+        days = max(1, min(days, 90))
+        cache_key = _cache_key("calendar", str(days))
+
     cached = _cache_get(cache_key)
     if cached is not None:
-        logger.debug("Calendar cache hit (days=%d)", days)
+        logger.debug("Calendar cache hit (%s)", cache_key)
         return cached
 
     try:
         service = _get_calendar_service()
-        now = datetime.now(timezone.utc)
-        time_min = now.isoformat()
-        time_max = (now + timedelta(days=days)).isoformat()
+
+        if date is not None:
+            tz = pytz.timezone(BRIEFING_TIMEZONE)
+            start = datetime(date.year, date.month, date.day, tzinfo=tz)
+            time_min = start.isoformat()
+            time_max = (start + timedelta(days=1)).isoformat()
+        else:
+            now = datetime.now(timezone.utc)
+            time_min = now.isoformat()
+            time_max = (now + timedelta(days=days)).isoformat()
 
         # Fetch all calendars the account has access to
         cal_list = service.calendarList().list().execute()
@@ -367,7 +383,8 @@ def fetch_calendar_events(days: int = 7) -> list[dict]:
 
         results.sort(key=lambda e: e["start"])
         _cache_set(cache_key, results, _CALENDAR_CACHE_TTL)
-        logger.info("Calendar: %d events for next %d days (across %d calendars)", len(results), days, len(calendar_ids))
+        label = date.isoformat() if date is not None else f"next {days}d"
+        logger.info("Calendar: %d events (%s, across %d calendars)", len(results), label, len(calendar_ids))
         return results
 
     except HttpError as exc:
