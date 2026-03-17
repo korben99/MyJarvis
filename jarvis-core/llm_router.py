@@ -48,7 +48,7 @@ def is_llm_router_available() -> bool:
 
 
 # ── Prompts (from prompts.py) ─────────────────────────────────────────────
-from prompts import ROUTER_SYSTEM as _ROUTER_SYSTEM, ROUTER_USER as _ROUTER_USER
+from prompts import get_prompt
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────
@@ -129,7 +129,7 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
     if not is_llm_router_available():
         return None
 
-    prompt = _ROUTER_USER.format(message=message)
+    prompt = get_prompt("ROUTER_USER").format(message=message)
 
     try:
         async with httpx.AsyncClient(timeout=ROUTER_TIMEOUT) as client:
@@ -142,7 +142,7 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
                 json={
                     "model": ROUTER_MODEL,
                     "messages": [
-                        {"role": "system", "content": _ROUTER_SYSTEM + no_think_suffix(ROUTER_MODEL)},
+                        {"role": "system", "content": get_prompt("ROUTER_SYSTEM") + no_think_suffix(ROUTER_MODEL)},
                         {"role": "user",   "content": prompt},
                     ],
                     "temperature": 0,

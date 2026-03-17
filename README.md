@@ -46,6 +46,7 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
 | **Open WebUI** | Docker, port 3000 | Chat interface, connects via `/v1/chat/completions` |
 | **Qdrant** | Docker, port 6333 | Vector DB for RAG document search and episodic memory |
 | **Redis** | Docker, port 6379 | Working memory, session context, conversation cache |
+| **`prompts.py`** | Python module | Single source of truth for all LLM prompts — supports live overrides via `get_prompt()` |
 
 ### Four-Tier LLM Architecture
 
@@ -322,6 +323,7 @@ All variables go in `/opt/jarvis/.env`.
 | `BRIEFING_TIMEZONE` | `Europe/Paris` | Timezone for scheduling |
 | `REFLECTION_INTERVAL_HOURS` | `6` | Hours between self-reflection cycles |
 | `ENABLE_ANALYSIS` | `true` | Enable post-response conversation analysis |
+| `REFINE_PROMPT_THRESHOLD` | `3` | Times a knowledge gap must be flagged before a prompt refinement is proposed |
 
 ### Conversation Limits
 
@@ -428,12 +430,13 @@ The morning briefing aggregates: calendar events, unread emails, weather, news h
 |--------|-------------|
 | `nothing` | Explicit no-op with reason |
 | `store_insight` | Save a learning about a user to `jarvis-self.json` |
-| `flag_knowledge_gap` | Log a topic Jarvis answered poorly |
+| `flag_knowledge_gap` | Log a topic Jarvis answered poorly (increments a per-topic counter) |
 | `send_notification` | Send a Gmail to one user (rate-limited to 1/user/day) |
 | `update_self_note` | Write a personal observation to `self_notes` |
 | `consolidate_memory` | Trigger memory compression for a user |
 | `check_health` | Verify all services and log status |
 | `update_trade_threshold` | Update `threshold_high` / `threshold_low` for a portfolio position autonomously |
+| `refine_prompt` | Propose an improved version of a prompt (see Prompt Self-Modification below) |
 
 ### Conversations
 
@@ -557,16 +560,21 @@ curl -X PUT http://localhost:8000/portfolio/position/KORBEN99/FR0000120578 \
 │   ├── Dockerfile
 │   ├── main.py            # API routes + request orchestration
 │   ├── memory.py          # Memory system (Redis + Qdrant)
-│   ├── self.py            # Proto-self / reflection loop
+│   ├── self.py            # Proto-self / reflection loop + autocoding actions
 │   ├── briefing.py        # Morning briefing generation
 │   ├── google_services.py # Gmail + Calendar
 │   ├── trading.py         # Boursorama portfolio surveillance
 │   ├── llm_router.py      # Intent classification (Tier 1)
 │   ├── analyzer.py        # Conversation analysis (Tier 2b)
+│   ├── prompts.py         # All LLM prompt constants + get_prompt() live override loader
 │   ├── config.py          # Configuration loader + model helpers
 │   └── JarvisData/
 │       ├── users_list.json
-│       └── reflections/
+│       ├── jarvis-self.json
+│       ├── reflections/
+│       └── prompts/
+│           ├── prompt_proposals.json   # Append-only proposal history
+│           └── prompt_overrides.json   # Live active overrides (applied without restart)
 ├── TradeData/             # Boursorama CSV exports (drop here)
 ├── RAGData/               # Documents to index
 │   ├── personal/
@@ -582,6 +590,78 @@ curl -X PUT http://localhost:8000/portfolio/position/KORBEN99/FR0000120578 \
     ├── jarvis-system-prompt.md
     └── jarvis_cheatsheet.md
 ```
+
+---
+
+## Prompt Self-Modification (Autocoding)
+
+Jarvis can propose improvements to its own LLM prompts. The feature is fully autonomous on the detection side, and requires human approval before any change takes effect.
+
+### How it works
+
+```
+Reflection cycle detects repeated knowledge gap
+    → flag_knowledge_gap increments Redis counter (jarvis:self:gap_counts)
+    → counter reaches REFINE_PROMPT_THRESHOLD (default: 3)
+    → next reflection cycle: LLM chooses refine_prompt action
+    → REASONING_MODEL rewrites the targeted prompt
+    → proposal saved to prompt_proposals.json
+    → email sent with old/new diff + approval instructions
+    → user replies in chat: "accepte la proposition [id]"
+    → prompt_overrides.json updated
+    → get_prompt() serves new text immediately (no restart needed)
+```
+
+### Guardrails
+
+| Guard | Where | Description |
+|-------|-------|-------------|
+| Hard threshold check | `_action_refine_prompt()` | Refuses to run if gap count < `REFINE_PROMPT_THRESHOLD` — LLM cannot bypass this |
+| Duplicate prevention | `_action_refine_prompt()` | Only one pending proposal per prompt at a time |
+| Rejection cooldown | `_action_refine_prompt()` | Same prompt cannot be re-proposed within 7 days of a rejection |
+| Human approval | `approve_proposal()` | Override is never written without explicit "accepte la proposition [id]" |
+
+### In-chat commands (trigger via `self` intent)
+
+| Command | Effect |
+|---------|--------|
+| `montre les propositions` | List all pending proposals with rationale |
+| `montre la proposition [id]` | Show full old/new diff for a specific proposal |
+| `accepte la proposition [id]` | Apply the override immediately — live, no restart |
+| `rejette la proposition [id]` | Mark as rejected, start 7-day cooldown |
+
+### Refineable prompts
+
+| Constant | Description |
+|----------|-------------|
+| `SYSTEM_BASE_FR` | Core Jarvis personality and instructions |
+| `BRIEFING_USER` | Morning briefing assembly instructions |
+| `ANALYSIS_PROMPT` | Conversation analysis (mood/fact extraction) |
+| `ROUTER_USER` | LLM intent router decision criteria |
+
+All other prompts remain read-only (reflection, nightly review, etc.) — only the four user-facing quality prompts are exposed to the refinement pipeline.
+
+### Data files
+
+Both files live in `JarvisData/prompts/` which is already inside the existing volume mount — no docker-compose changes needed.
+
+- **`prompt_proposals.json`** — append-only history of all proposals (pending / approved / rejected). Never truncated, useful for audit.
+- **`prompt_overrides.json`** — active overrides only: `{"PROMPT_NAME": "new text"}`. Served ahead of the module constant by `get_prompt()`. Delete a key to revert to the default.
+
+### Reverting an override
+
+```bash
+# Edit the file directly and remove the key, then the next get_prompt() call uses the default
+docker exec jarvis-api python3 -c "
+import json
+with open('/app/data/prompts/prompt_overrides.json') as f: d = json.load(f)
+del d['SYSTEM_BASE_FR']
+with open('/app/data/prompts/prompt_overrides.json', 'w') as f: json.dump(d, f, indent=2)
+print('reverted')
+"
+```
+
+No restart needed — `get_prompt()` detects the file change on the next call.
 
 ---
 

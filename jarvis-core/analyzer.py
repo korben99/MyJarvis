@@ -47,13 +47,13 @@ from config import (
 
 logger = logging.getLogger("jarvis-analyzer")
 
-from prompts import ANALYSIS_PROMPT
+from prompts import get_prompt
 
 
 async def analyze_exchange(user_msg: str, assistant_msg: str) -> dict:
     """Analyze a conversation exchange using the LLM."""
     try:
-        prompt = ANALYSIS_PROMPT.format(
+        prompt = get_prompt("ANALYSIS_PROMPT").format(
             user_message=user_msg[:1000],
             assistant_message=assistant_msg[:1000],
         )

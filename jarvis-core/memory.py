@@ -188,9 +188,11 @@ def append_conversation_message(
 
     entry = {"role": role, "content": content, "ts": time.time()}
 
-    r.rpush(key, json.dumps(entry))
-    r.ltrim(key, -CHAT_MAX_MESSAGES, -1)
-    r.expire(key, _CHAT_LOG_TTL)  # sliding TTL — resets on every message
+    pipe = r.pipeline()
+    pipe.rpush(key, json.dumps(entry))
+    pipe.ltrim(key, -CHAT_MAX_MESSAGES, -1)
+    pipe.expire(key, _CHAT_LOG_TTL)  # sliding TTL — resets on every message
+    pipe.execute()
 
 
 def get_conversation(user_code: str, session_id: str):
@@ -803,6 +805,7 @@ Retourne une seule phrase en français décrivant un fait stable sur l'utilisate
             },
             timeout=30.0,
         )
+        resp.raise_for_status()
         summary = resp.json()["choices"][0]["message"]["content"]
 
         store_autobiographical_event(user_code, summary, 0.9)

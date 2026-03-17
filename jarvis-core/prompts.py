@@ -1,5 +1,6 @@
 """
 prompts.py — All LLM prompt constants for Jarvis v7
+          — Also hosts get_prompt() for live override support (autocoding)
 =====================================================
 Single source of truth for every prompt string.
 Logic files import from here — they never define prompts inline.
@@ -7,8 +8,11 @@ Logic files import from here — they never define prompts inline.
 Intended for future self-modification: Jarvis can rewrite entries in this
 file between restarts to tune its own behaviour without touching logic code.
 
-Version: 1.0  (2026-03-17)
+Version: 1.1  (2026-03-17)
 """
+
+import json
+import os
 
 # ══════════════════════════════════════════════════════════════════════════
 #  SYSTEM PROMPTS
@@ -252,10 +256,14 @@ Décide :
   consolidate_memory   — comprimer la mémoire             params: {{"user_code":"..."}}
   check_health         — bilan de santé détaillé          params: {{}}
   update_trade_threshold — réviser un seuil d'alerte      params: {{"user_code":"...","isin":"...","threshold_high":0.0,"threshold_low":0.0}}
+  refine_prompt        — proposer une amélioration de prompt params: {{"prompt_name":"...","topic":"...","user_code":"..."}}
+                         Noms valides : SYSTEM_BASE_FR · BRIEFING_USER · ANALYSIS_PROMPT · ROUTER_USER
+                         Utiliser uniquement si une lacune est signalée ≥ 3 fois (compteur visible dans LACUNES).
 
 Règles :
 - send_notification : uniquement si la valeur pour l'utilisateur est claire et réelle.
 - update_trade_threshold : uniquement si le cours s'est fortement éloigné du seuil existant. ISIN exact requis.
+- refine_prompt : uniquement si un sujet revient souvent dans les lacunes. L'utilisateur devra approuver avant application.
 - Textes (focus, reason, subject, message) en français.
 - "nothing" si aucune action significative n'est nécessaire.
 
@@ -280,3 +288,79 @@ CONVERSATIONS ({count} échanges) :
 Apprentissages déjà enregistrés : {recent_learnings}
 
 {{"daily_summary":"résumé 2-3 phrases","user_insights":["nouvelles choses apprises sur l'utilisateur"],"self_reflections":["choses apprises par Jarvis pour mieux servir"],"tomorrow_suggestions":["sujets proactifs à mentionner demain"],"mood_summary":"évaluation de la journée en une phrase"}}"""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  AUTOCODING — PROMPT REFINEMENT
+# ══════════════════════════════════════════════════════════════════════════
+
+REFINE_PROMPT_SYSTEM = """\
+Tu es Jarvis en mode auto-amélioration.
+Tu analyses un prompt existant et tu proposes une version améliorée ciblée.
+Réponds UNIQUEMENT en JSON valide : {"proposed_text": "...", "rationale": "..."}
+Ne reformule pas tout — modifie uniquement ce qui est nécessaire pour adresser la lacune."""
+
+REFINE_PROMPT_USER = """\
+PROMPT : {prompt_name}
+LACUNE DÉTECTÉE : {topic}
+CONTEXTE : {context}
+
+TEXTE ACTUEL :
+{current_text}
+
+Propose une version améliorée qui adresse cette lacune sans altérer le reste.
+Conserve la structure, le ton et la langue d'origine.
+
+{{"proposed_text": "...", "rationale": "..."}}"""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  LIVE OVERRIDE LOADER
+# ══════════════════════════════════════════════════════════════════════════
+# get_prompt(name) is the canonical way to retrieve any prompt at runtime.
+# It checks prompt_overrides.json first (mtime-cached, no restart needed).
+# Falls back to the module constant if no override is active.
+# All callers should use get_prompt("NAME") instead of the bare constant.
+
+_overrides_path: str | None = None   # resolved lazily to avoid circular import
+_override_cache: dict        = {}
+_override_mtime: float       = -1.0
+
+
+def _resolve_overrides_path() -> str:
+    """Lazily resolve the overrides file path via config (avoids circular import)."""
+    global _overrides_path
+    if _overrides_path is None:
+        try:
+            from config import PROMPT_DATA_DIR
+            _overrides_path = os.path.join(PROMPT_DATA_DIR, "prompt_overrides.json")
+        except Exception:
+            _overrides_path = ""   # mark as failed so we don't retry forever
+    return _overrides_path
+
+
+def get_prompt(name: str) -> str:
+    """
+    Return the current text for prompt constant `name`.
+
+    Priority:
+      1. Active override in prompt_overrides.json  (live, mtime-cached)
+      2. Module-level constant                      (compile-time default)
+
+    The overrides file is only re-read when its mtime changes, so the overhead
+    on hot paths (router, analyzer) is a single os.stat() call.
+    """
+    global _override_cache, _override_mtime
+    path = _resolve_overrides_path()
+    if path and os.path.exists(path):
+        try:
+            mtime = os.path.getmtime(path)
+            if mtime != _override_mtime:
+                with open(path, encoding="utf-8") as f:
+                    _override_cache = json.load(f)
+                _override_mtime = mtime
+        except Exception:
+            pass
+    if name in _override_cache:
+        return _override_cache[name]
+    return globals().get(name, "")

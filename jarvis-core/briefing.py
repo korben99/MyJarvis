@@ -300,7 +300,7 @@ async def _fetch_news(interests: list[str]) -> list[str]:
 
 # ── LLM assembly ──────────────────────────────────────────────────────────
 
-from prompts import BRIEFING_SYSTEM as _BRIEFING_SYSTEM, BRIEFING_USER as _BRIEFING_USER
+from prompts import get_prompt
 
 
 async def _assemble_with_llm(
@@ -328,7 +328,7 @@ async def _assemble_with_llm(
 
     portfolio_text = sections.get("portfolio") or "Aucune donnée de portefeuille disponible."
 
-    prompt = _BRIEFING_USER.format(
+    prompt = get_prompt("BRIEFING_USER").format(
         user_name=user_name,
         date=date_str,
         calendar=calendar_text,
@@ -348,7 +348,7 @@ async def _assemble_with_llm(
                 json={
                     "model": PRIMARY_MODEL,
                     "messages": [
-                        {"role": "system", "content": _BRIEFING_SYSTEM.format(user_name=user_name) + no_think_suffix(PRIMARY_MODEL)},
+                        {"role": "system", "content": get_prompt("BRIEFING_SYSTEM").format(user_name=user_name) + no_think_suffix(PRIMARY_MODEL)},
                         {"role": "user", "content": prompt},
                     ],
                     "response_format": {"type": "json_object"},
@@ -390,9 +390,22 @@ async def gather_briefing(user_code: str) -> BriefingResult:
     news_task      = _fetch_news(interests)
     portfolio_task = asyncio.to_thread(get_portfolio_summary_text, user_code)
 
-    calendar, gmail, weather, news, portfolio = await asyncio.gather(
-        calendar_task, gmail_task, weather_task, news_task, portfolio_task
+    results = await asyncio.gather(
+        calendar_task, gmail_task, weather_task, news_task, portfolio_task,
+        return_exceptions=True,
     )
+
+    def _unwrap(val, default):
+        if isinstance(val, BaseException):
+            logger.warning("Briefing data source failed: %s", type(val).__name__)
+            return default
+        return val
+
+    calendar  = _unwrap(results[0], [])
+    gmail     = _unwrap(results[1], [])
+    weather   = _unwrap(results[2], "")
+    news      = _unwrap(results[3], [])
+    portfolio = _unwrap(results[4], "")
 
     sections = {
         "calendar":  calendar,

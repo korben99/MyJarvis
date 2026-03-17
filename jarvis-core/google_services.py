@@ -355,6 +355,7 @@ def fetch_calendar_events(days: int = 7, date: date_type | None = None) -> list[
         cal_list = service.calendarList().list().execute()
         calendar_ids = [c["id"] for c in cal_list.get("items", [])] or [GOOGLE_CALENDAR_ID]
 
+        seen_ids: set = set()
         results = []
         for cal_id in calendar_ids:
             resp = (
@@ -370,6 +371,11 @@ def fetch_calendar_events(days: int = 7, date: date_type | None = None) -> list[
                 .execute()
             )
             for event in resp.get("items", []):
+                event_id = event.get("id", "")
+                if event_id and event_id in seen_ids:
+                    continue  # shared event already added from another calendar
+                if event_id:
+                    seen_ids.add(event_id)
                 start = event.get("start", {})
                 end = event.get("end", {})
                 results.append({

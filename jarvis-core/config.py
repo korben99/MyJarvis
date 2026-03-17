@@ -104,6 +104,12 @@ BRIEFING_TIMEZONE = os.getenv("BRIEFING_TIMEZONE", "Europe/Paris")
 # ── Proto-self reflection loop ─────────────────────────────────────────────
 REFLECTION_INTERVAL_HOURS = int(os.getenv("REFLECTION_INTERVAL_HOURS", "6"))
 
+# ── Autocoding — prompt self-modification ─────────────────────────────────
+# Number of times a knowledge gap must be flagged before a prompt-refine is triggered
+REFINE_PROMPT_THRESHOLD = int(os.getenv("REFINE_PROMPT_THRESHOLD", "3"))
+# Stores prompt_proposals.json + prompt_overrides.json (inside the /app/data volume)
+PROMPT_DATA_DIR = os.path.join(os.path.dirname(SELF_MEMORY_PATH), "prompts")
+
 # ── Conversation storage limits ───────────────────────────────────────────
 CHAT_MAX_MESSAGES = int(os.getenv("CHAT_MAX_MESSAGES", "100"))   # server-side Redis LTRIM cap
 IOS_MAX_MESSAGES  = int(os.getenv("IOS_MAX_MESSAGES",  "50"))    # messages returned to iOS app

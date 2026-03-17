@@ -31,7 +31,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -45,7 +47,14 @@ from config import (
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
+    PROMPT_DATA_DIR,
+    REASONING_API_KEY,
+    REASONING_API_URL,
+    REASONING_MODEL,
+    REASONING_TIMEOUT,
+    REFINE_PROMPT_THRESHOLD,
     no_think_suffix,
+    tokens_param,
     QDRANT_URL,
     REDIS_URL,
     SELF_MEMORY_PATH,
@@ -61,6 +70,7 @@ logger = logging.getLogger("jarvis-self")
 _REFLECTION_LOG_KEY = "jarvis:self:reflection_log"
 _REFLECTION_LOG_MAX = 30
 _KNOWLEDGE_GAPS_KEY = "jarvis:self:knowledge_gaps"
+_GAP_COUNTS_KEY     = "jarvis:self:gap_counts"   # hash: slug → count
 _NOTIF_KEY_PREFIX   = "jarvis:self:notif"
 _NOTIF_TTL          = 86400   # 24h — one notification per user per day
 
@@ -220,15 +230,24 @@ def _get_user_activity(hours: int = 24) -> dict:
 
 
 def _get_knowledge_gaps(n: int = 5) -> list[str]:
-    """Return the most recently flagged knowledge gaps."""
+    """
+    Return the most recently flagged knowledge gaps, annotated with their
+    cumulative occurrence count so the reflection LLM can decide when to
+    trigger a prompt refinement.
+    """
     r = _redis()
-    raw = r.zrevrange(_KNOWLEDGE_GAPS_KEY, 0, n - 1)
-    results = []
+    raw      = r.zrevrange(_KNOWLEDGE_GAPS_KEY, 0, n - 1)
+    counts   = r.hgetall(_GAP_COUNTS_KEY)
+    results  = []
     for item in raw:
         try:
-            results.append(json.loads(item).get("topic", item))
+            topic = json.loads(item).get("topic", item)
         except Exception:
-            results.append(item)
+            topic = item
+        slug  = re.sub(r"\s+", "_", topic.lower())[:40]
+        count = int(counts.get(slug, 1))
+        label = f"{topic} (×{count})" if count > 1 else topic
+        results.append(label)
     return results
 
 
@@ -257,7 +276,7 @@ def gather_context() -> dict:
 #  LLM REFLECTION CALL
 # ══════════════════════════════════════════════════
 
-from prompts import REFLECTION_SYSTEM as _REFLECTION_SYSTEM, REFLECTION_PROMPT as _REFLECTION_PROMPT
+from prompts import get_prompt
 
 
 async def _call_reflection_llm(context: dict) -> dict | None:
@@ -273,7 +292,7 @@ async def _call_reflection_llm(context: dict) -> dict | None:
             lines.append(f"  {info['name']} ({code}): {info['conversations']} conversations | topics: {topics}")
         return "\n".join(lines) or "  No activity."
 
-    prompt = _REFLECTION_PROMPT.format(
+    prompt = get_prompt("REFLECTION_PROMPT").format(
         timestamp     = context["timestamp"],
         identity      = json.dumps(context["identity"], ensure_ascii=False),
         goals         = _fmt_goals(context["goals"]),
@@ -291,7 +310,7 @@ async def _call_reflection_llm(context: dict) -> dict | None:
                 json={
                     "model": PRIMARY_MODEL,
                     "messages": [
-                        {"role": "system", "content": _REFLECTION_SYSTEM + no_think_suffix(PRIMARY_MODEL)},
+                        {"role": "system", "content": get_prompt("REFLECTION_SYSTEM") + no_think_suffix(PRIMARY_MODEL)},
                         {"role": "user",   "content": prompt},
                     ],
                     "response_format": {"type": "json_object"},
@@ -343,8 +362,13 @@ def _action_flag_knowledge_gap(params: dict) -> str:
     entry = json.dumps({"topic": topic, "context": context, "date": datetime.now(timezone.utc).isoformat()})
     r.zadd(_KNOWLEDGE_GAPS_KEY, {entry: time.time()})
     r.zremrangebyrank(_KNOWLEDGE_GAPS_KEY, 0, -51)   # keep last 50
-    logger.info("Self action: knowledge gap flagged — %s", topic)
-    return f"flagged knowledge gap: {topic}"
+
+    # Increment per-topic counter (used by reflection LLM to decide when to refine a prompt)
+    slug  = re.sub(r"\s+", "_", topic.lower())[:40]
+    count = int(r.hincrby(_GAP_COUNTS_KEY, slug, 1) or 0)
+
+    logger.info("Self action: knowledge gap flagged — %s (count=%d)", topic, count)
+    return f"flagged knowledge gap: {topic} (count={count})"
 
 
 def _action_send_notification(params: dict) -> str:
@@ -418,7 +442,7 @@ def _action_consolidate_memory(params: dict) -> str:
 #  NIGHTLY REVIEW  (replaces nightly-reflection.py)
 # ══════════════════════════════════════════════════
 
-from prompts import NIGHTLY_SYSTEM as _NIGHTLY_SYSTEM, NIGHTLY_PROMPT as _NIGHTLY_PROMPT
+# prompts accessed via get_prompt() for live-override support
 
 
 async def _nightly_review_user(user_code: str, user_name: str, conversations: list[dict], review_date: str) -> dict | None:
@@ -430,7 +454,7 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
     data = load_self()
     recent_learnings = [l["text"] for l in data.get("learnings", [])[-5:]]
 
-    prompt = _NIGHTLY_PROMPT.format(
+    prompt = get_prompt("NIGHTLY_PROMPT").format(
         user_name=user_name,
         user_code=user_code,
         review_date=review_date,
@@ -447,7 +471,7 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
                 json={
                     "model": PRIMARY_MODEL,
                     "messages": [
-                        {"role": "system", "content": _NIGHTLY_SYSTEM + no_think_suffix(PRIMARY_MODEL)},
+                        {"role": "system", "content": get_prompt("NIGHTLY_SYSTEM") + no_think_suffix(PRIMARY_MODEL)},
                         {"role": "user",   "content": prompt},
                     ],
                     "response_format": {"type": "json_object"},
@@ -615,6 +639,298 @@ def _action_update_trade_threshold(params: dict) -> str:
     return result
 
 
+# ══════════════════════════════════════════════════
+#  AUTOCODING — PROMPT PROPOSALS
+# ══════════════════════════════════════════════════
+
+def _proposals_path() -> str:
+    return os.path.join(PROMPT_DATA_DIR, "prompt_proposals.json")
+
+
+def _overrides_path() -> str:
+    return os.path.join(PROMPT_DATA_DIR, "prompt_overrides.json")
+
+
+def _load_proposals() -> list[dict]:
+    try:
+        with open(_proposals_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def _save_proposals(proposals: list) -> None:
+    os.makedirs(PROMPT_DATA_DIR, exist_ok=True)
+    with open(_proposals_path(), "w", encoding="utf-8") as f:
+        json.dump(proposals, f, ensure_ascii=False, indent=2)
+
+
+def _load_overrides() -> dict:
+    try:
+        with open(_overrides_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_overrides(overrides: dict) -> None:
+    os.makedirs(PROMPT_DATA_DIR, exist_ok=True)
+    with open(_overrides_path(), "w", encoding="utf-8") as f:
+        json.dump(overrides, f, ensure_ascii=False, indent=2)
+
+
+def list_pending_proposals() -> list[dict]:
+    """Return all proposals with status='pending'."""
+    return [p for p in _load_proposals() if p.get("status") == "pending"]
+
+
+def approve_proposal(proposal_id: str) -> str:
+    """Apply the proposed text to prompt_overrides.json and mark as approved."""
+    proposals = _load_proposals()
+    found = next((p for p in proposals if p["id"] == proposal_id), None)
+    if not found:
+        return f"Proposition `{proposal_id}` introuvable."
+    if found["status"] != "pending":
+        return f"Proposition `{proposal_id}` est déjà **{found['status']}**."
+
+    # Write override
+    overrides = _load_overrides()
+    overrides[found["prompt_name"]] = found["proposed_text"]
+    _save_overrides(overrides)
+
+    # Mark approved
+    found["status"]      = "approved"
+    found["approved_at"] = datetime.now(timezone.utc).isoformat()
+    _save_proposals(proposals)
+
+    # Invalidate prompts in-memory cache so the new text is returned immediately
+    # (clears both the mtime sentinel and the cached dict — belt & suspenders)
+    try:
+        import prompts as _pm
+        _pm._override_mtime = -1.0
+        _pm._override_cache = {}
+    except Exception:
+        pass
+
+    logger.info("Proposal %s approved: %s updated", proposal_id, found["prompt_name"])
+    return (
+        f"✓ Proposition `{proposal_id}` approuvée.\n"
+        f"Le prompt **{found['prompt_name']}** est maintenant actif — aucun redémarrage nécessaire."
+    )
+
+
+def reject_proposal(proposal_id: str) -> str:
+    """Mark a proposal as rejected."""
+    proposals = _load_proposals()
+    found = next((p for p in proposals if p["id"] == proposal_id), None)
+    if not found:
+        return f"Proposition `{proposal_id}` introuvable."
+    if found["status"] != "pending":
+        return f"Proposition `{proposal_id}` est déjà **{found['status']}**."
+
+    found["status"]     = "rejected"
+    found["rejected_at"] = datetime.now(timezone.utc).isoformat()
+    _save_proposals(proposals)
+
+    logger.info("Proposal %s rejected", proposal_id)
+    return f"✗ Proposition `{proposal_id}` rejetée."
+
+
+def _notify_proposal(user_code: str, proposal: dict) -> None:
+    """Send an email notification with the proposal diff."""
+    to = USER_EMAILS.get(user_code, "")
+    if not to or not is_google_available():
+        return
+
+    pid           = proposal["id"]
+    name          = proposal["prompt_name"]
+    rationale     = proposal["rationale"]
+    current_short  = proposal["current_text"][:400]  + ("…" if len(proposal["current_text"])  > 400 else "")
+    proposed_short = proposal["proposed_text"][:400] + ("…" if len(proposal["proposed_text"]) > 400 else "")
+
+    text = (
+        f"Jarvis a identifié une opportunité d'amélioration du prompt « {name} ».\n\n"
+        f"Raison : {rationale}\n\n"
+        f"TEXTE ACTUEL :\n{current_short}\n\n"
+        f"TEXTE PROPOSÉ :\n{proposed_short}\n\n"
+        f"Pour approuver : dis à Jarvis « accepte la proposition {pid} »\n"
+        f"Pour rejeter  : dis à Jarvis « rejette la proposition {pid} »"
+    )
+    html = (
+        f"<p>Jarvis a identifié une opportunité d'amélioration du prompt <strong>{name}</strong>.</p>"
+        f"<p><strong>Raison :</strong> {rationale}</p>"
+        f"<h3>Texte actuel</h3>"
+        f"<pre style='background:#f5f5f5;padding:10px;font-size:12px;white-space:pre-wrap'>{current_short}</pre>"
+        f"<h3>Texte proposé</h3>"
+        f"<pre style='background:#e8f5e9;padding:10px;font-size:12px;white-space:pre-wrap'>{proposed_short}</pre>"
+        f"<p>Pour approuver : dis à Jarvis <strong>« accepte la proposition {pid} »</strong><br>"
+        f"Pour rejeter : dis à Jarvis <strong>« rejette la proposition {pid} »</strong></p>"
+        f"<p><em>— Jarvis</em></p>"
+    )
+    send_gmail_message(
+        to=to,
+        subject=f"Jarvis — Proposition de prompt #{pid} ({name})",
+        html_body=html,
+        text_body=text,
+    )
+
+
+def _action_refine_prompt(params: dict) -> str:
+    """
+    Call the reasoning model to propose an improved version of a prompt.
+    Stores the proposal in prompt_proposals.json and notifies by email.
+    Runs synchronously (called via asyncio.to_thread from run_reflection).
+    """
+    prompt_name = params.get("prompt_name", "").strip()
+    topic       = params.get("topic", "").strip()
+    context_str = params.get("context", "").strip()
+    user_code   = params.get("user_code", "").strip()
+
+    if not prompt_name or not topic:
+        return "refine_prompt: missing prompt_name or topic"
+    if user_code and user_code not in USER_CODES:
+        return f"refine_prompt: unknown user_code {user_code!r}"
+
+    current_text = get_prompt(prompt_name)
+    if not current_text:
+        return f"refine_prompt: unknown prompt {prompt_name!r}"
+
+    # Hard threshold check — LLM instructions are advisory; enforce here too
+    slug  = re.sub(r"\s+", "_", topic.lower())[:40]
+    count = int(_redis().hget(_GAP_COUNTS_KEY, slug) or 0)
+    if count < REFINE_PROMPT_THRESHOLD:
+        return (
+            f"refine_prompt: topic '{topic}' flagged {count}× "
+            f"(threshold={REFINE_PROMPT_THRESHOLD}) — too early"
+        )
+
+    # Guard: no duplicate pending proposal for the same prompt
+    existing = [p for p in list_pending_proposals() if p["prompt_name"] == prompt_name]
+    if existing:
+        return f"refine_prompt: proposal already pending for {prompt_name} (id={existing[0]['id']})"
+
+    # Guard: cooldown after rejection — don't re-propose same prompt within 7 days
+    all_proposals = _load_proposals()
+    recent_cutoff = datetime.now(timezone.utc).timestamp() - 7 * 86400
+    recently_rejected = [
+        p for p in all_proposals
+        if p["prompt_name"] == prompt_name
+        and p.get("status") == "rejected"
+        and datetime.fromisoformat(p.get("rejected_at", "2000-01-01T00:00:00+00:00")).timestamp() > recent_cutoff
+    ]
+    if recently_rejected:
+        return f"refine_prompt: {prompt_name} was rejected recently — cooldown active (7 days)"
+
+    refine_prompt_text = get_prompt("REFINE_PROMPT_USER").format(
+        prompt_name  = prompt_name,
+        topic        = topic,
+        context      = context_str or "aucun contexte supplémentaire",
+        current_text = current_text[:2000],
+    )
+
+    try:
+        resp = httpx.post(
+            f"{REASONING_API_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {REASONING_API_KEY}"},
+            json={
+                "model": REASONING_MODEL,
+                "messages": [
+                    {"role": "system", "content": get_prompt("REFINE_PROMPT_SYSTEM")},
+                    {"role": "user",   "content": refine_prompt_text},
+                ],
+                "response_format": {"type": "json_object"},
+                **{tokens_param(REASONING_MODEL): 1500},
+                "temperature": 0.4,
+            },
+            timeout=REASONING_TIMEOUT,
+        )
+        resp.raise_for_status()
+        result = json.loads(resp.json()["choices"][0]["message"]["content"])
+    except Exception as exc:
+        logger.error("refine_prompt: LLM call failed: %s", exc)
+        return f"refine_prompt: LLM call failed ({type(exc).__name__})"
+
+    proposed_text = result.get("proposed_text", "").strip()
+    rationale     = result.get("rationale", "").strip()
+
+    if not proposed_text:
+        return "refine_prompt: LLM returned empty proposed_text"
+
+    proposal = {
+        "id":            uuid.uuid4().hex[:8],
+        "prompt_name":   prompt_name,
+        "topic":         topic,
+        "current_text":  current_text,
+        "proposed_text": proposed_text,
+        "rationale":     rationale,
+        "status":        "pending",
+        "created_at":    datetime.now(timezone.utc).isoformat(),
+    }
+
+    proposals = _load_proposals()
+    proposals.append(proposal)
+    _save_proposals(proposals)
+
+    if user_code:
+        _notify_proposal(user_code, proposal)
+
+    logger.info("refine_prompt: proposal %s created for %s (topic: %s)", proposal["id"], prompt_name, topic)
+    return f"proposal {proposal['id']} created for {prompt_name}"
+
+
+def handle_proposal_command(message: str, user_code: str) -> str | None:
+    """
+    Detect and execute proposal management commands from a chat message.
+    Returns a formatted response string, or None if the message is not a proposal command.
+    Called by main.py before the full LLM pipeline when use_self=True.
+    """
+    msg = message.strip().lower()
+
+    # ── List pending proposals ──
+    if any(kw in msg for kw in (
+        "montre les propositions", "liste les propositions",
+        "propositions en attente", "show proposals", "list proposals",
+        "quelles propositions",
+    )):
+        proposals = list_pending_proposals()
+        if not proposals:
+            return "Aucune proposition de prompt en attente."
+        lines = [f"**{len(proposals)} proposition(s) en attente :**\n"]
+        for p in proposals:
+            lines.append(f"- `{p['id']}` — **{p['prompt_name']}** : {p['rationale'][:100]}")
+        lines.append("\nDis « accepte la proposition [id] » ou « rejette la proposition [id] ».")
+        return "\n".join(lines)
+
+    # ── Approve ──
+    m = re.search(r"(accepte?|approu?ve?)\s+(la\s+proposition\s+)?([a-f0-9]{6,8})\b", msg)
+    if m:
+        return approve_proposal(m.group(3))
+
+    # ── Reject ──
+    m = re.search(r"(rejette?|refu?se?|reject)\s+(la\s+proposition\s+)?([a-f0-9]{6,8})\b", msg)
+    if m:
+        return reject_proposal(m.group(3))
+
+    # ── Show specific proposal ──
+    m = re.search(r"(montre?|show|détail)\s+(la\s+proposition\s+)?([a-f0-9]{6,8})\b", msg)
+    if m:
+        pid       = m.group(3)
+        proposals = _load_proposals()
+        found     = next((p for p in proposals if p["id"] == pid), None)
+        if not found:
+            return f"Proposition `{pid}` introuvable."
+        cur  = found["current_text"][:300]  + ("…" if len(found["current_text"])  > 300 else "")
+        prop = found["proposed_text"][:300] + ("…" if len(found["proposed_text"]) > 300 else "")
+        return (
+            f"**Proposition `{pid}` — {found['prompt_name']}** ({found['status']})\n\n"
+            f"**Raison :** {found['rationale']}\n\n"
+            f"**Texte actuel :**\n```\n{cur}\n```\n\n"
+            f"**Texte proposé :**\n```\n{prop}\n```"
+        )
+
+    return None
+
+
 _ACTION_CATALOG = {
     "nothing":                  _action_nothing,
     "store_insight":            _action_store_insight,
@@ -624,6 +940,7 @@ _ACTION_CATALOG = {
     "consolidate_memory":       _action_consolidate_memory,
     "check_health":             _action_check_health,
     "update_trade_threshold":   _action_update_trade_threshold,
+    "refine_prompt":            _action_refine_prompt,
     # nightly_review is scheduled automatically — not in LLM action catalog
 }
 

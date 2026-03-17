@@ -211,7 +211,7 @@ def _resolve_ticker(isin: str, r: redis_lib.Redis, pos_key: str, name: str = "")
     """
     cached = r.hget(pos_key, "yahoo_ticker")
     if cached:
-        return cached
+        return None if cached == "UNKNOWN" else cached
 
     ticker = None
 
@@ -255,6 +255,9 @@ def _resolve_ticker(isin: str, r: redis_lib.Redis, pos_key: str, name: str = "")
 
     if ticker:
         r.hset(pos_key, "yahoo_ticker", ticker)
+    else:
+        # Cache the failure sentinel so we don't retry every hourly run
+        r.hset(pos_key, "yahoo_ticker", "UNKNOWN")
     return ticker
 
 
@@ -485,7 +488,9 @@ N'alerte QUE si au moins une des conditions suivantes est vraie :
   - Dividende prévu dans moins de 5 jours calendaires"""
 
 _ALERT_USER = """\
-Positions actuelles (intraday calculé par rapport à la veille) :
+Variation journalière totale du portefeuille : {daily_pnl_pct:+.2f}%
+
+Positions (J = variation intraday depuis la veille · PV_total = plus-value depuis l'achat) :
 {portfolio}
 
 Réponds en JSON uniquement : {{"alert": true/false, "message": "..."}}
@@ -518,13 +523,22 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
     if not eligible:
         return False, ""
 
+    # Compute total portfolio daily P&L explicitly so the LLM has a clear figure
+    total_value   = sum(float(p.get("current_value_eur", 0) or 0) for p in eligible)
+    daily_pnl_eur = sum(
+        float(p.get("current_value_eur", 0) or 0) * float(p.get("intraday_var_pct", 0) or 0) / 100
+        for p in eligible
+    )
+    daily_pnl_pct = round(daily_pnl_eur / total_value * 100, 2) if total_value > 0 else 0.0
+
     lines = []
     for p in eligible:
         try:
-            intra   = float(p.get("intraday_var_pct", 0))
-            pnl_pct = float(p.get("unrealized_pnl_pct", 0))
-            live    = float(p.get("last_price", 0))
-            line    = f"{p['name']}: cours={live}€ (intraday={intra:+.2f}%, PV={pnl_pct:+.2f}%)"
+            intra   = float(p.get("intraday_var_pct", 0) or 0)
+            pnl_pct = float(p.get("unrealized_pnl_pct", 0) or 0)
+            live    = float(p.get("last_price", 0) or 0)
+            # Label clearly: J = intraday (daily), PV_total = since purchase
+            line = f"{p['name']}: cours={live}€ (J={intra:+.2f}%, PV_total={pnl_pct:+.2f}%)"
             if p.get("threshold_high"):
                 line += f" seuil_haut={p['threshold_high']}€"
             if p.get("threshold_low"):
@@ -544,7 +558,10 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
                     "model": PRIMARY_MODEL,
                     "messages": [
                         {"role": "system", "content": _ALERT_SYSTEM + no_think_suffix(PRIMARY_MODEL)},
-                        {"role": "user",   "content": _ALERT_USER.format(portfolio="\n".join(lines))},
+                        {"role": "user",   "content": _ALERT_USER.format(
+                            portfolio="\n".join(lines),
+                            daily_pnl_pct=daily_pnl_pct,
+                        )},
                     ],
                     "response_format": {"type": "json_object"},
                     "max_tokens": 200,
@@ -557,12 +574,15 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
 
         if should_alert and message:
             now_iso = now.isoformat()
+            # Mark ALL eligible positions — not just name-matched ones.
+            # A portfolio-level alert ("perte journalière > 2%") contains no position
+            # name, so the old name-match logic never set last_alert_at, causing the
+            # same alert to refire every hour until the cooldown actually engaged.
             for p in eligible:
-                if p.get("name", "").upper() in message.upper():
-                    r.hset(_pos_key(user_code, p["isin"]), mapping={
-                        "last_alert_at":     now_iso,
-                        "last_alert_reason": message[:200],
-                    })
+                r.hset(_pos_key(user_code, p["isin"]), mapping={
+                    "last_alert_at":     now_iso,
+                    "last_alert_reason": message[:200],
+                })
 
         return should_alert, message
 

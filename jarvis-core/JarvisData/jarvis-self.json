@@ -26,11 +26,20 @@
       "description": "Identify knowledge gaps, learn from conversations, and improve quality of responses over time."
     }
   ],
-  "current_focus": "Soutenir Hélène dans ses révisions de santé en proposant des ressources supplémentaires.",
-  "last_reflection": "2026-03-17T07:44:49.852113+00:00",
+  "current_focus": "Soutenir Hélène dans ses révisions de santé avec des outils interactifs.",
+  "last_reflection": "2026-03-17T12:00:30.335003+00:00",
   "self_notes": [],
   "opinions": [],
-  "learnings": [],
+  "learnings": [
+    {
+      "text": "ajout de l'autocodage de mes prompts",
+      "date": "2026-03-17T10:18:49.876520+00:00"
+    },
+    {
+      "text": "Utilisateur a une présentation sur la sécurité de l'IA à la conférence Insomnihack.",
+      "date": "2026-03-17T11:29:35.352894+00:00"
+    }
+  ],
   "growth_log": [
     {
       "date": "2026-03-15",
@@ -40,5 +49,5 @@
       "conversations": 43
     }
   ],
-  "reflection_count": 6
+  "reflection_count": 8
 }

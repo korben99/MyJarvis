@@ -100,6 +100,8 @@ from self import (
     gather_context,
     get_current_focus,
     get_reflection_log,
+    handle_proposal_command,
+    list_pending_proposals,
     load_self,
     run_nightly_review,
     run_reflection,
@@ -329,30 +331,22 @@ def get_qdrant():
     return _qdrant_client
 
 
-# ── System prompt (strings live in prompts.py) ──
-from prompts import (
-    SYSTEM_BASE_EN as SYSTEM_PROMPT_BASE_EN,
-    SYSTEM_BASE_FR as SYSTEM_PROMPT_BASE_FR,
-    MEMORY_HEADER_EN as MEMORY_PROMPT_EN,
-    MEMORY_HEADER_FR as MEMORY_PROMPT_FR,
-    VOICE_SUFFIX_EN as VOICE_PROMPT_EN,
-    VOICE_SUFFIX_FR as VOICE_PROMPT_FR,
-    GOOGLE_QUERY_PROMPT as _GOOGLE_QUERY_PROMPT,
-)
+# ── System prompt (strings live in prompts.py — use get_prompt for live overrides) ──
+from prompts import get_prompt
 
 
 def build_system_prompt(
     session_id: str, voice_mode: bool = False, user_code: str = "default"
 ) -> str:
-    prompt = SYSTEM_PROMPT_BASE_FR
+    prompt = get_prompt("SYSTEM_BASE_FR")
 
     if HAS_MEMORY:
         memory_ctx = build_memory_context(session_id, user_code)
         if memory_ctx:
-            prompt += f"{MEMORY_PROMPT_FR}\n{memory_ctx}"
+            prompt += f"{get_prompt('MEMORY_HEADER_FR')}\n{memory_ctx}"
 
     if voice_mode:
-        prompt += VOICE_PROMPT_FR
+        prompt += get_prompt("VOICE_SUFFIX_FR")
 
     return prompt
 
@@ -1102,8 +1096,14 @@ async def describe_images(image_parts: list, text_prompt: str) -> str:
                         {
                             "type": "text",
                             "text": (
-                                "Décris cette image en détail et de façon précise. "
-                                f"Contexte de la question de l'utilisateur : {text_prompt or '(aucun)'}"
+                                "Analyse cette image de façon exhaustive et structurée.\n"
+                                "Décris dans cet ordre :\n"
+                                "1. Sujet principal et contexte général de la scène\n"
+                                "2. Tout texte, chiffre ou étiquette visible — recopie-le mot pour mot\n"
+                                "3. Personnes présentes (apparence, expression, action)\n"
+                                "4. Objets, couleurs dominantes, positions relatives\n"
+                                "5. Tout élément pertinent pour répondre à la question ci-dessous\n\n"
+                                f"Question de l'utilisateur : {text_prompt or 'Que contient cette image ?'}"
                             ),
                         },
                         *resolved,
@@ -1116,7 +1116,7 @@ async def describe_images(image_parts: list, text_prompt: str) -> str:
                 json={
                     "model": VISION_MODEL,
                     "messages": vision_messages,
-                    tokens_param(VISION_MODEL): 600,
+                    tokens_param(VISION_MODEL): 1024,
                     "stream": False,
                 },
             )
@@ -1169,7 +1169,7 @@ async def post_analysis(
             if "key" in fact and "value" in fact:
                 update_user_profile(user_code, fact["key"], fact["value"] or None)
 
-        for iw in analysis.get("interest_weights", []):
+        for iw in analysis.get("interest_weights") or []:
             if "term" in iw and "weight" in iw:
                 set_interest_weight(user_code, iw["term"], float(iw["weight"]))
 
@@ -1290,7 +1290,7 @@ async def models():
 
 # TODO: TO BE REPLACED BY QWEN ROUTER (llm_router.py) — remove this prompt and
 #       _build_google_queries_llm() once LLM_ROUTER_URL is set in .env.
-# _GOOGLE_QUERY_PROMPT imported from prompts.py above
+# Google query builder uses get_prompt("GOOGLE_QUERY_PROMPT")
 
 
 # TODO: TO BE REPLACED BY QWEN ROUTER — this function becomes a no-op once
@@ -1313,7 +1313,7 @@ async def _build_google_queries_llm(
                 json={
                     "model": PRIMARY_MODEL,
                     "messages": [
-                        {"role": "user", "content": _GOOGLE_QUERY_PROMPT.format(message=message) + no_think_suffix(PRIMARY_MODEL)}
+                        {"role": "user", "content": get_prompt("GOOGLE_QUERY_PROMPT").format(message=message) + no_think_suffix(PRIMARY_MODEL)}
                     ],
                     "response_format": {"type": "json_object"},
                     "max_tokens": 80,
@@ -1533,6 +1533,15 @@ async def chat(req: ChatRequest):
     # ── Self takes priority over briefing when both fire ──
     if use_self:
         use_briefing = False
+        # ── Proposal management commands (short-circuit before LLM) ──
+        proposal_resp = handle_proposal_command(req.message, user_code)
+        if proposal_resp is not None:
+            if req.stream:
+                async def _proposal_stream():
+                    yield f"data: {json.dumps({'content': proposal_resp})}\n\n"
+                    yield f"data: {json.dumps({'done': True})}\n\n"
+                return StreamingResponse(_proposal_stream(), media_type="text/event-stream")
+            return {"response": proposal_resp, "model": use_model, "session_id": req.session_id, "duration_ms": 0}
 
     # ── Briefing short-circuit — return stored or generate on-demand ──
     if use_briefing:
@@ -1681,12 +1690,14 @@ async def chat(req: ChatRequest):
         last_action = last_ref[0].get("action", "none") if last_ref else "none"
         last_reason = last_ref[0].get("reason", "") if last_ref else ""
         goals_text  = " | ".join(f"G{i+1}: {g['label']}" for i, g in enumerate(self_data.get("goals", [])))
+        pending_proposals = list_pending_proposals()
         self_ctx    = (
             f"=== TON ÉTAT INTERNE ===\n"
             f"Objectifs : {goals_text}\n"
             f"Focus actuel : {focus or 'pas encore défini'}\n"
             f"Dernière action autonome : {last_action}"
             + (f" — {last_reason}" if last_reason else "")
+            + (f"\nPropositions de prompt en attente : {len(pending_proposals)} — dis 'montre les propositions' pour voir" if pending_proposals else "")
         )
         context_parts.append(self_ctx)
         logger.info("self context injected for %s", user_code)
@@ -1712,7 +1723,13 @@ async def chat(req: ChatRequest):
 
     # Image description (vision two-stage pipeline)
     if image_description:
-        context_parts.append(f"=== IMAGE ANALYSÉE ===\n{image_description}")
+        context_parts.append(
+            f"=== IMAGE ENVOYÉE PAR L'UTILISATEUR ===\n"
+            f"L'utilisateur a joint une image à ce message. "
+            f"Voici son contenu analysé par le modèle de vision :\n\n"
+            f"{image_description}\n\n"
+            f"Réponds à la question de l'utilisateur en te basant sur cette analyse."
+        )
         logger.info("Vision: image description injected into context")
 
     if context_parts:
@@ -2060,7 +2077,7 @@ def _extract_content_parts(content: str | list) -> tuple[str, list]:
     """
     if isinstance(content, str):
         return content, []
-    text = " ".join(
+    text = "\n".join(
         p.get("text", "") for p in content
         if isinstance(p, dict) and p.get("type") == "text"
     ).strip()
@@ -2151,7 +2168,7 @@ async def proxy_chat(
 
     # ── Delegate entirely to /chat ──
     jarvis_req = ChatRequest(
-        message=message or "(image)",  # placeholder when only an image is sent
+        message=message or "Que contient cette image ?",  # placeholder when only an image is sent
         session_id=_proxy_session_id(user_code, req.messages),
         user_code=user_code,
         stream=req.stream,
