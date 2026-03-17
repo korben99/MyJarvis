@@ -11,6 +11,7 @@ struct JarvisApp: App {
     @StateObject private var api = JarvisAPI()
     @StateObject private var speechEngine = SpeechEngine()
     @StateObject private var wakeWord = WakeWordEngine()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -43,6 +44,20 @@ struct JarvisApp: App {
                     speechEngine.language = settings.language
                     if settings.wakeWordEnabled { wakeWord.start(language: settings.language) }
                 }
+        }
+        // Pause all audio when the app goes to background; resume on foreground.
+        // Without this, AVAudioEngine + SFSpeechRecognizer keep the mic and Neural Engine
+        // running indefinitely, draining battery and heating the device.
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background:
+                wakeWord.pause()
+                speechEngine.deactivateAudioSession()
+            case .active:
+                if settings.wakeWordEnabled { wakeWord.resume() }
+            default:
+                break
+            }
         }
     }
 }

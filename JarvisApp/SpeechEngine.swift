@@ -205,6 +205,10 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         timer?.invalidate()
         timer = nil
 
+        // Release the microphone hardware now. WhisperKit reads from the temp file
+        // and doesn't need the audio session. WakeWordEngine will reactivate if it resumes.
+        deactivateAudioSessionIfIdle()
+
         guard let url = recordingURL else { return nil }
 
         // Always clean up the temp file, regardless of which path we exit through.
@@ -280,6 +284,18 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         }
 
         isSpeaking = false
+        deactivateAudioSessionIfIdle()
+    }
+
+    /// Releases the audio hardware when neither recording nor speaking.
+    /// Call after any operation that could have been the last audio activity.
+    func deactivateAudioSession() {
+        deactivateAudioSessionIfIdle()
+    }
+
+    private func deactivateAudioSessionIfIdle() {
+        guard !isRecording && !isSpeaking else { return }
+        try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     // MARK: - Speech Delegate
@@ -290,6 +306,9 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     ) {
         Task { @MainActor in
             self.isSpeaking = false
+            // AVSpeechSynthesizer is done — release the audio session so the hardware
+            // can sleep. WakeWordEngine will reactivate it if/when it resumes.
+            self.deactivateAudioSessionIfIdle()
         }
     }
 

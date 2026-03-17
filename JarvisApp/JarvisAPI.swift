@@ -48,35 +48,27 @@ class JarvisAPI: ObservableObject {
         connectionState = .connecting
         activeNetwork   = .unknown
 
-        guard let (url, route) = await resolveActiveURL() else {
+        // resolveActiveURL() already fetches and validates /status (HTTP 200).
+        // We reuse its response body directly — no second network round-trip needed.
+        guard let (url, route, statusData) = await resolveActiveURL() else {
+            // Guard against cancelled tasks (e.g. rapid configure() calls while the
+            // user is typing in Settings) writing a spurious error to the UI.
+            guard !Task.isCancelled else { return }
             connectionState = .error("No server — check IP & Local Network permission")
             activeNetwork   = .unknown
             return
         }
+        guard !Task.isCancelled else { return }
 
         resolvedURL   = url
         activeNetwork = route
 
-        guard let statusURL = URL(string: "\(url)/status") else {
-            connectionState = .error("Invalid URL")
-            return
-        }
-
         do {
-            let (data, response) = try await URLSession.shared.data(from: statusURL)
-            let httpCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-            guard httpCode == 200 else {
-                connectionState = .error("Server returned HTTP \(httpCode)")
-                return
-            }
-            let status = try JSONDecoder().decode(StatusResponse.self, from: data)
+            let status = try JSONDecoder().decode(StatusResponse.self, from: statusData)
             let llm = status.services?.activeLLM
-            let modelName = llm?.model ?? status.status
-            connectionState = .connected(model: modelName)
-        } catch let decodeError as DecodingError {
-            connectionState = .error("Bad /status format: \(decodeError)")
+            connectionState = .connected(model: llm?.model ?? status.status)
         } catch {
-            connectionState = .error(error.localizedDescription)
+            connectionState = .error("Bad /status format: \(error)")
         }
     }
 
@@ -97,9 +89,9 @@ class JarvisAPI: ObservableObject {
         isProcessing = true
         defer { isProcessing = false }
 
-        // Re-resolve if we don't have a working URL yet
+        // Re-resolve if we don't have a working URL (initial state, or cleared after a failure).
         if resolvedURL.isEmpty {
-            if let (url, route) = await resolveActiveURL() {
+            if let (url, route, _) = await resolveActiveURL() {
                 resolvedURL   = url
                 activeNetwork = route
             }
@@ -126,6 +118,12 @@ class JarvisAPI: ObservableObject {
         do {
             let (bytes, _) = try await URLSession.shared.bytes(for: request)
 
+            // Accumulate tokens and flush to the UI at most ~30fps (every 33ms).
+            // This cuts @Published emissions from ~25/sec to ~30/sec → fewer SwiftUI
+            // re-renders while the chat list grows, dramatically improving scroll performance.
+            var pendingContent = ""
+            var lastFlush = ContinuousClock.now
+
             for try await line in bytes.lines {
                 guard !line.isEmpty else { continue }
                 guard line.hasPrefix("data: "),
@@ -133,16 +131,24 @@ class JarvisAPI: ObservableObject {
                       let chunk = try? JSONDecoder().decode(StreamChunk.self, from: data)
                 else { continue }
 
-                if let pos = messages.firstIndex(where: { $0.id == assistantID }) {
-                    if let content = chunk.content {
-                        messages[pos].content += content
+                if let content = chunk.content { pendingContent += content }
+
+                let isDone = chunk.done == true
+                let now = ContinuousClock.now
+                if isDone || now - lastFlush >= .milliseconds(33) {
+                    if let pos = messages.firstIndex(where: { $0.id == assistantID }) {
+                        if !pendingContent.isEmpty {
+                            messages[pos].content += pendingContent
+                            pendingContent = ""
+                        }
+                        if isDone { messages[pos].isStreaming = false }
                     }
-                    if chunk.done == true {
-                        messages[pos].isStreaming = false
-                    }
+                    lastFlush = now
                 }
             }
+            // Flush any remaining buffered content and mark stream done.
             if let pos = messages.firstIndex(where: { $0.id == assistantID }) {
+                if !pendingContent.isEmpty { messages[pos].content += pendingContent }
                 messages[pos].isStreaming = false
             }
         } catch {
@@ -150,13 +156,20 @@ class JarvisAPI: ObservableObject {
                 messages[pos].content = "Error: \(error.localizedDescription)"
                 messages[pos].isStreaming = false
             }
+            // Invalidate the cached URL so the next send triggers a fresh probe
+            // rather than hammering a server we already know is unreachable.
+            resolvedURL = ""
+            connectionState = .error("Connection lost")
         }
     }
 
     // MARK: - Private helpers
 
-    /// Tries local first (2 s timeout), then VPN. Returns the first reachable base URL.
-    private func resolveActiveURL() async -> (url: String, route: NetworkRoute)? {
+    /// Tries local first (2 s timeout), then VPN.
+    /// Returns (baseURL, route, /status response body) for the first candidate
+    /// that responds with HTTP 200 — so callers can decode the body without a
+    /// second network round-trip.
+    private func resolveActiveURL() async -> (url: String, route: NetworkRoute, data: Data)? {
         let candidates: [(String, NetworkRoute)] = [
             (localServerURL, .local),
             (vpnServerURL,   .vpn)
@@ -164,9 +177,9 @@ class JarvisAPI: ObservableObject {
         for (candidate, route) in candidates {
             guard !candidate.isEmpty,
                   let url = URL(string: "\(candidate)/status") else { continue }
-            if (try? await probeSession.data(from: url)) != nil {
-                return (candidate, route)
-            }
+            guard let (data, response) = try? await probeSession.data(from: url),
+                  (response as? HTTPURLResponse)?.statusCode == 200 else { continue }
+            return (candidate, route, data)
         }
         return nil
     }

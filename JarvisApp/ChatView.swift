@@ -6,6 +6,7 @@ import Combine
 import PhotosUI
 import UIKit
 
+@MainActor
 struct ChatView: View {
     @EnvironmentObject var api: JarvisAPI
     @State private var inputText = ""
@@ -52,7 +53,10 @@ struct ChatView: View {
                                 .frame(maxWidth: .infinity).padding(.top, 60)
                             }
                             ForEach(api.messages) { msg in
-                                MessageBubble(message: msg).id(msg.id)
+                                // .equatable() skips re-rendering bubbles whose message
+                                // hasn't changed — critical when streaming updates the last
+                                // bubble only, but previously caused all bubbles to re-draw.
+                                MessageBubble(message: msg).equatable().id(msg.id)
                             }
                         }
                         .padding(.horizontal, 16).padding(.vertical, 12)
@@ -61,7 +65,7 @@ struct ChatView: View {
                     .onChange(of: api.messages.count) { _, _ in
                         scrollToBottom(proxy)
                     }
-                    .onChange(of: api.isProcessing) { _, _ in
+                    .onChange(of: api.isProcessing) { @MainActor _, _ in
                         scrollToBottom(proxy)
                     }
                 }
@@ -110,13 +114,14 @@ struct ChatView: View {
                     }
 
                     HStack(spacing: 10) {
+                        let processing = api.isProcessing
                         // Photo picker button
                         PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
                             Image(systemName: "photo")
                                 .font(.system(size: 22))
-                                .foregroundColor(api.isProcessing ? .gray.opacity(0.3) : .gray)
+                                .foregroundColor(processing ? .gray.opacity(0.3) : .gray)
                         }
-                        .disabled(api.isProcessing)
+                        .disabled(processing)
                         .onChange(of: selectedPhotoItem) { _, item in
                             Task {
                                 if let data = try? await item?.loadTransferable(type: Data.self),
@@ -178,9 +183,17 @@ struct ChatView: View {
 
 // MARK: - Message Bubble
 
-struct MessageBubble: View {
+struct MessageBubble: View, Equatable {
     let message: ChatMessage
+    // Cache the decoded UIImage so it isn't re-decoded from Data on every render.
+    @State private var cachedImage: UIImage?
+
     private var isUser: Bool { message.role == .user }
+
+    // Equatable: delegate to ChatMessage which compares id + content + isStreaming.
+    static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
+        lhs.message == rhs.message
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -195,8 +208,9 @@ struct MessageBubble: View {
             }
 
             VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
-                // Image thumbnail (user messages only)
-                if let data = message.imageData, let ui = UIImage(data: data) {
+                // Image thumbnail (user messages only) — uses @State cache to avoid
+                // re-decoding the JPEG on every render.
+                if let ui = cachedImage {
                     Image(uiImage: ui)
                         .resizable()
                         .scaledToFill()
@@ -219,6 +233,11 @@ struct MessageBubble: View {
                 Text(timeString)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.gray.opacity(0.5))
+            }
+            .onAppear {
+                if cachedImage == nil, let data = message.imageData {
+                    cachedImage = UIImage(data: data)
+                }
             }
 
             if !isUser { Spacer(minLength: 48) }

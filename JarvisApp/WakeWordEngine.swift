@@ -83,7 +83,9 @@ class WakeWordEngine: ObservableObject {
             let inputNode = audioEngine.inputNode
             let format = inputNode.outputFormat(forBus: 0)
 
-            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+            // 4096 samples ≈ 93 ms at 44.1 kHz → ~11 callbacks/sec vs ~43/sec at 1024.
+            // Reduces continuous CPU overhead from the mic tap by ~4×.
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
                 guard buffer.frameLength > 0 else { return }
                 self?.recognitionRequest?.append(buffer)
             }
