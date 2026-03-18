@@ -237,6 +237,7 @@ INTENT_EXAMPLES_FR = {
         "trouve l'info dans mes documents",
         "analyse mes documents",
         "regarde mes notes",
+        "RAG",
     ],
     "web": [
         "cherche sur internet",

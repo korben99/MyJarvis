@@ -65,7 +65,7 @@ from config import (
     USERS,
 )
 from google_services import is_google_available, send_gmail_message
-from memory import atomic_json_write, get_self_memory, save_self_memory, self_memory_lock, store_autobiographical_event
+from memory import atomic_json_write, append_conversation_message, get_self_memory, save_self_memory, self_memory_lock, store_autobiographical_event
 
 logger = logging.getLogger("jarvis-self")
 
@@ -457,6 +457,10 @@ def _action_queue_push(params: dict) -> str:
     }))
     r.expire(pending_key, 86400)     # auto-expire if not polled within 24h
     r.setex(cooldown_key, _PUSH_COOLDOWN_TTL, "1")
+
+    # Also inject into the persistent iOS conversation so the message is visible
+    # when the user opens the app — even if the notification was missed.
+    append_conversation_message(user_code, "iphone-main", "assistant", message)
 
     logger.info("Self action: push queued for %s — %s", user_code, message[:80])
     return f"push queued for {user_code}: {message[:80]}"

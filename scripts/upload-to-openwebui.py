@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/jarvis/venv/bin/python3
 """
 Upload files to OpenWebUI via its API, then create/update a Knowledge base.
 OpenWebUI handles chunking, embedding, and Qdrant storage with proper file_ids.
@@ -22,6 +22,8 @@ load_dotenv("/opt/jarvis/.env")
 # Optional extraction libraries — used as fallback when OpenWebUI returns "empty content"
 try:
     import pypdf
+    import logging as _logging
+    _logging.getLogger("pypdf").setLevel(_logging.ERROR)   # silence "Ignoring wrong pointing object" warnings
     HAS_PYPDF = True
 except ImportError:
     HAS_PYPDF = False
@@ -45,8 +47,8 @@ TRACKING_FILE = "/opt/jarvis/logs/uploaded-files.json"
 OPENWEBUI_API_KEY = os.getenv("OPENWEBUI_API_KEY", "")
        
 #no pdf at the begining no .py, .html, .yml...
-EXTS = {".xls",".txt",".md",".csv",".docx"}
-MAX_FILE_SIZE_MB = 50          # skip files larger than this
+EXTS = {".xls",".txt",".md",".csv",".docx", ".pdf"}
+MAX_FILE_SIZE_MB = 1          # skip files larger than this
 UPLOAD_TIMEOUT   = 180         # seconds per upload
 ADD_TIMEOUT      = 300         # seconds for knowledge add call (embedding pipeline can be slow)
 MAX_RETRIES      = 3           # retries per API call

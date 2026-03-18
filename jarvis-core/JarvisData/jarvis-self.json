@@ -26,8 +26,8 @@
       "description": "Identify knowledge gaps, learn from conversations, and improve quality of responses over time."
     }
   ],
-  "current_focus": "Améliorer la compréhension des intérêts d'Hélène pour les films pour lui fournir des recommandations personnalisées.",
-  "last_reflection": "2026-03-18T13:50:54.425147+00:00",
+  "current_focus": "Améliorer la compréhension des intérêts de Sébastien pour le cinéma afin de lui fournir des recommandations personnalisées.",
+  "last_reflection": "2026-03-18T17:45:39.496157+00:00",
   "self_notes": [],
   "opinions": [],
   "learnings": [
@@ -123,7 +123,7 @@
       "conversations": 2
     }
   ],
-  "reflection_count": 20,
+  "reflection_count": 22,
   "user_relations": {
     "KORBEN99": {
       "affinity": 0.5,

@@ -11,31 +11,47 @@
 //   Info.plist → BGTaskSchedulerPermittedIdentifiers → ["fr.jarvis.push-poll"]
 
 import Foundation
+import Combine
 import UserNotifications
 import BackgroundTasks
 import UIKit
-
-// MARK: - Background task identifier
-
-let kJarvisPushPollTaskID = "fr.jarvis.push-poll"
 
 // MARK: - NotificationService
 
 @MainActor
 final class NotificationService: ObservableObject {
 
+    // nonisolated: must be reachable from nonisolated contexts (registerBackgroundTask,
+    // scheduleBackgroundRefresh) without a main-actor hop.
+    nonisolated static let taskID = "fr.jarvis.push-poll"
+
     // Set by JarvisApp after configure() so this service knows where to call.
-    var resolvedURL: String = ""
-    var userCode:    String = ""
+    var resolvedURL:    String = ""
+    var userCode:       String = ""
+    // Both candidate URLs — used to re-probe on a cold background launch.
+    var localServerURL: String = ""
+    var vpnServerURL:   String = ""
 
     private var pollTimer: Timer?
     private let pollInterval: TimeInterval = 15 * 60   // 15 min foreground interval
 
+    // Short-timeout session: background tasks have limited execution time (~30 s),
+    // so we can't afford URLSession.shared's 60 s default request timeout.
+    private let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest  = 10
+        config.timeoutIntervalForResource = 20
+        return URLSession(configuration: config)
+    }()
+
     // MARK: - Permissions
 
-    /// Call once at startup. Requests UNUserNotification authorization.
+    /// Call once at startup. Requests UNUserNotification authorization
+    /// and sets self as the notification center delegate so notifications
+    /// are also displayed while the app is in the foreground.
     func requestPermissions() async {
         let center = UNUserNotificationCenter.current()
+        center.delegate = self
         _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
     }
 
@@ -45,8 +61,9 @@ final class NotificationService: ObservableObject {
     func startForegroundPolling() {
         stopForegroundPolling()
         pollTimer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { await self.pollAndDeliver() }
+            Task { @MainActor [weak self] in
+                await self?.pollAndDeliver()
+            }
         }
     }
 
@@ -58,8 +75,10 @@ final class NotificationService: ObservableObject {
     // MARK: - Background task registration
 
     /// Register the BGAppRefreshTask identifier. Call from app init before the first scene.
-    static func registerBackgroundTask() {
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: kJarvisPushPollTaskID, using: nil) { task in
+    /// nonisolated: BGTaskScheduler.register is thread-safe and this method holds no
+    /// actor-isolated state, so it's safe to call from JarvisApp.init() without a Task hop.
+    nonisolated static func registerBackgroundTask() {
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.taskID, using: nil) { task in
             guard let refreshTask = task as? BGAppRefreshTask else { return }
             Task { @MainActor in
                 await NotificationService.shared.handleBackgroundTask(refreshTask)
@@ -69,7 +88,7 @@ final class NotificationService: ObservableObject {
 
     /// Schedule the next background refresh. Call after each execution and on app background.
     func scheduleBackgroundRefresh() {
-        let request = BGAppRefreshTaskRequest(identifier: kJarvisPushPollTaskID)
+        let request = BGAppRefreshTaskRequest(identifier: Self.taskID)
         request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)   // iOS may delay this
         try? BGTaskScheduler.shared.submit(request)
     }
@@ -84,21 +103,48 @@ final class NotificationService: ObservableObject {
         // Schedule the next refresh immediately so iOS queues it
         scheduleBackgroundRefresh()
 
-        task.expirationHandler = { task.setTaskCompleted(success: false) }
+        // Use [weak task] to avoid a retain cycle: the task holds its expirationHandler,
+        // and the handler must not hold a strong reference back to the task.
+        task.expirationHandler = { [weak task] in task?.setTaskCompleted(success: false) }
 
         await pollAndDeliver()
         task.setTaskCompleted(success: true)
+    }
+
+    // MARK: - URL resolution
+
+    /// Tries localServerURL first (2 s timeout), then vpnServerURL.
+    /// Returns the first base URL that responds, or nil if neither is reachable.
+    private func resolveURL() async -> String? {
+        let candidates = [localServerURL, vpnServerURL]
+        for candidate in candidates {
+            guard !candidate.isEmpty,
+                  let url = URL(string: "\(candidate)/status") else { continue }
+            if (try? await session.data(from: url)) != nil { return candidate }
+        }
+        return nil
     }
 
     // MARK: - Poll & deliver
 
     /// Call /device/pending/{userCode}, show a local notification for each message.
     func pollAndDeliver() async {
+        // On a cold background launch (app killed, woken by BGAppRefreshTask), JarvisAPI
+        // never gets to call configure(), so resolvedURL/userCode are empty. Re-probe to
+        // find a live server — tries local first, then VPN, matching JarvisAPI's routing.
+        if resolvedURL.isEmpty {
+            resolvedURL = await resolveURL()
+                       ?? UserDefaults.standard.string(forKey: "lastResolvedURL")
+                       ?? ""
+        }
+        if userCode.isEmpty {
+            userCode = UserDefaults.standard.string(forKey: "userCode") ?? ""
+        }
         guard !resolvedURL.isEmpty, !userCode.isEmpty else { return }
         guard let url = URL(string: "\(resolvedURL)/device/pending/\(userCode)") else { return }
 
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await session.data(from: url)
             let response  = try JSONDecoder().decode(PendingPushResponse.self, from: data)
             for push in response.messages {
                 await deliver(push.message)
@@ -122,7 +168,7 @@ final class NotificationService: ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody   = try? JSONEncoder().encode(body)
-        _ = try? await URLSession.shared.data(for: request)
+        _ = try? await session.data(for: request)
     }
 
     // MARK: - Local notification delivery
@@ -140,6 +186,20 @@ final class NotificationService: ObservableObject {
             trigger:    trigger
         )
         try? await UNUserNotificationCenter.current().add(request)
+    }
+}
+
+// MARK: - UNUserNotificationCenterDelegate
+
+extension NotificationService: UNUserNotificationCenterDelegate {
+    /// Called when a notification arrives while the app is in the foreground.
+    /// Without this, iOS silently drops the notification instead of showing it.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
     }
 }
 

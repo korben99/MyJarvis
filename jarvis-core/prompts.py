@@ -111,7 +111,10 @@ Return a JSON routing decision for this message.
 ─── intents (list) ── which data sources are needed ───────────────────────
   memory    : past conversations, personal facts, preferences the AI should know.
               Also: greetings, thanks, chitchat, updates, any message with no external data need.
-  rag       : user explicitly asks about their own documents, files, notes, or knowledge base.
+  rag       : user references their own documents, files, notes, CV, or knowledge base.
+              Fire when: "mon CV", "mes documents", "d'après mon fichier", "à partir de mon CV",
+              "curriculum vitae", or any request that implies using a personal stored document.
+              Also fire when the user explicitly says "RAG".
   web       : user EXPLICITLY requests an internet search, OR needs clearly time-sensitive data
               (today's stock price, live score, breaking news, a very recent event).
               Do NOT use for general questions answerable from training data. When in doubt → memory.
@@ -154,6 +157,8 @@ Return a JSON routing decision for this message.
   2. Task genuinely requires it: medical/legal/regulatory analysis,
        hard multi-step logic, complex cross-file debugging, deep scientific reasoning.
   false for everything else — the standard model handles most requests well.
+  NEVER true for: writing tasks (biography, email, summary, translation), simple questions,
+  document lookups, creative requests, or anything solvable in one reasoning step.
 
 ─── memory_scope ── string ────────────────────────────────────────────────
   episodic        : specific past exchanges or recent events.

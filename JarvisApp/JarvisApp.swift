@@ -37,6 +37,7 @@ struct JarvisApp: App {
                 }
                 .onChange(of: settings.vpnServerURL) { _, _ in
                     api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL, sessionID: settings.sessionID)
+                    syncNotificationService()
                 }
                 .onChange(of: settings.wakeWordEnabled) { _, enabled in
                     if enabled { wakeWord.start(language: settings.language) } else { wakeWord.stop() }
@@ -87,8 +88,15 @@ struct JarvisApp: App {
     /// Copy the resolved server URL and user code into NotificationService,
     /// then (re-)register the device with the backend.
     private func syncNotificationService() {
-        notifications.userCode    = settings.userCode
-        notifications.resolvedURL = api.resolvedURL
+        notifications.userCode       = settings.userCode
+        notifications.resolvedURL    = api.resolvedURL
+        notifications.localServerURL = settings.localServerURL
+        notifications.vpnServerURL   = settings.vpnServerURL
+        // Persist the resolved URL so a cold background launch (BGAppRefreshTask after the
+        // app was killed) can still poll without waiting for JarvisAPI to reconnect.
+        if !api.resolvedURL.isEmpty {
+            UserDefaults.standard.set(api.resolvedURL, forKey: "lastResolvedURL")
+        }
         guard !notifications.resolvedURL.isEmpty, !notifications.userCode.isEmpty else { return }
         Task { await notifications.registerDevice() }
     }
