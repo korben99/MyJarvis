@@ -151,6 +151,13 @@ USER_CODES: dict[str, str] = {code: u["firstname"] for code, u in USERS.items()}
 # code → email (empty string = no email delivery)
 USER_EMAILS: dict[str, str] = {code: u.get("mail", "") for code, u in USERS.items()}
 
+# email → code (reverse index — used by the OpenWebUI proxy to identify users by email)
+EMAIL_TO_CODE: dict[str, str] = {
+    u.get("mail", "").lower(): code
+    for code, u in USERS.items()
+    if u.get("mail")
+}
+
 # code → city for weather
 USER_CITIES: dict[str, str] = {code: u.get("city", "Paris") for code, u in USERS.items()}
 

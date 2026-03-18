@@ -39,6 +39,9 @@ Endpoints:
   GET    /memory/recent           — View recent conversation log
   GET    /memory/self             — View Jarvis self-knowledge
   DELETE /memory/reset            — Reset all memory
+  POST   /device/register         — Register iOS device token
+  GET    /device/pending/{code}   — Poll and clear pending push notifications
+  POST   /device/push/test/{code} — Manually trigger proactive push (dev)
 
   conversation
     ↓
@@ -103,6 +106,7 @@ from briefing import (
 )
 from self import (
     gather_context,
+    generate_proactive_push,
     get_current_focus,
     get_reflection_log,
     get_user_relation,
@@ -131,6 +135,7 @@ from config import (
     BRIEFING_ENABLED,
     BRIEFING_TIME,
     BRIEFING_TIMEZONE,
+    EMAIL_TO_CODE,
     EMBED_MODEL_NAME,
     ENABLE_ANALYSIS,
     IOS_MAX_MESSAGES,
@@ -1418,13 +1423,14 @@ async def self_state():
     data     = get_self_memory()
     last_ref = get_reflection_log(1)
     return {
-        "identity":        data.get("identity", {}),
-        "goals":           data.get("goals", []),
-        "current_focus":   data.get("current_focus", ""),
-        "last_reflection": data.get("last_reflection", ""),
+        "identity":         data.get("identity", {}),
+        "goals":            data.get("goals", []),
+        "current_focus":    data.get("current_focus", ""),
+        "last_reflection":  data.get("last_reflection", ""),
         "reflection_count": data.get("reflection_count", 0),
-        "last_action":     last_ref[0] if last_ref else None,
-        "self_notes":      data.get("self_notes", [])[-5:],
+        "last_action":      last_ref[0] if last_ref else None,
+        "self_notes":       data.get("self_notes", [])[-5:],
+        "user_relations":   data.get("user_relations", {}),
     }
 
 
@@ -1439,6 +1445,64 @@ async def self_reflect_now():
     """Trigger an immediate reflection cycle (for testing / manual trigger)."""
     result = await run_self_reflection()
     return result
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  DEVICE / PUSH NOTIFICATION  (Phase 1 — polling, no APNs required)
+# ══════════════════════════════════════════════════════════════════════════
+
+class DeviceRegisterRequest(BaseModel):
+    user_code:    str
+    device_token: str
+
+
+@app.post("/device/register", tags=["device"])
+async def device_register(req: DeviceRegisterRequest):
+    """
+    Register an iOS device token for a user.
+    The token is stored in Redis under jarvis:device:token:{user_code}.
+    This also enables proactive push generation in the reflection cycle.
+    """
+    if req.user_code not in USER_CODES:
+        raise HTTPException(403, "Invalid user code")
+    if not req.device_token:
+        raise HTTPException(400, "device_token required")
+
+    REDIS_CLIENT.set(f"jarvis:device:token:{req.user_code}", req.device_token)
+    logger.info("Device registered for %s", req.user_code)
+    return {"status": "ok", "user_code": req.user_code}
+
+
+@app.get("/device/pending/{user_code}", tags=["device"])
+async def device_pending(user_code: str):
+    """
+    Poll for pending push notifications. Returns and clears the queue.
+    Called by the iOS app every ~15 min via BGAppRefreshTask.
+    """
+    if user_code not in USER_CODES:
+        raise HTTPException(403, "Invalid user code")
+
+    pending_key = f"jarvis:push:pending:{user_code}"
+    messages: list[dict] = []
+    while True:
+        raw = REDIS_CLIENT.lpop(pending_key)
+        if raw is None:
+            break
+        try:
+            messages.append(json.loads(raw))
+        except Exception:
+            pass
+
+    return {"user_code": user_code, "messages": messages, "count": len(messages)}
+
+
+@app.post("/device/push/test/{user_code}", tags=["device"])
+async def device_push_test(user_code: str):
+    """Manually trigger a proactive push generation for one user (dev/test)."""
+    if user_code not in USER_CODES:
+        raise HTTPException(403, "Invalid user code")
+    result = await generate_proactive_push(user_code)
+    return {"status": result}
 
 
 @app.post("/chat")
@@ -2198,13 +2262,28 @@ async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
 async def proxy_chat(
     req: _OAIChatRequest,
     authorization: str = Header(default=None),
+    x_openwebui_user_email: str = Header(default=None),
 ):
-    # ── Auth: Bearer token = Jarvis user code ──
+    # ── Auth: OpenWebUI email header (priority) or Bearer user_code (iOS fallback) ──
+    # OpenWebUI sends X-OpenWebUI-User-Email when ENABLE_FORWARD_USER_INFO_HEADERS=true.
+    # The iOS app sends its user_code as the Bearer token directly.
     user_code = None
-    if authorization and authorization.startswith("Bearer "):
-        user_code = authorization[7:].strip()
+
+    if x_openwebui_user_email:
+        user_code = EMAIL_TO_CODE.get(x_openwebui_user_email.lower())
+        if not user_code:
+            raise HTTPException(401, f"No Jarvis user found for email {x_openwebui_user_email!r}")
+
+    if not user_code and authorization and authorization.startswith("Bearer "):
+        token = authorization[7:].strip()
+        # Accept user_code directly (iOS) or email as Bearer (fallback)
+        if token in USER_CODES:
+            user_code = token
+        else:
+            user_code = EMAIL_TO_CODE.get(token.lower())
+
     if not user_code or user_code not in USER_CODES:
-        raise HTTPException(401, "Unauthorized — use your Jarvis user code as the API key")
+        raise HTTPException(401, "Unauthorized — set your email as API key in OpenWebUI, or your user code for iOS")
 
     # ── Extract last user message (system messages replaced by Jarvis's own) ──
     last_user_msg = next(

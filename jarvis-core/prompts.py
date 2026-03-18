@@ -70,12 +70,22 @@ Retourne un objet JSON avec exactement ces champs :
 "topics"          : liste de 1 à 3 mots-clés (minuscules, langue de la conversation)
 "mood"            : humeur de l'utilisateur — UNIQUEMENT une valeur parmi : happy, neutral, focused, stressed, frustrated, curious, tired
 "user_facts"      : nouveaux faits appris sur l'utilisateur — liste de {{"key":"...","value":"..."}}
-                    value dans la langue de la conversation. Exemples :
-                    {{"key":"current_project","value":"conformité CRA"}}, {{"key":"expertise","value":"cybersécurité"}}
+                    value dans la langue de la conversation.
+                    RÈGLE DE NOMMAGE DES CLÉS :
+                    • Fait scalaire (une seule valeur possible) → clé simple :
+                      {{"key":"profession","value":"ingénieur"}}, {{"key":"ville","value":"Paris"}}
+                    • Fait multi-valeur (plusieurs items possibles dans une même catégorie) → format "categorie:item" :
+                      {{"key":"hobby:kart","value":"kart"}}, {{"key":"hobby:tennis","value":"tennis"}},
+                      {{"key":"skill:python","value":"Python"}}, {{"key":"langue:anglais","value":"anglais"}}
+                    • Catégories courantes : hobby, skill, langue, sport, outil, technologie
+                    • Toujours utiliser des minuscules sans accents pour la catégorie et l'item dans la clé
 "projects"        : noms de projets mentionnés (liste vide si aucun)
 "interest_weights": changements d'importance sur des centres d'intérêt (liste vide si aucun)
-                    Format : {{"term":"...","weight":0.0}}  —  0.0=supprimer · 1.0=normal · 2.0=passion
-                    Détecter : "oublie les montres" → weight 0.0 · "j'adore voyager" → weight 2.0
+                    Format : {{"term":"mot_clé_minuscule_sans_accent","weight":0.0}}
+                    "term" = le mot-clé exact, minuscules, sans accents : "kart", "tennis", "montres", "ia"
+                    weight : 0.0=supprimer · 1.0=normal · 2.0=passion
+                    Exemples : {{"term":"kart","weight":1.5}}, {{"term":"montres","weight":0.0}}
+                    Détecter : "oublie les montres" → weight 0.0 · "j'adore le kart" → weight 2.0
 "should_remember" : phrase à retenir (langue de la conversation) ou null si échange banal/éphémère
                     null obligatoire pour : météo, cours boursiers, scores, actualités du moment
                     Retenir uniquement ce qui reste vrai dans le temps : faits, projets, préférences, décisions
@@ -245,27 +255,37 @@ LACUNES CONNAISSANCE : {gaps}
 DERNIÈRE RÉFLEXION : {last_reflection}
 RELATIONS UTILISATEURS : {user_relations}
 
+PROFILS UTILISATEURS (clés Redis actuelles) :
+{user_profiles}
+
 Décide :
 1. Ton focus actuel (une phrase)
 2. Une action unique parmi ce catalogue :
 
-  nothing              — aucune action ce cycle          params: {{"reason":"..."}}
-  store_insight        — enregistrer un apprentissage     params: {{"user_code":"...","insight":"..."}}
-  flag_knowledge_gap   — noter un sujet à mieux maîtriser params: {{"topic":"...","context":"..."}}
-  send_notification    — email utile à un utilisateur     params: {{"user_code":"...","subject":"...","message":"..."}}
-  update_self_note     — observation personnelle           params: {{"note":"..."}}
-  consolidate_memory   — comprimer la mémoire             params: {{"user_code":"..."}}
-  check_health         — bilan de santé détaillé          params: {{}}
-  update_trade_threshold — réviser un seuil d'alerte      params: {{"user_code":"...","isin":"...","threshold_high":0.0,"threshold_low":0.0}}
-  refine_prompt        — proposer une amélioration de prompt params: {{"prompt_name":"...","topic":"...","user_code":"..."}}
+  nothing              — aucune action ce cycle             params: {{"reason":"..."}}
+  store_insight        — enregistrer un apprentissage        params: {{"user_code":"...","insight":"..."}}
+  flag_knowledge_gap   — noter un sujet à mieux maîtriser   params: {{"topic":"...","context":"..."}}
+  send_notification    — email utile à un utilisateur        params: {{"user_code":"...","subject":"...","message":"..."}}
+  update_self_note     — observation personnelle             params: {{"note":"..."}}
+  consolidate_memory   — comprimer la mémoire épisodique     params: {{"user_code":"..."}}
+  check_health         — bilan de santé détaillé             params: {{}}
+  update_trade_threshold — réviser un seuil d'alerte trading params: {{"user_code":"...","isin":"...","threshold_high":0.0,"threshold_low":0.0}}
+  refine_prompt        — proposer une amélioration de prompt  params: {{"prompt_name":"...","topic":"...","user_code":"..."}}
                          Noms valides : SYSTEM_BASE_FR · BRIEFING_USER · ANALYSIS_PROMPT · ROUTER_USER
-                         Utiliser uniquement si une lacune est signalée ≥ 3 fois (compteur visible dans LACUNES).
+  correct_profile      — corriger/supprimer une clé de profil params: {{"user_code":"...","key":"...","value":"..." ou null}}
+                         value=null supprime la clé. Utiliser si doublon évident ou valeur clairement obsolète.
+                         Exemple : hobby:montres ET interest:montres → supprimer l'un des deux.
+  ask_user             — poser une question de clarification  params: {{"user_code":"...","question":"..."}}
+                         Question courte, envoyée par push. L'utilisateur répond en chat, la mémoire se met à jour.
+                         Utiliser si une information clé est manquante ou incertaine.
 
 Règles :
+- correct_profile : uniquement si le doublon ou l'erreur est évident dans les profils ci-dessus. Ne pas deviner.
+- ask_user : question directe et utile. Une seule question à la fois, pas de question rhétorique.
 - send_notification : uniquement si la valeur pour l'utilisateur est claire et réelle.
 - update_trade_threshold : uniquement si le cours s'est fortement éloigné du seuil existant. ISIN exact requis.
-- refine_prompt : uniquement si un sujet revient souvent dans les lacunes. L'utilisateur devra approuver avant application.
-- Textes (focus, reason, subject, message) en français.
+- refine_prompt : uniquement si un sujet revient souvent dans les lacunes (≥ 3 fois). L'utilisateur approuve avant application.
+- Textes (focus, reason, question, message) en français.
 - "nothing" si aucune action significative n'est nécessaire.
 
 {{"focus":"...","action":"...","reason":"...","params":{{...}}}}"""

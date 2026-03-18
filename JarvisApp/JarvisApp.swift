@@ -4,14 +4,22 @@
 
 import SwiftUI
 import Combine
+import BackgroundTasks
 
 @main
 struct JarvisApp: App {
-    @StateObject private var settings = AppSettings()
-    @StateObject private var api = JarvisAPI()
+    @StateObject private var settings    = AppSettings()
+    @StateObject private var api         = JarvisAPI()
     @StateObject private var speechEngine = SpeechEngine()
-    @StateObject private var wakeWord = WakeWordEngine()
+    @StateObject private var wakeWord    = WakeWordEngine()
     @Environment(\.scenePhase) private var scenePhase
+
+    private let notifications = NotificationService.shared
+
+    init() {
+        // Register the BGAppRefreshTask identifier before the first scene loads.
+        NotificationService.registerBackgroundTask()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -25,6 +33,7 @@ struct JarvisApp: App {
                 }
                 .onChange(of: settings.localServerURL) { _, _ in
                     api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL, sessionID: settings.sessionID)
+                    syncNotificationService()
                 }
                 .onChange(of: settings.vpnServerURL) { _, _ in
                     api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL, sessionID: settings.sessionID)
@@ -39,10 +48,16 @@ struct JarvisApp: App {
                         wakeWord.start(language: lang)
                     }
                 }
+                // Sync api.resolvedURL → NotificationService after connection resolves
+                .onChange(of: api.connectionState) { _, _ in
+                    syncNotificationService()
+                }
                 .task {
                     await speechEngine.setup(model: settings.whisperModel)
                     speechEngine.language = settings.language
                     if settings.wakeWordEnabled { wakeWord.start(language: settings.language) }
+                    // Request notification permissions once on first launch
+                    await notifications.requestPermissions()
                 }
         }
         // Pause all audio when the app goes to background; resume on foreground.
@@ -53,11 +68,31 @@ struct JarvisApp: App {
             case .background:
                 wakeWord.pause()
                 speechEngine.deactivateAudioSession()
+                notifications.stopForegroundPolling()
+                notifications.scheduleBackgroundRefresh()
             case .active:
                 if settings.wakeWordEnabled { wakeWord.resume() }
+                syncNotificationService()
+                notifications.startForegroundPolling()
+                // Immediately poll on foreground so messages don't wait 15 min
+                Task { await notifications.pollAndDeliver() }
             default:
                 break
             }
         }
     }
+
+    // MARK: - Helpers
+
+    /// Copy the resolved server URL and user code into NotificationService,
+    /// then (re-)register the device with the backend.
+    private func syncNotificationService() {
+        notifications.userCode    = settings.userCode
+        notifications.resolvedURL = api.resolvedURL
+        guard !notifications.resolvedURL.isEmpty, !notifications.userCode.isEmpty else { return }
+        Task { await notifications.registerDevice() }
+    }
+
+    // Expose resolvedURL from JarvisAPI (needed by syncNotificationService)
+    // We declare resolvedURL as internal in JarvisAPI — see below.
 }

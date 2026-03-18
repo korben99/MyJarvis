@@ -9,18 +9,21 @@ Architecture:
   - Action catalog    : fixed set of bounded, safe actions
   - Reflection log    : Redis sorted set  jarvis:self:reflection_log  (capped 30)
   - Notification guard: Redis key         jarvis:self:notif:{user_code}:{date}
+  - Push system       : Redis list        jarvis:push:pending:{user_code}  (polled by iOS)
 
 Reflection cycle:
   1. gather_context()   — system health, user activity, topics, knowledge gaps
   2. LLM call           — returns {focus, action, reason, params}
   3. execute_action()   — dispatches to catalog function
   4. log_reflection()   — persists result to Redis + updates jarvis-self.json
+  5. generate_proactive_push() — per-user LLM call to queue contextual push if relevant
 
 Action catalog (v1 — grows in future versions):
   nothing                  — explicit no-op, with reason
   store_insight            — save a learning to a user's memory
   flag_knowledge_gap       — log a topic Jarvis answered poorly
   send_notification        — send a relevant Gmail to one user (1/user/day max)
+  queue_push               — queue an iOS push notification for one user
   update_self_note         — write an observation to self_notes in jarvis-self.json
   consolidate_memory       — trigger memory compression for a user
   check_health             — verify all services, log status
@@ -67,12 +70,16 @@ from memory import atomic_json_write, get_self_memory, save_self_memory, self_me
 logger = logging.getLogger("jarvis-self")
 
 # ── Redis keys ────────────────────────────────────────────────────────────
-_REFLECTION_LOG_KEY = "jarvis:self:reflection_log"
-_REFLECTION_LOG_MAX = 30
-_KNOWLEDGE_GAPS_KEY = "jarvis:self:knowledge_gaps"
-_GAP_COUNTS_KEY     = "jarvis:self:gap_counts"   # hash: slug → count
-_NOTIF_KEY_PREFIX   = "jarvis:self:notif"
-_NOTIF_TTL          = 86400   # 24h — one notification per user per day
+_REFLECTION_LOG_KEY    = "jarvis:self:reflection_log"
+_REFLECTION_LOG_MAX    = 30
+_KNOWLEDGE_GAPS_KEY    = "jarvis:self:knowledge_gaps"
+_GAP_COUNTS_KEY        = "jarvis:self:gap_counts"        # hash: slug → count
+_NOTIF_KEY_PREFIX      = "jarvis:self:notif"
+_NOTIF_TTL             = 86400   # 24h — one notification per user per day
+_PUSH_PENDING_PREFIX   = "jarvis:push:pending"           # list of pending push messages per user
+_DEVICE_TOKEN_PREFIX   = "jarvis:device:token"           # device token per user (set by /device/register)
+_PUSH_COOLDOWN_PREFIX  = "jarvis:push:cooldown"          # prevent push flooding (1 push per 2h per user)
+_PUSH_COOLDOWN_TTL     = 7200    # 2h
 
 
 # ── Redis / Qdrant singletons ─────────────────────────────────────────────
@@ -266,6 +273,7 @@ def gather_context() -> dict:
         "last_reflection": last_ref,
         "reflection_count": self_data.get("reflection_count", 0),
         "user_relations":  self_data.get("user_relations", {}),
+        "user_profiles":   _fmt_user_profiles(),
     }
 
 
@@ -293,19 +301,34 @@ def _fmt_activity(activity: dict) -> str:
     return "\n".join(lines) or "  No activity."
 
 
+def _fmt_user_profiles() -> str:
+    """Compact profile dump for all users — passed to the reflection LLM."""
+    from memory import get_user_profile
+    lines = []
+    for code, name in USER_CODES.items():
+        profile = get_user_profile(code)
+        if not profile:
+            continue
+        lines.append(f"  {name} ({code}):")
+        for k, v in list(profile.items())[:20]:   # cap at 20 keys to stay within token budget
+            lines.append(f"    {k} = {str(v)[:80]}")
+    return "\n".join(lines) or "  No profiles."
+
+
 # ─────────────────────────────────────────────────────────────────────────
 
 async def _call_reflection_llm(context: dict) -> dict | None:
     """Call the LLM to produce a reflection result."""
     prompt = get_prompt("REFLECTION_PROMPT").format(
-        timestamp     = context["timestamp"],
-        identity      = json.dumps(context["identity"], ensure_ascii=False),
-        goals         = _fmt_goals(context["goals"]),
-        health        = json.dumps(context["health"]),
-        activity      = _fmt_activity(context["user_activity"]),
-        gaps          = ", ".join(context["knowledge_gaps"]) or "none flagged",
+        timestamp       = context["timestamp"],
+        identity        = json.dumps(context["identity"], ensure_ascii=False),
+        goals           = _fmt_goals(context["goals"]),
+        health          = json.dumps(context["health"]),
+        activity        = _fmt_activity(context["user_activity"]),
+        gaps            = ", ".join(context["knowledge_gaps"]) or "none flagged",
         last_reflection = json.dumps(context["last_reflection"], ensure_ascii=False) if context["last_reflection"] else "none yet",
         user_relations  = json.dumps(context["user_relations"], ensure_ascii=False),
+        user_profiles   = context["user_profiles"],
     )
 
     try:
@@ -404,6 +427,78 @@ def _action_send_notification(params: dict) -> str:
         logger.info("Self action: notification sent to %s (%s)", user_code, to)
         return f"notification sent to {user_code}"
     return "send_notification: delivery failed"
+
+
+def _action_queue_push(params: dict) -> str:
+    """Queue an iOS push notification for a user. Polled by the app via GET /device/pending/{user_code}."""
+    user_code = params.get("user_code", "")
+    message   = params.get("message", "").strip()
+
+    if not user_code or user_code not in USER_CODES:
+        return "queue_push: invalid user_code"
+    if not message:
+        return "queue_push: empty message"
+
+    r = _redis()
+
+    # Device must be registered
+    if not r.exists(f"{_DEVICE_TOKEN_PREFIX}:{user_code}"):
+        return f"queue_push: no device registered for {user_code}"
+
+    # Cooldown guard: max 1 proactive push per 2h per user
+    cooldown_key = f"{_PUSH_COOLDOWN_PREFIX}:{user_code}"
+    if r.exists(cooldown_key):
+        return f"queue_push: cooldown active for {user_code}"
+
+    pending_key = f"{_PUSH_PENDING_PREFIX}:{user_code}"
+    r.rpush(pending_key, json.dumps({
+        "message":   message,
+        "queued_at": datetime.now(timezone.utc).isoformat(),
+    }))
+    r.expire(pending_key, 86400)     # auto-expire if not polled within 24h
+    r.setex(cooldown_key, _PUSH_COOLDOWN_TTL, "1")
+
+    logger.info("Self action: push queued for %s — %s", user_code, message[:80])
+    return f"push queued for {user_code}: {message[:80]}"
+
+
+def _action_correct_profile(params: dict) -> str:
+    """
+    Directly write or delete a key in a user's Redis profile.
+    Use for clear duplicates (hobby:montres + interest:montres) or stale/wrong values.
+    value=null deletes the key; any string value overwrites it.
+    """
+    user_code = params.get("user_code", "")
+    key       = params.get("key", "").strip()
+    value     = params.get("value")           # None means delete
+
+    if not user_code or user_code not in USER_CODES:
+        return "correct_profile: invalid user_code"
+    if not key:
+        return "correct_profile: missing key"
+
+    from memory import update_user_profile
+    update_user_profile(user_code, key, value if value is not None else None)
+    op = f"deleted '{key}'" if value is None else f"set '{key}' = '{value}'"
+    logger.info("Self action: correct_profile [%s] %s", user_code, op)
+    return f"correct_profile [{user_code}]: {op}"
+
+
+def _action_ask_user(params: dict) -> str:
+    """
+    Queue a short clarification question as an iOS push notification.
+    The user answers naturally in the next chat message; the analyzer captures the reply.
+    Uses the same push cooldown as queue_push (max 1 per 2h per user).
+    """
+    user_code = params.get("user_code", "")
+    question  = params.get("question", "").strip()
+
+    if not user_code or user_code not in USER_CODES:
+        return "ask_user: invalid user_code"
+    if not question:
+        return "ask_user: empty question"
+
+    return _action_queue_push({"user_code": user_code, "message": question})
 
 
 def _action_update_self_note(params: dict) -> str:
@@ -958,6 +1053,9 @@ _ACTION_CATALOG = {
     "store_insight":            _action_store_insight,
     "flag_knowledge_gap":       _action_flag_knowledge_gap,
     "send_notification":        _action_send_notification,
+    "queue_push":               _action_queue_push,
+    "correct_profile":          _action_correct_profile,
+    "ask_user":                 _action_ask_user,
     "update_self_note":         _action_update_self_note,
     "consolidate_memory":       _action_consolidate_memory,
     "check_health":             _action_check_health,
@@ -973,6 +1071,152 @@ def _execute_action(action: str, params: dict) -> str:
         logger.warning("Self: unknown action requested — %r (defaulting to nothing)", action)
         return f"unknown action: {action}"
     return fn(params)
+
+
+# ══════════════════════════════════════════════════
+#  PROACTIVE PUSH GENERATION
+# ══════════════════════════════════════════════════
+
+def _get_active_projects(user_code: str) -> list[dict]:
+    """Return in_progress / active projects for a user from Redis."""
+    try:
+        from memory import get_user_projects
+        return [
+            p for p in get_user_projects(user_code)
+            if p.get("status") in ("in_progress", "active")
+        ]
+    except Exception:
+        return []
+
+
+def _last_conversation_ts(user_code: str) -> float:
+    """Return Unix timestamp of the most recent episodic conversation, or 0."""
+    r = _redis()
+    entries = r.zrevrangebyscore(
+        f"episodic:{user_code}:conversations", "+inf", "-inf",
+        start=0, num=1, withscores=True,
+    )
+    return entries[0][1] if entries else 0.0
+
+
+async def generate_proactive_push(user_code: str) -> str:
+    """
+    Per-user LLM call: read recent conversations + active projects + mood,
+    decide if there is something worth checking on proactively.
+
+    Two trigger paths:
+      A) Recent conversation (last 24h) — reactive follow-up on what was discussed
+      B) Active project + silence > 48h — proactive check-in on ongoing work
+         even when the user hasn't talked to Jarvis recently
+
+    Guards:
+      - Device must be registered (jarvis:device:token:{user_code})
+      - Cooldown 2h between pushes per user (jarvis:push:cooldown:{user_code})
+      - At least one of: recent conversation OR active project with silence > 48h
+    """
+    r = _redis()
+
+    # Guard: device registered?
+    if not r.exists(f"{_DEVICE_TOKEN_PREFIX}:{user_code}"):
+        return "no device registered"
+
+    # Guard: cooldown active?
+    if r.exists(f"{_PUSH_COOLDOWN_PREFIX}:{user_code}"):
+        return "cooldown active"
+
+    now = time.time()
+
+    # ── Path A: recent conversations (last 24h) ──────────────────────────
+    cutoff      = now - 24 * 3600
+    entries_raw = r.zrangebyscore(f"episodic:{user_code}:conversations", cutoff, "+inf")
+
+    conv_lines: list[str] = []
+    for raw in entries_raw[-10:]:
+        try:
+            e = json.loads(raw)
+            user_msg = e.get("user", "")[:150]
+            asst_msg = e.get("assistant", "")[:150]
+            topics   = ", ".join(e.get("topics", []))
+            if user_msg:
+                conv_lines.append(f"User: {user_msg}")
+            if asst_msg:
+                conv_lines.append(f"Jarvis: {asst_msg}")
+            if topics:
+                conv_lines.append(f"Topics: {topics}")
+            conv_lines.append("")
+        except Exception:
+            pass
+
+    # ── Path B: active projects + silence > 48h ──────────────────────────
+    active_projects = _get_active_projects(user_code)
+    last_ts         = _last_conversation_ts(user_code)
+    silence_hours   = (now - last_ts) / 3600 if last_ts else 999
+
+    project_lines: list[str] = []
+    if active_projects and silence_hours > 48:
+        for p in active_projects[:5]:
+            project_lines.append(f"- {p['name']}: {p.get('description', '')[:120]}")
+
+    # Neither path has anything to work with → skip
+    if not conv_lines and not project_lines:
+        return "no recent conversations and no active projects"
+
+    # Get current mood from Redis emotional state
+    mood = "measured"
+    try:
+        mood_raw = r.get("jarvis:emotional_state")
+        if mood_raw:
+            mood = json.loads(mood_raw).get("mood", "measured")
+    except Exception:
+        pass
+
+    user_name = USER_CODES.get(user_code, user_code)
+    conv_text = "\n".join(conv_lines)[:2000] if conv_lines else "(aucune conversation récente)"
+
+    projects_section = ""
+    if project_lines:
+        projects_section = (
+            f"\nProjets actifs de {user_name} (silence depuis {silence_hours:.0f}h) :\n"
+            + "\n".join(project_lines) + "\n"
+        )
+
+    prompt = (
+        f"Voici les échanges récents avec {user_name} :\n\n{conv_text}\n"
+        f"{projects_section}\n"
+        f"Humeur actuelle de Jarvis : {mood}\n\n"
+        f"En tant que Jarvis, y a-t-il quelque chose qui mérite de reprendre contact de façon proactive ? "
+        f"Par exemple : prendre des nouvelles d'un projet en cours, d'une situation mentionnée, "
+        f"s'enquérir de la santé, relancer un sujet important. "
+        f"Si oui, écris un message court (1 phrase max, en français, naturel et chaleureux). "
+        f"Si non, réponds null.\n\n"
+        f"Réponds UNIQUEMENT en JSON : {{\"message\": \"...\"}} ou {{\"message\": null}}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                f"{PRIMARY_API_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
+                json={
+                    "model": PRIMARY_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "response_format": {"type": "json_object"},
+                    "max_tokens": 80,
+                    "temperature": 0.7,
+                },
+            )
+        result  = json.loads(resp.json()["choices"][0]["message"]["content"])
+        message = result.get("message")
+    except Exception as exc:
+        logger.warning("generate_proactive_push: LLM call failed for %s: %s", user_code, type(exc).__name__)
+        return "LLM call failed"
+
+    if not message:
+        return "no proactive message generated"
+
+    outcome = _action_queue_push({"user_code": user_code, "message": message})
+    logger.info("generate_proactive_push for %s: %s", user_code, outcome)
+    return outcome
 
 
 # ══════════════════════════════════════════════════
@@ -1026,4 +1270,12 @@ async def run_self_reflection() -> dict:
     log_reflection(log_entry)
 
     logger.info("=== Reflection complete: focus=%r action=%s outcome=%s ===", focus, action, outcome)
+
+    # Proactive push: per-user LLM call — fully guarded (device check + cooldown)
+    for code in USER_CODES:
+        try:
+            await generate_proactive_push(code)
+        except Exception as exc:
+            logger.warning("generate_proactive_push error for %s: %s", code, type(exc).__name__)
+
     return log_entry

@@ -358,7 +358,7 @@ All variables go in `/opt/jarvis/.env`.
 | `BRIEFING_ENABLED` | `true` | Enable daily morning briefing |
 | `BRIEFING_TIME` | `07:30` | Briefing delivery time (HH:MM) |
 | `BRIEFING_TIMEZONE` | `Europe/Paris` | Timezone for scheduling |
-| `REFLECTION_INTERVAL_HOURS` | `6` | Hours between self-reflection cycles |
+| `REFLECTION_INTERVAL_HOURS` | `2` | Hours between self-reflection cycles |
 | `ENABLE_ANALYSIS` | `true` | Enable post-response conversation analysis |
 | `REFINE_PROMPT_THRESHOLD` | `3` | Times a knowledge gap must be flagged before a prompt refinement is proposed |
 
@@ -463,7 +463,7 @@ The morning briefing aggregates: calendar events, unread emails, weather, news h
 
 Jarvis maintains two autonomous cognitive cycles:
 
-**Reflection loop** (every 6 h) — global self-observation. Jarvis reviews system health, user activity, and knowledge gaps, then picks one action from the catalog. Outcome and new focus are persisted to `jarvis-self.json`.
+**Reflection loop** (every 2 h) — global self-observation. Jarvis reviews system health, user activity, and knowledge gaps, then picks one action from the catalog. At the end of each cycle Jarvis also runs a per-user **proactive push** check. Outcome and new focus are persisted to `jarvis-self.json`.
 
 **Nightly review** (23:00) — per-user conversation review. For each user who had conversations that day, Jarvis extracts durable user facts (→ Qdrant autobiographical), self-improvement notes (→ `learnings[]`), and updates the **user relation** for that user.
 
@@ -475,11 +475,40 @@ Jarvis maintains two autonomous cognitive cycles:
 | `store_insight` | Save a learning about a user to `jarvis-self.json` |
 | `flag_knowledge_gap` | Log a topic Jarvis answered poorly (increments a per-topic counter) |
 | `send_notification` | Send a Gmail to one user (rate-limited to 1/user/day) |
+| `queue_push` | Queue an iOS push notification for one user (rate-limited to 1/user/2h) |
 | `update_self_note` | Write a personal observation to `self_notes` |
 | `consolidate_memory` | Trigger memory compression for a user |
 | `check_health` | Verify all services and log status |
 | `update_trade_threshold` | Update `threshold_high` / `threshold_low` for a portfolio position autonomously |
 | `refine_prompt` | Propose an improved version of a prompt (see Prompt Self-Modification below) |
+
+#### Proactive Push Notifications (Phase 1 — polling)
+
+After each reflection cycle, Jarvis runs a lightweight LLM call per user to decide whether to send a proactive push notification. No APNs account required — the iOS app polls the backend.
+
+**How it works:**
+```
+Reflection cycle ends (every 2h)
+    → generate_proactive_push(user_code) per user
+    → reads last 10 episodic conversations + current mood
+    → asks PRIMARY_MODEL: "is there something worth checking on? If yes, 1 sentence."
+    → if message returned: writes to Redis list jarvis:push:pending:{user_code}
+    → iOS app polls GET /device/pending/{user_code} (foreground every 15 min, background every ~2h)
+    → iOS displays local UNUserNotification
+```
+
+**Guards:**
+- Device must be registered (`POST /device/register`) — no device, no push
+- 2h cooldown per user between pushes (prevents flooding)
+- Generates nothing if no conversations in the last 24h
+
+**Push endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/device/register` | Register device token for a user |
+| `GET` | `/device/pending/{user_code}` | Poll and clear pending notifications |
+| `POST` | `/device/push/test/{user_code}` | Manually trigger proactive push generation (dev) |
 
 #### Per-User Relation
 
@@ -506,6 +535,14 @@ Tonalité Jarvis : warm → Adopte un ton chaleureux et bienveillant.
 ```
 
 **Design principle:** in-conversation mood is already perceived by the LLM from the message history — no real-time state update is needed. The relation captures only what cannot be inferred from a single exchange.
+
+### Device / Push Notifications
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/device/register` | Register iOS device token (body: `{user_code, device_token}`) |
+| `GET` | `/device/pending/{user_code}` | Poll and atomically clear pending push notifications |
+| `POST` | `/device/push/test/{user_code}` | Manually trigger a proactive push LLM call (dev/test) |
 
 ### Conversations
 
@@ -625,6 +662,18 @@ curl -X PUT http://localhost:8000/portfolio/position/KORBEN99/FR0000120578 \
 ├── docker-compose.yml
 ├── .env
 ├── jarvis-status.sh
+├── JarvisApp/                 # iOS Swift app (Xcode project)
+│   ├── JarvisApp.swift        # App entry point, lifecycle, notification wiring
+│   ├── JarvisAPI.swift        # API client: streaming chat, history, routing
+│   ├── NotificationService.swift  # Push polling (BGAppRefreshTask + foreground timer)
+│   ├── ContentView.swift      # Root view
+│   ├── ChatView.swift         # Chat UI
+│   ├── VoiceView.swift        # Voice mode UI
+│   ├── SettingsView.swift     # Server URL, user code, model config
+│   ├── AppSettings.swift      # @AppStorage persistent settings
+│   ├── SpeechEngine.swift     # WhisperKit STT + AVSpeech TTS
+│   ├── WakeWordEngine.swift   # On-device wake word detection
+│   └── Models.swift           # Shared data models
 ├── jarvis-core/
 │   ├── Dockerfile
 │   ├── main.py            # API routes + request orchestration
@@ -731,6 +780,31 @@ print('reverted')
 ```
 
 No restart needed — `get_prompt()` detects the file change on the next call.
+
+---
+
+## iOS App (JarvisApp)
+
+A native Swift/SwiftUI app for iPhone that connects to the Jarvis API. Voice and notifications are handled entirely on-device; the app sends and receives text only.
+
+### Feature history (chronological)
+
+1. **Text chat** — streaming SSE chat with the Jarvis API, session history, clear conversation
+2. **Voice mode** — WhisperKit on-device STT + AVSpeech TTS; concise responses optimised for listening
+3. **Image attachments** — send a photo from camera or library; JPEG compressed and sent as base64 to the VISION_MODEL pipeline
+4. **Wake word** — always-on keyword detection (on-device, no cloud) to trigger voice mode hands-free
+5. **Proactive push notifications** — BGAppRefreshTask polls `/device/pending/{user_code}` every ~2h in background (15 min in foreground); messages generated by the Jarvis reflection cycle are delivered as local notifications
+
+### Xcode setup for push notifications
+
+Two manual steps required in Xcode (not in code):
+
+1. **Signing & Capabilities** → **Background Modes** → tick **Background App Refresh**
+2. **Info.plist** → add key `BGTaskSchedulerPermittedIdentifiers` (Array) → item `fr.jarvis.push-poll`
+
+### Network routing
+
+The app probes `localServerURL` first (2 s timeout), then falls back to `vpnServerURL` (Tailscale). The resolved URL is displayed in the status bar and reused for all subsequent calls until a failure triggers a fresh probe.
 
 ---
 

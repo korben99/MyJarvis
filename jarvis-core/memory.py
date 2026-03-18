@@ -62,8 +62,13 @@ from config import (
     RAG_TOP_K,
     RECALL_MEMORY_SIMILARITY_THRESHOLD,
     REDIS_URL,
+    ROUTER_API_KEY,
+    ROUTER_API_URL,
+    ROUTER_MODEL,
+    ROUTER_TIMEOUT,
     SELF_MEMORY_PATH,
     USER_CODES,
+    no_think_suffix,
 )
 
 _qdrant = None
@@ -219,14 +224,92 @@ def get_user_profile(user_code: str) -> dict:
     return data or {}
 
 
+def _normalize_profile_key(user_code: str, new_key: str, existing_keys: list) -> str | None:
+    """
+    Ask the router LLM whether *new_key* is semantically equivalent to any of *existing_keys*.
+    Returns the matching existing key name (the one to evict), or None if the key is genuinely new.
+
+    Fast paths (no LLM call):
+    - new_key already present verbatim → None (plain overwrite, no eviction needed)
+    - ROUTER_MODEL is empty (router disabled) → None
+    """
+    if not existing_keys or not ROUTER_MODEL or new_key in existing_keys:
+        return None
+
+    try:
+        keys_list = ", ".join(f'"{k}"' for k in existing_keys)
+        suffix = no_think_suffix(ROUTER_MODEL)
+        prompt = (
+            f"Clés existantes dans le profil utilisateur : [{keys_list}]\n"
+            f"Nouvelle clé candidate : \"{new_key}\"\n\n"
+            f"Les clés peuvent être scalaires (ex: \"profession\") ou namespaced \"categorie:item\" (ex: \"hobby:kart\").\n"
+            f"Une clé est un DOUBLON d'une clé existante si et seulement si elles désignent LE MÊME concept ou objet :\n"
+            f"  • \"hobby:kart\" == \"loisir:kart\" → OUI (même sport, catégorie synonyme)\n"
+            f"  • \"hobby:kart\" == \"hobby:tennis\" → NON (même catégorie, sports différents)\n"
+            f"  • \"skill:python\" == \"competence:python\" → OUI (même technologie)\n"
+            f"  • \"profession\" == \"metier\" → OUI (même fait scalaire)\n"
+            f"Réponds en JSON uniquement, rien d'autre : "
+            f'{{\"match\": \"clé_existante\"}} si doublon, {{\"match\": null}} si non.{suffix}'
+        )
+
+        resp = httpx.post(
+            f"{ROUTER_API_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {ROUTER_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": ROUTER_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.0,
+                "max_tokens": 40,
+            },
+            timeout=ROUTER_TIMEOUT,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+
+        # Strip markdown code fences if the model wraps its output
+        if content.startswith("```"):
+            parts = content.split("```")
+            content = parts[1] if len(parts) > 1 else content
+            if content.startswith("json"):
+                content = content[4:]
+        content = content.strip()
+
+        parsed = json.loads(content)
+        match = parsed.get("match")
+        if match and match in existing_keys:
+            logger.info("User %s profile key '%s' matches existing '%s' — will evict old key", user_code, new_key, match)
+            return match
+        return None
+
+    except Exception as exc:
+        logger.warning("Profile key normalization skipped (%s): %s", new_key, exc)
+        return None
+
+
 def update_user_profile(user_code: str, key: str, value: str | None):
-    """Add, update, or delete (value=None) a user profile fact."""
+    """Add, update, or delete (value=None) a user profile fact.
+
+    Preventive duplicate guard: before writing a new key, the router LLM checks
+    whether it is semantically equivalent to an existing key.  If a match is found,
+    the old key is deleted before the new one is written, preventing profile bloat.
+    """
     r = get_redis()
+    profile_redis_key = f"user:{user_code}:profile"
+
     if value is None:
-        r.hdel(f"user:{user_code}:profile", key)
+        r.hdel(profile_redis_key, key)
         logger.info("User %s profile deleted: %s", user_code, key)
     else:
-        r.hset(f"user:{user_code}:profile", key, value)
+        existing_keys = r.hkeys(profile_redis_key)
+
+        # Key normalization: if new_key is semantically equivalent to an existing key
+        # (same concept or same category:item under a synonym category), evict the old
+        # key and write under the new name — no value merging, each key is atomic.
+        duplicate = _normalize_profile_key(user_code, key, existing_keys)
+        if duplicate:
+            r.hdel(profile_redis_key, duplicate)
+
+        r.hset(profile_redis_key, key, value)
         logger.info("User %s profile updated: %s = %s", user_code, key, value)
 
 
@@ -725,12 +808,22 @@ def build_memory_context(session_id: str, user_code: str) -> str:
     """Build a memory context string to inject into the system prompt."""
     parts = []
 
-    # User profile
+    # User profile — namespaced keys (hobby:kart) are grouped by category for readability
     profile = get_user_profile(user_code)
     if profile:
         parts.append("=== PROFIL UTILISATEUR ===")
+        grouped: dict[str, list[str]] = {}
+        scalars: list[tuple[str, str]] = []
         for k, v in profile.items():
+            if ":" in k:
+                category, _ = k.split(":", 1)
+                grouped.setdefault(category, []).append(v)
+            else:
+                scalars.append((k, v))
+        for k, v in scalars:
             parts.append(f"- {k}: {v}")
+        for category, values in grouped.items():
+            parts.append(f"- {category}: {', '.join(values)}")
 
     # User preferences
     prefs = get_user_preferences(user_code)
@@ -859,21 +952,96 @@ Retourne une seule phrase en français décrivant un fait stable sur l'utilisate
         logger.error("Memory consolidation failed for %s: %s", user_code, e)
 
 
+def _curative_profile_cleanup(user_code: str):
+    """
+    Nightly curative cleanup of the Redis user profile hash.
+
+    Sends the full profile to the analysis LLM and asks it to identify:
+    - Semantic duplicates (same fact under two different key names)
+    - Obsolete/contradictory keys superseded by a more recent entry
+
+    The LLM returns {"keys_to_delete": ["key1", "key2"]}  — each key is then
+    deleted via HDEL.  The surviving key keeps the most up-to-date value.
+    No write is performed other than deletions (values are never rewritten here).
+
+    Skip condition: profile has fewer than 5 keys (not worth the LLM call).
+    """
+    r = get_redis()
+    profile = r.hgetall(f"user:{user_code}:profile")
+    if len(profile) < 5:
+        return
+
+    try:
+        profile_str = "\n".join(f'- "{k}": {v}' for k, v in profile.items())
+        suffix = no_think_suffix(ANALYSIS_MODEL)
+        prompt = (
+            f"Voici le profil Redis d'un utilisateur ({len(profile)} clés) :\n"
+            f"{profile_str}\n\n"
+            f"Identifie les clés à supprimer parmi :\n"
+            f"1. Doublons sémantiques — même information sous deux noms différents "
+            f"(garde la clé la plus descriptive/récente, supprime l'autre)\n"
+            f"2. Entrées obsolètes ou contredites par une autre clé plus récente\n\n"
+            f"Réponds uniquement en JSON, rien d'autre : "
+            f'{{\"keys_to_delete\": [\"clé1\", \"clé2\"]}} '
+            f"ou {{\"keys_to_delete\": []}} si le profil est propre.{suffix}"
+        )
+
+        resp = httpx.post(
+            f"{ANALYSIS_API_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {ANALYSIS_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": ANALYSIS_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.0,
+                "max_tokens": 120,
+            },
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+
+        if content.startswith("```"):
+            parts = content.split("```")
+            content = parts[1] if len(parts) > 1 else content
+            if content.startswith("json"):
+                content = content[4:]
+        content = content.strip()
+
+        parsed = json.loads(content)
+        # Only delete keys that actually exist in the profile (safety guard)
+        keys_to_delete = [k for k in parsed.get("keys_to_delete", []) if k in profile]
+
+        if keys_to_delete:
+            r.hdel(f"user:{user_code}:profile", *keys_to_delete)
+            logger.info("[%s] Curative profile cleanup: deleted %s", user_code, keys_to_delete)
+        else:
+            logger.info("[%s] Curative profile cleanup: profile is clean", user_code)
+
+    except Exception as exc:
+        logger.error("Curative profile cleanup failed for %s: %s", user_code, exc)
+
+
 def consolidate_memories(user_code: str = None, max_items: int = 20):
     """
     Nightly memory consolidation.
 
     If user_code is provided -> consolidate only this user.
     If user_code is None -> iterate over all users.
+
+    Steps per user:
+    1. Episodic memory consolidation → autobiographical summary
+    2. Curative profile cleanup → remove duplicate / stale Redis profile keys
     """
     try:
         if user_code:
             _consolidate_user_memories(user_code, max_items)
+            _curative_profile_cleanup(user_code)
             return
 
         for uc in USER_CODES.keys():
-            logger.info(f"Memory consolidation for user {uc}")
+            logger.info("Memory consolidation for user %s", uc)
             _consolidate_user_memories(uc, max_items)
+            _curative_profile_cleanup(uc)
 
     except Exception as e:
         logger.error("Global memory consolidation failed: %s", e)

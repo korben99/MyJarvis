@@ -15,7 +15,7 @@ class JarvisAPI: ObservableObject {
 
     private var localServerURL = ""
     private var vpnServerURL   = ""
-    private var resolvedURL    = ""
+    var resolvedURL            = ""   // internal — read by NotificationService
     private var sessionID      = "iphone-main"
 
     // URLSession with a short timeout used only for reachability probes

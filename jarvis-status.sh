@@ -5,7 +5,7 @@ echo ""
 source /opt/jarvis/.env
 
 echo "── Local Services ──"
-for svc in jarvis-qdrant jarvis-redis jarvis-webui jarvis-api jarvis-claude-proxy; do
+for svc in jarvis-qdrant jarvis-redis jarvis-webui jarvis-api; do
     if docker ps --format '{{.Names}}' | grep -q "$svc"; then
         echo "  ✅ $svc"
     else
@@ -18,7 +18,7 @@ echo "── LLM Providers ──"
 
 # OpenAI
 if [ -n "$OPENAI_API_KEY" ] && [ "$OPENAI_API_KEY" != "sk-your-openai-key-here" ]; then
-    HTTP_CODE=$(curl -s -o /tmp/oai_resp.json -w "%{http_code}" --connect-timeout 5 \
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 \
         -H "Authorization: Bearer $OPENAI_API_KEY" \
         https://api.openai.com/v1/models)
     if [ "$HTTP_CODE" = "200" ]; then
@@ -26,7 +26,6 @@ if [ -n "$OPENAI_API_KEY" ] && [ "$OPENAI_API_KEY" != "sk-your-openai-key-here" 
     else
         echo "  ❌ OpenAI API — error (HTTP $HTTP_CODE)"
     fi
-    rm -f /tmp/oai_resp.json
 else
     echo "  ⬜ OpenAI API — no key configured"
 fi
@@ -46,27 +45,31 @@ else
     echo "  ⬜ Claude API — no key configured"
 fi
 
-# RunPod / Local Ollama (for future Mac Studio)
-if [ -n "$RUNPOD_OLLAMA_URL" ] && [ "$RUNPOD_OLLAMA_URL" != "http://localhost:11434" ]; then
-    HTTP_CODE=$(curl -s -o /tmp/ollama_resp.json -w "%{http_code}" --connect-timeout 5 "$RUNPOD_OLLAMA_URL/v1/models")
-    if [ "$HTTP_CODE" = "200" ] && python3 -c "import json; json.load(open('/tmp/ollama_resp.json'))" 2>/dev/null; then
-        echo "  ✅ Ollama (RunPod) — online"
-        python3 -c "
-import json
-data = json.load(open('/tmp/ollama_resp.json'))
-for m in data.get('data', []):
-    print(f\"     • {m['id']}\")" 2>/dev/null
-    else
-        echo "  ❌ Ollama (RunPod) — offline"
-    fi
-    rm -f /tmp/ollama_resp.json
+# Ollama
+if curl -s --connect-timeout 2 http://localhost:11434/api/tags > /dev/null 2>&1; then
+    echo "  ✅ Ollama (local) — online"
 else
-    # Check local Ollama (future Mac Studio)
-    if curl -s --connect-timeout 2 http://localhost:11434/api/tags > /dev/null 2>&1; then
-        echo "  ✅ Ollama (local) — online"
-    else
-        echo "  ⬜ Ollama (local) — not running"
-    fi
+    echo "  ⬜ Ollama (local) — not running"
+fi
+
+echo ""
+echo "── External APIs ──"
+
+# Weather (Open-Meteo — no key required)
+WEATHER_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 \
+    "https://api.open-meteo.com/v1/forecast?latitude=48.85&longitude=2.35&current_weather=true")
+if [ "$WEATHER_CODE" = "200" ]; then
+    echo "  ✅ Open-Meteo (weather) — reachable"
+else
+    echo "  ❌ Open-Meteo (weather) — unreachable (HTTP $WEATHER_CODE)"
+fi
+
+# DuckDuckGo
+DDG_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "https://duckduckgo.com/")
+if [ "$DDG_CODE" = "200" ] || [ "$DDG_CODE" = "301" ] || [ "$DDG_CODE" = "302" ]; then
+    echo "  ✅ DuckDuckGo (web search) — reachable"
+else
+    echo "  ❌ DuckDuckGo (web search) — unreachable (HTTP $DDG_CODE)"
 fi
 
 echo ""
@@ -78,32 +81,64 @@ else
     echo "  ❌ Qdrant collection not found"
 fi
 
-
-
 echo ""
 echo "── Memory ──"
-source /opt/jarvis/.env
-MEM_STATUS=$(curl -s http://localhost:8000/memory/profile 2>/dev/null)
-if [ -n "$MEM_STATUS" ]; then
-    PROFILE_KEYS=$(echo "$MEM_STATUS" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('profile',{})))" 2>/dev/null)
-    PROJECTS=$(echo "$MEM_STATUS" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('projects',[])))" 2>/dev/null)
-    echo "  ✅ User profile: ${PROFILE_KEYS:-0} facts"
-    echo "  ✅ Projects tracked: ${PROJECTS:-0}"
+FIRST_USER=$(python3 -c "
+import json, os
+path = os.getenv('USERS_LIST', '/opt/jarvis/jarvis-core/JarvisData/users_list.json')
+try:
+    users = json.load(open(path))
+    print(users[0]['code'] if users else 'KORBEN99')
+except Exception:
+    print('KORBEN99')
+" 2>/dev/null)
+FIRST_USER=${FIRST_USER:-KORBEN99}
 
-    EMOTION=$(curl -s http://localhost:8000/memory/emotional-state 2>/dev/null)
-    MOOD=$(echo "$EMOTION" | python3 -c "import sys,json; print(json.load(sys.stdin).get('mood','?'))" 2>/dev/null)
-    echo "  ✅ Jarvis mood: ${MOOD:-unknown}"
+MEM_STATUS=$(curl -s "http://localhost:8000/memory/profile/${FIRST_USER}" 2>/dev/null)
+if echo "$MEM_STATUS" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+    python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+keys = len(d.get('profile', {}))
+proj = len(d.get('projects', []))
+print(f'  ✅ User profile (${FIRST_USER}): {keys} facts, {proj} projects')
+" <<< "$MEM_STATUS" 2>/dev/null
 else
-    echo "  ⬜ Memory not available (jarvis-api not running)"
+    echo "  ⬜ Memory not available (jarvis-api not running?)"
 fi
 
-# Check reflections
-REFL_COUNT=$(ls /opt/jarvis/data/reflections/*.json 2>/dev/null | wc -l)
-echo "  ✅ Reflections: ${REFL_COUNT} days"
+EMOTION=$(curl -s http://localhost:8000/memory/emotional-state 2>/dev/null)
+MOOD=$(echo "$EMOTION" | python3 -c "import sys,json; print(json.load(sys.stdin).get('mood','?'))" 2>/dev/null)
+echo "  ✅ Current mood: ${MOOD:-unknown}"
 
+echo ""
+echo "── Proto-Self ──"
+SELF=$(curl -s http://localhost:8000/self/state 2>/dev/null)
+if echo "$SELF" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+    python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+focus  = (d.get('current_focus') or '(not set)')[:70]
+count  = d.get('reflection_count', 0)
+action = d.get('last_action') or {}
+last   = action.get('action', '?') if action else '?'
+rels   = d.get('user_relations', {})
+print(f'  ✅ Reflection cycles: {count}')
+print(f'  ✅ Focus: {focus}')
+print(f'  ✅ Last autonomous action: {last}')
+if rels:
+    for code, rel in rels.items():
+        print(f'  ✅ Relation {code}: affinity={rel[\"affinity\"]} | style={rel[\"interaction_style\"]} | mood={rel[\"average_interaction_mood\"]}')
+else:
+    print('  ⬜ No user relations yet (first nightly review pending)')
+" <<< "$SELF" 2>/dev/null
+else
+    echo "  ⬜ Proto-Self not available"
+fi
 
 echo ""
 echo "── Access ──"
 IP=$(hostname -I | awk '{print $1}')
 echo "  Open WebUI:  http://${IP}:3000"
+echo "  Jarvis API:  http://${IP}:8000"
 echo "  Qdrant:      http://${IP}:6333/dashboard"

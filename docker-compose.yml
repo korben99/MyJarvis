@@ -40,6 +40,7 @@ services:
       - RAG_EMBEDDING_MODEL=paraphrase-multilingual-MiniLM-L12-v2
       - DEFAULT_MODELS=${PRIMARY_MODEL:-gpt-4o-mini}
       - MAX_UPLOAD_SIZE=${MAX_UPLOAD_SIZE:-5242880}
+      - ENABLE_FORWARD_USER_INFO_HEADERS=true
     depends_on:
       - qdrant
       - redis
@@ -66,6 +67,9 @@ services:
       - ./jarvis-core/JarvisData:/app/data
       - ./TradeData:/app/trade_data
     environment:
+      # ── Python logging (no buffering — logs appear in real-time) ───────────
+      - PYTHONUNBUFFERED=1
+
       # ── Shared OpenAI credentials ──────────────────────────────────────────
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_API_URL=${OPENAI_API_URL:-https://api.openai.com/v1}
@@ -124,7 +128,7 @@ services:
       - BRIEFING_ENABLED=${BRIEFING_ENABLED:-true}
       - BRIEFING_TIME=${BRIEFING_TIME:-07:30}
       - BRIEFING_TIMEZONE=${BRIEFING_TIMEZONE:-Europe/Paris}
-      - REFLECTION_INTERVAL_HOURS=${REFLECTION_INTERVAL_HOURS:-6}
+      - REFLECTION_INTERVAL_HOURS=${REFLECTION_INTERVAL_HOURS:-2}
 
       # ── Conversation limits ─────────────────────────────────────────────────
       - CHAT_MAX_MESSAGES=${CHAT_MAX_MESSAGES:-100}

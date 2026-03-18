@@ -38,6 +38,7 @@ try:
 except ImportError:
     HAS_HTML = False
 
+
 OPENWEBUI_URL = os.getenv("OPENWEBUI_URL", "http://localhost:3000")
 DATA_DIR      = os.getenv("DATA_DIR",      "/opt/jarvis/RAGData")
 TRACKING_FILE = "/opt/jarvis/logs/uploaded-files.json"
@@ -352,6 +353,12 @@ def main():
                              headers=headers, timeout=ADD_TIMEOUT,
                              json={"file_id": file_id})
             except APIError as e:
+                if e.status_code == 400 and "duplicate" in e.body.lower():
+                    # Already in the knowledge base — treat as success, stop retrying
+                    print(f"OK (duplicate — already indexed, id={file_id})")
+                    uploaded[key] = file_id
+                    ok += 1
+                    continue
                 if e.status_code == 400 and "empty" in e.body.lower():
                     # OpenWebUI couldn't extract text — try locally and re-upload as .txt
                     print(f"(OpenWebUI parse failed, trying local extraction...)", end=" ", flush=True)
