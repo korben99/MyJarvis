@@ -1,13 +1,4 @@
-  Roadmap — Next 3 Milestones
-
-  1. Autocoding — Jarvis edits its own prompts
-
-  What: Add a refine_prompt action to the self-reflection catalog. After flagging a knowledge gap N times, Jarvis proposes a
-  targeted improvement to one of its own prompt templates (router rules, analysis prompt, briefing structure) and writes it to a
-  prompts/ override directory that takes precedence over the hardcoded strings. A human-approval flag gates the write.
-  Why it matters: Closes the feedback loop between poor answers and the instructions that caused them. The router use_reasoning
-  false-positive pattern and the self intent confusion you fixed manually would be correctable autonomously.
-  Entry point: self.py action catalog + a prompts/overrides.json loader in each module.
+  Roadmap — Next 
 
   2. Full Self-Improvement Loop
 

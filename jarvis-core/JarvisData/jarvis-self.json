@@ -26,8 +26,8 @@
       "description": "Identify knowledge gaps, learn from conversations, and improve quality of responses over time."
     }
   ],
-  "current_focus": "Soutenir Hélène dans ses révisions de santé avec des ressources supplémentaires.",
-  "last_reflection": "2026-03-17T14:03:05.533196+00:00",
+  "current_focus": "Soutenir Hélène dans ses intérêts cinématographiques en lui proposant des recommandations de films basées sur ses goûts.",
+  "last_reflection": "2026-03-18T07:10:42.866861+00:00",
   "self_notes": [],
   "opinions": [],
   "learnings": [
@@ -39,6 +39,26 @@
     {
       "text": "L'utilisateur a écrit un article sur le durcissement des infrastructures critiques.",
       "date": "2026-03-17T17:08:40.738803+00:00"
+    },
+    {
+      "text": "Je dois être plus précis dans mes questions pour clarifier le contexte des demandes de l'utilisateur.",
+      "date": "2026-03-16",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Je dois m'assurer de bien comprendre les erreurs techniques pour fournir des solutions adaptées rapidement.",
+      "date": "2026-03-16",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Je dois être attentif aux questions variées de l'utilisateur et être prêt à fournir des informations sur différents sujets.",
+      "date": "2026-03-16",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Il est important de rester concentré sur les demandes spécifiques de l'utilisateur tout en étant ouvert à des sujets divers.",
+      "date": "2026-03-16",
+      "source": "nightly_review"
     }
   ],
   "growth_log": [
@@ -49,7 +69,37 @@
       "summary": "Aujourd'hui, Sébastien a participé aux élections municipales et a réalisé un bon score de 85 points lors d'un tir contrôlé à 25 mètres. Il a également posé des questions sur la météo à Paris et sur ce que je sais de lui.",
       "mood": "Sébastien a passé une journée positive et engagée.",
       "conversations": 43
+    },
+    {
+      "date": "2026-03-16",
+      "user_code": "KORBEN99",
+      "user_name": "Sébastien",
+      "summary": "Aujourd'hui, Sébastien a configuré son agenda Outlook pour le synchroniser avec Google Calendar et a travaillé sur la configuration de son projet GitHub sur Linux. Il a également partagé des informations sur un événement qu'il organise pour ses clients.",
+      "mood": "La journée a été marquée par une ambiance curieuse et proactive.",
+      "conversations": 14
+    },
+    {
+      "date": "2026-03-16",
+      "user_code": "AQWZSX",
+      "user_name": "Hélène",
+      "summary": "Aujourd'hui, Hélène a demandé de l'aide pour réviser son examen de galop 6, en se concentrant sur la santé des chevaux et les maladies classiques. Elle a également posé une question sur la consommation de saumon cru, montrant un intérêt pour des sujets variés.",
+      "mood": "L'ambiance de la journée était neutre et concentrée sur l'apprentissage.",
+      "conversations": 3
     }
   ],
-  "reflection_count": 9
+  "reflection_count": 12,
+  "user_relations": {
+    "KORBEN99": {
+      "affinity": 0.5,
+      "interaction_style": "direct",
+      "average_interaction_mood": "measured",
+      "updated_at": "2026-03-18T07:02:35.085375+00:00"
+    },
+    "AQWZSX": {
+      "affinity": 0.5,
+      "interaction_style": "gentle",
+      "average_interaction_mood": "warm",
+      "updated_at": "2026-03-18T07:02:35.085399+00:00"
+    }
+  }
 }

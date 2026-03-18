@@ -104,6 +104,22 @@ def get_current_focus() -> str:
     return get_self_memory().get("current_focus", "")
 
 
+_DEFAULT_RELATION = {
+    "affinity": 0.5,
+    "interaction_style": "direct",
+    "average_interaction_mood": "measured",
+}
+
+_VALID_STYLES = {"direct", "gentle", "formal", "playful"}
+_VALID_MOODS  = {"warm", "enthusiastic", "measured", "playful", "professional"}
+
+
+def get_user_relation(user_code: str) -> dict:
+    """Return the current relation dict for a user (with defaults if missing)."""
+    relations = get_self_memory().get("user_relations", {})
+    return {**_DEFAULT_RELATION, **relations.get(user_code, {})}
+
+
 def _update_self_fields(**fields) -> None:
     """Update specific top-level fields in jarvis-self.json under the shared lock."""
     with self_memory_lock:
@@ -250,6 +266,7 @@ def gather_context() -> dict:
         "knowledge_gaps":  gaps,
         "last_reflection": last_ref,
         "reflection_count": self_data.get("reflection_count", 0),
+        "user_relations":  self_data.get("user_relations", {}),
     }
 
 
@@ -281,6 +298,7 @@ async def _call_reflection_llm(context: dict) -> dict | None:
         activity      = _fmt_activity(context["user_activity"]),
         gaps          = ", ".join(context["knowledge_gaps"]) or "none flagged",
         last_reflection = json.dumps(context["last_reflection"], ensure_ascii=False) if context["last_reflection"] else "none yet",
+        user_relations  = json.dumps(context["user_relations"], ensure_ascii=False),
     )
 
     try:
@@ -427,6 +445,7 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
 
     data = get_self_memory()
     recent_self_reflections = [l["text"] for l in data.get("learnings", [])[-5:]]
+    current_relation = get_user_relation(user_code)
 
     prompt = get_prompt("NIGHTLY_PROMPT").format(
         user_name=user_name,
@@ -435,6 +454,7 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
         count=len(conversations),
         conv_text=conv_text[:3000] or "(no conversation content)",
         recent_self_reflections=json.dumps(recent_self_reflections, ensure_ascii=False),
+        current_relation=json.dumps(current_relation, ensure_ascii=False),
     )
 
     try:
@@ -514,11 +534,12 @@ async def run_nightly_interaction_review() -> None:
             if insight:
                 store_autobiographical_event(user_code, insight, importance=0.7)
 
-        # ── Jarvis self-improvement notes + diary → jarvis-self.json ─────────
+        # ── Jarvis self-improvement notes + diary + user relation → jarvis-self.json
         # Lock here: no await is held while the lock is active.
         summary      = review.get("daily_summary", "")
         self_refls   = [r for r in review.get("self_reflections", []) if r]
-        if self_refls or summary:
+        rel_update   = review.get("user_relation_update", {})
+        if self_refls or summary or rel_update:
             with self_memory_lock:
                 data = get_self_memory()
                 for refl in self_refls:
@@ -536,6 +557,30 @@ async def run_nightly_interaction_review() -> None:
                         "mood":          review.get("mood_summary", ""),
                         "conversations": len(conversations),
                     })
+                if rel_update:
+                    current = {**_DEFAULT_RELATION, **data.get("user_relations", {}).get(user_code, {})}
+                    # Validate and clamp each field
+                    new_affinity = rel_update.get("affinity", current["affinity"])
+                    try:
+                        new_affinity = round(max(0.0, min(1.0, float(new_affinity))), 2)
+                    except (TypeError, ValueError):
+                        new_affinity = current["affinity"]
+                    new_style = rel_update.get("interaction_style", current["interaction_style"])
+                    if new_style not in _VALID_STYLES:
+                        new_style = current["interaction_style"]
+                    new_mood = rel_update.get("average_interaction_mood", current["average_interaction_mood"])
+                    if new_mood not in _VALID_MOODS:
+                        new_mood = current["average_interaction_mood"]
+                    data.setdefault("user_relations", {})[user_code] = {
+                        "affinity":               new_affinity,
+                        "interaction_style":      new_style,
+                        "average_interaction_mood": new_mood,
+                        "updated_at":             datetime.now(timezone.utc).isoformat(),
+                    }
+                    logger.info(
+                        "User relation updated for %s: affinity=%.2f style=%s mood=%s",
+                        user_code, new_affinity, new_style, new_mood,
+                    )
                 data["learnings"]  = data.get("learnings",  [])[-100:]
                 data["growth_log"] = data.get("growth_log", [])[-365:]
                 save_self_memory(data)

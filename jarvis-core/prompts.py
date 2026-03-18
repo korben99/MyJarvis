@@ -243,6 +243,7 @@ SANTÉ SYSTÈME : {health}
 ACTIVITÉ UTILISATEURS (24h) : {activity}
 LACUNES CONNAISSANCE : {gaps}
 DERNIÈRE RÉFLEXION : {last_reflection}
+RELATIONS UTILISATEURS : {user_relations}
 
 Décide :
 1. Ton focus actuel (une phrase)
@@ -293,14 +294,30 @@ CONVERSATIONS ({count} échanges) :
 Dernières auto-réflexions Jarvis déjà enregistrées (évite les doublons) :
 {recent_self_reflections}
 
+RELATION ACTUELLE AVEC CET UTILISATEUR :
+{current_relation}
+
 Réponds avec ce JSON :
 {{
   "daily_summary":        "résumé 2-3 phrases de la journée",
   "user_insights":        ["fait durable sur l'utilisateur", "..."],
   "self_reflections":     ["amélioration de comportement Jarvis", "..."],
   "tomorrow_suggestions": ["sujet proactif à mentionner demain", "..."],
-  "mood_summary":         "ambiance de la journée en une phrase"
-}}"""
+  "mood_summary":         "ambiance de la journée en une phrase",
+  "user_relation_update": {{
+    "affinity":                  0.0,
+    "interaction_style":         "direct|gentle|formal|playful",
+    "average_interaction_mood":  "warm|enthusiastic|measured|playful|professional"
+  }}
+}}
+
+Règles pour user_relation_update :
+- affinity : float entre 0.0 et 1.0. Ajuste LÉGÈREMENT par rapport à la valeur actuelle (max ±0.1 par nuit).
+  0.0=relation froide · 0.5=neutre · 1.0=relation très forte et positive.
+- interaction_style : comment L'UTILISATEUR préfère communiquer (son style à lui).
+- average_interaction_mood : tonalité que TOI (Jarvis) adoptes naturellement avec cet utilisateur,
+  apprise sur le long terme. Ne pas changer brutalement — évolue lentement.
+- Si aucun changement n'est justifié, retourne les valeurs actuelles telles quelles."""
 
 
 # ══════════════════════════════════════════════════════════════════════════

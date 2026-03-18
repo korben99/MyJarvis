@@ -38,17 +38,18 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
 └───────────────┘  └─────────────────┘
 ```
 ## MEMORY STRUCTURE
-  ┌──────────────────────────────────┬───────────┬────────────────────────────────────────────────────────────┐
-  │              Store               │ Lives in  │                       Should contain                       │
-  ├──────────────────────────────────┼───────────┼────────────────────────────────────────────────────────────┤
-  │ jarvis-self.json                 │ self.py   │ Jarvis's identity, personality, self-notes, reflection log │
-  ├──────────────────────────────────┼───────────┼────────────────────────────────────────────────────────────┤
-  │ Redis hashes user:profile:{code} │ memory.py │ User facts, preferences, interests                         │
-  ├──────────────────────────────────┼───────────┼────────────────────────────────────────────────────────────┤
-  │ Qdrant episodic                  │ memory.py │ Per-user conversation summaries                            │
-  ├──────────────────────────────────┼───────────┼────────────────────────────────────────────────────────────┤
-  │ Qdrant autobiographical          │ memory.py │ Long-term facts about the user                             │
-  └──────────────────────────────────┴───────────┴────────────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────┬───────────┬────────────────────────────────────────────────────────────────────────┐
+  │              Store               │ Lives in  │                          Should contain                                │
+  ├──────────────────────────────────┼───────────┼────────────────────────────────────────────────────────────────────────┤
+  │ jarvis-self.json                 │ self.py   │ Jarvis's identity, goals, focus, self-notes, reflection log,           │
+  │                                  │           │ per-user relations (affinity, interaction style, tonal preference)     │
+  ├──────────────────────────────────┼───────────┼────────────────────────────────────────────────────────────────────────┤
+  │ Redis hashes user:profile:{code} │ memory.py │ User facts, preferences, interests                                     │
+  ├──────────────────────────────────┼───────────┼────────────────────────────────────────────────────────────────────────┤
+  │ Qdrant episodic                  │ memory.py │ Per-user conversation summaries                                        │
+  ├──────────────────────────────────┼───────────┼────────────────────────────────────────────────────────────────────────┤
+  │ Qdrant autobiographical          │ memory.py │ Long-term facts about the user                                         │
+  └──────────────────────────────────┴───────────┴────────────────────────────────────────────────────────────────────────┘
 
   ┌────────────────────────────────────────────────┬──────────────────────────────────────┬─────────────────────────────────────────────────────────┐
   │                      Data                      │             Destination              │                           Key                           │
@@ -64,6 +65,8 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
   ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
   │ Jarvis day diary (daily_summary)               │ jarvis-self.json → growth_log[]      │ user_code kept — it's Jarvis's own timeline, not a user │
   │                                                │                                      │  fact                                                   │
+  ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+  │ Per-user relation (nightly review)             │ jarvis-self.json → user_relations{}  │ keyed by user_code                                      │
   ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
   │ Tomorrow suggestions                           │ Redis TTL 24h                        │ jarvis:{user_code}:tomorrow_suggestions                 │
   └────────────────────────────────────────────────┴──────────────────────────────────────┴─────────────────────────────────────────────────────────┘
@@ -156,7 +159,7 @@ If the LLM router is unavailable or fails, the embedding-based semantic router t
 | Semantic Memory | Redis Hashes | User profiles, preferences, learned facts |
 | Episodic Memory | Qdrant | Conversation summaries that passed the importance threshold |
 | Autobiographical Memory | Qdrant | High-importance milestones consolidated from episodic memory |
-| Self Memory | JSON file | Jarvis identity, goals, reflection log |
+| Self Memory | JSON file | Jarvis identity, goals, focus, reflection log, per-user relations |
 
 #### Episodic Salience Score (ESS)
 
@@ -192,6 +195,8 @@ User message
     → if conversation_type=conversational: skip RAG
     → Parallel context gathering (memory[scope] + RAG + web + Google + self + portfolio)
     → Pending trade alerts injected if any are queued
+    → Self context injected: internal state (focus, goals, last action)
+                           + per-user relation (affinity, style, tonal directives)
     → Tier 2 PRIMARY or Tier 3 REASONING (full context → streaming response)
     → Conversation analyzer / ANALYSIS_MODEL (extract facts, mood, topics, ESS)
     → Memory storage: ESS > 0.35 → Qdrant episodic | ESS > 0.60 → autobiographical
@@ -452,9 +457,15 @@ The morning briefing aggregates: calendar events, unread emails, weather, news h
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/self/state` | Current focus, mood, and active goals |
+| `GET` | `/self/state` | Current focus, goals, and per-user relations |
 | `GET` | `/self/log` | Last N reflection entries |
 | `POST` | `/self/reflect` | Trigger an immediate reflection cycle |
+
+Jarvis maintains two autonomous cognitive cycles:
+
+**Reflection loop** (every 6 h) — global self-observation. Jarvis reviews system health, user activity, and knowledge gaps, then picks one action from the catalog. Outcome and new focus are persisted to `jarvis-self.json`.
+
+**Nightly review** (23:00) — per-user conversation review. For each user who had conversations that day, Jarvis extracts durable user facts (→ Qdrant autobiographical), self-improvement notes (→ `learnings[]`), and updates the **user relation** for that user.
 
 **Reflection action catalog** — actions the LLM can choose during each reflection cycle:
 
@@ -469,6 +480,32 @@ The morning briefing aggregates: calendar events, unread emails, weather, news h
 | `check_health` | Verify all services and log status |
 | `update_trade_threshold` | Update `threshold_high` / `threshold_low` for a portfolio position autonomously |
 | `refine_prompt` | Propose an improved version of a prompt (see Prompt Self-Modification below) |
+
+#### Per-User Relation
+
+Jarvis maintains a slow-evolving perception of each user, updated exclusively during the nightly review (long-term signal, not reactive to individual messages):
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `affinity` | `0.0 – 1.0` | How positively Jarvis perceives the relationship (0.5 = neutral, max ±0.1 shift per night) |
+| `interaction_style` | `direct` · `gentle` · `formal` · `playful` | How the user prefers to communicate |
+| `average_interaction_mood` | `warm` · `enthusiastic` · `measured` · `playful` · `professional` | Tonal register Jarvis adopts with this user, learned over time |
+
+At each conversation, these three values are translated into **explicit directives** and injected into the system prompt alongside the internal state block:
+
+```
+=== ÉTAT INTERNE ===
+Focus : ...
+Objectifs : ...
+Dernière action autonome : ...
+
+=== RELATION AVEC CET UTILISATEUR ===
+Affinité : 0.8/1.0 → Tu apprécies cet utilisateur, investis-toi pleinement.
+Style : direct → Réponds sans détours, va droit au but.
+Tonalité Jarvis : warm → Adopte un ton chaleureux et bienveillant.
+```
+
+**Design principle:** in-conversation mood is already perceived by the LLM from the message history — no real-time state update is needed. The relation captures only what cannot be inferred from a single exchange.
 
 ### Conversations
 

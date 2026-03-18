@@ -100,6 +100,7 @@ from self import (
     gather_context,
     get_current_focus,
     get_reflection_log,
+    get_user_relation,
     handle_proposal_command,
     list_pending_proposals,
     run_nightly_interaction_review,
@@ -1711,16 +1712,45 @@ async def chat(req: ChatRequest):
         last_reason = last_ref[0].get("reason", "") if last_ref else ""
         goals_text  = " | ".join(f"G{i+1}: {g['label']}" for i, g in enumerate(self_data.get("goals", [])))
         pending_proposals = list_pending_proposals()
+
+        _STYLE_DIRECTIVES = {
+            "direct":   "Réponds sans détours, va droit au but, sans formules de politesse superflues.",
+            "gentle":   "Adopte une communication douce et bienveillante, prends le temps d'être rassurant.",
+            "formal":   "Maintiens un registre formel et respectueux en toutes circonstances.",
+            "playful":  "Tu peux être léger et décontracté, l'humour est bienvenu.",
+        }
+        _MOOD_DIRECTIVES = {
+            "warm":           "Adopte un ton chaleureux et bienveillant.",
+            "enthusiastic":   "Sois enthousiaste et investi dans tes réponses.",
+            "measured":       "Reste posé et mesuré, ne surjoue pas.",
+            "playful":        "Tu peux être joueur et humoristique.",
+            "professional":   "Garde un registre professionnel et précis.",
+        }
+
+        rel           = get_user_relation(user_code)
+        affinity      = rel["affinity"]
+        style         = rel["interaction_style"]
+        mood          = rel["average_interaction_mood"]
+        affinity_note = (
+            "Tu apprécies beaucoup cet utilisateur, investis-toi pleinement." if affinity >= 0.7
+            else "Tu ne connais pas encore bien cet utilisateur, reste attentif."  if affinity <= 0.3
+            else "Ta relation avec cet utilisateur est équilibrée."
+        )
+
         self_ctx = (
-            f"=== TON ÉTAT INTERNE ===\n"
+            f"=== ÉTAT INTERNE ===\n"
             f"Objectifs : {goals_text}\n"
-            f"Focus actuel : {focus or 'pas encore défini'}\n"
+            f"Focus : {focus or 'pas encore défini'}\n"
             f"Dernière action autonome : {last_action}"
             + (f" — {last_reason}" if last_reason else "")
             + (f"\nPropositions de prompt en attente : {len(pending_proposals)} — dis 'montre les propositions' pour voir" if pending_proposals else "")
+            + f"\n\n=== RELATION AVEC CET UTILISATEUR ===\n"
+            f"Affinité : {affinity:.1f}/1.0 → {affinity_note}\n"
+            f"Style de communication : {style} → {_STYLE_DIRECTIVES.get(style, '')}\n"
+            f"Tonalité Jarvis : {mood} → {_MOOD_DIRECTIVES.get(mood, '')}"
         )
         context_parts.append(self_ctx)
-        logger.info("self context injected for %s", user_code)
+        logger.info("self context injected for %s (affinity=%.2f style=%s mood=%s)", user_code, affinity, style, mood)
 
     # 8. IMAGE (always last — directly about this message)
     if image_description:
