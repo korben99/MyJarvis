@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import pickle
+from collections import Counter
 import tempfile
 import time
 import uuid
@@ -354,8 +355,6 @@ def get_conversation_summary(user_code: str, days: int = 7) -> str:
     if topics_seen:
         summary += f"Sujets abordés : {', '.join(topics_seen)}. "
     if moods:
-        from collections import Counter
-
         mood_counts = Counter(moods).most_common(3)
         summary += (
             f"Humeurs dominantes : {', '.join(f'{m}({c})' for m, c in mood_counts)}."

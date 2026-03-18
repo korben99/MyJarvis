@@ -105,6 +105,9 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     func startRecording() {
 
+        // Prevent creating a second recorder if one is already running.
+        guard !isRecording else { return }
+
         Task {
 
             let granted = await requestMicrophonePermission()
@@ -264,6 +267,7 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     func speak(_ text: String, rate: Float = 0.52) {
 
+        guard !text.isEmpty else { return }
         synthesizer.stopSpeaking(at: .immediate)
 
         let utterance = AVSpeechUtterance(string: text)

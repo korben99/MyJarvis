@@ -26,6 +26,15 @@ class JarvisAPI: ObservableObject {
         return URLSession(configuration: config)
     }()
 
+    // URLSession for non-streaming API calls (history, clear). 10 s request timeout
+    // prevents these from hanging for the URLSession.shared default of 60 s.
+    private let apiSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest  = 10
+        config.timeoutIntervalForResource = 30
+        return URLSession(configuration: config)
+    }()
+
     // MARK: - Configuration
 
     private var configureTask: Task<Void, Never>?
@@ -97,7 +106,9 @@ class JarvisAPI: ObservableObject {
             }
         }
 
-        guard let url = URL(string: "\(resolvedURL)/chat") else {
+        // resolvedURL can be empty if the probe failed above; an empty prefix produces
+        // URL(string: "/chat") which is non-nil, so we must guard explicitly.
+        guard !resolvedURL.isEmpty, let url = URL(string: "\(resolvedURL)/chat") else {
             if let pos = messages.firstIndex(where: { $0.id == assistantID }) {
                 messages[pos].content = "Error: no reachable server"
                 messages[pos].isStreaming = false
@@ -116,7 +127,14 @@ class JarvisAPI: ObservableObject {
         )
 
         do {
-            let (bytes, _) = try await URLSession.shared.bytes(for: request)
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            if let httpCode = (response as? HTTPURLResponse)?.statusCode, httpCode != 200 {
+                if let pos = messages.firstIndex(where: { $0.id == assistantID }) {
+                    messages[pos].content = "Error: server returned HTTP \(httpCode)"
+                    messages[pos].isStreaming = false
+                }
+                return
+            }
 
             // Accumulate tokens and flush to the UI at most ~30fps (every 33ms).
             // This cuts @Published emissions from ~25/sec to ~30/sec → fewer SwiftUI
@@ -167,8 +185,8 @@ class JarvisAPI: ObservableObject {
 
     /// Tries local first (2 s timeout), then VPN.
     /// Returns (baseURL, route, /status response body) for the first candidate
-    /// that responds with HTTP 200 — so callers can decode the body without a
-    /// second network round-trip.
+    /// that responds without a network error — status code validation is left to
+    /// checkConnection() which decodes the body.
     private func resolveActiveURL() async -> (url: String, route: NetworkRoute, data: Data)? {
         let candidates: [(String, NetworkRoute)] = [
             (localServerURL, .local),
@@ -177,8 +195,7 @@ class JarvisAPI: ObservableObject {
         for (candidate, route) in candidates {
             guard !candidate.isEmpty,
                   let url = URL(string: "\(candidate)/status") else { continue }
-            guard let (data, response) = try? await probeSession.data(from: url),
-                  (response as? HTTPURLResponse)?.statusCode == 200 else { continue }
+            guard let (data, _) = try? await probeSession.data(from: url) else { continue }
             return (candidate, route, data)
         }
         return nil
@@ -188,21 +205,17 @@ class JarvisAPI: ObservableObject {
         messages.last(where: { $0.role == .assistant })?.content
     }
 
-    func clearMessages() {
-        messages.removeAll()
-    }
-
     /// Clears local messages and server-side conversation history.
     func clearConversation() async {
         messages.removeAll()
-        guard let userCode = UserDefaults.standard.string(forKey: "userCode"), !userCode.isEmpty else{ return }
+        guard let userCode = UserDefaults.standard.string(forKey: "userCode"), !userCode.isEmpty else { return }
         guard !resolvedURL.isEmpty,
               let url = URL(string: "\(resolvedURL)/conversations/\(userCode)/\(sessionID)") else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "DELETE"
-        _ = try? await URLSession.shared.data(for: req)
+        _ = try? await apiSession.data(for: req)
     }
-    
+
     func loadConversation() async {
         guard !resolvedURL.isEmpty else { return }
 
@@ -213,7 +226,7 @@ class JarvisAPI: ObservableObject {
         }
 
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await apiSession.data(from: url)
 
             let history = try JSONDecoder().decode([HistoryMessage].self, from: data)
 

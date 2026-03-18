@@ -184,8 +184,7 @@ def _check_service_health() -> dict:
 
     # Primary LLM (lightweight models list call)
     try:
-        import httpx as _httpx
-        r = _httpx.get(
+        r = httpx.get(
             f"{PRIMARY_API_URL}/models",
             headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
             timeout=5,
@@ -277,19 +276,27 @@ def gather_context() -> dict:
 from prompts import get_prompt
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────
+
+def _fmt_goals(goals: list[dict]) -> str:
+    return "\n".join(
+        f"  G{i+1}. {g.get('label', '?')}: {g.get('description', '')}"
+        for i, g in enumerate(goals)
+    )
+
+
+def _fmt_activity(activity: dict) -> str:
+    lines = []
+    for code, info in activity.items():
+        topics = ", ".join(info["topics"]) or "none"
+        lines.append(f"  {info['name']} ({code}): {info['conversations']} conversations | topics: {topics}")
+    return "\n".join(lines) or "  No activity."
+
+
+# ─────────────────────────────────────────────────────────────────────────
+
 async def _call_reflection_llm(context: dict) -> dict | None:
     """Call the LLM to produce a reflection result."""
-
-    def _fmt_goals(goals):
-        return "\n".join(f"  G{i+1}. {g.get('label', '?')}: {g.get('description', '')}" for i, g in enumerate(goals))
-
-    def _fmt_activity(activity):
-        lines = []
-        for code, info in activity.items():
-            topics = ", ".join(info["topics"]) or "none"
-            lines.append(f"  {info['name']} ({code}): {info['conversations']} conversations | topics: {topics}")
-        return "\n".join(lines) or "  No activity."
-
     prompt = get_prompt("REFLECTION_PROMPT").format(
         timestamp     = context["timestamp"],
         identity      = json.dumps(context["identity"], ensure_ascii=False),

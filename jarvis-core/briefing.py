@@ -27,8 +27,8 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 import redis as redis_lib
-
 import pytz
+from ddgs import DDGS
 
 from config import (
     BRIEFING_TIMEZONE,
@@ -49,6 +49,7 @@ from google_services import (
     send_gmail_message,
 )
 from memory import get_interest_weights, get_user_profile, search_memory
+from prompts import get_prompt
 from trading import get_portfolio_summary_text
 
 logger = logging.getLogger("jarvis-briefing")
@@ -265,27 +266,35 @@ async def _fetch_weather(city: str) -> str:
         return ""
 
 
+def _ddg_news_sync(query: str) -> list[dict]:
+    """Synchronous DDG news fetch — run via asyncio.to_thread."""
+    with DDGS() as ddgs:
+        return list(ddgs.news(query, region="fr-fr", max_results=5))
+
+
+def _unwrap(val, default):
+    """Unwrap an asyncio.gather result, returning default on exception."""
+    if isinstance(val, BaseException):
+        logger.warning("Briefing data source failed: %s", type(val).__name__)
+        return default
+    return val
+
+
 async def _fetch_news(interests: list[str]) -> list[str]:
     """
     Fetch top headlines personalised by user interests.
     Uses a space-separated keyword query (no OR — DDGS news is unreliable with operators).
     Falls back to 'actualités france' if no interests or first query fails.
     """
-    from ddgs import DDGS
-
     # Build a simple keyword query from the top 3 interests
     queries = []
     if interests:
         queries.append(" ".join(interests[:3]))
     queries.append("actualités france")   # fallback
 
-    def _ddg_news(query: str) -> list[dict]:
-        with DDGS() as ddgs:
-            return list(ddgs.news(query, region="fr-fr", max_results=5))
-
     for query in queries:
         try:
-            results = await asyncio.to_thread(_ddg_news, query)
+            results = await asyncio.to_thread(_ddg_news_sync, query)
             if results:
                 logger.info("News fetched (%d results) for query: %r", len(results), query)
                 return [
@@ -299,9 +308,6 @@ async def _fetch_news(interests: list[str]) -> list[str]:
 
 
 # ── LLM assembly ──────────────────────────────────────────────────────────
-
-from prompts import get_prompt
-
 
 async def _assemble_with_llm(
     user_name: str,
@@ -394,12 +400,6 @@ async def gather_briefing(user_code: str) -> BriefingResult:
         calendar_task, gmail_task, weather_task, news_task, portfolio_task,
         return_exceptions=True,
     )
-
-    def _unwrap(val, default):
-        if isinstance(val, BaseException):
-            logger.warning("Briefing data source failed: %s", type(val).__name__)
-            return default
-        return val
 
     calendar  = _unwrap(results[0], [])
     gmail     = _unwrap(results[1], [])

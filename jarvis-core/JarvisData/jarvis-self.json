@@ -26,8 +26,8 @@
       "description": "Identify knowledge gaps, learn from conversations, and improve quality of responses over time."
     }
   ],
-  "current_focus": "Soutenir Hélène dans ses intérêts cinématographiques en lui proposant des recommandations de films basées sur ses goûts.",
-  "last_reflection": "2026-03-18T07:10:42.866861+00:00",
+  "current_focus": "Soutenir Hélène dans ses intérêts cinématographiques en lui proposant des recommandations spécifiques basées sur ses goûts.",
+  "last_reflection": "2026-03-18T07:57:22.852089+00:00",
   "self_notes": [],
   "opinions": [],
   "learnings": [
@@ -87,7 +87,7 @@
       "conversations": 3
     }
   ],
-  "reflection_count": 12,
+  "reflection_count": 14,
   "user_relations": {
     "KORBEN99": {
       "affinity": 0.5,

@@ -43,6 +43,7 @@ from typing import Optional
 import httpx
 import pytz
 import redis as redis_lib
+import yfinance as yf
 
 from config import (
     BRIEFING_TIMEZONE,
@@ -217,7 +218,6 @@ def _resolve_ticker(isin: str, r: redis_lib.Redis, pos_key: str, name: str = "")
 
     # 1. ISIN search
     try:
-        import yfinance as yf
         results = yf.Search(isin, max_results=1)
         quotes = results.quotes
         if quotes:
@@ -229,7 +229,6 @@ def _resolve_ticker(isin: str, r: redis_lib.Redis, pos_key: str, name: str = "")
     # 2. Name search
     if not ticker and name:
         try:
-            import yfinance as yf
             results = yf.Search(name, max_results=1)
             quotes = results.quotes
             if quotes:
@@ -261,13 +260,28 @@ def _resolve_ticker(isin: str, r: redis_lib.Redis, pos_key: str, name: str = "")
     return ticker
 
 
+async def _ticker_llm_call_async(prompt: str) -> str:
+    """Async LLM call for ticker resolution — run via asyncio.run()."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{PRIMARY_API_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
+            json={
+                "model": PRIMARY_MODEL,
+                "messages": [{"role": "user", "content": prompt + no_think_suffix(PRIMARY_MODEL)}],
+                "max_tokens": 20,
+                "temperature": 0,
+            },
+        )
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+
 def _resolve_ticker_llm(isin: str, name: str) -> str | None:
     """
     Ask PRIMARY_MODEL to guess the Yahoo Finance ticker for an ISIN + name.
     Synchronous, called only when yfinance search yields nothing.
     Returns the ticker string or None if the LLM can't determine it.
     """
-    import asyncio
     prompt = (
         f"What is the Yahoo Finance ticker symbol for this security?\n"
         f"ISIN: {isin}\n"
@@ -276,21 +290,7 @@ def _resolve_ticker_llm(isin: str, name: str) -> str | None:
         f"If you are not confident, reply with 'UNKNOWN'."
     )
     try:
-        async def _call():
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{PRIMARY_API_URL}/chat/completions",
-                    headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
-                    json={
-                        "model": PRIMARY_MODEL,
-                        "messages": [{"role": "user", "content": prompt + no_think_suffix(PRIMARY_MODEL)}],
-                        "max_tokens": 20,
-                        "temperature": 0,
-                    },
-                )
-            return resp.json()["choices"][0]["message"]["content"].strip()
-
-        raw = asyncio.run(_call())
+        raw = asyncio.run(_ticker_llm_call_async(prompt))
         if raw and raw.upper() != "UNKNOWN" and " " not in raw and len(raw) <= 12:
             return raw
         logger.warning("LLM ticker resolution returned unusable value '%s' for %s", raw, isin)
@@ -305,12 +305,6 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
     Uses a per-ISIN Redis cache (55 min TTL) to avoid hammering Yahoo.
     Returns { isin: {price, intraday_var_pct} }.
     """
-    try:
-        import yfinance as yf
-    except ImportError:
-        logger.error("yfinance not installed — cannot fetch prices")
-        return {}
-
     r = _get_redis()
     isins = list(r.smembers(_idx_key(user_code)))
     if not isins:
@@ -639,12 +633,6 @@ def auto_set_thresholds(user_code: str) -> int:
     Only positions missing BOTH thresholds are touched.
     Returns the number of positions updated.
     """
-    try:
-        import yfinance as yf
-    except ImportError:
-        logger.error("yfinance not installed — cannot auto-set thresholds")
-        return 0
-
     r = _get_redis()
     isins = list(r.smembers(_idx_key(user_code)))
     updated = 0

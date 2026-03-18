@@ -9,6 +9,7 @@ import AVFoundation
 import Speech
 import Combine
 
+@MainActor
 class WakeWordEngine: ObservableObject {
 
     @Published var isListening = false
@@ -24,6 +25,8 @@ class WakeWordEngine: ObservableObject {
     private var tapInstalled = false
     private var retryCount = 0
     private static let maxRetries = 5
+    // Stored so teardown() can cancel a pending retry sleep.
+    private var retryTask: Task<Void, Never>?
 
     // MARK: - Lifecycle
 
@@ -34,7 +37,8 @@ class WakeWordEngine: ObservableObject {
         enabled = true
         retryCount = 0
         SFSpeechRecognizer.requestAuthorization { [weak self] status in
-            DispatchQueue.main.async {
+            // Authorization callback can arrive on any thread — hop to MainActor.
+            Task { @MainActor [weak self] in
                 guard status == .authorized else { return }
                 self?.startSession()
             }
@@ -68,10 +72,13 @@ class WakeWordEngine: ObservableObject {
 
         retryCount = 0   // reset on each successful new session start
 
-        // Auto-restart before the 1-minute iOS limit kicks in
+        // Auto-restart before the 1-minute iOS limit kicks in.
+        // Timer block is @Sendable — hop to MainActor to safely access actor-isolated state.
         restartTimer = Timer.scheduledTimer(withTimeInterval: 45, repeats: false) { [weak self] _ in
-            guard self?.enabled == true else { return }
-            self?.startSession()
+            Task { @MainActor [weak self] in
+                guard let self, self.enabled else { return }
+                self.startSession()
+            }
         }
 
         do {
@@ -95,41 +102,48 @@ class WakeWordEngine: ObservableObject {
             try audioEngine.start()
 
             recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-                guard let self else { return }
+                // This callback fires on a background thread. Extract plain values from the
+                // result before hopping to MainActor so we never access actor-isolated state
+                // from a non-isolated context (data race).
+                let transcription = result?.bestTranscription.formattedString
+                let taskError = error
 
-                if let result {
-                    let words = result.bestTranscription.formattedString
-                        .lowercased()
-                        .split(separator: " ")
-                    // Only check the last 3 words to avoid stale matches
-                    let recent = words.suffix(3).joined(separator: " ")
-                    if recent.contains("jarvis") {
-                        // Always dispatch back to main — recognition callbacks are on a bg thread.
-                        DispatchQueue.main.async { [weak self] in
-                            guard let self else { return }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+
+                    if let transcription {
+                        let words = transcription.lowercased().split(separator: " ")
+                        // Only check the last 3 words to avoid stale matches
+                        let recent = words.suffix(3).joined(separator: " ")
+                        if recent.contains("jarvis") {
                             self.wakeWordDetected = true
                             self.retryCount = 0
                             self.startSession()
+                            return
                         }
-                        return
                     }
-                }
 
-                if let error, self.enabled {
-                    // Exponential backoff with a max retry cap.
-                    let nsError = error as NSError
-                    let isFatal = nsError.domain == "kAFAssistantErrorDomain" &&
-                                  (nsError.code == 1101 || nsError.code == 203)
-                    guard !isFatal, self.retryCount < Self.maxRetries else { return }
-                    let delay = pow(2.0, Double(self.retryCount))
-                    self.retryCount += 1
-                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                        self?.startSession()
+                    if let error = taskError, self.enabled {
+                        // Exponential backoff with a max retry cap.
+                        let nsError = error as NSError
+                        let isFatal = nsError.domain == "kAFAssistantErrorDomain" &&
+                                      (nsError.code == 1101 || nsError.code == 203)
+                        guard !isFatal, self.retryCount < Self.maxRetries else { return }
+                        let delay = pow(2.0, Double(self.retryCount))
+                        self.retryCount += 1
+                        // Store the task so teardown() can cancel the sleep if stop() is called.
+                        self.retryTask?.cancel()
+                        self.retryTask = Task { @MainActor [weak self] in
+                            try? await Task.sleep(for: .seconds(delay))
+                            // Re-check enabled after the sleep — stop() may have been called.
+                            guard let self, self.enabled else { return }
+                            self.startSession()
+                        }
                     }
                 }
             }
 
-            DispatchQueue.main.async { self.isListening = true }
+            isListening = true   // safe: we're @MainActor
 
         } catch {
             print("[WakeWord] session error: \(error.localizedDescription)")
@@ -139,6 +153,8 @@ class WakeWordEngine: ObservableObject {
     private func teardown() {
         restartTimer?.invalidate()
         restartTimer = nil
+        retryTask?.cancel()        // cancel any pending retry sleep
+        retryTask = nil
         recognitionTask?.cancel()
         recognitionTask = nil
         recognitionRequest?.endAudio()

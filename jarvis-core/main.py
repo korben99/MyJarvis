@@ -60,20 +60,25 @@ memory compression
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
 import os
+import pickle
 import time
 import unicodedata
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional
+from urllib.parse import quote
 
 import httpx
+import pytz
 import redis as redis_lib
 import uvicorn
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from ddgs import DDGS
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -162,6 +167,7 @@ from config import (
     tokens_param,
 )
 from memory import (
+    MODEL_CACHE_DIR,
     append_conversation_message,
     build_memory_context,
     get_conversation,
@@ -362,9 +368,6 @@ def _load_intent_embeddings(embed_model) -> dict:
     otherwise recompute and save. Cache is invalidated by a SHA-256 of the
     serialized INTENT_EXAMPLES_FR dict.
     """
-    import hashlib, pickle
-    from memory import MODEL_CACHE_DIR
-
     cache_dir = MODEL_CACHE_DIR
     os.makedirs(cache_dir, exist_ok=True)
 
@@ -422,9 +425,6 @@ async def lifespan(app: FastAPI):
     # ── Schedulers (briefing + proto-self — independent features) ──
     scheduler = None
     try:
-        from apscheduler.schedulers.asyncio import AsyncIOScheduler
-        import pytz
-
         hour, minute = (int(x) for x in BRIEFING_TIME.split(":"))
         tz = pytz.timezone(BRIEFING_TIMEZONE)
         scheduler = AsyncIOScheduler(timezone=tz)
@@ -867,29 +867,58 @@ def _is_news_query(query: str) -> bool:
     return any(k in q for k in keywords)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  HELPERS
+# ══════════════════════════════════════════════════════════════════════════
+
+def _ddg_news_sync(query: str, max_results: int) -> list[dict]:
+    """Synchronous DDG news fetch — run via run_in_executor."""
+    results = []
+    with DDGS() as ddgs:
+        for r in ddgs.news(query, max_results=max_results):
+            body   = r.get("body", "")
+            date   = r.get("date", "")
+            source = r.get("source", "")
+            prefix = " | ".join(filter(None, [date, source]))
+            results.append({
+                "title": r.get("title", ""),
+                "body":  f"[{prefix}] {body}" if prefix else body,
+                "url":   r.get("url", ""),
+            })
+    return results
+
+
+def _ddg_text_sync(query: str, max_results: int) -> list[dict]:
+    """Synchronous DDG text fetch — run via run_in_executor."""
+    results = []
+    with DDGS() as ddgs:
+        for r in ddgs.text(query, max_results=max_results):
+            results.append({
+                "title": r.get("title", ""),
+                "body":  r.get("body", ""),
+                "url":   r.get("href", ""),
+            })
+    return results
+
+
+def _fmt_event_time(iso: str, user_tz: pytz.BaseTzInfo) -> str:
+    """Convert an ISO 8601 datetime string to a localised HH:MM display string."""
+    try:
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(user_tz).strftime("%d/%m %H:%M")
+    except ValueError:
+        return iso  # all-day date string "YYYY-MM-DD" — return as-is
+
+
+# ══════════════════════════════════════════════════════════════════════════
+
 async def search_news(query: str, max_results: int = 5) -> list[dict]:
     """Fetch news via DDG news search (returns real articles with date and source)."""
     try:
         loop = asyncio.get_running_loop()
-
-        def _ddg_news():
-            results = []
-            with DDGS() as ddgs:
-                for r in ddgs.news(query, max_results=max_results):
-                    body = r.get("body", "")
-                    date = r.get("date", "")
-                    source = r.get("source", "")
-                    prefix = " | ".join(filter(None, [date, source]))
-                    results.append(
-                        {
-                            "title": r.get("title", ""),
-                            "body": f"[{prefix}] {body}" if prefix else body,
-                            "url": r.get("url", ""),
-                        }
-                    )
-            return results
-
-        results = await loop.run_in_executor(None, _ddg_news)
+        results = await loop.run_in_executor(None, _ddg_news_sync, query, max_results)
         logger.info(f"News: {len(results)} articles for: {query[:50]}")
         return results
     except Exception as e:
@@ -922,21 +951,7 @@ async def search_web(query: str, max_results: int = 3) -> list[dict]:
 
     try:
         loop = asyncio.get_running_loop()
-
-        def _ddg():
-            results = []
-            with DDGS() as ddgs:
-                for r in ddgs.text(query, max_results=max_results):
-                    results.append(
-                        {
-                            "title": r.get("title", ""),
-                            "body": r.get("body", ""),
-                            "url": r.get("href", ""),
-                        }
-                    )
-            return results
-
-        results = await loop.run_in_executor(None, _ddg)
+        results = await loop.run_in_executor(None, _ddg_text_sync, query, max_results)
         logger.info(f"Web: {len(results)} results for: {query[:50]}")
         # deduplicate by url
         seen = set()
@@ -965,7 +980,6 @@ async def search_web(query: str, max_results: int = 3) -> list[dict]:
 # ── WIKIPEDIA SEARCH
 # =============================
 async def search_wikipedia(query: str):
-    from urllib.parse import quote
     url = f"https://fr.wikipedia.org/api/rest_v1/page/summary/{quote(query)}"
 
     try:
@@ -1070,7 +1084,6 @@ async def _resolve_image_part(part: dict, client: httpx.AsyncClient) -> dict:
     try:
         r = await client.get(url, timeout=15)
         r.raise_for_status()
-        import base64
         mime = r.headers.get("content-type", "image/jpeg").split(";")[0]
         b64 = base64.b64encode(r.content).decode()
         logger.debug("Vision: re-encoded internal image (%s, %d bytes)", mime, len(r.content))
@@ -1656,13 +1669,15 @@ async def chat(req: ChatRequest):
 
     # 4a. CALENDAR
     if calendar_results:
+        _user_tz = pytz.timezone(USERS.get(user_code, {}).get("timezone", "UTC"))
         context_parts.append("=== AGENDA ===")
         for evt in calendar_results:
-            line = f"{evt['start']} — {evt['summary']}"
+            if evt.get("all_day"):
+                line = f"{evt['start']} — {evt['summary']} [journée entière]"
+            else:
+                line = f"{_fmt_event_time(evt['start'], _user_tz)} — {evt['summary']}"
             if evt.get("location"):
                 line += f" ({evt['location']})"
-            if evt.get("all_day"):
-                line += " [journée entière]"
             context_parts.append(line)
         logger.info(f"calendar context: {len(calendar_results)} events injected")
 
@@ -1989,11 +2004,10 @@ async def portfolio_upload(
     if not file.filename or not file.filename.endswith(".csv"):
         raise HTTPException(400, "Only .csv files are accepted")
 
-    import os as _os
-    trade_dir = _os.getenv("TRADE_DATA_DIR", "/app/trade_data")
-    _os.makedirs(trade_dir, exist_ok=True)
+    trade_dir = os.getenv("TRADE_DATA_DIR", "/app/trade_data")
+    os.makedirs(trade_dir, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    dest = _os.path.join(trade_dir, f"positions_{ts}.csv")
+    dest = os.path.join(trade_dir, f"positions_{ts}.csv")
     with open(dest, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
