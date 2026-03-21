@@ -152,7 +152,7 @@
 
 ## Autres axes (non planifiés)
 
-- [ ] Écriture calendrier Google (créer des événements, pas seulement lire)
+- [x] Écriture calendrier Google (créer des événements, pas seulement lire)
 - [ ] Migration Mac Mini M4 Pro (livraison fin avril 2026 — Qwen local Tier 1 + Tier 2)
 - [ ] Support Android (remplace le polling iOS par un mécanisme web)
 - [ ] Mémoire conversationnelle agentique (Couche 3) — Jarvis émet des commandes

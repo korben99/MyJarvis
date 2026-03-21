@@ -447,18 +447,33 @@ def send_gmail_message(to: str, subject: str, html_body: str, text_body: str = "
 # ══════════════════════════════════════════════════
 
 _CALENDAR_WRITE_KEYWORDS = (
-    "crée un", "créer un", "crée une", "créer une",
+    # crée
+    "crée un", "créer un", "crée une", "créer une", "crée moi",
+    # ajoute
     "ajoute un", "ajouter un", "ajoute une", "ajouter une",
+    "ajoute moi", "ajoute-moi", "ajoutes-moi",
     "ajoute dans", "ajouter dans",
+    # planifie
     "planifie", "planifier",
+    # mets
     "mets dans mon agenda", "mettre dans mon agenda",
-    "bloque le", "bloquer le", "bloque une", "bloquer une",
+    "mets moi un", "mets-moi un",
+    # bloque
+    "bloque le", "bloquer le", "bloque une", "bloquer une", "bloque moi",
+    # rajoute
     "rajoute", "rajouter",
+    # inscris
     "inscris-moi", "inscris moi",
-    "pose un rdv", "poser un rdv",
+    # pose
+    "pose un rdv", "poser un rdv", "pose moi un",
+    # prends rdv
     "prends rendez-vous", "prendre rendez-vous",
+    # nouveau
     "nouveau rendez-vous", "nouvel événement", "nouvelle réunion",
+    # réserve
     "réserve", "réserver",
+    # schedule
+    "schedule", "organise une réunion", "organiser une réunion",
 )
 
 

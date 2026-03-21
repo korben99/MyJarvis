@@ -110,6 +110,11 @@ REFINE_PROMPT_THRESHOLD = int(os.getenv("REFINE_PROMPT_THRESHOLD", "3"))
 # Stores prompt_proposals.json + prompt_overrides.json (inside the /app/data volume)
 PROMPT_DATA_DIR = os.path.join(os.path.dirname(SELF_MEMORY_PATH), "prompts")
 
+# ── Router training data collector ────────────────────────────────────────
+# JSONL file of (message, routing_json) pairs for future LoRA fine-tuning.
+# Mount on host: ./RouterData:/app/router_data  (see docker-compose.yml)
+ROUTER_DATA_DIR = os.getenv("ROUTER_DATA_DIR", "/app/router_data")
+
 # ── Conversation storage limits ───────────────────────────────────────────
 CHAT_MAX_MESSAGES = int(os.getenv("CHAT_MAX_MESSAGES", "100"))   # server-side Redis LTRIM cap
 IOS_MAX_MESSAGES  = int(os.getenv("IOS_MAX_MESSAGES",  "50"))    # messages returned to iOS app

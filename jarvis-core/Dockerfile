@@ -1,5 +1,5 @@
 FROM python:3.11-slim
-WORKDIR /app/src
+WORKDIR /app
 RUN pip install --no-cache-dir \
     fastapi uvicorn[standard] httpx pydantic python-dotenv \
     qdrant-client sentence-transformers ddgs redis \

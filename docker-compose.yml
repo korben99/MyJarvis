@@ -51,6 +51,7 @@ services:
       dockerfile: Dockerfile
     container_name: jarvis-api
     restart: unless-stopped
+    working_dir: /app/src
     ports:
       - "8000:8000"
     volumes:
@@ -58,6 +59,7 @@ services:
       - ./jarvis-core/JarvisData:/app/data
       - ./logs:/app/logs
       - ./TradeData:/app/trade_data
+      - ./RouterData:/app/router_data
     environment:
       # ── Python logging (no buffering — logs appear in real-time) ───────────
       - PYTHONUNBUFFERED=1

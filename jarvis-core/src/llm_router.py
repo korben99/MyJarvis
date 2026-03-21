@@ -25,7 +25,10 @@ RouterResult fields:
 """
 
 import json
+import os
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import httpx
 
@@ -35,6 +38,7 @@ from config import (
     PRIMARY_MODEL,
     ROUTER_API_URL,
     ROUTER_API_KEY,
+    ROUTER_DATA_DIR,
     ROUTER_MODEL,
     ROUTER_TIMEOUT,
 )
@@ -63,6 +67,62 @@ class RouterResult:
     memory_scope:     str = field(default="auto")
     conversation_type: str = field(default="conversational")
 
+
+
+# ── Training data collector ───────────────────────────────────────────────
+
+def _log_routing_sample(
+    message: str,
+    result: "RouterResult",
+    model: str,
+) -> None:
+    """Append one JSONL entry to the router training file.
+
+    File: {ROUTER_DATA_DIR}/routing_samples.jsonl
+    Each line is a self-contained JSON object with:
+      - id / ts   : deduplication + timeline
+      - message   : raw user input
+      - routing   : the full RouterResult as a dict
+      - model     : which router model produced this result
+      - ok        : null = uncurated, true = validated, false = wrong
+    """
+    os.makedirs(ROUTER_DATA_DIR, exist_ok=True)
+    sample = {
+        "id":      str(uuid.uuid4()),
+        "ts":      datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+        "message": message,
+        "routing": {
+            "intents": [
+                intent
+                for intent, flag in [
+                    ("memory",    result.use_memory),
+                    ("rag",       result.use_rag),
+                    ("web",       result.use_web),
+                    ("weather",   result.use_weather),
+                    ("gmail",     result.use_gmail),
+                    ("calendar",  result.use_calendar),
+                    ("briefing",  result.use_briefing),
+                    ("self",      result.use_self),
+                    ("portfolio", result.use_portfolio),
+                ]
+                if flag
+            ],
+            "gmail_query":      result.gmail_query,
+            "calendar_days":    result.calendar_days,
+            "weather_location": result.weather_location,
+            "use_reasoning":    result.use_reasoning,
+            "memory_scope":     result.memory_scope,
+            "conversation_type": result.conversation_type,
+        },
+        "model": model,
+        "ok":    None,  # null = not yet reviewed by human
+    }
+    path = os.path.join(ROUTER_DATA_DIR, "routing_samples.jsonl")
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        logger.warning("Could not write routing sample: %s", exc)
 
 
 # ── Core call ─────────────────────────────────────────────────────────────
@@ -166,4 +226,5 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
         model, intents, weather_location, gmail_query, calendar_days, use_reasoning,
         memory_scope, conversation_type,
     )
+    _log_routing_sample(message, result, model)
     return result
