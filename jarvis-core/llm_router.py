@@ -25,8 +25,6 @@ RouterResult fields:
 """
 
 import json
-import logging
-import re
 from dataclasses import dataclass, field
 
 import httpx
@@ -39,19 +37,14 @@ from config import (
     ROUTER_API_KEY,
     ROUTER_MODEL,
     ROUTER_TIMEOUT,
-    no_think_suffix,
 )
-
-logger = logging.getLogger("jarvis-llm-router")
-
-
-
-# ── Prompts (from prompts.py) ─────────────────────────────────────────────
+from helpers import call_llm_async, extract_llm_json, get_logger
 from prompts import get_prompt
+
+logger = get_logger("jarvis-llm-router")
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────
-
 @dataclass
 class RouterResult:
     use_memory:       bool
@@ -70,46 +63,6 @@ class RouterResult:
     memory_scope:     str = field(default="auto")
     conversation_type: str = field(default="conversational")
 
-
-# ── JSON extraction (mlx-lm resilience) ──────────────────────────────────
-
-def _extract_json(raw: str) -> dict:
-    """
-    Parse JSON from a model response robustly.
-
-    Strategy:
-    1. Try direct parse (works when response_format is supported).
-    2. Strip markdown code fences if present.
-    3. Extract the first {...} block from the text (mlx-lm fallback for
-       older versions that ignore response_format).
-
-    Raises json.JSONDecodeError if nothing works.
-    """
-    raw = raw.strip()
-
-    # 1. Direct parse
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-
-    # 2. Strip markdown code fences
-    if "```" in raw:
-        inner = raw.split("```")[1]
-        first_newline = inner.find("\n")
-        if first_newline != -1 and not inner[:first_newline].strip().startswith("{"):
-            inner = inner[first_newline:].strip()
-        try:
-            return json.loads(inner.strip())
-        except json.JSONDecodeError:
-            pass
-
-    # 3. Extract first {...} block (handles prose-prefixed responses)
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if match:
-        return json.loads(match.group())
-
-    raise json.JSONDecodeError("No JSON found in router response", raw, 0)
 
 
 # ── Core call ─────────────────────────────────────────────────────────────
@@ -132,30 +85,23 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
     prompt = get_prompt("ROUTER_USER").format(message=message)
 
     try:
-        async with httpx.AsyncClient(timeout=ROUTER_TIMEOUT) as client:
-            resp = await client.post(
-                f"{api_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": get_prompt("ROUTER_SYSTEM") + no_think_suffix(ROUTER_MODEL)},
-                        {"role": "user",   "content": prompt},
-                    ],
-                    "temperature": 0,
-                    "max_tokens": 250,
-                    # response_format is supported by OpenAI and mlx-lm ≥ 0.21.
-                    # Older mlx-lm versions ignore it — _extract_json() handles that.
-                    "response_format": {"type": "json_object"},
-                    "stream": False,
-                },
-            )
-        resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"]
-        parsed = _extract_json(raw)
+        # response_format is supported by OpenAI and mlx-lm ≥ 0.21.
+        # Older mlx-lm versions ignore it — extract_llm_json() handles that.
+        raw = await call_llm_async(
+            [
+                {"role": "system", "content": get_prompt("ROUTER_SYSTEM")},
+                {"role": "user",   "content": prompt},
+            ],
+            model=model,
+            api_url=api_url,
+            api_key=api_key,
+            temperature=0,
+            max_tokens=250,  # CHECK IF 250 IS ENOUGH
+            json_response=True,
+            no_think=True,
+            timeout=ROUTER_TIMEOUT,
+        )
+        parsed = extract_llm_json(raw)
 
     except httpx.TimeoutException:
         logger.warning(

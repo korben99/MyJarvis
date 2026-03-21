@@ -35,7 +35,6 @@ import asyncio
 import csv
 import glob
 import json
-import logging
 import os
 from datetime import datetime, timezone
 from typing import Optional
@@ -51,47 +50,17 @@ from config import (
     PRIMARY_API_URL,
     PRIMARY_MODEL,
     REDIS_URL,
-    no_think_suffix,
 )
+from trade_keys import idx_key, pos_key, import_ts_key, price_cache_key, alert_queue_key
+from helpers import get_logger, get_redis
 
-logger = logging.getLogger("jarvis-trading")
+logger = get_logger("jarvis-trading")
 
 TRADE_DATA_DIR = os.getenv("TRADE_DATA_DIR", "/app/trade_data")
 PRICE_CACHE_TTL = 55 * 60  # 55 minutes
-_ALERT_MIN_INTERVAL_HOURS = 4  # Don't re-alert same position within 4 h
+_ALERT_MIN_INTERVAL_HOURS = 8  # Don't re-alert same position within 4 h
 _ALERT_QUEUE_TTL = 86400       # Pending alerts expire after 24 h
 
-
-# ── Redis helpers ──────────────────────────────────────────────────────────
-
-_redis_client: redis_lib.Redis | None = None
-
-
-def _get_redis() -> redis_lib.Redis:
-    global _redis_client
-    if _redis_client is None:
-        _redis_client = redis_lib.from_url(REDIS_URL, decode_responses=True)
-    return _redis_client
-
-
-def _idx_key(user_code: str) -> str:
-    return f"trade:{user_code}:index"
-
-
-def _pos_key(user_code: str, isin: str) -> str:
-    return f"trade:{user_code}:pos:{isin}"
-
-
-def _import_ts_key(user_code: str) -> str:
-    return f"trade:{user_code}:last_import_ts"
-
-
-def _price_cache_key(isin: str) -> str:
-    return f"trade:price_cache:{isin}"
-
-
-def _alert_queue_key(user_code: str) -> str:
-    return f"trade:{user_code}:pending_alerts"
 
 
 # ── CSV parsing ────────────────────────────────────────────────────────────
@@ -150,7 +119,7 @@ def import_csv_to_redis(user_code: str) -> int:
     if not path:
         return 0
 
-    r = _get_redis()
+    r = get_redis()
     last_ts = float(r.get(_import_ts_key(user_code)) or 0)
     if os.path.getmtime(path) <= last_ts:
         return 0
@@ -262,18 +231,17 @@ def _resolve_ticker(isin: str, r: redis_lib.Redis, pos_key: str, name: str = "")
 
 async def _ticker_llm_call_async(prompt: str) -> str:
     """Async LLM call for ticker resolution — run via asyncio.run()."""
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{PRIMARY_API_URL}/chat/completions",
-            headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
-            json={
-                "model": PRIMARY_MODEL,
-                "messages": [{"role": "user", "content": prompt + no_think_suffix(PRIMARY_MODEL)}],
-                "max_tokens": 20,
-                "temperature": 0,
-            },
-        )
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    return (await call_llm_async(
+        [{"role": "user", "content": prompt}],
+        model=PRIMARY_MODEL,
+        api_url=PRIMARY_API_URL,
+        api_key=PRIMARY_API_KEY,
+        temperature=0,
+        max_tokens=20,
+        json_response=False,
+        no_think=True,
+        timeout=15.0,
+    )).strip()
 
 
 def _resolve_ticker_llm(isin: str, name: str) -> str | None:
@@ -290,7 +258,11 @@ def _resolve_ticker_llm(isin: str, name: str) -> str | None:
         f"If you are not confident, reply with 'UNKNOWN'."
     )
     try:
-        raw = asyncio.run(_ticker_llm_call_async(prompt))
+        try:
+            loop = asyncio.get_running_loop()
+            raw = loop.run_until_complete(_ticker_llm_call_async(prompt))
+        except RuntimeError:
+            raw = asyncio.run(_ticker_llm_call_async(prompt))
         if raw and raw.upper() != "UNKNOWN" and " " not in raw and len(raw) <= 12:
             return raw
         logger.warning("LLM ticker resolution returned unusable value '%s' for %s", raw, isin)
@@ -305,7 +277,7 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
     Uses a per-ISIN Redis cache (55 min TTL) to avoid hammering Yahoo.
     Returns { isin: {price, intraday_var_pct} }.
     """
-    r = _get_redis()
+    r = get_redis()
     isins = list(r.smembers(_idx_key(user_code)))
     if not isins:
         return {}
@@ -373,7 +345,7 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
 
 def update_prices_in_redis(user_code: str, prices: dict[str, dict]) -> None:
     """Write freshly fetched prices into each position hash."""
-    r = _get_redis()
+    r = get_redis()
     now = datetime.now(timezone.utc).isoformat()
     for isin, data in prices.items():
         key = _pos_key(user_code, isin)
@@ -389,7 +361,7 @@ def update_prices_in_redis(user_code: str, prices: dict[str, dict]) -> None:
 
 def get_portfolio(user_code: str) -> list[dict]:
     """Return all positions enriched with live P&L calculations."""
-    r = _get_redis()
+    r = get_redis()
     isins = sorted(r.smembers(_idx_key(user_code)))
     portfolio = []
     for isin in isins:
@@ -497,7 +469,7 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
     Rate-limits per position: same position won't alert twice within 4 h.
     Returns (should_alert, message).
     """
-    r = _get_redis()
+    r = get_redis()
     positions = get_portfolio(user_code)
     if not positions:
         return False, ""
@@ -544,25 +516,24 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
             pass
 
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(
-                f"{PRIMARY_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
-                json={
-                    "model": PRIMARY_MODEL,
-                    "messages": [
-                        {"role": "system", "content": _ALERT_SYSTEM + no_think_suffix(PRIMARY_MODEL)},
-                        {"role": "user",   "content": _ALERT_USER.format(
-                            portfolio="\n".join(lines),
-                            daily_pnl_pct=daily_pnl_pct,
-                        )},
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "max_tokens": 200,
-                    "temperature": 0,
-                },
-            )
-        result = json.loads(resp.json()["choices"][0]["message"]["content"])
+        content = await call_llm_async(
+            [
+                {"role": "system", "content": _ALERT_SYSTEM},
+                {"role": "user",   "content": _ALERT_USER.format(
+                    portfolio="\n".join(lines),
+                    daily_pnl_pct=daily_pnl_pct,
+                )},
+            ],
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
+            temperature=0,
+            max_tokens=200,
+            json_response=True,
+            no_think=True,
+            timeout=20.0,
+        )
+        result = json.loads(content)
         should_alert = bool(result.get("alert", False))
         message      = result.get("message", "")
 
@@ -588,7 +559,7 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
 # ── Pending alert queue ─────────────────────────────────────────────────────
 
 def push_pending_alert(user_code: str, message: str) -> None:
-    r = _get_redis()
+    r = get_redis()
     key = _alert_queue_key(user_code)
     existing = json.loads(r.get(key) or "[]")
     existing.append({"message": message, "at": datetime.now(timezone.utc).isoformat()})
@@ -597,7 +568,7 @@ def push_pending_alert(user_code: str, message: str) -> None:
 
 def pop_pending_alerts(user_code: str) -> list[dict]:
     """Return and clear all queued alerts for a user."""
-    r = _get_redis()
+    r = get_redis()
     key = _alert_queue_key(user_code)
     raw = r.get(key)
     if not raw:
@@ -633,7 +604,7 @@ def auto_set_thresholds(user_code: str) -> int:
     Only positions missing BOTH thresholds are touched.
     Returns the number of positions updated.
     """
-    r = _get_redis()
+    r = get_redis()
     isins = list(r.smembers(_idx_key(user_code)))
     updated = 0
 
@@ -721,27 +692,26 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
     )
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                f"{PRIMARY_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
-                json={
-                    "model": PRIMARY_MODEL,
-                    "messages": [
-                        {"role": "system", "content": "Tu es un assistant de gestion de portefeuille boursier." + no_think_suffix(PRIMARY_MODEL)},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "max_tokens": 1000,
-                    "temperature": 0.2,
-                },
-            )
-        result = json.loads(resp.json()["choices"][0]["message"]["content"])
+        content = await call_llm_async(
+            [
+                {"role": "system", "content": "Tu es un assistant de gestion de portefeuille boursier."},
+                {"role": "user", "content": prompt},
+            ],
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
+            temperature=0.2,
+            max_tokens=1000,
+            json_response=True,
+            no_think=True,
+            timeout=60.0,
+        )
+        result = json.loads(content)
     except Exception as exc:
         logger.error("LLM threshold suggestion failed for %s: %s", user_code, exc)
         return {}
 
-    r = _get_redis()
+    r = get_redis()
     suggestions: dict = {}
 
     for item in result.get("positions", []):
@@ -784,7 +754,7 @@ async def run_trade_check(user_codes: list[str]) -> None:
                 if filled:
                     logger.info("Trade: auto-set thresholds for %d positions (%s)", filled, user_code)
 
-            if not _get_redis().smembers(_idx_key(user_code)):
+            if not get_redis().smembers(_idx_key(user_code)):
                 continue  # No positions yet — nothing to do
 
             if _is_market_hours():

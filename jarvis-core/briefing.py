@@ -21,26 +21,30 @@ Entry points:
 
 import asyncio
 import json
-import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import httpx
-import redis as redis_lib
-import pytz
 from ddgs import DDGS
 
 from config import (
-    BRIEFING_TIMEZONE,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
-    no_think_suffix,
-    REDIS_URL,
     USER_CITIES,
     USER_CODES,
     USER_EMAILS,
-    USERS,
+    USER_TIMEZONES,
+)
+from helpers import (
+    WEATHER_CODES,
+    call_llm_async,
+    fmt_event_time,
+    get_logger,
+    get_redis,
+    get_user_tz,
+    now_user,
+    today_user,
 )
 from google_services import (
     fetch_calendar_events,
@@ -48,17 +52,17 @@ from google_services import (
     is_google_available,
     send_gmail_message,
 )
-from memory import get_interest_weights, get_user_profile, search_memory
+from memory import get_interest_weights, get_user_profile, get_user_projects
 from prompts import get_prompt
 from trading import get_portfolio_summary_text
 
-logger = logging.getLogger("jarvis-briefing")
+logger = get_logger("jarvis-briefing")
 
 # ── Redis key helpers ─────────────────────────────────────────────────────
 _BRIEFING_TTL = 28 * 3600   # 28h — survives until next morning
 
 
-def _redis_key(user_code: str) -> str:
+def _briefing_key(user_code: str) -> str:
     return f"briefing:{user_code}:latest"
 
 
@@ -80,16 +84,6 @@ class BriefingResult:
 
 # ── Redis store/retrieve ──────────────────────────────────────────────────
 
-_redis_client: redis_lib.Redis | None = None
-
-
-def _get_redis() -> redis_lib.Redis:
-    global _redis_client
-    if _redis_client is None:
-        _redis_client = redis_lib.from_url(REDIS_URL, decode_responses=True)
-    return _redis_client
-
-
 def store_briefing(user_code: str, result: BriefingResult) -> None:
     try:
         payload = json.dumps({
@@ -99,7 +93,7 @@ def store_briefing(user_code: str, result: BriefingResult) -> None:
             "text": result.text,
             "html": result.html,
         }, ensure_ascii=False)
-        _get_redis().setex(_redis_key(user_code), _BRIEFING_TTL, payload)
+        get_redis().setex(_briefing_key(user_code), _BRIEFING_TTL, payload)
         logger.info("Briefing stored for %s", user_code)
     except Exception as exc:
         logger.error("Briefing store failed: %s", type(exc).__name__)
@@ -107,7 +101,7 @@ def store_briefing(user_code: str, result: BriefingResult) -> None:
 
 def get_stored_briefing(user_code: str) -> BriefingResult | None:
     try:
-        raw = _get_redis().get(_redis_key(user_code))
+        raw = get_redis().get(_briefing_key(user_code))
         if not raw:
             return None
         d = json.loads(raw)
@@ -183,32 +177,18 @@ def _get_user_interests(user_code: str) -> list[str]:
 def _get_active_projects(user_code: str) -> list[str]:
     """
     Recall ongoing projects / tasks from vector memory.
-    Returns up to 4 relevant snippets.
+    Returns up to 4 relevant snippets if active or in_progress
     """
-    try:
-        memories = search_memory(user_code, "project task working on deadline objective", limit=4)
-        snippets = []
-        for m in memories:
-            text = m.get("text", "").strip()
-            if text:
-                snippets.append(text[:200])
-        return snippets
-    except Exception:
-        return []
+    projects = get_user_projects(user_code)
+    return [
+        f"{p['name']}: {p.get('description','')}"
+        for p in projects
+        if p.get("status") in ("active", "in_progress")
+    ][:4]
 
 
-_WX_CODES = {
-    0: "Ciel dégagé", 1: "Principalement dégagé", 2: "Partiellement nuageux",
-    3: "Couvert", 45: "Brouillard", 48: "Brouillard givrant",
-    51: "Bruine légère", 53: "Bruine modérée", 55: "Bruine dense",
-    61: "Pluie faible", 63: "Pluie modérée", 65: "Pluie forte",
-    71: "Neige faible", 73: "Neige modérée", 75: "Neige forte",
-    80: "Averses faibles", 81: "Averses modérées", 82: "Averses fortes",
-    95: "Orage", 96: "Orage avec grêle", 99: "Orage violent",
-}
 
-
-async def _fetch_weather(city: str) -> str:
+async def _fetch_weather(city: str, tz_name: str = "Europe/Paris") -> str:
     """Fetch today's weather summary for the city via Open-Meteo (geocoding + forecast)."""
     try:
         async with httpx.AsyncClient(timeout=8) as client:
@@ -231,7 +211,7 @@ async def _fetch_weather(city: str) -> str:
                     "longitude": lon,
                     "current": "temperature_2m,weather_code",
                     "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code",
-                    "timezone": BRIEFING_TIMEZONE,
+                    "timezone": tz_name,
                     "forecast_days": 1,
                 },
             )
@@ -250,7 +230,7 @@ async def _fetch_weather(city: str) -> str:
             if tmax is None:
                 return ""
 
-            condition = _WX_CODES.get(int(code), "")
+            condition = WEATHER_CODES.get(int(code), "")
             parts = [f"{city}"]
             if t_now is not None:
                 parts.append(f"actuellement {t_now:.0f}°C")
@@ -297,10 +277,9 @@ async def _fetch_news(interests: list[str]) -> list[str]:
             results = await asyncio.to_thread(_ddg_news_sync, query)
             if results:
                 logger.info("News fetched (%d results) for query: %r", len(results), query)
-                return [
-                    f"{r['title']} — {r.get('source', '')}"
-                    for r in results if r.get("title")
-                ]
+            return [
+                f"{r['title']} — {r.get('body','')[:120]} ({r.get('source','')})"
+            ]
         except Exception as exc:
             logger.warning("News fetch failed for %r: %s", query, type(exc).__name__)
 
@@ -311,13 +290,18 @@ async def _fetch_news(interests: list[str]) -> list[str]:
 
 async def _assemble_with_llm(
     user_name: str,
+    user_code: str,
     sections: dict,
 ) -> tuple[str, str]:
     """Call the LLM to write the final briefing text and HTML."""
-    date_str = datetime.now(timezone.utc).strftime("%A %d %B %Y")
+    date_str = now_user(user_code).strftime("%A %d %B %Y")
 
     calendar_text = "\n".join(
-        f"- {e['start'][:16]} : {e['summary']}" + (f" ({e['location']})" if e.get("location") else "")
+        (
+            f"- {e['start']} : {e['summary']}" + (f" ({e['location']})" if e.get("location") else "")
+            if e.get("all_day") else
+            f"- {fmt_event_time(e['start'], user_code, '%H:%M')} : {e['summary']}" + (f" ({e['location']})" if e.get("location") else "")
+        )
         for e in sections.get("calendar", [])
     ) or "Aucun événement aujourd'hui."
 
@@ -347,22 +331,15 @@ async def _assemble_with_llm(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{PRIMARY_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
-                json={
-                    "model": PRIMARY_MODEL,
-                    "messages": [
-                        {"role": "system", "content": get_prompt("BRIEFING_SYSTEM").format(user_name=user_name) + no_think_suffix(PRIMARY_MODEL)},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "max_tokens": 1200,
-                    "temperature": 0.6,
-                },
-            )
-        result = json.loads(resp.json()["choices"][0]["message"]["content"])
+        content = await call_llm_async(
+            [
+                {"role": "system", "content": get_prompt("BRIEFING_SYSTEM").format(user_name=user_name)},
+                {"role": "user", "content": prompt},
+            ],
+            model=PRIMARY_MODEL, api_url=PRIMARY_API_URL, api_key=PRIMARY_API_KEY,
+            temperature=0.6, max_tokens=1200, json_response=True, no_think=True, timeout=30.0,
+        )
+        result = json.loads(content)
         return result.get("text", ""), result.get("html", "")
     except Exception as exc:
         logger.error("Briefing LLM assembly failed: %s", type(exc).__name__)
@@ -381,7 +358,8 @@ async def gather_briefing(user_code: str) -> BriefingResult:
     """
     user_name = USER_CODES.get(user_code, user_code)
     city = USER_CITIES.get(user_code, "Paris")
-    logger.info("Generating briefing for %s (%s)", user_name, user_code)
+    tz_name = USER_TIMEZONES.get(user_code, "Europe/Paris")
+    logger.info("Generating briefing for %s (%s, tz=%s)", user_name, user_code, tz_name)
 
     # Personalisation data (sync, fast)
     interests = _get_user_interests(user_code)
@@ -389,10 +367,10 @@ async def gather_briefing(user_code: str) -> BriefingResult:
     logger.info("Briefing interests for %s: %s", user_code, interests)
 
     # Parallel data gathering — date= gives midnight→midnight fetch across all calendars
-    today = datetime.now(pytz.timezone(BRIEFING_TIMEZONE)).date()
-    calendar_task  = asyncio.to_thread(fetch_calendar_events, 1, today) if is_google_available() else asyncio.sleep(0, result=[])
+    today = today_user(user_code)
+    calendar_task  = asyncio.to_thread(fetch_calendar_events, 1, today, tz_name) if is_google_available() else asyncio.sleep(0, result=[])
     gmail_task     = asyncio.to_thread(fetch_gmail_messages, "is:unread newer_than:1d", 5) if is_google_available() else asyncio.sleep(0, result=[])
-    weather_task   = _fetch_weather(city)
+    weather_task   = _fetch_weather(city, tz_name)
     news_task      = _fetch_news(interests)
     portfolio_task = asyncio.to_thread(get_portfolio_summary_text, user_code)
 
@@ -417,7 +395,7 @@ async def gather_briefing(user_code: str) -> BriefingResult:
         "portfolio": portfolio,
     }
 
-    text, html = await _assemble_with_llm(user_name, sections)
+    text, html = await _assemble_with_llm(user_name, user_code, sections)
 
     result = BriefingResult(
         user_code=user_code,
@@ -442,14 +420,14 @@ def deliver_briefing(user_code: str, result: BriefingResult) -> None:
         return
 
     # Avoid double-sending (e.g. on container restart)
-    r = _get_redis()
+    r = get_redis()
     sent_key = _sent_key(user_code)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = now_user(user_code).strftime("%Y-%m-%d")
     if r.get(sent_key) == today:
         logger.info("Briefing already sent today for %s — skipping", user_code)
         return
 
-    date_label = datetime.now(timezone.utc).strftime("%d/%m/%Y")
+    date_label = now_user(user_code).strftime("%d/%m/%Y")
     subject = f"Jarvis — Briefing du {date_label}"
     success = send_gmail_message(to=to, subject=subject, html_body=result.html, text_body=result.text)
 

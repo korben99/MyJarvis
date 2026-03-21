@@ -28,7 +28,6 @@ Compression memory added, to be runned every month.
 
 import hashlib
 import json
-import logging
 import os
 import pickle
 from collections import Counter
@@ -38,9 +37,6 @@ import uuid
 from datetime import datetime, timezone
 from threading import Lock
 
-import httpx
-import redis
-from qdrant_client import QdrantClient
 from qdrant_client.models import PointIdsList
 from sentence_transformers import SentenceTransformer
 
@@ -57,43 +53,26 @@ from config import (
     NOVELTY_THRESHOLD,
     QDRANT_COLLECTION,
     QDRANT_MEMORY_COLLECTION,
-    QDRANT_URL,
     RAG_SCORE_THRESHOLD,
     RAG_TOP_K,
     RECALL_MEMORY_SIMILARITY_THRESHOLD,
-    REDIS_URL,
     ROUTER_API_KEY,
     ROUTER_API_URL,
     ROUTER_MODEL,
     ROUTER_TIMEOUT,
     SELF_MEMORY_PATH,
     USER_CODES,
-    no_think_suffix,
 )
 
-_qdrant = None
-_embed_model = None
-_embed_lock = Lock()
-logger = logging.getLogger("jarvis-memory")
-
-# ── qdran Connection ──
+from helpers import call_llm, extract_llm_json, get_logger, get_qdrant, get_redis, redis_get_json, redis_set_json
 
 
-def get_qdrant():
-    global _qdrant
-    if _qdrant is None:
-        _qdrant = QdrantClient(
-            url=QDRANT_URL,
-            timeout=10
-        )
-    return _qdrant
-
+logger = get_logger("jarvis-memory")
 
 # ── Embedding model — local-first, HF fallback ───────────────────────────
-
 MODEL_CACHE_DIR = os.getenv("MODEL_CACHE_DIR", "/app/data/model_cache")
-
-
+_embed_model = None
+_embed_lock = Lock()
 def get_embed_model():
     global _embed_model
     if _embed_model is None:
@@ -119,17 +98,6 @@ def get_embed_model():
     return _embed_model
 
 
-# ── Redis Connection ──
-
-_redis = None
-
-
-def get_redis():
-    global _redis
-    if _redis is None:
-        _redis = redis.from_url(REDIS_URL, decode_responses=True)
-    return _redis
-
 
 # ══════════════════════════════════════════════════
 #  WORKING MEMORY — Current state, volatile
@@ -152,11 +120,7 @@ def set_working_memory(session_id: str, key: str, value: str, ttl: int = 86400):
 
 def get_emotional_state() -> dict:
     """Get Jarvis's current emotional state."""
-    r = get_redis()
-    data = r.get("jarvis:emotional_state")
-    if data:
-        return json.loads(data)
-    return {
+    return redis_get_json("jarvis:emotional_state") or {
         "mood": "neutral",
         "energy": 0.7,
         "confidence": 0.8,
@@ -168,7 +132,6 @@ def get_emotional_state() -> dict:
 
 def update_emotional_state(updates: dict):
     """Update emotional state with new values."""
-    r = get_redis()
     state = get_emotional_state()
     state.update(updates)
     state["last_updated"] = datetime.now(timezone.utc).isoformat()
@@ -176,7 +139,7 @@ def update_emotional_state(updates: dict):
     for key in ["energy", "confidence", "curiosity", "concern"]:
         if key in state and isinstance(state[key], (int, float)):
             state[key] = max(0.0, min(1.0, state[key]))
-    r.set("jarvis:emotional_state", json.dumps(state))
+    redis_set_json("jarvis:emotional_state", state)
 
 
 # ══════════════════════════════════════════════════
@@ -238,7 +201,6 @@ def _normalize_profile_key(user_code: str, new_key: str, existing_keys: list) ->
 
     try:
         keys_list = ", ".join(f'"{k}"' for k in existing_keys)
-        suffix = no_think_suffix(ROUTER_MODEL)
         prompt = (
             f"Clés existantes dans le profil utilisateur : [{keys_list}]\n"
             f"Nouvelle clé candidate : \"{new_key}\"\n\n"
@@ -249,32 +211,20 @@ def _normalize_profile_key(user_code: str, new_key: str, existing_keys: list) ->
             f"  • \"skill:python\" == \"competence:python\" → OUI (même technologie)\n"
             f"  • \"profession\" == \"metier\" → OUI (même fait scalaire)\n"
             f"Réponds en JSON uniquement, rien d'autre : "
-            f'{{\"match\": \"clé_existante\"}} si doublon, {{\"match\": null}} si non.{suffix}'
+            f'{{\"match\": \"clé_existante\"}} si doublon, {{\"match\": null}} si non.'
         )
 
-        resp = httpx.post(
-            f"{ROUTER_API_URL}/chat/completions",
-            headers={"Authorization": f"Bearer {ROUTER_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": ROUTER_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
-                "max_tokens": 40,
-            },
+        raw = call_llm(
+            [{"role": "user", "content": prompt}],
+            model=ROUTER_MODEL,
+            api_url=ROUTER_API_URL,
+            api_key=ROUTER_API_KEY,
+            temperature=0.0,
+            max_tokens=40,
+            no_think=True,
             timeout=ROUTER_TIMEOUT,
         )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"].strip()
-
-        # Strip markdown code fences if the model wraps its output
-        if content.startswith("```"):
-            parts = content.split("```")
-            content = parts[1] if len(parts) > 1 else content
-            if content.startswith("json"):
-                content = content[4:]
-        content = content.strip()
-
-        parsed = json.loads(content)
+        parsed = extract_llm_json(raw)
         match = parsed.get("match")
         if match and match in existing_keys:
             logger.info("User %s profile key '%s' matches existing '%s' — will evict old key", user_code, new_key, match)
@@ -330,36 +280,63 @@ def get_interest_weights(user_code: str) -> dict[str, float]:
     return {k: float(v) for k, v in raw.items()}
 
 
-"""Get list of user's active projects."""
-
-
+# simplification possible quand tous les projets seront migrés dans le nouveau format
 def get_user_projects(user_code: str) -> list:
-    r = get_redis()
-    data = r.get(f"user:{user_code}:projects")
-    return json.loads(data) if data else []
+    """Get list of user's active projects."""
+    projects = redis_get_json(f"user:{user_code}:projects", default=[])
+    if not projects:
+        return []
 
+    normalized = []
+    changed = False
 
-"""Update active projects list."""
+    for p in projects:
+        if isinstance(p, str):
+            p = {"name": p}
+            changed = True
+
+        # Normalization migration
+        if "status" not in p:
+            p["status"] = "active"
+            changed = True
+        if "first_mentioned" not in p:
+            p["first_mentioned"] = None
+            changed = True
+        if "last_update" not in p:
+            p["last_update"] = None
+            changed = True
+        normalized.append(p)
+
+    if changed:
+        redis_set_json(f"user:{user_code}:projects", normalized)
+
+    return normalized
 
 
 def update_user_projects(user_code: str, projects: list):
-    r = get_redis()
-    r.set(f"user:{user_code}:projects", json.dumps(projects))
-
-
-"""Get user preferences (language, style, etc.)."""
+    """Update active projects list."""
+    normalized = []
+    for p in projects:
+        if isinstance(p, str):
+            p = {"name": p}
+        normalized.append({
+            "name": p.get("name"),
+            "status": p.get("status", "active"),
+            "first_mentioned": p.get("first_mentioned"),
+            "last_update": p.get("last_update"),
+        })
+    redis_set_json(f"user:{user_code}:projects", normalized)
 
 
 def get_user_preferences(user_code: str) -> dict:
+    """Get user preferences (language, style, etc.)."""
     r = get_redis()
     data = r.hgetall(f"user:{user_code}:preferences")
     return data or {}
 
 
-"""Update a preference."""
-
-
 def update_user_preference(user_code: str, key: str, value: str):
+    """Update a preference."""
     r = get_redis()
     r.hset(f"user:{user_code}:preferences", key, value)
 
@@ -445,6 +422,46 @@ def get_conversation_summary(user_code: str, days: int = 7) -> str:
 
     return summary
 
+
+def apply_project_updates(user_code: str, project_events: list[str]):
+    projects = get_user_projects(user_code)
+    now = datetime.now(timezone.utc).isoformat()
+
+    project_map = {p["name"]: p for p in projects}
+
+    for event in project_events:
+        try:
+            action, name = event.split(":", 1)
+            name = name.strip()
+        except ValueError:
+            continue
+
+        if action == "create":
+            if name not in project_map:
+                project_map[name] = {
+                    "name": name,
+                    "status": "active",
+                    "first_mentioned": now,
+                    "last_update": now,
+                }
+
+        elif action == "update":
+            if name in project_map:
+                project_map[name]["last_update"] = now
+            else:
+                project_map[name] = {
+                    "name": name,
+                    "status": "active",
+                    "first_mentioned": now,
+                    "last_update": now,
+                }
+
+        elif action == "done":
+            if name in project_map:
+                project_map[name]["status"] = "done"
+                project_map[name]["last_update"] = now
+
+    update_user_projects(user_code, list(project_map.values()))
 
 # ══════════════════════════════════════════════════
 #  COMPLETE MEMORY TO QDRANT — Conversation history + summaries + AUTOBIOGRAPHIE
@@ -920,22 +937,16 @@ Souvenirs :
 Retourne une seule phrase en français décrivant un fait stable sur l'utilisateur.
 """
 
-        resp = httpx.post(
-            f"{ANALYSIS_API_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {ANALYSIS_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": ANALYSIS_MODEL,
-                "messages": [{"role": "user", "content": summary_prompt}],
-                "temperature": 0.1,
-                "max_tokens": 120,
-            },
+        summary = call_llm(
+            [{"role": "user", "content": summary_prompt}],
+            model=ANALYSIS_MODEL,
+            api_url=ANALYSIS_API_URL,
+            api_key=ANALYSIS_API_KEY,
+            temperature=0.1,
+            max_tokens=120,
+            json_response=False,
             timeout=30.0,
         )
-        resp.raise_for_status()
-        summary = resp.json()["choices"][0]["message"]["content"]
 
         store_autobiographical_event(user_code, summary, 0.9)
 
@@ -973,7 +984,6 @@ def _curative_profile_cleanup(user_code: str):
 
     try:
         profile_str = "\n".join(f'- "{k}": {v}' for k, v in profile.items())
-        suffix = no_think_suffix(ANALYSIS_MODEL)
         prompt = (
             f"Voici le profil Redis d'un utilisateur ({len(profile)} clés) :\n"
             f"{profile_str}\n\n"
@@ -983,31 +993,19 @@ def _curative_profile_cleanup(user_code: str):
             f"2. Entrées obsolètes ou contredites par une autre clé plus récente\n\n"
             f"Réponds uniquement en JSON, rien d'autre : "
             f'{{\"keys_to_delete\": [\"clé1\", \"clé2\"]}} '
-            f"ou {{\"keys_to_delete\": []}} si le profil est propre.{suffix}"
+            f"ou {{\"keys_to_delete\": []}} si le profil est propre."
         )
 
-        resp = httpx.post(
-            f"{ANALYSIS_API_URL}/chat/completions",
-            headers={"Authorization": f"Bearer {ANALYSIS_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": ANALYSIS_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
-                "max_tokens": 120,
-            },
+        parsed = extract_llm_json(call_llm(
+            [{"role": "user", "content": prompt}],
+            model=ANALYSIS_MODEL,
+            api_url=ANALYSIS_API_URL,
+            api_key=ANALYSIS_API_KEY,
+            temperature=0.0,
+            max_tokens=120,
+            no_think=True,
             timeout=30.0,
-        )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"].strip()
-
-        if content.startswith("```"):
-            parts = content.split("```")
-            content = parts[1] if len(parts) > 1 else content
-            if content.startswith("json"):
-                content = content[4:]
-        content = content.strip()
-
-        parsed = json.loads(content)
+        ))
         # Only delete keys that actually exist in the profile (safety guard)
         keys_to_delete = [k for k in parsed.get("keys_to_delete", []) if k in profile]
 

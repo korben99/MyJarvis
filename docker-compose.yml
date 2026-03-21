@@ -64,7 +64,11 @@ services:
       - ./jarvis-core/briefing.py:/app/briefing.py
       - ./jarvis-core/self.py:/app/self.py
       - ./jarvis-core/trading.py:/app/trading.py
+      - ./jarvis-core/helpers.py:/app/helpers.py
+      - ./jarvis-core/trade_keys.py:/app/trade_keys.py
+      - ./jarvis-core/web_search.py:/app/web_search.py
       - ./jarvis-core/JarvisData:/app/data
+      - ./logs:/app/logs
       - ./TradeData:/app/trade_data
     environment:
       # ── Python logging (no buffering — logs appear in real-time) ───────────

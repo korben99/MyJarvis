@@ -66,7 +66,6 @@ import asyncio
 import base64
 import hashlib
 import json
-import logging
 import os
 import pickle
 import time
@@ -79,15 +78,12 @@ from urllib.parse import quote
 
 import httpx
 import pytz
-import redis as redis_lib
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from ddgs import DDGS
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from qdrant_client import QdrantClient
 
 # Local modules (memory system)
 from analyzer import analyze_exchange
@@ -96,6 +92,8 @@ from google_services import (
     fetch_gmail_messages,
     is_google_available,
 )
+from helpers import WEATHER_CODES, call_llm_async, extract_llm_json, fmt_event_time, get_logger, get_qdrant, get_redis, get_user_tz, setup_logging
+from web_search import INTERNET_ERROR, optimize_web_query, search_news, search_weather, search_web
 from llm_router import RouterResult, llm_route
 from briefing import (
     BriefingResult,
@@ -145,6 +143,7 @@ from config import (
     PRIMARY_API_URL,
     PRIMARY_MODEL,
     PRIMARY_TIMEOUT,
+    PROJECT_THRESHOLD,
     QDRANT_COLLECTION,
     QDRANT_MEMORY_COLLECTION,
     QDRANT_URL,
@@ -168,7 +167,6 @@ from config import (
     USER_CODES,
     USER_TRADING,
     USERS,
-    no_think_suffix,
     tokens_param,
 )
 from memory import (
@@ -188,7 +186,7 @@ from memory import (
     update_emotional_state,
     set_interest_weight,
     update_user_profile,
-    update_user_projects,
+    apply_project_updates,
 )
 
 HAS_MEMORY = True
@@ -331,18 +329,12 @@ INTENT_EXAMPLES_FR = {
     ],
 }
 
-logger = logging.getLogger("jarvis-api")
+logger = get_logger("jarvis-api")
 # ── Lazy-loaded components ──
-_qdrant_client = None
+
 HTTP_CLIENT = httpx.AsyncClient(timeout=30.0)
-REDIS_CLIENT = redis_lib.from_url(REDIS_URL, decode_responses=True)
-
-
-def get_qdrant():
-    global _qdrant_client
-    if _qdrant_client is None:
-        _qdrant_client = QdrantClient(url=QDRANT_URL)
-    return _qdrant_client
+REDIS_CLIENT = get_redis()
+QDRANT_CLIENT = get_qdrant()
 
 
 # ── System prompt (strings live in prompts.py — use get_prompt for live overrides) ──
@@ -412,7 +404,7 @@ def _load_intent_embeddings(embed_model) -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logging.basicConfig(level=logging.INFO)
+    setup_logging()
 
     logger.info(
         f"Jarvis API v7 starting — router: {ROUTER_MODEL}, reasoning: {REASONING_MODEL}, memory: {HAS_MEMORY}, analysis: {ENABLE_ANALYSIS and HAS_MEMORY}"
@@ -425,7 +417,6 @@ async def lifespan(app: FastAPI):
 
     if HAS_MEMORY:
         EMBED_MODEL = get_embed_model()
-        get_qdrant()
         INTENT_EMBEDDINGS.update(_load_intent_embeddings(EMBED_MODEL))
 
     # ── Schedulers (briefing + proto-self — independent features) ──
@@ -565,41 +556,6 @@ def trim_chunks(chunks, char_budget, text_key="text", max_item_chars=800):
     return selected
 
 
-def optimize_web_query(message: str) -> str:
-    """
-    Convert conversational question into search-engine query
-    """
-    msg = message.lower()
-
-    remove = [
-        "est ce que",
-        "peux tu",
-        "dis moi",
-        "explique",
-        "pourquoi",
-        "comment",
-        "tell me",
-        "what is",
-        "why",
-        "how",
-    ]
-
-    for r in remove:
-        msg = msg.replace(r, "")
-
-    msg = msg.strip()
-
-    # remove punctuation
-    msg = msg.replace("?", "").replace("!", "")
-
-    # shorten
-    words = msg.split()
-    if len(words) > 10:
-        words = words[:10]
-
-    return " ".join(words)
-
-
 # SEMANTIC ROUTING
 def semantic_route_query(message: str):
 
@@ -648,11 +604,10 @@ async def search_documents(query: str, top_k: int = RAG_TOP_K) -> list[dict]:
         if EMBED_MODEL is None:
             raise RuntimeError("Embedding model not initialized")
         vector = await loop.run_in_executor(None, lambda: EMBED_MODEL.encode(query, normalize_embeddings=True).tolist())
-        client = await loop.run_in_executor(None, get_qdrant)
         results = await loop.run_in_executor(
             None,
             lambda: (
-                client.query_points(
+                QDRANT_CLIENT.query_points(
                     collection_name=QDRANT_COLLECTION, query=vector, limit=top_k
                 ).points
             ),
@@ -691,321 +646,6 @@ async def search_documents(query: str, top_k: int = RAG_TOP_K) -> list[dict]:
         return chunks
     except Exception as e:
         logger.warning("RAG search failed: %s", e)
-        return []
-
-
-# =============================
-# ── Weather: Open-Meteo (free, no API key) ──
-# =============================
-
-
-_WEATHER_CODES = {
-    0: "Ciel dégagé",
-    1: "Principalement dégagé",
-    2: "Partiellement nuageux",
-    3: "Couvert",
-    45: "Brouillard",
-    48: "Brouillard givrant",
-    51: "Bruine légère",
-    53: "Bruine modérée",
-    55: "Bruine dense",
-    61: "Pluie faible",
-    63: "Pluie modérée",
-    65: "Pluie forte",
-    71: "Neige faible",
-    73: "Neige modérée",
-    75: "Neige forte",
-    80: "Averses faibles",
-    81: "Averses modérées",
-    82: "Averses violentes",
-    95: "Orage",
-    96: "Orage avec grêle",
-    99: "Orage violent avec grêle",
-}
-
-
-def _is_weather_query(query: str) -> bool:
-    keywords = [
-        "météo", "meteo", "weather", "forecast", "prévision",
-        "température", "temperature", "degrés", "degré",
-        "pluie", "rain", "neige", "snow", "grêle",
-        "vent", "wind", "rafale",
-        "soleil", "sun", "nuage", "nuageux", "nuageuse", "couvert",
-        "ensoleillé", "ensoleillée", "orage", "brouillard", "brume",
-        "humidité", "précipitation",
-    ]
-    q = query.lower()
-    return any(k in q for k in keywords)
-
-
-# DEPRECATED: location extraction is now handled by the LLM router (weather_location field).
-# Kept as fallback for the embedding router path only.
-def _extract_location(query: str) -> str:
-    stop = {
-        # weather terms
-        "météo", "meteo", "weather", "forecast", "prévision", "prévisions",
-        "température", "temperature", "temps", "climat",
-        "pluie", "vent", "neige", "soleil", "nuage", "nuageux", "nuageuse",
-        "orage", "brouillard", "brume", "humidité", "degrés", "degré",
-        "mini", "maxi", "minimum", "maximum", "min", "max",
-        # time words
-        "aujourd'hui", "today", "demain", "tomorrow", "semaine", "week",
-        "matin", "soir", "après-midi", "nuit", "maintenant", "now",
-        "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche",
-        # question words
-        "quelle", "quel", "quels", "quelles", "comment", "est-ce", "est",
-        "qu'est", "que", "quoi",
-        # filler / prepositions
-        "à", "a", "de", "du", "pour", "en", "sur", "le", "la", "les", "dans",
-        "il", "y", "va", "fait", "aura", "t", "avoir", "au", "aux",
-        # politeness / request words
-        "merci", "svp", "stp", "bonjour", "bonsoir", "s'il", "vous", "plaît",
-        "moi", "dis", "donne", "montre", "cherche", "dites",
-        "?", "!", ".",
-    }
-    # strip punctuation from each token, skip pure numbers (dept codes etc.)
-    words = []
-    for w in query.split():
-        clean = w.strip("?!.,;:")
-        if clean.lower() not in stop and not clean.isdigit():
-            words.append(clean)
-    return " ".join(words).strip()
-
-
-async def search_weather(query: str) -> list[dict]:
-    """Fetch real forecast from Open-Meteo (geocoding + forecast, no API key)."""
-    location = _extract_location(query)
-    if not location:
-        logger.warning("Weather: no location extracted from query, skipping")
-        return []
-    try:
-        c = HTTP_CLIENT
-        geo = await c.get(
-            "https://geocoding-api.open-meteo.com/v1/search",
-            params={"name": location, "count": 1, "language": "fr"},
-        )
-        geo.raise_for_status()
-        results = geo.json().get("results")
-        if not results:
-            logger.warning(f"Weather: location not found for '{location}'")
-            return []
-        place = results[0]
-        lat, lon = place["latitude"], place["longitude"]
-        name = place.get("name", location)
-        country = place.get("country", "")
-
-        wx = await c.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": lat,
-                "longitude": lon,
-                "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m",
-                "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max",
-                "timezone": "auto",
-                "forecast_days": 3,
-            },
-        )
-        wx.raise_for_status()
-        data = wx.json()
-
-        cur = data.get("current", {})
-        daily = data.get("daily", {})
-        condition = _WEATHER_CODES.get(cur.get("weather_code", -1), "")
-
-        now_body = (
-            f"Actuellement à {name} ({country}) : {cur.get('temperature_2m')}°C "
-            f"(ressenti {cur.get('apparent_temperature')}°C), {condition}. "
-            f"Vent {cur.get('wind_speed_10m')} km/h, Humidité {cur.get('relative_humidity_2m')}%."
-        )
-
-        days = []
-        for i, date in enumerate(daily.get("time", [])[:3]):
-            code = daily["weather_code"][i]
-            days.append(
-                f"{date}: {_WEATHER_CODES.get(code, '')} "
-                f"{daily['temperature_2m_min'][i]}–{daily['temperature_2m_max'][i]}°C, "
-                f"précip. {daily['precipitation_sum'][i]} mm, "
-                f"vent max {daily['wind_speed_10m_max'][i]} km/h"
-            )
-        forecast_body = " | ".join(days)
-
-        logger.info(f"Weather: fetched forecast for {name}")
-        return [
-            {
-                "title": f"Météo actuelle — {name}",
-                "body": now_body,
-                "url": f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}",
-            },
-            {
-                "title": f"Prévisions 3 jours — {name}",
-                "body": forecast_body,
-                "url": f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}",
-            },
-        ]
-    except Exception as e:
-        logger.error(f"Weather fetch error: {e}")
-        return []
-
-
-# =============================
-# ── News: DuckDuckGo news search ──
-# =============================
-
-
-def _is_news_query(query: str) -> bool:
-    keywords = [
-        "news",
-        "actualité",
-        "actualites",
-        "actu",
-        "dernière",
-        "dernieres",
-        "latest",
-        "recent",
-        "aujourd'hui",
-        "today",
-        "breaking",
-        "que se passe",
-        "what is happening",
-        "en ce moment",
-    ]
-    q = query.lower()
-    return any(k in q for k in keywords)
-
-
-# ══════════════════════════════════════════════════════════════════════════
-#  HELPERS
-# ══════════════════════════════════════════════════════════════════════════
-
-def _ddg_news_sync(query: str, max_results: int) -> list[dict]:
-    """Synchronous DDG news fetch — run via run_in_executor."""
-    results = []
-    with DDGS() as ddgs:
-        for r in ddgs.news(query, max_results=max_results):
-            body   = r.get("body", "")
-            date   = r.get("date", "")
-            source = r.get("source", "")
-            prefix = " | ".join(filter(None, [date, source]))
-            results.append({
-                "title": r.get("title", ""),
-                "body":  f"[{prefix}] {body}" if prefix else body,
-                "url":   r.get("url", ""),
-            })
-    return results
-
-
-def _ddg_text_sync(query: str, max_results: int) -> list[dict]:
-    """Synchronous DDG text fetch — run via run_in_executor."""
-    results = []
-    with DDGS() as ddgs:
-        for r in ddgs.text(query, max_results=max_results):
-            results.append({
-                "title": r.get("title", ""),
-                "body":  r.get("body", ""),
-                "url":   r.get("href", ""),
-            })
-    return results
-
-
-def _fmt_event_time(iso: str, user_tz: pytz.BaseTzInfo) -> str:
-    """Convert an ISO 8601 datetime string to a localised HH:MM display string."""
-    try:
-        dt = datetime.fromisoformat(iso)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(user_tz).strftime("%d/%m %H:%M")
-    except ValueError:
-        return iso  # all-day date string "YYYY-MM-DD" — return as-is
-
-
-# ══════════════════════════════════════════════════════════════════════════
-
-async def search_news(query: str, max_results: int = 5) -> list[dict]:
-    """Fetch news via DDG news search (returns real articles with date and source)."""
-    try:
-        loop = asyncio.get_running_loop()
-        results = await loop.run_in_executor(None, _ddg_news_sync, query, max_results)
-        logger.info(f"News: {len(results)} articles for: {query[:50]}")
-        return results
-    except Exception as e:
-        logger.error(f"News search error: {e}")
-        return []
-
-
-# =============================
-# ── WEB SEARCH
-# =============================
-
-
-def _strip_accents(s: str) -> str:
-    return "".join(
-        c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn"
-    )
-
-
-async def search_web(query: str, max_results: int = 3) -> list[dict]:
-    """Route weather to Open-Meteo, news to DDG news, everything else to DDG text."""
-    if _is_weather_query(query):
-        results = await search_weather(query)
-        if results:
-            return results
-
-    if _is_news_query(query):
-        results = await search_news(query, max_results=max_results)
-        if results:
-            return results
-
-    try:
-        loop = asyncio.get_running_loop()
-        results = await loop.run_in_executor(None, _ddg_text_sync, query, max_results)
-        logger.info(f"Web: {len(results)} results for: {query[:50]}")
-        # deduplicate by url
-        seen = set()
-        clean = []
-
-        for r in results:
-            if r["url"] in seen:
-                continue
-            seen.add(r["url"])
-            clean.append(r)
-
-        # fallback wikipedia if no result in DDKGO
-        if not clean:
-            wiki = await search_wikipedia(query)
-            if wiki:
-                return wiki
-
-        return clean
-
-    except Exception as e:
-        logger.error(f"Web search error: {e}")
-        return []
-
-
-# =============================
-# ── WIKIPEDIA SEARCH
-# =============================
-async def search_wikipedia(query: str):
-    url = f"https://fr.wikipedia.org/api/rest_v1/page/summary/{quote(query)}"
-
-    try:
-        c = HTTP_CLIENT
-        r = await c.get(url)
-
-        if r.status_code != 200:
-            return []
-
-        data = r.json()
-
-        return [
-            {
-                "title": data.get("title"),
-                "body": data.get("extract"),
-                "url": data.get("content_urls", {}).get("desktop", {}).get("page"),
-            }
-        ]
-    except (httpx.RequestError, ValueError) as e:
-        logger.warning(f"Wikipedia search failed: {e}")
         return []
 
 
@@ -1090,7 +730,7 @@ async def _resolve_image_part(part: dict, client: httpx.AsyncClient) -> dict:
     try:
         r = await client.get(url, timeout=15)
         r.raise_for_status()
-        mime = r.headers.get("content-type", "image/jpeg").split(";")[0]
+        mime = (r.headers.get("content-type") or "image/jpeg").split(";")[0]
         b64 = base64.b64encode(r.content).decode()
         logger.debug("Vision: re-encoded internal image (%s, %d bytes)", mime, len(r.content))
         return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
@@ -1161,18 +801,11 @@ async def post_analysis(
     if not HAS_MEMORY:
         return
     try:
-        analysis = await analyze_exchange(user_msg, assistant_msg)
+        existing_projects = get_user_projects(user_code)
+        analysis = await analyze_exchange(user_msg, assistant_msg, existing_projects)
         importance = analysis.get("importance", 0)
-        log_conversation(
-            user_code=user_code,
-            session_id=session_id,
-            user_msg=user_msg,
-            assistant_msg=assistant_msg,
-            mood=analysis.get("mood", "neutral"),
-            topics=analysis.get("topics", []),
-            importance=importance,
-            memory_summary=analysis.get("memory_summary"),
-        )
+        
+
 
         mood = analysis.get("mood", "neutral")
         mood_to_state = {
@@ -1186,28 +819,35 @@ async def post_analysis(
         if mood in mood_to_state:
             update_emotional_state(mood_to_state[mood])
 
+        # --- PROJECTS UPDATE ---
+        projects = analysis.get("projects", [])
+        if projects:
+            apply_project_updates(user_code, projects)
+
+        # --- USER PROFILE ---
         for fact in analysis.get("user_facts", []):
             if "key" in fact and "value" in fact:
                 update_user_profile(user_code, fact["key"], fact["value"] or None)
-
+        
+        # --- INTEREST WEIGHTS ---
         for iw in analysis.get("interest_weights") or []:
             if "term" in iw and "weight" in iw:
                 set_interest_weight(user_code, iw["term"], float(iw["weight"]))
+    
+        # --- EPISODIC MEMORY ---
+        log_conversation(
+            user_code=user_code,
+            session_id=session_id,
+            user_msg=user_msg,
+            assistant_msg=assistant_msg,
+            mood=analysis.get("mood", "neutral"),
+            topics=analysis.get("topics", []),
+            importance=importance,
+            memory_summary=analysis.get("memory_summary"),
+        )
 
-        projects = analysis.get("projects", [])
-        if projects:
-            existing = get_user_projects(user_code)
-            existing_names = [p["name"] if isinstance(p, dict) else p for p in existing]
-            for proj in projects:
-                if proj not in existing_names:
-                    existing.append(
-                        {
-                            "name": proj,
-                            "first_mentioned": datetime.now(timezone.utc).isoformat(),
-                        }
-                    )
-            update_user_projects(user_code, existing)
-
+        logger.info(f"[PROJECTS] events={projects}")
+        logger.info(f"[PROJECTS] state={get_user_projects(user_code)}")
 
         logger.info(
             "Analysis: mood=%s, topics=%s, facts=%d",
@@ -1226,16 +866,14 @@ async def status():
     rag_ok, point_count = False, 0
     memory_ok, memory_point_count = False, 0
     try:
-        client = get_qdrant()
-        info = client.get_collection(QDRANT_COLLECTION)
+        info = QDRANT_CLIENT.get_collection(QDRANT_COLLECTION)
         rag_ok = True
         point_count = info.points_count
     except Exception:
         pass
 
     try:
-        client = get_qdrant()
-        mem_info = client.get_collection(QDRANT_MEMORY_COLLECTION)
+        mem_info = QDRANT_CLIENT.get_collection(QDRANT_MEMORY_COLLECTION)
         memory_ok = True
         memory_point_count = mem_info.points_count
     except Exception:
@@ -1325,22 +963,12 @@ async def _build_google_queries_llm(
         return "", 7
 
     try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            resp = await client.post(
-                f"{PRIMARY_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
-                json={
-                    "model": PRIMARY_MODEL,
-                    "messages": [
-                        {"role": "user", "content": get_prompt("GOOGLE_QUERY_PROMPT").format(message=message) + no_think_suffix(PRIMARY_MODEL)}
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "max_tokens": 80,
-                    "temperature": 0,
-                },
-            )
-        result = resp.json()["choices"][0]["message"]["content"]
-        parsed = json.loads(result)
+        result = await call_llm_async(
+            [{"role": "user", "content": get_prompt("GOOGLE_QUERY_PROMPT").format(message=message)}],
+            model=PRIMARY_MODEL, api_url=PRIMARY_API_URL, api_key=PRIMARY_API_KEY,
+            temperature=0, max_tokens=80, json_response=True, no_think=True, timeout=8.0,
+        )
+        parsed = extract_llm_json(result)
         gmail_query = parsed.get("gmail_query") or ""
         calendar_days = int(parsed.get("calendar_days") or 7)
         logger.info("LLM query builder: gmail=%r calendar_days=%d", gmail_query, calendar_days)
@@ -1672,7 +1300,7 @@ async def chat(req: ChatRequest):
         asyncio.to_thread(search_memory, user_code, req.message, 5, _memory_scope) if HAS_MEMORY and use_memory else _empty(),
         # Web/weather search — weather intent takes priority and bypasses generic web search
         search_weather(_weather_query) if use_weather_auto else
-        search_web(optimize_web_query(req.message)) if (req.use_web or use_web_auto) else _empty(),
+        search_web(optimize_web_query(req.message), original_message=req.message) if (req.use_web or use_web_auto) else _empty(),
         # Gmail
         asyncio.to_thread(fetch_gmail_messages, gmail_query) if use_gmail else _empty(),
         # Calendar
@@ -1703,7 +1331,15 @@ async def chat(req: ChatRequest):
     context_parts = []
 
     # 1. WEB
-    if web_results:
+    if web_results == INTERNET_ERROR:
+        context_parts.append(
+            "=== ACCÈS INTERNET ===\n"
+            "La connexion internet est actuellement indisponible. "
+            "Informe l'utilisateur que tu ne peux pas effectuer la recherche demandée "
+            "et propose-lui de réessayer plus tard."
+        )
+        logger.warning("web: internet unavailable — injecting error context")
+    elif web_results:
         web_selected = trim_chunks(web_results, WEB_CHAR_BUDGET, text_key="body")
         if web_selected:
             context_parts.append("=== RÉSULTATS WEB ===")
@@ -1734,13 +1370,12 @@ async def chat(req: ChatRequest):
 
     # 4a. CALENDAR
     if calendar_results:
-        _user_tz = pytz.timezone(USERS.get(user_code, {}).get("timezone", "UTC"))
         context_parts.append("=== AGENDA ===")
         for evt in calendar_results:
             if evt.get("all_day"):
                 line = f"{evt['start']} — {evt['summary']} [journée entière]"
             else:
-                line = f"{_fmt_event_time(evt['start'], _user_tz)} — {evt['summary']}"
+                line = f"{fmt_event_time(evt['start'], user_code)} — {evt['summary']}"
             if evt.get("location"):
                 line += f" ({evt['location']})"
             context_parts.append(line)
@@ -1891,7 +1526,8 @@ async def chat(req: ChatRequest):
                     user_code, req.session_id, "assistant", full
                 )
                 ms = int((time.time() - start) * 1000)
-                yield f"data: {json.dumps({'done': True, 'model': use_model, 'duration_ms': ms, 'rag_sources': [{'source': c['source'], 'score': c['score']} for c in rag_chunks], 'web_sources': [{'title': w['title'], 'url': w['url']} for w in web_results]})}\n\n"
+                _safe_web = [] if web_results == INTERNET_ERROR else web_results
+                yield f"data: {json.dumps({'done': True, 'model': use_model, 'duration_ms': ms, 'rag_sources': [{'source': c['source'], 'score': c['score']} for c in rag_chunks], 'web_sources': [{'title': w['title'], 'url': w['url']} for w in _safe_web]})}\n\n"
                 if ENABLE_ANALYSIS and HAS_MEMORY:
                     asyncio.create_task(
                         post_analysis(req.session_id, user_code, req.message, full)
@@ -1938,7 +1574,8 @@ async def chat(req: ChatRequest):
                 {"source": c["source"], "score": c["score"]} for c in rag_chunks
             ],
             "web_sources": [
-                {"title": w["title"], "url": w["url"]} for w in web_results
+                {"title": w["title"], "url": w["url"]}
+                for w in web_results if w != INTERNET_ERROR[0]
             ],
         }
 
@@ -2128,21 +1765,14 @@ async def portfolio_analysis(user_code: str, authorization: str = Header(default
         raise HTTPException(404, "No portfolio data — import a CSV first")
 
     try:
-        async with httpx.AsyncClient(timeout=40) as client:
-            resp = await client.post(
-                f"{PRIMARY_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
-                json={
-                    "model": PRIMARY_MODEL,
-                    "messages": [
-                        {"role": "system", "content": "Tu es Jarvis, conseiller financier personnel. Analyse le portefeuille boursier de l'utilisateur de façon factuelle et constructive." + no_think_suffix(PRIMARY_MODEL)},
-                        {"role": "user",   "content": f"Analyse ce portefeuille et donne tes observations :\n\n{summary}"},
-                    ],
-                    "max_tokens": 600,
-                    "temperature": 0.4,
-                },
-            )
-        analysis = resp.json()["choices"][0]["message"]["content"]
+        analysis = await call_llm_async(
+            [
+                {"role": "system", "content": "Tu es Jarvis, conseiller financier personnel. Analyse le portefeuille boursier de l'utilisateur de façon factuelle et constructive."},
+                {"role": "user",   "content": f"Analyse ce portefeuille et donne tes observations :\n\n{summary}"},
+            ],
+            model=PRIMARY_MODEL, api_url=PRIMARY_API_URL, api_key=PRIMARY_API_KEY,
+            temperature=0.4, max_tokens=600, json_response=False, timeout=40.0,
+        )
         return {"user": USER_CODES[user_code], "analysis": analysis, "portfolio_snapshot": summary}
     except Exception as exc:
         raise HTTPException(500, f"Analysis failed: {exc}")

@@ -32,7 +32,6 @@ Action catalog (v1 — grows in future versions):
 
 import asyncio
 import json
-import logging
 import os
 import re
 import time
@@ -40,13 +39,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import httpx
-import redis as redis_lib
-from qdrant_client import QdrantClient
-
 import pytz
 
 from config import (
-    GOOGLE_CALENDAR_ID,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
@@ -56,18 +51,16 @@ from config import (
     REASONING_MODEL,
     REASONING_TIMEOUT,
     REFINE_PROMPT_THRESHOLD,
-    no_think_suffix,
-    tokens_param,
-    QDRANT_URL,
-    REDIS_URL,
     USER_CODES,
     USER_EMAILS,
     USERS,
 )
 from google_services import is_google_available, send_gmail_message
+from helpers import call_llm, call_llm_async, extract_llm_json, get_logger, get_qdrant, get_redis
 from memory import atomic_json_write, append_conversation_message, get_self_memory, save_self_memory, self_memory_lock, store_autobiographical_event
+from trade_keys import idx_key, pos_key
 
-logger = logging.getLogger("jarvis-self")
+logger = get_logger("jarvis-self")
 
 # ── Redis keys ────────────────────────────────────────────────────────────
 _REFLECTION_LOG_KEY    = "jarvis:self:reflection_log"
@@ -83,25 +76,6 @@ _PUSH_COOLDOWN_TTL     = 7200    # 2h
 
 
 # ── Redis / Qdrant singletons ─────────────────────────────────────────────
-
-_redis_client: redis_lib.Redis | None = None
-_qdrant_client: QdrantClient | None = None
-
-
-def _redis() -> redis_lib.Redis:
-    global _redis_client
-    if _redis_client is None:
-        _redis_client = redis_lib.from_url(REDIS_URL, decode_responses=True)
-    return _redis_client
-
-
-def _qdrant() -> QdrantClient:
-    global _qdrant_client
-    if _qdrant_client is None:
-        _qdrant_client = QdrantClient(url=QDRANT_URL, timeout=10)
-    return _qdrant_client
-
-
 
 def get_goals() -> list[dict]:
     return get_self_memory().get("goals", [])
@@ -141,7 +115,7 @@ def _update_self_fields(**fields) -> None:
 
 def log_reflection(entry: dict) -> None:
     """Append a reflection result to the Redis log (capped at _REFLECTION_LOG_MAX)."""
-    r = _redis()
+    r = get_redis()
     score = time.time()
     r.zadd(_REFLECTION_LOG_KEY, {json.dumps(entry, ensure_ascii=False): score})
     # Trim to most recent entries
@@ -152,7 +126,7 @@ def log_reflection(entry: dict) -> None:
 
 def get_reflection_log(n: int = 10) -> list[dict]:
     """Return the last n reflection entries, most recent first."""
-    r = _redis()
+    r = get_redis()
     raw = r.zrevrange(_REFLECTION_LOG_KEY, 0, n - 1)
     results = []
     for item in raw:
@@ -177,14 +151,14 @@ def _check_service_health() -> dict:
     health = {}
     # Redis
     try:
-        _redis().ping()
+        get_redis().ping()
         health["redis"] = "ok"
     except Exception:
         health["redis"] = "unreachable"
 
     # Qdrant
     try:
-        _qdrant().get_collections()
+        get_qdrant().get_collections()
         health["qdrant"] = "ok"
     except Exception:
         health["qdrant"] = "unreachable"
@@ -208,7 +182,7 @@ def _get_user_activity(hours: int = 24) -> dict:
     Count recent conversations per user by scanning their episodic Redis log.
     Returns {user_code: {name, conversations, topics}}.
     """
-    r = _redis()
+    r = get_redis()
     cutoff = time.time() - hours * 3600
     activity = {}
 
@@ -238,7 +212,7 @@ def _get_knowledge_gaps(n: int = 5) -> list[str]:
     cumulative occurrence count so the reflection LLM can decide when to
     trigger a prompt refinement.
     """
-    r = _redis()
+    r = get_redis()
     raw      = r.zrevrange(_KNOWLEDGE_GAPS_KEY, 0, n - 1)
     counts   = r.hgetall(_GAP_COUNTS_KEY)
     results  = []
@@ -332,22 +306,20 @@ async def _call_reflection_llm(context: dict) -> dict | None:
     )
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{PRIMARY_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
-                json={
-                    "model": PRIMARY_MODEL,
-                    "messages": [
-                        {"role": "system", "content": get_prompt("REFLECTION_SYSTEM") + no_think_suffix(PRIMARY_MODEL)},
-                        {"role": "user",   "content": prompt},
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "max_tokens": 300,
-                    "temperature": 0.7,
-                },
-            )
-        return json.loads(resp.json()["choices"][0]["message"]["content"])
+        content = await call_llm_async(
+            [
+                {"role": "system", "content": get_prompt("REFLECTION_SYSTEM")},
+                {"role": "user",   "content": prompt},
+            ],
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
+            temperature=0.7,
+            max_tokens=600,
+            json_response=True,
+            timeout=45.0,
+        )
+        return json.loads(content)
     except Exception as exc:
         logger.error("Reflection LLM call failed: %s", type(exc).__name__)
         return None
@@ -380,7 +352,7 @@ def _action_flag_knowledge_gap(params: dict) -> str:
     if not topic:
         return "flag_knowledge_gap: missing topic"
 
-    r = _redis()
+    r = get_redis()
     entry = json.dumps({"topic": topic, "context": context, "date": datetime.now(timezone.utc).isoformat()})
     r.zadd(_KNOWLEDGE_GAPS_KEY, {entry: time.time()})
     r.zremrangebyrank(_KNOWLEDGE_GAPS_KEY, 0, -51)   # keep last 50
@@ -409,7 +381,7 @@ def _action_send_notification(params: dict) -> str:
         return "send_notification: Google not configured"
 
     # One notification per user per day guard (uses user's local timezone)
-    r = _redis()
+    r = get_redis()
     user_tz_str = USERS.get(user_code, {}).get("timezone", "Europe/Paris")
     user_tz = pytz.timezone(user_tz_str)
     today = datetime.now(user_tz).strftime("%Y-%m-%d")
@@ -439,7 +411,7 @@ def _action_queue_push(params: dict) -> str:
     if not message:
         return "queue_push: empty message"
 
-    r = _redis()
+    r = get_redis()
 
     # Device must be registered
     if not r.exists(f"{_DEVICE_TOKEN_PREFIX}:{user_code}"):
@@ -564,22 +536,20 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
     )
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                f"{PRIMARY_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
-                json={
-                    "model": PRIMARY_MODEL,
-                    "messages": [
-                        {"role": "system", "content": get_prompt("NIGHTLY_SYSTEM") + no_think_suffix(PRIMARY_MODEL)},
-                        {"role": "user",   "content": prompt},
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "max_tokens": 600,
-                    "temperature": 0.3,
-                },
-            )
-        return json.loads(resp.json()["choices"][0]["message"]["content"])
+        content = await call_llm_async(
+            [
+                {"role": "system", "content": get_prompt("NIGHTLY_SYSTEM")},
+                {"role": "user",   "content": prompt},
+            ],
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
+            temperature=0.3,
+            max_tokens=600,
+            json_response=True,
+            timeout=60.0,
+        )
+        return json.loads(content)
     except Exception as exc:
         logger.error("Nightly review LLM call failed for %s: %s", user_code, type(exc).__name__)
         return None
@@ -600,7 +570,7 @@ async def run_nightly_interaction_review() -> None:
     Idempotent: Redis lock per user per date (TTL 25h).
     """
     logger.info("=== Nightly interaction review starting ===")
-    r = _redis()
+    r = get_redis()
     now = datetime.now(timezone.utc)
     yesterday = now - timedelta(days=1)
     review_date = yesterday.strftime("%Y-%m-%d")
@@ -643,7 +613,7 @@ async def run_nightly_interaction_review() -> None:
         # ── Jarvis self-improvement notes + diary + user relation → jarvis-self.json
         # Lock here: no await is held while the lock is active.
         summary      = review.get("daily_summary", "")
-        self_refls   = [r for r in review.get("self_reflections", []) if r]
+        self_refls   = [s for s in review.get("self_reflections", []) if s]
         rel_update   = review.get("user_relation_update", {})
         if self_refls or summary or rel_update:
             with self_memory_lock:
@@ -728,16 +698,11 @@ def _action_update_trade_threshold(params: dict) -> str:
     if th is None and tl is None:
         return "update_trade_threshold: at least one of threshold_high / threshold_low is required"
 
-    try:
-        from trading import _get_redis as _trade_redis, _pos_key, _idx_key
-    except ImportError as exc:
-        return f"update_trade_threshold: trading module unavailable ({exc})"
-
-    r = _trade_redis()
-    if isin not in r.smembers(_idx_key(user_code)):
+    r = get_redis()
+    if not r.sismember(idx_key(user_code), isin):
         return f"update_trade_threshold: ISIN {isin} not in portfolio for {user_code}"
 
-    key     = _pos_key(user_code, isin)
+    key     = pos_key(user_code, isin)
     mapping = {}
     parts   = []
 
@@ -759,6 +724,7 @@ def _action_update_trade_threshold(params: dict) -> str:
 
     r.hset(key, mapping=mapping)
     pos_name = r.hget(key, "name") or isin
+ 
     result   = f"threshold updated for {pos_name} ({isin}): {', '.join(parts)}"
     logger.info("Self action: %s", result)
     return result
@@ -918,7 +884,7 @@ def _action_refine_prompt(params: dict) -> str:
 
     # Hard threshold check — LLM instructions are advisory; enforce here too
     slug  = re.sub(r"\s+", "_", topic.lower())[:40]
-    count = int(_redis().hget(_GAP_COUNTS_KEY, slug) or 0)
+    count = int(get_redis().hget(_GAP_COUNTS_KEY, slug) or 0)
     if count < REFINE_PROMPT_THRESHOLD:
         return (
             f"refine_prompt: topic '{topic}' flagged {count}× "
@@ -950,23 +916,21 @@ def _action_refine_prompt(params: dict) -> str:
     )
 
     try:
-        resp = httpx.post(
-            f"{REASONING_API_URL}/chat/completions",
-            headers={"Authorization": f"Bearer {REASONING_API_KEY}"},
-            json={
-                "model": REASONING_MODEL,
-                "messages": [
-                    {"role": "system", "content": get_prompt("REFINE_PROMPT_SYSTEM")},
-                    {"role": "user",   "content": refine_prompt_text},
-                ],
-                "response_format": {"type": "json_object"},
-                **{tokens_param(REASONING_MODEL): 1500},
-                "temperature": 0.4,
-            },
+        content = call_llm(
+            [
+                {"role": "system", "content": get_prompt("REFINE_PROMPT_SYSTEM")},
+                {"role": "user",   "content": refine_prompt_text},
+            ],
+            model=REASONING_MODEL,
+            api_url=REASONING_API_URL,
+            api_key=REASONING_API_KEY,
+            temperature=0.4,
+            max_tokens=1500,
+            json_response=True,
+            no_think=False,
             timeout=REASONING_TIMEOUT,
         )
-        resp.raise_for_status()
-        result = json.loads(resp.json()["choices"][0]["message"]["content"])
+        result = extract_llm_json(content)
     except Exception as exc:
         logger.error("refine_prompt: LLM call failed: %s", exc)
         return f"refine_prompt: LLM call failed ({type(exc).__name__})"
@@ -1095,7 +1059,7 @@ def _get_active_projects(user_code: str) -> list[dict]:
 
 def _last_conversation_ts(user_code: str) -> float:
     """Return Unix timestamp of the most recent episodic conversation, or 0."""
-    r = _redis()
+    r = get_redis()
     entries = r.zrevrangebyscore(
         f"episodic:{user_code}:conversations", "+inf", "-inf",
         start=0, num=1, withscores=True,
@@ -1118,7 +1082,7 @@ async def generate_proactive_push(user_code: str) -> str:
       - Cooldown 2h between pushes per user (jarvis:push:cooldown:{user_code})
       - At least one of: recent conversation OR active project with silence > 48h
     """
-    r = _redis()
+    r = get_redis()
 
     # Guard: device registered?
     if not r.exists(f"{_DEVICE_TOKEN_PREFIX}:{user_code}"):
@@ -1197,20 +1161,18 @@ async def generate_proactive_push(user_code: str) -> str:
     )
 
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(
-                f"{PRIMARY_API_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
-                json={
-                    "model": PRIMARY_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "response_format": {"type": "json_object"},
-                    "max_tokens": 80,
-                    "temperature": 0.7,
-                },
-            )
-        result  = json.loads(resp.json()["choices"][0]["message"]["content"])
-        message = result.get("message")
+        content = await call_llm_async(
+            [{"role": "user", "content": prompt}],
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
+            temperature=0.7,
+            max_tokens=80,
+            json_response=True,
+            no_think=True,
+            timeout=20.0,
+        )
+        message = json.loads(content).get("message")
     except Exception as exc:
         logger.warning("generate_proactive_push: LLM call failed for %s: %s", user_code, type(exc).__name__)
         return "LLM call failed"

@@ -120,6 +120,7 @@ IMPORTANCE_THRESHOLD              = 0.35
 RECALL_MEMORY_SIMILARITY_THRESHOLD = 0.7
 AUTOBIO_IMPORTANCE_THRESHOLD      = 0.6
 NOVELTY_THRESHOLD                 = 0.15
+PROJECT_THRESHOLD                 = 0.6
 
 
 # ══════════════════════════════════════════════════
@@ -160,6 +161,9 @@ EMAIL_TO_CODE: dict[str, str] = {
 
 # code → city for weather
 USER_CITIES: dict[str, str] = {code: u.get("city", "Paris") for code, u in USERS.items()}
+
+# code → timezone name (IANA)
+USER_TIMEZONES: dict[str, str] = {code: u.get("timezone", "Europe/Paris") for code, u in USERS.items()}
 
 # codes with trading enabled
 USER_TRADING: list[str] = [code for code, u in USERS.items() if u.get("trading", False)]

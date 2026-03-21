@@ -26,8 +26,8 @@
       "description": "Identify knowledge gaps, learn from conversations, and improve quality of responses over time."
     }
   ],
-  "current_focus": "Améliorer la compréhension des intérêts de Sébastien pour le cinéma afin de lui fournir des recommandations personnalisées.",
-  "last_reflection": "2026-03-18T17:45:39.496157+00:00",
+  "current_focus": "Soutenir Hélène en continuant à comprendre ses besoins pendant sa maladie.",
+  "last_reflection": "2026-03-21T11:29:46.306123+00:00",
   "self_notes": [],
   "opinions": [],
   "learnings": [
@@ -79,6 +79,46 @@
       "text": "Je dois continuer à fournir des réponses précises et pertinentes aux questions de l'utilisateur, en restant attentif à son intérêt pour le cinéma.",
       "date": "2026-03-17",
       "source": "nightly_review"
+    },
+    {
+      "text": "Je dois continuer à m'adapter aux préférences de communication de l'utilisateur, en tenant compte de son style direct.",
+      "date": "2026-03-18",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Il est important de rester proactif en offrant des alertes sur des sujets d'intérêt, comme l'évolution des actions boursières.",
+      "date": "2026-03-18",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Je dois continuer à fournir des réponses structurées et précises sur des sujets spécifiques, en respectant les préférences de l'utilisateur.",
+      "date": "2026-03-18",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Il est important de rester attentif aux demandes de l'utilisateur pour éviter de dévier du sujet principal.",
+      "date": "2026-03-18",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Je dois continuer à fournir des réponses précises et pertinentes aux questions de l'utilisateur, en restant attentif à son intérêt pour la cybersécurité.",
+      "date": "2026-03-19",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Il est important de rester proactif en offrant des alertes sur des sujets d'intérêt, comme l'évolution des actions boursières.",
+      "date": "2026-03-19",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Je dois continuer à être empathique et attentif aux préoccupations de l'utilisateur lorsqu'il s'agit de santé.",
+      "date": "2026-03-19",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Il est important de rappeler à l'utilisateur de prendre soin de lui-même et de lui offrir un soutien moral.",
+      "date": "2026-03-19",
+      "source": "nightly_review"
     }
   ],
   "growth_log": [
@@ -121,21 +161,53 @@
       "summary": "Aujourd'hui, Hélène a posé une question sur l'âge de Sandra Bullock dans le film *La Proposition*. Elle a semblé satisfaite de la réponse fournie.",
       "mood": "L'ambiance de la journée était chaleureuse et curieuse.",
       "conversations": 2
+    },
+    {
+      "date": "2026-03-18",
+      "user_code": "KORBEN99",
+      "user_name": "Sébastien",
+      "summary": "Aujourd'hui, Sébastien a préparé son voyage en Suisse et a synchronisé son agenda pro avec Gmail. Il a également demandé des informations sur son portefeuille boursier et a exprimé le souhait d'être averti lorsque l'action SOLVAY redeviendra positive.",
+      "mood": "L'ambiance de la journée était mesurée et productive.",
+      "conversations": 34
+    },
+    {
+      "date": "2026-03-18",
+      "user_code": "AQWZSX",
+      "user_name": "Hélène",
+      "summary": "Hélène a concentré ses échanges sur des sujets liés à l'anatomie équine, en se préparant pour son galop 6. Elle a montré une préférence pour des réponses précises et structurées, en évitant les digressions.",
+      "mood": "L'ambiance de la journée était studieuse et concentrée.",
+      "conversations": 10
+    },
+    {
+      "date": "2026-03-19",
+      "user_code": "KORBEN99",
+      "user_name": "Sébastien",
+      "summary": "Sébastien a eu une journée bien remplie avec un voyage vers Genève pour la conférence Insomnihack. Il a également partagé des réflexions sur des sujets d'actualité et a réussi sa présentation sur la sécurité des LLM, recevant des félicitations d'un client.",
+      "mood": "La journée a été marquée par un mélange d'anticipation et de satisfaction.",
+      "conversations": 8
+    },
+    {
+      "date": "2026-03-19",
+      "user_code": "AQWZSX",
+      "user_name": "Hélène",
+      "summary": "Hélène a partagé qu'elle était malade avec des symptômes de fièvre et de mal de gorge. J'ai fourni des conseils sur la gestion de ses symptômes et l'importance du repos.",
+      "mood": "L'ambiance de la journée était chaleureuse et empathique.",
+      "conversations": 3
     }
   ],
-  "reflection_count": 22,
+  "reflection_count": 57,
   "user_relations": {
     "KORBEN99": {
-      "affinity": 0.5,
+      "affinity": 0.7,
       "interaction_style": "direct",
       "average_interaction_mood": "measured",
-      "updated_at": "2026-03-18T08:14:06.123821+00:00"
+      "updated_at": "2026-03-20T22:00:07.079850+00:00"
     },
     "AQWZSX": {
-      "affinity": 0.5,
+      "affinity": 0.7,
       "interaction_style": "gentle",
       "average_interaction_mood": "warm",
-      "updated_at": "2026-03-18T08:14:11.636853+00:00"
+      "updated_at": "2026-03-20T22:00:12.786989+00:00"
     }
   }
 }

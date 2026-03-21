@@ -21,13 +21,11 @@ import email.mime.multipart
 import email.mime.text
 import hashlib
 import json
-import logging
 import threading
 from datetime import date as date_type
 from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 
-import redis as redis_lib
 from google.auth.exceptions import GoogleAuthError, TransportError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -42,10 +40,10 @@ from config import (
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
     GOOGLE_REFRESH_TOKEN,
-    REDIS_URL,
 )
+from helpers import get_logger, get_redis
 
-logger = logging.getLogger("jarvis-google")
+logger = get_logger("jarvis-google")
 
 # ── OAuth scopes ──
 _SCOPES = [
@@ -70,7 +68,6 @@ _gmail_service = None
 _calendar_service = None
 _creds_lock = threading.Lock()
 _service_lock = threading.Lock()
-_redis = None
 
 
 # ══════════════════════════════════════════════════
@@ -149,16 +146,9 @@ def _get_calendar_service():
 #  REDIS CACHE
 # ══════════════════════════════════════════════════
 
-def _get_redis():
-    global _redis
-    if _redis is None:
-        _redis = redis_lib.from_url(REDIS_URL, decode_responses=True)
-    return _redis
-
-
 def _cache_get(key: str):
     try:
-        data = _get_redis().get(key)
+        data = get_redis().get(key)
         return json.loads(data) if data else None
     except Exception:
         return None
@@ -166,7 +156,7 @@ def _cache_get(key: str):
 
 def _cache_set(key: str, data, ttl: int):
     try:
-        _get_redis().setex(key, ttl, json.dumps(data, ensure_ascii=False))
+        get_redis().setex(key, ttl, json.dumps(data, ensure_ascii=False))
     except Exception:
         pass
 
@@ -316,19 +306,22 @@ def fetch_gmail_messages(query: str, max_results: int = _GMAIL_MAX_RESULTS) -> l
 #  CALENDAR
 # ══════════════════════════════════════════════════
 
-def fetch_calendar_events(days: int = 7, date: date_type | None = None) -> list[dict]:
+def fetch_calendar_events(days: int = 7, date: date_type | None = None, tz_name: str | None = None) -> list[dict]:
     """
     Fetch calendar events across all calendars.
 
-    date=None  → from now to now+days (rolling window, default)
-    date=<date>→ full day midnight-to-midnight in BRIEFING_TIMEZONE (used by briefing)
+    date=None       → from now to now+days (rolling window, default)
+    date=<date>     → full day midnight-to-midnight in tz_name (used by briefing)
+    tz_name=None    → falls back to BRIEFING_TIMEZONE
     Results cached in Redis for _CALENDAR_CACHE_TTL seconds.
     """
     if not is_google_available():
         return []
 
+    effective_tz = tz_name or BRIEFING_TIMEZONE
+
     if date is not None:
-        cache_key = _cache_key("calendar_today", date.strftime("%Y-%m-%d"))
+        cache_key = _cache_key("calendar_today", date.strftime("%Y-%m-%d"), effective_tz)
     else:
         days = max(1, min(days, 90))
         cache_key = _cache_key("calendar", str(days))
@@ -342,7 +335,7 @@ def fetch_calendar_events(days: int = 7, date: date_type | None = None) -> list[
         service = _get_calendar_service()
 
         if date is not None:
-            tz = pytz.timezone(BRIEFING_TIMEZONE)
+            tz = pytz.timezone(effective_tz)
             start = datetime(date.year, date.month, date.day, tzinfo=tz)
             time_min = start.isoformat()
             time_max = (start + timedelta(days=1)).isoformat()

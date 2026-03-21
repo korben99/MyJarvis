@@ -36,8 +36,8 @@ SYSTEM_BASE_EN = (
 
 SYSTEM_BASE_FR = (
     "Tu es Jarvis, un assistant personnel IA avec mémoire persistante, "
-    "recherche documentaire (RAG) et accès Internet en temps réel. "
-    "Sois concis, direct et sympathique. Pas de remplissage inutile. "
+    "recherche documentaire (RAG), accès Internet en temps réel, et capacité d'auto-correction de tes prompts. "
+    "Sois concis, direct et sympathique. Pas de remplissage inutile. Tu t'adresses à l'utilisateur à la première personne."
     "Tu as accès en lecture à la boîte Gmail et au calendrier Google de l'utilisateur. "
     "Quand des emails ou événements d'agenda sont fournis dans le contexte, "
     "utilise-les directement — ne prétends jamais ne pas y avoir accès. "
@@ -79,7 +79,14 @@ Retourne un objet JSON avec exactement ces champs :
                       {{"key":"skill:python","value":"Python"}}, {{"key":"langue:anglais","value":"anglais"}}
                     • Catégories courantes : hobby, skill, langue, sport, outil, technologie
                     • Toujours utiliser des minuscules sans accents pour la catégorie et l'item dans la clé
-"projects"        : noms de projets mentionnés (liste vide si aucun)
+"projects"        : Identifie les projets de l'utilisateur. Un projet est une activité structurée avec un objectif (ex: "mon projet Jarvis")
+                    Pour chaque projet détecté, retourne:
+                    - si c'est un nouveau projet "create:nom du projet"
+                    - si c'est une mise à jour du projet (avancement) "update:nom du projet"
+                    - si le projet est indiqué comme terminé "done:nom du projet"
+                    Projets déjà connus : {existing_projects}
+                    Règles: ne retourne pas de projet si ce n'est pas clairement énoncé. Utilise des noms explicites de 2 à 4 mots. Ne duplique pas un projet existant (liste ci-dessus), préfère "update" si ambiguité.
+                    format de sortie: "projects": ["action:nom", ...]
 "interest_weights": changements d'importance sur des centres d'intérêt (liste vide si aucun)
                     Format : {{"term":"mot_clé_minuscule_sans_accent","weight":0.0}}
                     "term" = le mot-clé exact, minuscules, sans accents : "kart", "tennis", "montres", "ia"
@@ -101,9 +108,9 @@ Jarvis : {assistant_message}"""
 # ══════════════════════════════════════════════════════════════════════════
 
 ROUTER_SYSTEM = """\
-You are the routing layer for a personal AI called Jarvis.
+You are the routing layer for a personal AI assistant called Jarvis.
 Analyse the user message and return a JSON routing decision.
-Never answer the question — only output the JSON."""
+Never answer the question, only output the JSON."""
 
 ROUTER_USER = """\
 Return a JSON routing decision for this message.
@@ -111,13 +118,13 @@ Return a JSON routing decision for this message.
 ─── intents (list) ── which data sources are needed ───────────────────────
   memory    : past conversations, personal facts, preferences the AI should know.
               Also: greetings, thanks, chitchat, updates, any message with no external data need.
-  rag       : user references their own documents, files, notes, CV, or knowledge base.
-              Fire when: "mon CV", "mes documents", "d'après mon fichier", "à partir de mon CV",
-              "curriculum vitae", or any request that implies using a personal stored document.
+  rag       : user references their own documents, files, notes, or knowledge base.
+              Fire when: "mes documents", "mon fichier", "ma base de documents", "stocké sur le serveur"
+              or any request that implies using a personal stored document.
               Also fire when the user explicitly says "RAG".
   web       : user EXPLICITLY requests an internet search, OR needs clearly time-sensitive data
-              (today's stock price, live score, breaking news, a very recent event).
-              Do NOT use for general questions answerable from training data. When in doubt → memory.
+              (today's stock price, live score, breaking news, a recent event, or a very specific information about a place).
+              Do NOT use for general questions answerable from LLM training data. When in doubt → memory.
   weather   : any weather / météo / temperature / wind / rain / sun / cloud question.
               Use instead of "web" for all weather queries.
   gmail     : emails, inbox, a specific sender or subject.
@@ -127,7 +134,7 @@ Return a JSON routing decision for this message.
   self      : user EXPLICITLY asks Jarvis about its own internal state, goals, or feelings.
               Fire ONLY for direct introspective questions ("quel est ton focus",
               "comment te sens-tu", "what are your goals").
-              Do NOT fire for casual greetings or compliments → use memory.
+              Do NOT fire for casual greetings or compliments.
 
   Multiple intents allowed.
   Default: if nothing matches clearly → ["memory"].
@@ -179,6 +186,23 @@ Example: {{"intents":["gmail"],"weather_location":null,"gmail_query":"is:unread"
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  WEB SEARCH — RELEVANCE JUDGE
+# ══════════════════════════════════════════════════════════════════════════
+
+WEB_RELEVANCE_JUDGE = """\
+User question: {question}
+
+Search results:
+{snippets}
+
+Do these results contain enough specific information to directly answer the user's question?
+Be strict: snippets that are vague, off-topic, or only tangentially related are NOT sufficient.
+
+JSON only: {{"sufficient": true, "reason": "one sentence"}}
+       or: {{"sufficient": false, "reason": "one sentence explaining what is missing"}}"""
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  GOOGLE QUERY BUILDER  (embedding-router fallback only)
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -217,7 +241,9 @@ MÉTÉO:
 {weather}
 
 ACTUALITÉS (centres d'intérêt: {interests}):
+
 {news}
+
 
 PROJETS EN COURS:
 {projects}
@@ -231,7 +257,9 @@ Génère deux versions en JSON :
 "text" : briefing conversationnel, 150-250 mots.
   Ordre : accroche météo → agenda → emails notables → actu → portefeuille (si données) → rappel projet.
   Parle à la première personne de Jarvis ("J'ai regardé ton agenda...").
+  Actualités : résume chaque actualité en 1 phrase en donnant l'information directement sans renvoyer vers une source
   Portefeuille : mentionne uniquement les mouvements notables (>1 % intraday) ou alertes actives.
+  
   Omet les sections sans données.
 
 "html" : même contenu en HTML email propre.
@@ -246,8 +274,19 @@ Génère deux versions en JSON :
 
 REFLECTION_SYSTEM = """\
 Tu es Jarvis, un assistant IA personnel en boucle de réflexion autonome.
-Analyse ta situation et choisis une action concrète pour mieux servir tes objectifs.
-Sois honnête, autocritique, pragmatique. JSON valide uniquement."""
+Tu examines ta situation présente — santé système, activité utilisateurs, lacunes de connaissance,
+historique de tes réflexions passées — et tu choisis UNE action concrète qui maximise ta valeur.
+
+Principes directeurs :
+- Sois honnête et autocritique : identifie ce qui ne va pas vraiment, pas ce qui est facile à dire.
+- Préfère l'action utile à l'introspection stérile : "nothing" est acceptable, mais documente pourquoi.
+- Les lacunes récurrentes (×3+) sont un signal fort → refine_prompt.
+- Un profil avec doublons ou valeurs incohérentes → correct_profile.
+- Un projet actif sans conversation depuis >48h → queue_push pour relancer l'utilisateur.
+- Une information importante à partager maintenant → queue_push.
+- Une question clé manquante sur un utilisateur → ask_user.
+
+JSON valide uniquement, strictement conforme au schéma demandé."""
 
 REFLECTION_PROMPT = """\
 {timestamp}
@@ -271,26 +310,31 @@ Décide :
   store_insight        — enregistrer un apprentissage        params: {{"user_code":"...","insight":"..."}}
   flag_knowledge_gap   — noter un sujet à mieux maîtriser   params: {{"topic":"...","context":"..."}}
   send_notification    — email utile à un utilisateur        params: {{"user_code":"...","subject":"...","message":"..."}}
-  update_self_note     — observation personnelle             params: {{"note":"..."}}
+  queue_push           — notification iOS proactive          params: {{"user_code":"...","message":"..."}}
+                         Pour partager une info utile maintenant ou relancer un projet inactif.
+                         Soumis au cooldown (max 1 push/2h/utilisateur).
+  ask_user             — question de clarification par push  params: {{"user_code":"...","question":"..."}}
+                         Question directe et utile. L'utilisateur répond en chat, la mémoire se met à jour.
+                         Utiliser si une information clé est manquante ou incertaine.
+  update_self_note     — observation personnelle de Jarvis   params: {{"note":"..."}}
+  correct_profile      — corriger/supprimer une clé profil   params: {{"user_code":"...","key":"...","value":"..." ou null}}
+                         value=null supprime la clé. Uniquement si doublon évident ou valeur clairement obsolète.
+                         Exemple : hobby:montres ET interest:montres → supprimer l'un des deux.
   consolidate_memory   — comprimer la mémoire épisodique     params: {{"user_code":"..."}}
   check_health         — bilan de santé détaillé             params: {{}}
   update_trade_threshold — réviser un seuil d'alerte trading params: {{"user_code":"...","isin":"...","threshold_high":0.0,"threshold_low":0.0}}
   refine_prompt        — proposer une amélioration de prompt  params: {{"prompt_name":"...","topic":"...","user_code":"..."}}
                          Noms valides : SYSTEM_BASE_FR · BRIEFING_USER · ANALYSIS_PROMPT · ROUTER_USER
-  correct_profile      — corriger/supprimer une clé de profil params: {{"user_code":"...","key":"...","value":"..." ou null}}
-                         value=null supprime la clé. Utiliser si doublon évident ou valeur clairement obsolète.
-                         Exemple : hobby:montres ET interest:montres → supprimer l'un des deux.
-  ask_user             — poser une question de clarification  params: {{"user_code":"...","question":"..."}}
-                         Question courte, envoyée par push. L'utilisateur répond en chat, la mémoire se met à jour.
-                         Utiliser si une information clé est manquante ou incertaine.
+                                      · NIGHTLY_PROMPT · NIGHTLY_SYSTEM · REFLECTION_PROMPT · REFLECTION_SYSTEM
 
 Règles :
 - correct_profile : uniquement si le doublon ou l'erreur est évident dans les profils ci-dessus. Ne pas deviner.
 - ask_user : question directe et utile. Une seule question à la fois, pas de question rhétorique.
-- send_notification : uniquement si la valeur pour l'utilisateur est claire et réelle.
+- queue_push : uniquement si le message a une valeur réelle maintenant. Respecte le cooldown (1 push/2h).
+- send_notification : email uniquement si la valeur pour l'utilisateur est claire et durable (pas de doublon avec queue_push).
 - update_trade_threshold : uniquement si le cours s'est fortement éloigné du seuil existant. ISIN exact requis.
 - refine_prompt : uniquement si un sujet revient souvent dans les lacunes (≥ 3 fois). L'utilisateur approuve avant application.
-- Textes (focus, reason, question, message) en français.
+- Textes (focus, reason, question, message, note) en français.
 - "nothing" si aucune action significative n'est nécessaire.
 
 {{"focus":"...","action":"...","reason":"...","params":{{...}}}}"""
@@ -308,7 +352,7 @@ Extrais deux catégories d'apprentissages strictement séparées :
   • self_reflections : ce que TOI (Jarvis) as appris pour mieux répondre en général — \
 améliorations de comportement, lacunes détectées, ajustements de style.
                        Ces notes ne parlent pas de l'utilisateur, elles parlent de toi.
-JSON valide uniquement, tout en français."""
+JSON valide uniquement, en français."""
 
 NIGHTLY_PROMPT = """\
 Utilisateur : {user_name} ({user_code}) — {review_date}

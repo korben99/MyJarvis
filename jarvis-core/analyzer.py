@@ -11,10 +11,10 @@ After each exchange, extracts:
 Uses the LLM to analyze — costs ~$0.001 per analysis.
 
 Episodic Salience Score (ESS)
-Le score d’importance devient la somme de plusieurs signaux :
+Le score d'importance devient la somme de plusieurs signaux :
 
 Personal relevance
-informations sur l’utilisateur (facts, projets)
+informations sur l'utilisateur (facts, projets)
 
 Emotional intensity
 émotions positives ou négatives fortes
@@ -33,118 +33,100 @@ message long / détaillé
 """
 
 import json
-import logging
-
-import httpx
 
 from config import (
     ANALYSIS_API_KEY,
     ANALYSIS_API_URL,
     ANALYSIS_MODEL,
     IMPORTANCE_THRESHOLD,
-    no_think_suffix,
 )
-
-logger = logging.getLogger("jarvis-analyzer")
-
+from helpers import call_llm_async, extract_llm_json, get_logger
 from prompts import get_prompt
 
+logger = get_logger("jarvis-analyzer")
 
-async def analyze_exchange(user_msg: str, assistant_msg: str) -> dict:
+
+async def analyze_exchange(user_msg: str, assistant_msg: str, existing_projects: list = None) -> dict:
     """Analyze a conversation exchange using the LLM."""
     try:
+        projects_context = (
+            ", ".join(p["name"] for p in existing_projects if isinstance(p, dict) and p.get("name") and p.get("status") != "done")
+            if existing_projects else "aucun"
+        )
         prompt = get_prompt("ANALYSIS_PROMPT").format(
             user_message=user_msg[:1000],
             assistant_message=assistant_msg[:1000],
+            existing_projects=projects_context,
         )
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{ANALYSIS_API_URL}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {ANALYSIS_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": ANALYSIS_MODEL,
-                    "messages": [{"role": "user", "content": prompt + no_think_suffix(ANALYSIS_MODEL)}],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0.1,
-                    "max_tokens": 500,
-                },
-            )
-            data = resp.json()
+        content = await call_llm_async(
+            [{"role": "user", "content": prompt}],
+            model=ANALYSIS_MODEL,
+            api_url=ANALYSIS_API_URL,
+            api_key=ANALYSIS_API_KEY,
+            temperature=0.1,
+            max_tokens=500,
+            json_response=True,
+            no_think=True,
+            timeout=30.0,
+        )
 
-            if "choices" not in data:
-                logger.error(f"Analyzer invalid response: {data}")
-                raise ValueError("Invalid analyzer response")
-            content = data["choices"][0]["message"]["content"]
+        try:
+            result = extract_llm_json(content)
+        except json.JSONDecodeError as exc:
+            logger.error("Analyzer JSON parse error: %s", exc.doc[:200])
+            raise
 
-            # Parse JSON (strip markdown code fences if present)
-            content = content.strip()
-            if "```" in content:
-                # Extract content between first and last ``` markers
-                inner = content.split("```")[1]
-                # Strip optional language identifier on first line (e.g. "json\n")
-                first_newline = inner.find("\n")
-                if first_newline != -1 and not inner[:first_newline].strip().startswith("{"):
-                    inner = inner[first_newline:].strip()
-                content = inner.strip()
+        # Episodic Salience Score (ESS) — signals combined into [0, 1]
+        # IMPORTANCE_THRESHOLD = 0.35 → stored as episodic vector
+        # AUTOBIO_IMPORTANCE_THRESHOLD = 0.60 → stored as autobiographical
+        importance = 0.0
 
-            try:
-                result = json.loads(content)
-            except json.JSONDecodeError:
-                logger.error(f"Analyzer JSON parse error: {content[:200]}")
-                raise
+        # LLM's own judgment is the primary signal: 0.4 alone clears
+        # IMPORTANCE_THRESHOLD so any exchange the LLM deems worth
+        # remembering is captured, even with no other signals.
+        # Only count the bonus when the LLM provided an actual summary
+        # sentence — a bare boolean true gives no usable memory_summary.
+        remember_text = result.get("should_remember")
 
-            # Episodic Salience Score (ESS) — signals combined into [0, 1]
-            # IMPORTANCE_THRESHOLD = 0.35 → stored as episodic vector
-            # AUTOBIO_IMPORTANCE_THRESHOLD = 0.60 → stored as autobiographical
-            importance = 0.0
+        if isinstance(remember_text, str) and remember_text.strip():
+            importance += 0.40
 
-            # LLM's own judgment is the primary signal: 0.4 alone clears
-            # IMPORTANCE_THRESHOLD so any exchange the LLM deems worth
-            # remembering is captured, even with no other signals.
-            # Only count the bonus when the LLM provided an actual summary
-            # sentence — a bare boolean true gives no usable memory_summary.
-            if isinstance(result.get("should_remember"), str) and result["should_remember"].strip():
-                importance += 0.40
+        # Personal facts revealed by the user
+        importance += min(len(result.get("user_facts", [])), 3) * 0.20
 
-            # Personal facts revealed by the user
-            importance += min(len(result.get("user_facts", [])), 3) * 0.20
+        # Projects / goal context
+        importance += min(len(result.get("projects", [])), 2) * 0.15
 
-            # Projects / goal context
-            importance += min(len(result.get("projects", [])), 2) * 0.15
+        # Emotional intensity (mild boost — avoid over-storing rants)
+        mood = result.get("mood", "neutral")
+        if mood in ["happy", "curious", "focused"]:
+            importance += 0.10
+        elif mood in ["stressed", "frustrated"]:
+            importance += 0.15
 
-            # Emotional intensity (mild boost — avoid over-storing rants)
-            mood = result.get("mood", "neutral")
-            if mood in ["happy", "curious", "focused"]:
-                importance += 0.10
-            elif mood in ["stressed", "frustrated"]:
-                importance += 0.15
+        # Message depth (minor signal — long messages often carry more info)
+        if len(user_msg) > 80:
+            importance += 0.05
 
-            # Message depth (minor signal — long messages often carry more info)
-            if len(user_msg) > 80:
-                importance += 0.05
+        # Clamp score
+        importance = min(importance, 1.0)
+        result["importance"] = round(importance, 3)
 
-            # Clamp score
-            importance = min(importance, 1.0)
-            result["importance"] = round(importance, 3)
+        # Convert "should_remember" sentence into boolean
+        remember_text = result.get("should_remember")
 
-            # Convert "should_remember" sentence into boolean
-            remember_text = result.get("should_remember")
+        if remember_text and isinstance(remember_text, str):
+            result["memory_summary"] = remember_text
+            result["should_remember"] = result["importance"] > IMPORTANCE_THRESHOLD
+        else:
+            result["memory_summary"] = None
+            result["should_remember"] = False
 
-            if remember_text and isinstance(remember_text, str):
-                result["memory_summary"] = remember_text
-                result["should_remember"] = result["importance"] > IMPORTANCE_THRESHOLD
-            else:
-                result["memory_summary"] = None
-                result["should_remember"] = False
-
-            return result
+        return result
 
     except Exception as e:
-        logger.error(f"Analysis error: {e}")
+        logger.error("Analysis error: %s", e)
         return {
             "topics": [],
             "mood": "neutral",
