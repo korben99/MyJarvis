@@ -140,6 +140,20 @@ def today_user(user_code: str) -> date:
     return now_user(user_code).date()
 
 
+def build_iso_dt(date_str: str, time_str: str, tz_name: str) -> str:
+    """
+    Build an ISO 8601 datetime string with timezone offset.
+    date_str: "YYYY-MM-DD", time_str: "HH:MM", tz_name: e.g. "Europe/Paris"
+    Returns e.g. "2026-03-25T14:00:00+01:00"
+    """
+    tz = pytz.timezone(tz_name)
+    naive = datetime(
+        int(date_str[:4]), int(date_str[5:7]), int(date_str[8:10]),
+        int(time_str[:2]), int(time_str[3:5]),
+    )
+    return tz.localize(naive).isoformat()
+
+
 def fmt_event_time(iso: str, user_code: str, fmt: str = "%d/%m %H:%M") -> str:
     """
     Convert an ISO 8601 datetime string (with or without UTC offset) to the

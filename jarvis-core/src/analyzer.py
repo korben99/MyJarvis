@@ -46,17 +46,19 @@ from prompts import get_prompt
 logger = get_logger("jarvis-analyzer")
 
 
-async def analyze_exchange(user_msg: str, assistant_msg: str, existing_projects: list = None) -> dict:
+async def analyze_exchange(user_msg: str, assistant_msg: str, existing_projects: list = None, existing_profile_keys: list = None) -> dict:
     """Analyze a conversation exchange using the LLM."""
     try:
         projects_context = (
             ", ".join(p["name"] for p in existing_projects if isinstance(p, dict) and p.get("name") and p.get("status") != "done")
             if existing_projects else "aucun"
         )
+        profile_keys_str = ", ".join(existing_profile_keys) if existing_profile_keys else "aucune"
         prompt = get_prompt("ANALYSIS_PROMPT").format(
             user_message=user_msg[:1000],
             assistant_message=assistant_msg[:1000],
             existing_projects=projects_context,
+            existing_profile_keys=profile_keys_str,
         )
 
         content = await call_llm_async(

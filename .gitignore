@@ -13,4 +13,4 @@ TradeData/
 JarvisConfig
 jarvis-core/reflections/
 jarvis-core/JarvisData/model_cache/
-
+*.pyc

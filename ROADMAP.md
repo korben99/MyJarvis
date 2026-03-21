@@ -38,14 +38,20 @@
 - [x] Migration manuelle des anciens profils plats
 
 ### Préventif — normalisation à l'écriture
-- [x] `_normalize_profile_key()` — router LLM détecte les doublons sémantiques
-- [x] Exemples : `hobby:kart` ≠ `hobby:tennis`, `hobby:kart` == `loisir:kart`
-- [x] Prompt analyser mis à jour (règles de nommage, `interest_weights` explicites)
+- [x] `_normalize_profile_key()` — pipeline 3 étapes (alias canonique O(1) → LLM par famille namespace)
+- [x] `_SCALAR_CANONICAL` : `ville→location`, `entreprise→current_employer`… sans appel LLM
+- [x] `_NS_FAMILY` : comparaison uniquement dans la même famille (`hobby/interest/loisir`)
+- [x] Clés existantes injectées dans `ANALYSIS_PROMPT` — le LLM réutilise les noms exacts
+- [x] Règle explicite `hobby:X` interdit de coexister avec `interest:X` pour le même sujet
 
 ### Curatif — nettoyage nightly
 - [x] `_curative_profile_cleanup()` — LLM identifie les clés à supprimer
 - [x] Sortie `{"keys_to_delete": [...]}` — exécution HDEL sécurisée
 - [x] Intégré dans `consolidate_memories()`
+
+### Projets
+- [x] Statut `in_progress` / `done` (migration du `"active"` legacy)
+- [x] `_fuzzy_project_name()` — correspondance par overlap de mots (≥ 60 %) pour éviter les doublons par dérive de nom
 
 ---
 
@@ -71,6 +77,28 @@
 - [x] `ask_user` — Jarvis envoie une question push, l'utilisateur répond en chat
 - [x] Push proactif par utilisateur (Path A : conversations récentes, Path B : projets actifs)
 - [x] Revue nightly (résumé journalier, insights, auto-réflexions)
+
+---
+
+## Recherche web (v7 — terminé)
+
+- [x] `web_search.py` extrait de `main.py` — module indépendant
+- [x] Routage automatique : météo (Open-Meteo) · actualités (DDG news) · général (pipeline profond)
+- [x] Pipeline 3 étapes : snippets DDG → juge LLM → fetch pages parallèle → juge → refine query → DDG
+- [x] `_llm_judge_relevance()` — juge binaire router model, fail-open
+- [x] `_refine_web_query()` — génère une meilleure requête si résultats insuffisants
+- [x] Sentinel `INTERNET_ERROR` — contexte propre injecté dans le prompt LLM si réseau indisponible
+
+---
+
+## Robustesse et infrastructure (v7 — terminé)
+
+- [x] Logging centralisé dans `helpers.py` (`setup_logging` + `get_logger`)
+- [x] Fichier tournant `/opt/jarvis/logs/jarvis-api.log` (5 MB × 3, bind-mount host)
+- [x] Bind-mounts complets : `helpers.py`, `trade_keys.py`, `web_search.py` ajoutés à `docker-compose.yml`
+- [x] `no_think=True` ciblé sur les appels JSON rapides (router, analyzer, briefing, trading)
+- [x] `no_think=False` préservé pour les phases importantes (questions utilisateur, self-réflexion)
+- [x] `last_nightly` écrit dans `jarvis-self.json` après chaque revue nocturne
 
 ---
 
@@ -108,10 +136,24 @@
 
 ---
 
+## Nettoyage technique (dette)
+
+### Suppression du routeur sémantique (fallback embedding)
+> Prérequis : LLM router considéré stable et toujours disponible.
+
+- [ ] `main.py` — supprimer `INTENT_EXAMPLES_FR` (~105 lignes), `INTENT_EMBEDDINGS`, `_load_intent_embeddings()`, `semantic_route_query()`, 8 constantes `ROUTER_*_THRESHOLD`, appel lifespan, bloc `else` dans `chat()` → 3 lignes de defaults
+- [ ] `main.py` — supprimer `_build_google_queries_llm()` et ses TODO (fallback Google query builder, remplacé par le LLM router)
+- [ ] `main.py` — supprimer 5 lignes de code commenté (`# hist.append(...)` × 4, `# hist = conversation_history...`)
+- [ ] `google_services.py` — supprimer `build_gmail_query()` et `detect_calendar_range()` (section "DEPRECATED", non appelées)
+- [ ] `prompts.py` — supprimer `SYSTEM_BASE_EN` (constante anglaise non utilisée, seul `SYSTEM_BASE_FR` est actif)
+- [ ] `llm_router.py` — supprimer commentaire `# CHECK IF 250 IS ENOUGH` (question résolue)
+
+---
+
 ## Autres axes (non planifiés)
 
 - [ ] Écriture calendrier Google (créer des événements, pas seulement lire)
-- [ ] Migration Mac Mini M4 Pro (infrastructure)
+- [ ] Migration Mac Mini M4 Pro (livraison fin avril 2026 — Qwen local Tier 1 + Tier 2)
 - [ ] Support Android (remplace le polling iOS par un mécanisme web)
 - [ ] Mémoire conversationnelle agentique (Couche 3) — Jarvis émet des commandes
       mémoire structurées pendant la conversation, pas seulement via l'analyser

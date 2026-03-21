@@ -19,6 +19,9 @@ struct VoiceView: View {
     @State private var lastResponse = ""
     @State private var pulseScale: CGFloat = 1.0
     @State private var isProcessingVoice = false
+    // Monotonically increasing — used as sensoryFeedback trigger so haptic fires
+    // only on detection, not on the subsequent wakeWordDetected = false reset.
+    @State private var wakeWordHapticCount = 0
 
     // Derived state for the orb
     private var currentPhase: Phase {
@@ -102,13 +105,14 @@ struct VoiceView: View {
             }
             .onChange(of: wakeWord.wakeWordDetected) { _, detected in
                 guard detected else { return }
+                wakeWordHapticCount += 1        // increment before reset so trigger fires once
                 wakeWord.wakeWordDetected = false
                 guard canInteract else { return }
                 lastResponse = ""
                 wakeWord.pause()
                 speech.startRecording()
             }
-            .sensoryFeedback(.impact(flexibility: .solid, intensity: 0.8), trigger: wakeWord.wakeWordDetected)
+            .sensoryFeedback(.impact(flexibility: .solid, intensity: 0.8), trigger: wakeWordHapticCount)
             .onChange(of: speech.isSpeaking) { _, isSpeaking in
                 if !isSpeaking { wakeWord.resume() }
             }

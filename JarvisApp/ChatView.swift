@@ -14,6 +14,10 @@ struct ChatView: View {
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var selectedImage: UIImage?
     @FocusState private var isInputFocused: Bool
+    // When the user drags the scroll view during streaming, auto-scroll is
+    // suspended so they can read earlier content. Resets when a new message
+    // arrives or streaming ends.
+    @State private var isAutoScrollEnabled = true
 
     var body: some View {
         NavigationStack {
@@ -62,11 +66,24 @@ struct ChatView: View {
                         .padding(.horizontal, 16).padding(.vertical, 12)
                     }
                     .scrollDismissesKeyboard(.interactively)
+                    // Disable auto-scroll if the user manually drags during streaming,
+                    // so they can read earlier content without being yanked back.
+                    .simultaneousGesture(DragGesture().onChanged { _ in
+                        if api.messages.last?.isStreaming == true { isAutoScrollEnabled = false }
+                    })
                     .onChange(of: api.messages.count) { _, _ in
+                        isAutoScrollEnabled = true   // new message: re-enable
                         scrollToBottom(proxy)
                     }
-                    .onChange(of: api.isProcessing) { @MainActor _, _ in
+                    .onChange(of: api.isProcessing) { @MainActor _, isProcessing in
+                        if !isProcessing { isAutoScrollEnabled = true }  // stream ended: re-enable
                         scrollToBottom(proxy)
+                    }
+                    // Scroll to bottom as streaming content grows — gated on
+                    // isAutoScrollEnabled so a manual drag can pause it.
+                    .onChange(of: api.messages.last?.content.count) { _, _ in
+                        guard let last = api.messages.last, last.isStreaming, isAutoScrollEnabled else { return }
+                        proxy.scrollTo(last.id, anchor: .bottom)
                     }
                 }
             }
@@ -82,6 +99,7 @@ struct ChatView: View {
                         Button { Task { await api.clearConversation() } } label: {
                             Image(systemName: "trash").foregroundColor(.gray)
                         }
+                        .disabled(api.isProcessing)
                         Button { showSettings = true } label: {
                             Image(systemName: "gear").foregroundColor(.gray)
                         }
@@ -227,7 +245,10 @@ struct MessageBubble: View, Equatable {
                             ? Color.jarvisBlue.opacity(0.2)
                             : Color.jarvisCard)
                         .clipShape(RoundedRectangle(cornerRadius: 16))
-                        .textSelection(.enabled)
+                        // Disable text selection while streaming — the selection overlay
+                        // tracks character positions in the growing string, which is very
+                        // expensive at 10fps for long responses.
+                        .textSelectionIfEnabled(!message.isStreaming)
                 }
 
                 Text(timeString)
@@ -252,6 +273,17 @@ struct MessageBubble: View, Equatable {
 
     private var timeString: String {
         Self.timeFormatter.string(from: message.timestamp)
+    }
+}
+
+// MARK: - Helpers
+
+private extension View {
+    /// Applies .textSelection(.enabled) only when `enabled` is true.
+    /// A ternary won't compile here because EnabledTextSelectability and
+    /// DisabledTextSelectability are distinct concrete types, not the same generic.
+    @ViewBuilder func textSelectionIfEnabled(_ enabled: Bool) -> some View {
+        if enabled { self.textSelection(.enabled) } else { self }
     }
 }
 

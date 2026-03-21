@@ -44,7 +44,8 @@ struct SettingsView: View {
                     HStack {
                         Button {
                             isTesting = true; testResult = nil
-                            api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL, sessionID: settings.sessionID)
+                            // configure() already triggers checkConnection() internally —
+                            // calling both concurrently races on resolvedURL/connectionState.
                             Task {
                                 await api.checkConnection()
                                 isTesting = false

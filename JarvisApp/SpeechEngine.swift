@@ -32,6 +32,9 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     // MARK: - Private
 
     private var whisperKit: WhisperKit?
+    // Incremented in switchModel() so setup() can detect it has been superseded
+    // by a newer model-change request and bail without overwriting the new load.
+    private var setupGeneration = 0
     private var audioRecorder: AVAudioRecorder?
     private var recordingURL: URL?
     private var timer: Timer?
@@ -57,6 +60,9 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
         guard !isModelLoaded && !isModelLoading else { return }
 
+        // Snapshot the generation so we can detect if switchModel() is called
+        // while WhisperKit is loading (which can take many seconds).
+        let myGeneration = setupGeneration
         isModelLoading = true
         modelLoadProgress = "Loading \(model) model..."
 
@@ -70,21 +76,31 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                 )
             )
 
-            whisperKit = try await WhisperKit(config)
+            let kit = try await WhisperKit(config)
 
+            // A newer switchModel() call increments setupGeneration — if that
+            // happened while we were loading, discard this result entirely.
+            guard myGeneration == setupGeneration else { return }
+
+            whisperKit = kit
             isModelLoaded = true
             modelLoadProgress = "Ready"
 
         } catch {
-            modelLoadProgress = "Error: \(error.localizedDescription)"
+            if myGeneration == setupGeneration {
+                modelLoadProgress = "Error: \(error.localizedDescription)"
+            }
         }
 
-        isModelLoading = false
+        if myGeneration == setupGeneration { isModelLoading = false }
     }
 
     func switchModel(to model: String) async {
+        // Increment first so any in-flight setup() sees it is superseded.
+        setupGeneration += 1
         whisperKit = nil
         isModelLoaded = false
+        isModelLoading = false   // reset in case a previous setup is mid-flight
         await setup(model: model)
     }
 
@@ -105,14 +121,19 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     func startRecording() {
 
-        // Prevent creating a second recorder if one is already running.
+        // Claim isRecording synchronously before spawning the Task.
+        // If this were set inside the Task (after the async permission await), a second
+        // call to startRecording() could pass the guard during that window and create
+        // two concurrent AVAudioRecorder sessions.
         guard !isRecording else { return }
+        isRecording = true
 
         Task {
 
             let granted = await requestMicrophonePermission()
 
             guard granted else {
+                isRecording = false
                 print("Microphone permission denied")
                 return
             }
@@ -120,6 +141,7 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             do {
                 try configureAudioSession()
             } catch {
+                isRecording = false
                 print("Audio session error:", error)
                 return
             }
@@ -147,7 +169,7 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                 audioRecorder?.isMeteringEnabled = true
                 audioRecorder?.record()
 
-                isRecording = true
+                // isRecording already true — set remaining state
                 recordingDuration = 0
                 silenceDuration = 0
                 silenceProgress = 0
@@ -169,6 +191,8 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                 timer = t
 
             } catch {
+                isRecording = false
+                recordingURL = nil
                 print("Recording error:", error)
             }
         }
@@ -213,6 +237,7 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         deactivateAudioSessionIfIdle()
 
         guard let url = recordingURL else { return nil }
+        recordingURL = nil  // clear immediately — stale URL would point at a deleted file
 
         // Always clean up the temp file, regardless of which path we exit through.
         defer { try? FileManager.default.removeItem(at: url) }
@@ -319,13 +344,20 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     // MARK: - Voice selection
 
     /// Returns the best available voice for the given language: premium > enhanced > default.
+    /// Result is cached per language — `speechVoices()` scans all installed voices on every
+    /// call and is called on every `speak()` invocation in a voice-assistant loop.
+    private static var voiceCache: [String: AVSpeechSynthesisVoice?] = [:]
+
     static func bestVoice(for language: String) -> AVSpeechSynthesisVoice? {
+        if let cached = voiceCache[language] { return cached }
         let locale = language == "fr" ? "fr-FR" : "en-US"
         let all = AVSpeechSynthesisVoice.speechVoices()
         let matching = all.filter { $0.language.hasPrefix(language) }
-        return matching.first(where: { $0.quality == .premium })
+        let voice = matching.first(where: { $0.quality == .premium })
             ?? matching.first(where: { $0.quality == .enhanced })
             ?? AVSpeechSynthesisVoice(language: locale)
+        voiceCache[language] = voice
+        return voice
     }
 
     // MARK: - Permissions

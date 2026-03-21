@@ -54,19 +54,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./jarvis-core/prompts.py:/app/prompts.py
-      - ./jarvis-core/main.py:/app/main.py
-      - ./jarvis-core/memory.py:/app/memory.py
-      - ./jarvis-core/analyzer.py:/app/analyzer.py
-      - ./jarvis-core/config.py:/app/config.py
-      - ./jarvis-core/google_services.py:/app/google_services.py
-      - ./jarvis-core/llm_router.py:/app/llm_router.py
-      - ./jarvis-core/briefing.py:/app/briefing.py
-      - ./jarvis-core/self.py:/app/self.py
-      - ./jarvis-core/trading.py:/app/trading.py
-      - ./jarvis-core/helpers.py:/app/helpers.py
-      - ./jarvis-core/trade_keys.py:/app/trade_keys.py
-      - ./jarvis-core/web_search.py:/app/web_search.py
+      - ./jarvis-core/src:/app/src
       - ./jarvis-core/JarvisData:/app/data
       - ./logs:/app/logs
       - ./TradeData:/app/trade_data

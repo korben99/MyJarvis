@@ -88,11 +88,14 @@ from pydantic import BaseModel
 # Local modules (memory system)
 from analyzer import analyze_exchange
 from google_services import (
+    create_calendar_event,
+    extract_calendar_event_llm,
     fetch_calendar_events,
     fetch_gmail_messages,
+    is_calendar_write,
     is_google_available,
 )
-from helpers import WEATHER_CODES, call_llm_async, extract_llm_json, fmt_event_time, get_logger, get_qdrant, get_redis, get_user_tz, setup_logging
+from helpers import WEATHER_CODES, build_iso_dt, call_llm_async, extract_llm_json, fmt_event_time, get_logger, get_qdrant, get_redis, get_user_tz, setup_logging
 from web_search import INTERNET_ERROR, optimize_web_query, search_news, search_weather, search_web
 from llm_router import RouterResult, llm_route
 from briefing import (
@@ -330,6 +333,7 @@ INTENT_EXAMPLES_FR = {
 }
 
 logger = get_logger("jarvis-api")
+
 # ── Lazy-loaded components ──
 
 HTTP_CLIENT = httpx.AsyncClient(timeout=30.0)
@@ -802,7 +806,8 @@ async def post_analysis(
         return
     try:
         existing_projects = get_user_projects(user_code)
-        analysis = await analyze_exchange(user_msg, assistant_msg, existing_projects)
+        existing_profile_keys = list(get_user_profile(user_code).keys())
+        analysis = await analyze_exchange(user_msg, assistant_msg, existing_projects, existing_profile_keys)
         importance = analysis.get("importance", 0)
         
 
@@ -1178,6 +1183,45 @@ async def chat(req: ChatRequest):
     # hist = conversation_history.setdefault(req.session_id, [])
     hist = get_conversation(user_code, req.session_id)
 
+    # ── Pending calendar action: confirm or cancel ────────────────────────
+    _pending_key = f"jarvis:{user_code}:pending_calendar_action"
+    _pending_raw = REDIS_CLIENT.get(_pending_key)
+    if _pending_raw:
+        _words = set(req.message.lower().split())
+        if _words & {"oui", "ok", "confirme", "yes", "go", "allez", "parfait", "ouais", "yep", "exact"}:
+            _pending = json.loads(_pending_raw)
+            REDIS_CLIENT.delete(_pending_key)
+            _event_id = await asyncio.to_thread(
+                create_calendar_event,
+                _pending["title"], _pending["start_dt"], _pending["end_dt"],
+                _pending.get("description", ""), _pending.get("location", ""),
+            )
+            _cal_reply = (
+                f"C'est fait ! J'ai ajouté « {_pending['title']} » à ton agenda."
+                if _event_id else
+                "Désolé, je n'ai pas pu créer l'événement. Vérifie les droits d'accès au calendrier."
+            )
+            append_conversation_message(user_code, req.session_id, "user", req.message)
+            append_conversation_message(user_code, req.session_id, "assistant", _cal_reply)
+            if req.stream:
+                async def _cal_confirm_stream():
+                    yield f"data: {json.dumps({'content': _cal_reply})}\n\n"
+                    yield f"data: {json.dumps({'done': True, 'model': PRIMARY_MODEL, 'duration_ms': 0})}\n\n"
+                return StreamingResponse(_cal_confirm_stream(), media_type="text/event-stream")
+            return {"response": _cal_reply, "model": PRIMARY_MODEL, "session_id": req.session_id, "duration_ms": 0}
+        elif _words & {"non", "annule", "annuler", "cancel", "stop", "no", "nope"}:
+            REDIS_CLIENT.delete(_pending_key)
+            _cancel_reply = "D'accord, j'annule. L'événement n'a pas été créé."
+            append_conversation_message(user_code, req.session_id, "user", req.message)
+            append_conversation_message(user_code, req.session_id, "assistant", _cancel_reply)
+            if req.stream:
+                async def _cal_cancel_stream():
+                    yield f"data: {json.dumps({'content': _cancel_reply})}\n\n"
+                    yield f"data: {json.dumps({'done': True, 'model': PRIMARY_MODEL, 'duration_ms': 0})}\n\n"
+                return StreamingResponse(_cal_cancel_stream(), media_type="text/event-stream")
+            return {"response": _cancel_reply, "model": PRIMARY_MODEL, "session_id": req.session_id, "duration_ms": 0}
+        # neither confirm nor cancel → fall through, let LLM handle
+
     # Resolve user identity
     user_name = None
     if req.user_code and req.user_code in USER_CODES:
@@ -1270,6 +1314,39 @@ async def chat(req: ChatRequest):
         return {"response": result.text, "model": use_model, "session_id": req.session_id, "duration_ms": 0}
 
     # self intent: state is injected as context below — no short-circuit
+
+    # ── Calendar write ────────────────────────────────────────────────────
+    if is_calendar_write(req.message) and is_google_available():
+        _event = await extract_calendar_event_llm(req.message)
+        if _event:
+            try:
+                _start_dt = build_iso_dt(_event["date"], _event["start_time"], BRIEFING_TIMEZONE)
+                _end_dt   = build_iso_dt(_event["date"], _event["end_time"],   BRIEFING_TIMEZONE)
+                _pending_data = json.dumps({
+                    "title":       _event["title"],
+                    "start_dt":    _start_dt,
+                    "end_dt":      _end_dt,
+                    "description": _event.get("description", ""),
+                    "location":    _event.get("location", ""),
+                })
+                REDIS_CLIENT.setex(f"jarvis:{user_code}:pending_calendar_action", 600, _pending_data)
+                _loc_line = f"\n📍 {_event['location']}" if _event.get("location") else ""
+                _confirm_msg = (
+                    f"Je vais créer : **{_event['title']}**\n"
+                    f"📅 {_event['date']} · {_event['start_time']} → {_event['end_time']}"
+                    f"{_loc_line}\n\nConfirmes ?"
+                )
+                append_conversation_message(user_code, req.session_id, "user", req.message)
+                append_conversation_message(user_code, req.session_id, "assistant", _confirm_msg)
+                if req.stream:
+                    async def _cal_write_stream():
+                        yield f"data: {json.dumps({'content': _confirm_msg})}\n\n"
+                        yield f"data: {json.dumps({'done': True, 'model': PRIMARY_MODEL, 'duration_ms': 0})}\n\n"
+                    return StreamingResponse(_cal_write_stream(), media_type="text/event-stream")
+                return {"response": _confirm_msg, "model": PRIMARY_MODEL, "session_id": req.session_id, "duration_ms": 0}
+            except Exception as exc:
+                logger.warning("Calendar write prep failed: %s", type(exc).__name__)
+                # Fall through to normal LLM (will ask for clarification)
 
     # Conversational messages (greetings, thanks, chitchat) don't need document retrieval
     _is_conversational = (

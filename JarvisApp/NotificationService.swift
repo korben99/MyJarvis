@@ -19,7 +19,7 @@ import UIKit
 // MARK: - NotificationService
 
 @MainActor
-final class NotificationService: ObservableObject {
+final class NotificationService: NSObject, ObservableObject {
 
     // nonisolated: must be reachable from nonisolated contexts (registerBackgroundTask,
     // scheduleBackgroundRefresh) without a main-actor hop.
@@ -34,6 +34,7 @@ final class NotificationService: ObservableObject {
 
     private var pollTimer: Timer?
     private let pollInterval: TimeInterval = 15 * 60   // 15 min foreground interval
+    private var isPolling = false   // prevents concurrent polls delivering duplicate notifications
 
     // Short-timeout session: background tasks have limited execution time (~30 s),
     // so we can't afford URLSession.shared's 60 s default request timeout.
@@ -115,12 +116,23 @@ final class NotificationService: ObservableObject {
 
     /// Tries localServerURL first (2 s timeout), then vpnServerURL.
     /// Returns the first base URL that responds, or nil if neither is reachable.
+    /// On a cold background launch the in-memory URLs are empty (no UI ever rendered),
+    /// so we fall back to the @AppStorage values persisted by AppSettings.
     private func resolveURL() async -> String? {
-        let candidates = [localServerURL, vpnServerURL]
-        for candidate in candidates {
+        let local = localServerURL.isEmpty
+            ? (UserDefaults.standard.string(forKey: "localServerURL") ?? "")
+            : localServerURL
+        let vpn = vpnServerURL.isEmpty
+            ? (UserDefaults.standard.string(forKey: "vpnServerURL") ?? "")
+            : vpnServerURL
+
+        for candidate in [local, vpn] {
             guard !candidate.isEmpty,
                   let url = URL(string: "\(candidate)/status") else { continue }
-            if (try? await session.data(from: url)) != nil { return candidate }
+            // 2 s per candidate — matches JarvisAPI's probeSession and keeps us well
+            // inside the ~30 s BGAppRefreshTask execution budget.
+            let request = URLRequest(url: url, timeoutInterval: 2)
+            if (try? await session.data(for: request)) != nil { return candidate }
         }
         return nil
     }
@@ -129,6 +141,10 @@ final class NotificationService: ObservableObject {
 
     /// Call /device/pending/{userCode}, show a local notification for each message.
     func pollAndDeliver() async {
+        guard !isPolling else { return }
+        isPolling = true
+        defer { isPolling = false }
+
         // On a cold background launch (app killed, woken by BGAppRefreshTask), JarvisAPI
         // never gets to call configure(), so resolvedURL/userCode are empty. Re-probe to
         // find a live server — tries local first, then VPN, matching JarvisAPI's routing.

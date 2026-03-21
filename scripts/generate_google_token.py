@@ -31,10 +31,10 @@ except ImportError:
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar",
 ]
 
-CLIENT_SECRET_FILE = "scripts/client_secret.json"
+CLIENT_SECRET_FILE = "/opt/jarvis/scripts/client_secret.json"
 
 print("Jarvis — Google OAuth token generator")
 print("=" * 40)

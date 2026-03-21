@@ -52,7 +52,7 @@ from config import (
     REDIS_URL,
 )
 from trade_keys import idx_key, pos_key, import_ts_key, price_cache_key, alert_queue_key
-from helpers import get_logger, get_redis
+from helpers import call_llm_async, get_logger, get_redis
 
 logger = get_logger("jarvis-trading")
 
@@ -120,7 +120,7 @@ def import_csv_to_redis(user_code: str) -> int:
         return 0
 
     r = get_redis()
-    last_ts = float(r.get(_import_ts_key(user_code)) or 0)
+    last_ts = float(r.get(import_ts_key(user_code)) or 0)
     if os.path.getmtime(path) <= last_ts:
         return 0
 
@@ -128,8 +128,8 @@ def import_csv_to_redis(user_code: str) -> int:
     if not positions:
         return 0
 
-    idx_key = _idx_key(user_code)
-    r.delete(idx_key)
+    idx_key_cur = idx_key(user_code)
+    r.delete(idx_key_cur)
 
     # Jarvis-managed fields that must never be overwritten by a CSV import
     _JARVIS_FIELDS = (
@@ -141,7 +141,7 @@ def import_csv_to_redis(user_code: str) -> int:
 
     for pos in positions:
         isin = pos["isin"]
-        key = _pos_key(user_code, isin)
+        key = pos_key(user_code, isin)
 
         # Preserve existing Jarvis-managed values
         existing = r.hgetall(key)
@@ -160,9 +160,9 @@ def import_csv_to_redis(user_code: str) -> int:
         if jarvis_values:
             r.hset(key, mapping=jarvis_values)
 
-        r.sadd(idx_key, isin)
+        r.sadd(idx_key_cur, isin)
 
-    r.set(_import_ts_key(user_code), os.path.getmtime(path))
+    r.set(import_ts_key(user_code), os.path.getmtime(path))
     logger.info("Imported %d positions for %s from %s", len(positions), user_code, os.path.basename(path))
     return len(positions)
 
@@ -278,7 +278,7 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
     Returns { isin: {price, intraday_var_pct} }.
     """
     r = get_redis()
-    isins = list(r.smembers(_idx_key(user_code)))
+    isins = list(r.smembers(idx_key(user_code)))
     if not isins:
         return {}
 
@@ -286,16 +286,16 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
     to_fetch: list[tuple[str, str]] = []  # (isin, ticker)
 
     for isin in isins:
-        cached = r.get(_price_cache_key(isin))
+        cached = r.get(price_cache_key(isin))
         if cached:
             try:
                 results[isin] = json.loads(cached)
                 continue
             except json.JSONDecodeError:
                 pass
-        pos_key = _pos_key(user_code, isin)
-        name = r.hget(pos_key, "name") or ""
-        ticker = _resolve_ticker(isin, r, pos_key, name)
+        pos_key_u = pos_key(user_code, isin)
+        name = r.hget(pos_key_u, "name") or ""
+        ticker = _resolve_ticker(isin, r, pos_key_u, name)
         if ticker:
             to_fetch.append((isin, ticker))
 
@@ -309,7 +309,7 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
             # Sanity check: compare against last Boursorama CSV price.
             # A deviation > 15% vs the last CSV import is suspicious (likely wrong ticker).
             # > 30% almost certainly means we resolved the wrong security — invalidate and skip.
-            pos_key_check = _pos_key(user_code, isin)
+            pos_key_check = pos_key(user_code, isin)
             try:
                 csv_price = float(r.hget(pos_key_check, "last_price_csv") or 0)
                 if csv_price > 0 and price > 0:
@@ -333,12 +333,12 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
 
             entry = {"price": round(float(price), 4), "intraday_var_pct": change_pct}
             results[isin] = entry
-            r.setex(_price_cache_key(isin), PRICE_CACHE_TTL, json.dumps(entry))
+            r.setex(price_cache_key(isin), PRICE_CACHE_TTL, json.dumps(entry))
             logger.debug("Price %s: %.4f (%+.2f%%)", ticker, price, change_pct)
         except Exception as exc:
             logger.warning("Price fetch failed for %s (%s): %s", ticker, isin, exc)
             # Clear cached ticker so next run retries resolution
-            r.hdel(_pos_key(user_code, isin), "yahoo_ticker")
+            r.hdel(pos_key(user_code, isin), "yahoo_ticker")
 
     return results
 
@@ -348,7 +348,7 @@ def update_prices_in_redis(user_code: str, prices: dict[str, dict]) -> None:
     r = get_redis()
     now = datetime.now(timezone.utc).isoformat()
     for isin, data in prices.items():
-        key = _pos_key(user_code, isin)
+        key = pos_key(user_code, isin)
         if r.exists(key):
             r.hset(key, mapping={
                 "last_price":       data["price"],
@@ -362,10 +362,10 @@ def update_prices_in_redis(user_code: str, prices: dict[str, dict]) -> None:
 def get_portfolio(user_code: str) -> list[dict]:
     """Return all positions enriched with live P&L calculations."""
     r = get_redis()
-    isins = sorted(r.smembers(_idx_key(user_code)))
+    isins = sorted(r.smembers(idx_key(user_code)))
     portfolio = []
     for isin in isins:
-        raw = r.hgetall(_pos_key(user_code, isin))
+        raw = r.hgetall(pos_key(user_code, isin))
         if not raw:
             continue
         try:
@@ -544,7 +544,7 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
             # name, so the old name-match logic never set last_alert_at, causing the
             # same alert to refire every hour until the cooldown actually engaged.
             for p in eligible:
-                r.hset(_pos_key(user_code, p["isin"]), mapping={
+                r.hset(pos_key(user_code, p["isin"]), mapping={
                     "last_alert_at":     now_iso,
                     "last_alert_reason": message[:200],
                 })
@@ -560,7 +560,7 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
 
 def push_pending_alert(user_code: str, message: str) -> None:
     r = get_redis()
-    key = _alert_queue_key(user_code)
+    key = alert_queue_key(user_code)
     existing = json.loads(r.get(key) or "[]")
     existing.append({"message": message, "at": datetime.now(timezone.utc).isoformat()})
     r.setex(key, _ALERT_QUEUE_TTL, json.dumps(existing, ensure_ascii=False))
@@ -569,7 +569,7 @@ def push_pending_alert(user_code: str, message: str) -> None:
 def pop_pending_alerts(user_code: str) -> list[dict]:
     """Return and clear all queued alerts for a user."""
     r = get_redis()
-    key = _alert_queue_key(user_code)
+    key = alert_queue_key(user_code)
     raw = r.get(key)
     if not raw:
         return []
@@ -605,11 +605,11 @@ def auto_set_thresholds(user_code: str) -> int:
     Returns the number of positions updated.
     """
     r = get_redis()
-    isins = list(r.smembers(_idx_key(user_code)))
+    isins = list(r.smembers(idx_key(user_code)))
     updated = 0
 
     for isin in isins:
-        key = _pos_key(user_code, isin)
+        key = pos_key(user_code, isin)
         pos = r.hgetall(key)
 
         # Skip if at least one threshold is already set (user or LLM configured)
@@ -720,7 +720,7 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
         tl   = item.get("threshold_low")
         if not isin or th is None or tl is None:
             continue
-        key = _pos_key(user_code, isin)
+        key = pos_key(user_code, isin)
         if not r.exists(key):
             continue
         th = round(float(th), 2)
@@ -754,7 +754,7 @@ async def run_trade_check(user_codes: list[str]) -> None:
                 if filled:
                     logger.info("Trade: auto-set thresholds for %d positions (%s)", filled, user_code)
 
-            if not get_redis().smembers(_idx_key(user_code)):
+            if not get_redis().smembers(idx_key(user_code)):
                 continue  # No positions yet — nothing to do
 
             if _is_market_hours():

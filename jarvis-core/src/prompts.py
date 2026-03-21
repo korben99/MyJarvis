@@ -38,7 +38,8 @@ SYSTEM_BASE_FR = (
     "Tu es Jarvis, un assistant personnel IA avec mémoire persistante, "
     "recherche documentaire (RAG), accès Internet en temps réel, et capacité d'auto-correction de tes prompts. "
     "Sois concis, direct et sympathique. Pas de remplissage inutile. Tu t'adresses à l'utilisateur à la première personne."
-    "Tu as accès en lecture à la boîte Gmail et au calendrier Google de l'utilisateur. "
+    "Tu as accès en lecture/écriture à la boîte Gmail et au calendrier Google de l'utilisateur. "
+    "Tu peux créer des événements dans le calendrier de l'utilisateur quand il te le demande. "
     "Quand des emails ou événements d'agenda sont fournis dans le contexte, "
     "utilise-les directement — ne prétends jamais ne pas y avoir accès. "
     "Quand l'utilisateur partage un fichier, son contenu est injecté dans le message — "
@@ -71,14 +72,19 @@ Retourne un objet JSON avec exactement ces champs :
 "mood"            : humeur de l'utilisateur — UNIQUEMENT une valeur parmi : happy, neutral, focused, stressed, frustrated, curious, tired
 "user_facts"      : nouveaux faits appris sur l'utilisateur — liste de {{"key":"...","value":"..."}}
                     value dans la langue de la conversation.
-                    RÈGLE DE NOMMAGE DES CLÉS :
+                    ⚠ RÈGLE ABSOLUE — RÉUTILISER LES CLÉS EXISTANTES :
+                    Clés déjà présentes dans le profil : [{existing_profile_keys}]
+                    Si le fait correspond à l'une de ces clés, utilise EXACTEMENT ce nom de clé.
+                    Ne crée une nouvelle clé QUE si le fait est genuinement absent du profil.
+                    RÈGLE DE NOMMAGE (pour les faits genuinement nouveaux seulement) :
                     • Fait scalaire (une seule valeur possible) → clé simple :
-                      {{"key":"profession","value":"ingénieur"}}, {{"key":"ville","value":"Paris"}}
-                    • Fait multi-valeur (plusieurs items possibles dans une même catégorie) → format "categorie:item" :
+                      {{"key":"profession","value":"ingénieur"}}, {{"key":"location","value":"Paris"}}
+                    • Fait multi-valeur (plusieurs items dans une même catégorie) → format "categorie:item" :
                       {{"key":"hobby:kart","value":"kart"}}, {{"key":"hobby:tennis","value":"tennis"}},
                       {{"key":"skill:python","value":"Python"}}, {{"key":"langue:anglais","value":"anglais"}}
                     • Catégories courantes : hobby, skill, langue, sport, outil, technologie
                     • Toujours utiliser des minuscules sans accents pour la catégorie et l'item dans la clé
+                    • Ne jamais créer hobby:X ET interest:X pour le même sujet — choisir hobby:X
 "projects"        : Identifie les projets de l'utilisateur. Un projet est une activité structurée avec un objectif (ex: "mon projet Jarvis")
                     Pour chaque projet détecté, retourne:
                     - si c'est un nouveau projet "create:nom du projet"
@@ -411,6 +417,29 @@ Propose une version améliorée qui adresse cette lacune sans altérer le reste.
 Conserve la structure, le ton et la langue d'origine.
 
 {{"proposed_text": "...", "rationale": "..."}}"""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  CALENDAR WRITE — EVENT EXTRACTION
+# ══════════════════════════════════════════════════════════════════════════
+
+CALENDAR_WRITE_EXTRACT = """\
+Extract the calendar event details from this user message.
+Today's date is {today}. Timezone: {timezone}.
+
+User message: {message}
+
+Return JSON only. No explanation.
+Fields:
+  title       : event name
+  date        : "YYYY-MM-DD"
+  start_time  : "HH:MM" (24h)
+  end_time    : "HH:MM" (24h) — if not specified, add 1 hour to start_time
+  location    : string or ""
+  description : string or ""
+
+If date or start_time cannot be determined, return {{"error": "missing_info"}}.
+Example: {{"title":"Dentiste","date":"2026-03-25","start_time":"14:00","end_time":"15:00","location":"","description":""}}"""
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -40,8 +40,14 @@ from config import (
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
     GOOGLE_REFRESH_TOKEN,
+    PRIMARY_API_KEY,
+    PRIMARY_API_URL,
+    PRIMARY_MODEL,
+    ROUTER_API_KEY,
+    ROUTER_API_URL,
+    ROUTER_MODEL,
 )
-from helpers import get_logger, get_redis
+from helpers import call_llm_async, extract_llm_json, get_logger, get_redis
 
 logger = get_logger("jarvis-google")
 
@@ -49,7 +55,7 @@ logger = get_logger("jarvis-google")
 _SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar",
 ]
 
 # ── Cache TTLs (seconds) ──
@@ -434,6 +440,129 @@ def send_gmail_message(to: str, subject: str, html_body: str, text_body: str = "
     except Exception as exc:
         logger.error("Gmail send unexpected error: %s", type(exc).__name__)
         return False
+
+
+# ══════════════════════════════════════════════════
+#  CALENDAR WRITE — INTENT + EXTRACTION
+# ══════════════════════════════════════════════════
+
+_CALENDAR_WRITE_KEYWORDS = (
+    "crée un", "créer un", "crée une", "créer une",
+    "ajoute un", "ajouter un", "ajoute une", "ajouter une",
+    "ajoute dans", "ajouter dans",
+    "planifie", "planifier",
+    "mets dans mon agenda", "mettre dans mon agenda",
+    "bloque le", "bloquer le", "bloque une", "bloquer une",
+    "rajoute", "rajouter",
+    "inscris-moi", "inscris moi",
+    "pose un rdv", "poser un rdv",
+    "prends rendez-vous", "prendre rendez-vous",
+    "nouveau rendez-vous", "nouvel événement", "nouvelle réunion",
+    "réserve", "réserver",
+)
+
+
+def is_calendar_write(message: str) -> bool:
+    msg = message.lower()
+    return any(kw in msg for kw in _CALENDAR_WRITE_KEYWORDS)
+
+
+async def extract_calendar_event_llm(message: str) -> dict | None:
+    """
+    Extract event details from a user message using the router model.
+    Returns a dict {title, date, start_time, end_time, location, description} or None.
+    """
+    from datetime import date as _date
+    from prompts import get_prompt
+    today = _date.today().strftime("%Y-%m-%d")
+    _model   = ROUTER_MODEL   or PRIMARY_MODEL
+    _api_url = ROUTER_API_URL or PRIMARY_API_URL
+    _api_key = ROUTER_API_KEY or PRIMARY_API_KEY
+    try:
+        raw = await call_llm_async(
+            [{"role": "user", "content": get_prompt("CALENDAR_WRITE_EXTRACT").format(
+                message=message, today=today, timezone=BRIEFING_TIMEZONE,
+            )}],
+            model=_model, api_url=_api_url, api_key=_api_key,
+            temperature=0, max_tokens=150, json_response=True, no_think=True, timeout=8.0,
+        )
+        parsed = extract_llm_json(raw)
+        if "error" in parsed or not parsed.get("title") or not parsed.get("date") or not parsed.get("start_time"):
+            return None
+        if not parsed.get("end_time"):
+            h, m = int(parsed["start_time"][:2]), int(parsed["start_time"][3:5])
+            parsed["end_time"] = f"{(h + 1) % 24:02d}:{m:02d}"
+        return parsed
+    except Exception as exc:
+        logger.warning("Calendar event extraction failed: %s", type(exc).__name__)
+        return None
+
+
+# ══════════════════════════════════════════════════
+#  CALENDAR WRITE — API CALLS
+# ══════════════════════════════════════════════════
+
+def _invalidate_calendar_cache() -> None:
+    """Delete all Google calendar Redis cache entries so next read is fresh."""
+    try:
+        r = get_redis()
+        cursor = 0
+        deleted = 0
+        while True:
+            cursor, keys = r.scan(cursor, match="google:calendar*", count=100)
+            if keys:
+                r.delete(*keys)
+                deleted += len(keys)
+            if cursor == 0:
+                break
+        if deleted:
+            logger.info("Calendar cache invalidated (%d keys)", deleted)
+    except Exception as exc:
+        logger.warning("Calendar cache invalidation failed: %s", type(exc).__name__)
+
+
+def create_calendar_event(
+    title: str,
+    start_dt: str,
+    end_dt: str,
+    description: str = "",
+    location: str = "",
+    calendar_id: str | None = None,
+) -> str | None:
+    """
+    Create an event in Google Calendar.
+    start_dt / end_dt: ISO 8601 with timezone, e.g. "2026-03-25T14:00:00+01:00".
+    Returns the event ID on success, None on failure.
+    """
+    if not is_google_available():
+        logger.warning("Calendar write skipped — Google not configured")
+        return None
+
+    cal_id = calendar_id or GOOGLE_CALENDAR_ID
+    try:
+        service = _get_calendar_service()
+        body: dict = {
+            "summary": title,
+            "start": {"dateTime": start_dt},
+            "end":   {"dateTime": end_dt},
+        }
+        if description:
+            body["description"] = description
+        if location:
+            body["location"] = location
+        created = service.events().insert(calendarId=cal_id, body=body).execute()
+        event_id = created.get("id")
+        logger.info("Calendar event created (id=%s, title=%r)", event_id, title)
+        _invalidate_calendar_cache()
+        return event_id
+    except HttpError as exc:
+        logger.error("Calendar create error (HTTP %s)", exc.status_code)
+        return None
+    except RuntimeError:
+        return None
+    except Exception as exc:
+        logger.error("Calendar create unexpected error: %s", type(exc).__name__)
+        return None
 
 
 # ══════════════════════════════════════════════════=====

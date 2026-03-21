@@ -72,7 +72,7 @@ _NOTIF_TTL             = 86400   # 24h — one notification per user per day
 _PUSH_PENDING_PREFIX   = "jarvis:push:pending"           # list of pending push messages per user
 _DEVICE_TOKEN_PREFIX   = "jarvis:device:token"           # device token per user (set by /device/register)
 _PUSH_COOLDOWN_PREFIX  = "jarvis:push:cooldown"          # prevent push flooding (1 push per 2h per user)
-_PUSH_COOLDOWN_TTL     = 7200    # 2h
+_PUSH_COOLDOWN_TTL     = 72000    # 2h
 
 
 # ── Redis / Qdrant singletons ─────────────────────────────────────────────
@@ -657,8 +657,9 @@ async def run_nightly_interaction_review() -> None:
                         "User relation updated for %s: affinity=%.2f style=%s mood=%s",
                         user_code, new_affinity, new_style, new_mood,
                     )
-                data["learnings"]  = data.get("learnings",  [])[-100:]
-                data["growth_log"] = data.get("growth_log", [])[-365:]
+                data["learnings"]     = data.get("learnings",  [])[-100:]
+                data["growth_log"]    = data.get("growth_log", [])[-365:]
+                data["last_nightly"]  = review_date
                 save_self_memory(data)
 
         logger.info("Nightly review done for %s — %s", user_code, summary[:80])

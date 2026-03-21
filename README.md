@@ -82,6 +82,8 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
 | **Qdrant** | Docker, port 6333 | Vector DB for RAG document search and episodic memory |
 | **Redis** | Docker, port 6379 | Working memory, session context, conversation cache |
 | **`prompts.py`** | Python module | Single source of truth for all LLM prompts — supports live overrides via `get_prompt()` |
+| **`web_search.py`** | Python module | All external search backends: Open-Meteo weather, DDG news, 3-stage deep text pipeline |
+| **`helpers.py`** | Python module | Shared utilities: LLM HTTP clients, logging setup, Redis/Qdrant singletons, JSON parsing |
 
 ### Four-Tier LLM Architecture
 
@@ -176,6 +178,22 @@ After each exchange, `analyzer.py` computes an importance score in `[0, 1]` that
 Storage thresholds (set in `config.py`):
 - **`IMPORTANCE_THRESHOLD` (0.35)** — stored as episodic vector in Qdrant
 - **`AUTOBIO_IMPORTANCE_THRESHOLD` (0.60)** — additionally stored as autobiographical event
+
+#### Profile Key Deduplication
+
+Profile facts are stored as Redis hash fields with namespaced keys (`hobby:kart`, `skill:python`, `location`). A three-stage pipeline prevents duplicates:
+
+| Stage | Method | Cost |
+|-------|--------|------|
+| 1. Source prevention | Existing profile keys injected into `ANALYSIS_PROMPT` — LLM reuses exact key names instead of inventing new ones | Prompt tokens only |
+| 2. Canonical alias | `_SCALAR_CANONICAL` dict maps common synonyms (`ville→location`, `entreprise→current_employer`) without any LLM call | O(1) |
+| 3. Category-aware LLM | Router model compares only against keys in the same namespace family (`hobby:*` vs `interest:*`), not all 30+ keys | 1 fast LLM call on a small set |
+
+Stage 1 prevents ~90 % of duplicates at the source. Stages 2–3 are safety nets.
+
+#### Project Tracking
+
+Projects are stored as JSON objects with `name`, `status` (`in_progress` / `done`), `first_mentioned`, and `last_update`. The `apply_project_updates()` function resolves project names using word-overlap fuzzy matching (≥ 60 % threshold) before exact-string lookup, preventing name-drift duplicates (`"Jarvis"` → `"Jarvis v7"`).
 
 #### Memory Retrieval Ranking
 
@@ -556,7 +574,7 @@ Tonalité Jarvis : warm → Adopte un ton chaleureux et bienveillant.
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/search?q=...&top_k=5` | RAG document search only |
-| `GET` | `/web?q=...&max_results=3` | Web search only (DuckDuckGo) |
+| `GET` | `/web?q=...&max_results=3` | Web search only (DuckDuckGo deep pipeline) |
 
 ### Portfolio / Trading
 
@@ -655,6 +673,80 @@ curl -X PUT http://localhost:8000/portfolio/position/KORBEN99/FR0000120578 \
 
 ---
 
+## Web Search
+
+All web search logic lives in `web_search.py`, keeping `main.py` free of HTTP concerns. The module is imported directly and has no circular dependency on the rest of the stack.
+
+### Routing
+
+`search_web(query, original_message)` routes automatically:
+
+| Condition | Backend | Notes |
+|-----------|---------|-------|
+| Weather keyword detected | Open-Meteo (geocoding + forecast) | No API key required |
+| News keyword detected | DuckDuckGo news | Returns 3–5 articles with date and source |
+| Everything else | 3-stage deep DDG pipeline | See below |
+
+### 3-Stage Deep Pipeline
+
+Applied to all general queries. Each stage advances only if the previous one is judged insufficient:
+
+```
+Stage 1 — DDG text snippets
+          → LLM judge (router model): sufficient? yes → return / no → Stage 2
+
+Stage 2 — Fetch actual pages in parallel (up to 3 URLs)
+          → LLM judge: sufficient? yes → return / no → Stage 3
+
+Stage 3 — LLM generates a refined query → fresh DDG search → merge → return
+```
+
+The **LLM judge** (`_llm_judge_relevance`) uses the router model with `no_think=True` — fast binary decision (`sufficient: true/false`) at minimal cost. It fails open: any error returns `True` so the pipeline is never blocked.
+
+The **query refiner** (`_refine_web_query`) also uses the router model to generate a better search query given the thin results and the original user question.
+
+### Internet Error Handling
+
+When the network is unreachable (DNS failure, TCP refused, `httpx.NetworkError`), `search_web` returns the `INTERNET_ERROR` sentinel instead of an empty list. `main.py` detects it and injects a context block:
+
+```
+=== ACCÈS INTERNET ===
+La connexion internet est actuellement indisponible. Informe l'utilisateur
+que tu ne peux pas effectuer la recherche demandée et propose-lui de réessayer plus tard.
+```
+
+The LLM then responds naturally ("Je n'ai plus accès à internet en ce moment…") instead of silently returning no results.
+
+---
+
+## Logging
+
+All Jarvis modules share a single logging configuration defined in `helpers.py`.
+
+### Setup
+
+`setup_logging()` is called once at startup (in the FastAPI `lifespan`). It configures the root logger with:
+- **Console handler** — INFO level, same format as before
+- **Rotating file handler** — 5 MB × 3 backups, written to `/app/logs/jarvis-api.log`
+
+The log directory is bind-mounted from the host (`./logs:/app/logs`), so logs are immediately accessible at `/opt/jarvis/logs/jarvis-api.log` without entering the container.
+
+### Usage in modules
+
+Every module gets its named logger via `helpers.get_logger`:
+```python
+from helpers import get_logger
+logger = get_logger("jarvis-memory")
+```
+
+This replaces the per-module `import logging` + `logging.getLogger(...)` pattern. `config.py` is the only exception (it is imported by `helpers.py` and cannot import from it without a circular dependency).
+
+### Noisy loggers silenced
+
+`setup_logging()` sets `WARNING` level on: `httpx`, `httpcore`, `primp`, `sentence_transformers`, `apscheduler`, `urllib3`, `asyncio`.
+
+---
+
 ## Project Structure
 
 ```
@@ -684,7 +776,10 @@ curl -X PUT http://localhost:8000/portfolio/position/KORBEN99/FR0000120578 \
 │   ├── trading.py         # Boursorama portfolio surveillance
 │   ├── llm_router.py      # Intent classification (Tier 1)
 │   ├── analyzer.py        # Conversation analysis (Tier 2b)
+│   ├── web_search.py      # External search: weather (Open-Meteo), news (DDG), 3-stage deep web
 │   ├── prompts.py         # All LLM prompt constants + get_prompt() live override loader
+│   ├── helpers.py         # Shared: LLM clients, logging (setup_logging/get_logger), Redis/Qdrant singletons
+│   ├── trade_keys.py      # Redis key helpers for the trading module
 │   ├── config.py          # Configuration loader + model helpers
 │   └── JarvisData/
 │       ├── users_list.json
@@ -756,8 +851,12 @@ Reflection cycle detects repeated knowledge gap
 | `BRIEFING_USER` | Morning briefing assembly instructions |
 | `ANALYSIS_PROMPT` | Conversation analysis (mood/fact extraction) |
 | `ROUTER_USER` | LLM intent router decision criteria |
+| `NIGHTLY_PROMPT` | Per-user conversation review instructions |
+| `NIGHTLY_SYSTEM` | System context for nightly review |
+| `REFLECTION_PROMPT` | Autonomous reflection action selection |
+| `REFLECTION_SYSTEM` | System context for reflection cycle |
 
-All other prompts remain read-only (reflection, nightly review, etc.) — only the four user-facing quality prompts are exposed to the refinement pipeline.
+The first four are user-facing quality prompts. The last four are internal autonomy prompts — they can also be refined when the reflection loop identifies recurring self-improvement opportunities.
 
 ### Data files
 

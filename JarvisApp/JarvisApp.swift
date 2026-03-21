@@ -39,6 +39,16 @@ struct JarvisApp: App {
                     api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL, sessionID: settings.sessionID)
                     syncNotificationService()
                 }
+                .onChange(of: settings.userCode) { _, _ in
+                    // userCode is the polling identity — sync immediately so
+                    // NotificationService doesn't keep polling the old endpoint.
+                    syncNotificationService()
+                }
+                .onChange(of: settings.sessionID) { _, _ in
+                    // Keep api.sessionID consistent with settings — without this,
+                    // the session only updates when the Done button is pressed.
+                    api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL, sessionID: settings.sessionID)
+                }
                 .onChange(of: settings.wakeWordEnabled) { _, enabled in
                     if enabled { wakeWord.start(language: settings.language) } else { wakeWord.stop() }
                 }
@@ -75,8 +85,13 @@ struct JarvisApp: App {
                 if settings.wakeWordEnabled { wakeWord.resume() }
                 syncNotificationService()
                 notifications.startForegroundPolling()
-                // Immediately poll on foreground so messages don't wait 15 min
-                Task { await notifications.pollAndDeliver() }
+                // Immediately poll + reload conversation on foreground so messages
+                // pushed by jarvis-core (added to session history while the app was
+                // backgrounded or suspended) appear in the chat UI without a restart.
+                Task {
+                    await notifications.pollAndDeliver()
+                    await api.loadConversation()
+                }
             default:
                 break
             }

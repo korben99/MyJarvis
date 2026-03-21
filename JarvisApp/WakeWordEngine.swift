@@ -66,6 +66,8 @@ class WakeWordEngine: ObservableObject {
     // MARK: - Session
 
     private func startSession() {
+        // Guard against the auth-callback Task firing after stop() was called.
+        guard enabled else { return }
         teardown()
 
         guard let recognizer, recognizer.isAvailable else { return }

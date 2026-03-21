@@ -35,6 +35,16 @@ class JarvisAPI: ObservableObject {
         return URLSession(configuration: config)
     }()
 
+    // URLSession for SSE streaming. URLSession.shared has a 7-day resource timeout —
+    // a server that hangs mid-stream would hold the connection open indefinitely.
+    // 120 s resource timeout kills a stalled stream well within any reasonable LLM latency.
+    private let sseSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest  = 30
+        config.timeoutIntervalForResource = 120
+        return URLSession(configuration: config)
+    }()
+
     // MARK: - Configuration
 
     private var configureTask: Task<Void, Never>?
@@ -86,8 +96,16 @@ class JarvisAPI: ObservableObject {
     func sendMessage(_ text: String, image: UIImage? = nil, voiceMode: Bool = false) async {
         guard !text.isEmpty || image != nil else { return }
 
-        // Compress image to JPEG base64 (≤ 1 MB target via 0.7 quality)
-        let imageData = image?.jpegData(compressionQuality: 0.7)
+        // Resize + compress on a background thread — UIGraphicsImageRenderer on a large
+        // photo can block the main thread for up to 300 ms (noticeable frame drop).
+        let imageData: Data?
+        if let img = image {
+            imageData = await Task.detached(priority: .userInitiated) {
+                JarvisAPI.resized(img, maxDimension: 1280).jpegData(compressionQuality: 0.7)
+            }.value
+        } else {
+            imageData = nil
+        }
         let imageBase64 = imageData.map { $0.base64EncodedString() }
 
         messages.append(ChatMessage(role: .user, content: text, imageData: imageData))
@@ -119,7 +137,9 @@ class JarvisAPI: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONEncoder().encode(
+        // try! is safe: ChatRequest contains only String/Bool/Int/Optional — cannot fail.
+        // Silencing the error with try? would send a nil body and produce a cryptic server error.
+        request.httpBody = try! JSONEncoder().encode(
             ChatRequest(message: text, session_id: sessionID,
                         user_code: UserDefaults.standard.string(forKey: "userCode"),
                         model: nil, stream: true, voice_mode: voiceMode,
@@ -127,7 +147,7 @@ class JarvisAPI: ObservableObject {
         )
 
         do {
-            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            let (bytes, response) = try await sseSession.bytes(for: request)
             if let httpCode = (response as? HTTPURLResponse)?.statusCode, httpCode != 200 {
                 if let pos = messages.firstIndex(where: { $0.id == assistantID }) {
                     messages[pos].content = "Error: server returned HTTP \(httpCode)"
@@ -153,7 +173,7 @@ class JarvisAPI: ObservableObject {
 
                 let isDone = chunk.done == true
                 let now = ContinuousClock.now
-                if isDone || now - lastFlush >= .milliseconds(33) {
+                if isDone || now - lastFlush >= .milliseconds(100) {
                     if let pos = messages.firstIndex(where: { $0.id == assistantID }) {
                         if !pendingContent.isEmpty {
                             messages[pos].content += pendingContent
@@ -205,6 +225,20 @@ class JarvisAPI: ObservableObject {
         messages.last(where: { $0.role == .assistant })?.content
     }
 
+    /// Scales `image` down so its longest side is ≤ `maxDimension`.
+    /// Returns the original if it already fits, avoiding a pointless redraw.
+    /// nonisolated — UIGraphicsImageRenderer is thread-safe on iOS 10+, so this
+    /// can be called from a background Task without a MainActor hop.
+    private nonisolated static func resized(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
+        let size = image.size
+        guard size.width > maxDimension || size.height > maxDimension else { return image }
+        let scale   = maxDimension / max(size.width, size.height)
+        let newSize = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+        return UIGraphicsImageRenderer(size: newSize).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: newSize))
+        }
+    }
+
     /// Clears local messages and server-side conversation history.
     func clearConversation() async {
         messages.removeAll()
@@ -217,7 +251,8 @@ class JarvisAPI: ObservableObject {
     }
 
     func loadConversation() async {
-        guard !resolvedURL.isEmpty else { return }
+        // Don't clobber an in-flight stream — isProcessing is true while SSE is active.
+        guard !resolvedURL.isEmpty, !isProcessing else { return }
 
         let userCode = UserDefaults.standard.string(forKey: "userCode") ?? "default"
 
@@ -227,9 +262,34 @@ class JarvisAPI: ObservableObject {
 
         do {
             let (data, _) = try await apiSession.data(from: url)
-
             let history = try JSONDecoder().decode([HistoryMessage].self, from: data)
 
+            // Smart merge — avoid replacing every ChatMessage with a new UUID,
+            // which would force SwiftUI to re-render every bubble unnecessarily.
+            //
+            // Case 1: nothing changed → no-op, zero re-renders.
+            // Case 2: server has more messages (jarvis-core added some) and the
+            //         existing local messages are a clean prefix → append only the
+            //         new tail, preserving existing bubble identity.
+            // Case 3: anything else (clear, edit, mismatch) → full replace.
+
+            if history.count == messages.count,
+               zip(messages, history).allSatisfy({ $0.role.rawValue == $1.role && $0.content == $1.content }) {
+                return  // no change
+            }
+
+            if history.count > messages.count,
+               zip(messages, history).allSatisfy({ $0.role.rawValue == $1.role && $0.content == $1.content }) {
+                // Existing messages are a prefix of history — append only new ones.
+                let newMessages = history.dropFirst(messages.count).map {
+                    ChatMessage(role: ChatMessage.Role(rawValue: $0.role) ?? .assistant,
+                                content: $0.content)
+                }
+                messages.append(contentsOf: newMessages)
+                return
+            }
+
+            // Full replace fallback (conversation was cleared or history diverged).
             messages = history.map {
                 ChatMessage(role: ChatMessage.Role(rawValue: $0.role) ?? .assistant,
                             content: $0.content)
