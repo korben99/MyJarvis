@@ -68,6 +68,7 @@ import hashlib
 import json
 import os
 import pickle
+import shutil
 import time
 import unicodedata
 import uuid
@@ -80,7 +81,7 @@ import httpx
 import pytz
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -129,6 +130,7 @@ from trading import (
     auto_set_thresholds,
     suggest_thresholds_llm,
 )
+from prompts import get_prompt
 
 # config file load
 from config import (
@@ -166,6 +168,7 @@ from config import (
     SELF_MEMORY_PATH,
     USER_CITIES,
     USER_CODES,
+    USER_TIMEZONES,
     USER_TRADING,
     USERS,
     tokens_param,
@@ -349,9 +352,6 @@ QDRANT_CLIENT = get_qdrant()
 
 
 # ── System prompt (strings live in prompts.py — use get_prompt for live overrides) ──
-from prompts import get_prompt
-
-
 def build_system_prompt(
     session_id: str, voice_mode: bool = False, user_code: str = "default"
 ) -> str:
@@ -1734,9 +1734,6 @@ if HAS_MEMORY:
 # ══════════════════════════════════════════════════
 #  TRADING / PORTFOLIO
 # ══════════════════════════════════════════════════
-
-from fastapi import UploadFile, File
-import shutil
 
 
 @app.get("/portfolio/{user_code}", tags=["portfolio"])

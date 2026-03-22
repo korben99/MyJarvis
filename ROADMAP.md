@@ -147,6 +147,49 @@ Un mécanisme de mémoire de la boucle elle-même. Si Jarvis exécute une chaîn
 
 ## Nettoyage technique (dette)
 
+### Refactoring main.py (2 000 lignes → modules cohérents)
+
+> **Prérequis recommandé** : supprimer d'abord le routeur sémantique (voir section ci-dessous)
+> pour économiser ~200 lignes avant de découper — le refactoring sera plus propre.
+>
+> **Décisions ouvertes à trancher avant d'implémenter :**
+> - `deps.py` ou imports depuis `main.py` pour les singletons partagés ?
+> - `intent_router.py` temporaire ou suppression directe lors du refactoring ?
+> - `build_context()` extrait dans `pipeline.py` (beaucoup de paramètres) ou inline dans `chat.py` ?
+
+**Structure cible :**
+
+| Fichier | Contenu | Lignes est. |
+|---------|---------|-------------|
+| `main.py` | Bootstrap uniquement : globals, lifespan, app, include_router | ~120 |
+| `deps.py` | Singletons partagés : REDIS_CLIENT, QDRANT_CLIENT, EMBED_MODEL, HTTP_CLIENT, _STREAM_CLIENTS, HAS_MEMORY | ~60 |
+| `llm_client.py` | stream_openai, select_model, trim_chunks, describe_images, openai_headers | ~280 |
+| `rag.py` | search_documents | ~55 |
+| `pipeline.py` | build_system_prompt, post_analysis, assemblage contexte (7 sources + budgets) | ~300 |
+| `intent_router.py` | INTENT_EXAMPLES_FR, semantic_route_query — **marqué à supprimer** | ~200 |
+| `routes/chat.py` | ChatRequest + endpoint chat() principal | ~400 |
+| `routes/proxy.py` | /v1/chat/completions OpenAI-compat | ~175 |
+| `routes/portfolio.py` | 6 endpoints trading | ~150 |
+| `routes/system.py` | /status, /models, /search, /web, history, clear | ~80 |
+| `routes/briefing.py` | 2 endpoints + job scheduler | ~65 |
+| `routes/device.py` | register, pending, push/test | ~65 |
+| `routes/memory.py` | 5 endpoints mémoire | ~40 |
+| `routes/self.py` | 3 endpoints proto-self | ~35 |
+
+**Ordre d'implémentation (chaque étape est déployable indépendamment) :**
+- [ ] 1. Créer `deps.py` — zéro dépendances locales
+- [ ] 2. Créer `llm_client.py` et `rag.py` — dépendent uniquement de `deps.py` + config
+- [ ] 3. Créer `intent_router.py` — dépend de `deps.py` ; marqué "à supprimer"
+- [ ] 4. Créer `pipeline.py` — dépend de llm_client, rag, intent_router, memory, analyzer
+- [ ] 5. Créer `routes/chat.py` avec APIRouter — hub central
+- [ ] 6. Créer les routes périphériques (briefing, self, device, memory, portfolio, system, proxy)
+- [ ] 7. Réduire `main.py` à son rôle de bootstrap (~120 lignes)
+
+**Bugs à corriger lors du refactoring :**
+- `USER_TIMEZONES` utilisé L.1337-1338 mais absent de `from config import (...)` dans main.py
+- `from fastapi import UploadFile, File` et `import shutil` importés en milieu de fichier (L.1738) → déplacer en tête de `routes/portfolio.py`
+- `from prompts import get_prompt` importé tardivement (L.352) → normaliser
+
 ### Suppression du routeur sémantique (fallback embedding)
 > Prérequis : LLM router considéré stable et toujours disponible.
 
