@@ -42,22 +42,26 @@ import httpx
 import pytz
 
 from config import (
+    GROWTH_LOG_MAX_ENTRIES,
+    MAX_REFLECTION_TOKENS,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
+    PRIMARY_TIMEOUT,
     PROMPT_DATA_DIR,
     REASONING_API_KEY,
     REASONING_API_URL,
     REASONING_MODEL,
     REASONING_TIMEOUT,
     REFINE_PROMPT_THRESHOLD,
+    USER_ADMINS,
     USER_CODES,
     USER_EMAILS,
     USERS,
 )
 from google_services import is_google_available, send_gmail_message
 from helpers import call_llm, call_llm_async, extract_llm_json, get_logger, get_qdrant, get_redis
-from memory import atomic_json_write, append_conversation_message, get_self_memory, save_self_memory, self_memory_lock, store_autobiographical_event
+from memory import atomic_json_write, append_conversation_message, get_emotional_state, get_self_memory, save_self_memory, self_memory_lock, store_autobiographical_event
 from trade_keys import idx_key, pos_key
 
 logger = get_logger("jarvis-self")
@@ -72,7 +76,7 @@ _NOTIF_TTL             = 86400   # 24h — one notification per user per day
 _PUSH_PENDING_PREFIX   = "jarvis:push:pending"           # list of pending push messages per user
 _DEVICE_TOKEN_PREFIX   = "jarvis:device:token"           # device token per user (set by /device/register)
 _PUSH_COOLDOWN_PREFIX  = "jarvis:push:cooldown"          # prevent push flooding (1 push per 2h per user)
-_PUSH_COOLDOWN_TTL     = 72000    # 2h
+_PUSH_COOLDOWN_TTL     = 72000    # 20h
 
 
 # ── Redis / Qdrant singletons ─────────────────────────────────────────────
@@ -140,6 +144,56 @@ def get_reflection_log(n: int = 10) -> list[dict]:
 def get_last_reflection() -> dict | None:
     entries = get_reflection_log(1)
     return entries[0] if entries else None
+
+
+def _extract_behavioral_patterns(n: int = 20) -> list[str]:
+    """Derive up to 5 recurring behavioral patterns from the last n reflection entries.
+
+    Fully deterministic — no LLM call. Three signals are analysed:
+      1. Action frequency: which actions dominate (≥ 20 % of cycles).
+      2. Time-of-day clustering for "nothing" choices.
+      3. Recurring keywords in focus fields (word seen ≥ 3 times).
+    """
+    from collections import Counter
+
+    logs = get_reflection_log(n)
+    if not logs:
+        return []
+
+    total = len(logs)
+    patterns: list[str] = []
+
+    # 1. Action frequency
+    action_counts: Counter = Counter(e.get("action", "unknown") for e in logs)
+    for action, count in action_counts.most_common(3):
+        pct = round(count / total * 100)
+        if pct >= 20:
+            patterns.append(f"action « {action} » choisie dans {pct}% des cycles ({count}/{total})")
+
+    # 2. "nothing" time-of-day clustering
+    nothing_hours = []
+    for e in logs:
+        if e.get("action") == "nothing" and e.get("timestamp"):
+            try:
+                nothing_hours.append(datetime.fromisoformat(e["timestamp"]).hour)
+            except Exception:
+                pass
+    if len(nothing_hours) >= 3:
+        avg_h = sum(nothing_hours) / len(nothing_hours)
+        if avg_h >= 20 or avg_h <= 6:
+            patterns.append(f"tend à ne rien faire la nuit/soirée (heure moyenne: {avg_h:.0f}h)")
+
+    # 3. Recurring keywords in focus fields
+    word_counts: Counter = Counter()
+    for e in logs:
+        for word in e.get("focus", "").lower().split():
+            if len(word) > 5:
+                word_counts[word] += 1
+    top_words = [w for w, c in word_counts.most_common(5) if c >= 3]
+    if top_words:
+        patterns.append(f"focus récurrents : {', '.join(top_words[:3])}")
+
+    return patterns[:5]
 
 
 # ══════════════════════════════════════════════════
@@ -211,6 +265,8 @@ def _get_knowledge_gaps(n: int = 5) -> list[str]:
     Return the most recently flagged knowledge gaps, annotated with their
     cumulative occurrence count so the reflection LLM can decide when to
     trigger a prompt refinement.
+    Gaps whose prompt already has a pending proposal are marked so the LLM
+    does not waste a cycle trying to re-propose.
     """
     r = get_redis()
     raw      = r.zrevrange(_KNOWLEDGE_GAPS_KEY, 0, n - 1)
@@ -218,7 +274,8 @@ def _get_knowledge_gaps(n: int = 5) -> list[str]:
     results  = []
     for item in raw:
         try:
-            topic = json.loads(item).get("topic", item)
+            d     = json.loads(item)
+            topic = d.get("topic", item)
         except Exception:
             topic = item
         slug  = re.sub(r"\s+", "_", topic.lower())[:40]
@@ -226,6 +283,16 @@ def _get_knowledge_gaps(n: int = 5) -> list[str]:
         label = f"{topic} (×{count})" if count > 1 else topic
         results.append(label)
     return results
+
+
+def _fmt_pending_proposals() -> str:
+    proposals = list_pending_proposals()
+    if not proposals:
+        return "none"
+    return "; ".join(
+        f"{p['id']} — {p['prompt_name']} (topic: {p['topic']})"
+        for p in proposals
+    )
 
 
 def gather_context() -> dict:
@@ -237,17 +304,22 @@ def gather_context() -> dict:
     last_ref   = get_last_reflection()
 
     return {
-        "timestamp":       datetime.now(timezone.utc).isoformat(),
-        "identity":        self_data.get("identity", {}),
-        "goals":           self_data.get("goals", []),
-        "current_focus":   self_data.get("current_focus", ""),
-        "health":          health,
-        "user_activity":   activity,
-        "knowledge_gaps":  gaps,
-        "last_reflection": last_ref,
-        "reflection_count": self_data.get("reflection_count", 0),
-        "user_relations":  self_data.get("user_relations", {}),
-        "user_profiles":   _fmt_user_profiles(),
+        "timestamp":           datetime.now(timezone.utc).isoformat(),
+        "identity":            self_data.get("identity", {}),
+        "goals":               self_data.get("goals", []),
+        "current_focus":       self_data.get("current_focus", ""),
+        "health":              health,
+        "user_activity":       activity,
+        "knowledge_gaps":      gaps,
+        "pending_proposals":   _fmt_pending_proposals(),
+        "last_reflection":     last_ref,
+        "reflection_count":    self_data.get("reflection_count", 0),
+        "user_relations":      self_data.get("user_relations", {}),
+        "user_profiles":       _fmt_user_profiles(),
+        "behavioral_patterns": _extract_behavioral_patterns(20),
+        "emotional_state":     get_emotional_state(),
+        "self_notes":          self_data.get("self_notes", [])[-5:],
+        "opinions":            self_data.get("opinions", [])[-5:],
     }
 
 
@@ -275,6 +347,22 @@ def _fmt_activity(activity: dict) -> str:
     return "\n".join(lines) or "  No activity."
 
 
+def _fmt_self_notes(notes: list[dict]) -> str:
+    if not notes:
+        return "  aucune note"
+    return "\n".join(
+        f"  [{n.get('date', '')[:10]}] {n.get('note', '')}" for n in notes
+    )
+
+
+def _fmt_opinions(opinions: list[dict]) -> str:
+    if not opinions:
+        return "  aucune opinion"
+    return "\n".join(
+        f"  {o.get('topic', '?')} : {o.get('opinion', '')}" for o in opinions
+    )
+
+
 def _fmt_user_profiles() -> str:
     """Compact profile dump for all users — passed to the reflection LLM."""
     from memory import get_user_profile
@@ -293,16 +381,24 @@ def _fmt_user_profiles() -> str:
 
 async def _call_reflection_llm(context: dict) -> dict | None:
     """Call the LLM to produce a reflection result."""
+    bp = context.get("behavioral_patterns", [])
+    behavioral_patterns = "\n".join(f"  • {p}" for p in bp) if bp else "  aucun pattern identifié"
+
     prompt = get_prompt("REFLECTION_PROMPT").format(
-        timestamp       = context["timestamp"],
-        identity        = json.dumps(context["identity"], ensure_ascii=False),
-        goals           = _fmt_goals(context["goals"]),
-        health          = json.dumps(context["health"]),
-        activity        = _fmt_activity(context["user_activity"]),
-        gaps            = ", ".join(context["knowledge_gaps"]) or "none flagged",
-        last_reflection = json.dumps(context["last_reflection"], ensure_ascii=False) if context["last_reflection"] else "none yet",
-        user_relations  = json.dumps(context["user_relations"], ensure_ascii=False),
-        user_profiles   = context["user_profiles"],
+        timestamp            = context["timestamp"],
+        identity             = json.dumps(context["identity"], ensure_ascii=False),
+        goals                = _fmt_goals(context["goals"]),
+        health               = json.dumps(context["health"]),
+        activity             = _fmt_activity(context["user_activity"]),
+        gaps                 = ", ".join(context["knowledge_gaps"]) or "none flagged",
+        pending_proposals    = context["pending_proposals"],
+        last_reflection      = json.dumps(context["last_reflection"], ensure_ascii=False) if context["last_reflection"] else "none yet",
+        behavioral_patterns  = behavioral_patterns,
+        emotional_state      = json.dumps(context.get("emotional_state", {}), ensure_ascii=False),
+        self_notes           = _fmt_self_notes(context.get("self_notes", [])),
+        opinions             = _fmt_opinions(context.get("opinions", [])),
+        user_relations       = json.dumps(context["user_relations"], ensure_ascii=False),
+        user_profiles        = context["user_profiles"],
     )
 
     try:
@@ -315,11 +411,11 @@ async def _call_reflection_llm(context: dict) -> dict | None:
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.7,
-            max_tokens=600,
+            max_tokens=MAX_REFLECTION_TOKENS,
             json_response=True,
             timeout=45.0,
         )
-        return json.loads(content)
+        return extract_llm_json(content)
     except Exception as exc:
         logger.error("Reflection LLM call failed: %s", type(exc).__name__)
         return None
@@ -517,8 +613,11 @@ def _action_consolidate_memory(params: dict) -> str:
 
 async def _nightly_review_user(user_code: str, user_name: str, conversations: list[dict], review_date: str) -> dict | None:
     """Call LLM for per-user nightly review. Returns parsed dict or None on failure."""
+    # Sort by importance desc so the LLM sees the most significant exchanges first,
+    # even if the 6000-char budget is hit before the end of the day's conversations.
+    sorted_convs = sorted(conversations, key=lambda c: c.get("importance", 0), reverse=True)
     conv_text = ""
-    for c in conversations[-50:]:
+    for c in sorted_convs:
         conv_text += f"User: {c.get('user', '')[:200]}\nJarvis: {c.get('assistant', '')[:200]}\nMood: {c.get('mood', '?')}\n\n"
 
     data = get_self_memory()
@@ -530,7 +629,7 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
         user_code=user_code,
         review_date=review_date,
         count=len(conversations),
-        conv_text=conv_text[:3000] or "(no conversation content)",
+        conv_text=conv_text[:6000] or "(no conversation content)",
         recent_self_reflections=json.dumps(recent_self_reflections, ensure_ascii=False),
         current_relation=json.dumps(current_relation, ensure_ascii=False),
     )
@@ -549,7 +648,7 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
             json_response=True,
             timeout=60.0,
         )
-        return json.loads(content)
+        return extract_llm_json(content)
     except Exception as exc:
         logger.error("Nightly review LLM call failed for %s: %s", user_code, type(exc).__name__)
         return None
@@ -658,7 +757,7 @@ async def run_nightly_interaction_review() -> None:
                         user_code, new_affinity, new_style, new_mood,
                     )
                 data["learnings"]     = data.get("learnings",  [])[-100:]
-                data["growth_log"]    = data.get("growth_log", [])[-365:]
+                data["growth_log"]    = data.get("growth_log", [])[-GROWTH_LOG_MAX_ENTRIES:]
                 data["last_nightly"]  = review_date
                 save_self_memory(data)
 
@@ -791,6 +890,15 @@ def approve_proposal(proposal_id: str) -> str:
     found["approved_at"] = datetime.now(timezone.utc).isoformat()
     _save_proposals(proposals)
 
+    # Reset the knowledge gap counter for this topic so the reflection loop
+    # doesn't re-trigger refine_prompt at the next cycle.
+    topic_slug = re.sub(r"\s+", "_", found.get("topic", "").lower())[:40]
+    if topic_slug:
+        try:
+            get_redis().hdel(_GAP_COUNTS_KEY, topic_slug)
+        except Exception:
+            pass
+
     # Invalidate prompts in-memory cache so the new text is returned immediately
     # (clears both the mtime sentinel and the cached dict — belt & suspenders)
     try:
@@ -899,15 +1007,27 @@ def _action_refine_prompt(params: dict) -> str:
 
     # Guard: cooldown after rejection — don't re-propose same prompt within 7 days
     all_proposals = _load_proposals()
-    recent_cutoff = datetime.now(timezone.utc).timestamp() - 7 * 86400
+    now_ts = datetime.now(timezone.utc).timestamp()
+    recent_cutoff_reject = now_ts - 7 * 86400
     recently_rejected = [
         p for p in all_proposals
         if p["prompt_name"] == prompt_name
         and p.get("status") == "rejected"
-        and datetime.fromisoformat(p.get("rejected_at", "2000-01-01T00:00:00+00:00")).timestamp() > recent_cutoff
+        and datetime.fromisoformat(p.get("rejected_at", "2000-01-01T00:00:00+00:00")).timestamp() > recent_cutoff_reject
     ]
     if recently_rejected:
         return f"refine_prompt: {prompt_name} was rejected recently — cooldown active (7 days)"
+
+    # Guard: cooldown after approval — don't re-propose same prompt within 30 days
+    recent_cutoff_approve = now_ts - 30 * 86400
+    recently_approved = [
+        p for p in all_proposals
+        if p["prompt_name"] == prompt_name
+        and p.get("status") == "approved"
+        and datetime.fromisoformat(p.get("approved_at", "2000-01-01T00:00:00+00:00")).timestamp() > recent_cutoff_approve
+    ]
+    if recently_approved:
+        return f"refine_prompt: {prompt_name} was approved recently — cooldown active (30 days)"
 
     refine_prompt_text = get_prompt("REFINE_PROMPT_USER").format(
         prompt_name  = prompt_name,
@@ -922,14 +1042,14 @@ def _action_refine_prompt(params: dict) -> str:
                 {"role": "system", "content": get_prompt("REFINE_PROMPT_SYSTEM")},
                 {"role": "user",   "content": refine_prompt_text},
             ],
-            model=REASONING_MODEL,
-            api_url=REASONING_API_URL,
-            api_key=REASONING_API_KEY,
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
             temperature=0.4,
             max_tokens=1500,
             json_response=True,
             no_think=False,
-            timeout=REASONING_TIMEOUT,
+            timeout=PRIMARY_TIMEOUT,
         )
         result = extract_llm_json(content)
     except Exception as exc:
@@ -957,8 +1077,9 @@ def _action_refine_prompt(params: dict) -> str:
     proposals.append(proposal)
     _save_proposals(proposals)
 
-    if user_code:
-        _notify_proposal(user_code, proposal)
+    # Notify admins only — prompt changes are a system-level action
+    for _code in USER_ADMINS:
+        _notify_proposal(_code, proposal)
 
     logger.info("refine_prompt: proposal %s created for %s (topic: %s)", proposal["id"], prompt_name, topic)
     return f"proposal {proposal['id']} created for {prompt_name}"
@@ -990,11 +1111,15 @@ def handle_proposal_command(message: str, user_code: str) -> str | None:
     # ── Approve ──
     m = re.search(r"(accepte?|approu?ve?)\s+(la\s+proposition\s+)?([a-f0-9]{6,8})\b", msg)
     if m:
+        if user_code not in USER_ADMINS:
+            return "⛔ Seul un administrateur peut approuver une proposition de prompt."
         return approve_proposal(m.group(3))
 
     # ── Reject ──
     m = re.search(r"(rejette?|refu?se?|reject)\s+(la\s+proposition\s+)?([a-f0-9]{6,8})\b", msg)
     if m:
+        if user_code not in USER_ADMINS:
+            return "⛔ Seul un administrateur peut rejeter une proposition de prompt."
         return reject_proposal(m.group(3))
 
     # ── Show specific proposal ──

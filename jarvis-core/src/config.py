@@ -29,13 +29,6 @@ PRIMARY_API_URL = os.getenv("PRIMARY_API_URL") or OPENAI_API_URL
 PRIMARY_API_KEY = os.getenv("PRIMARY_API_KEY") or OPENAI_API_KEY
 PRIMARY_TIMEOUT = float(os.getenv("PRIMARY_TIMEOUT") or "60")
 
-# ── Tier 2b — Analysis model (mood extraction, memory consolidation) ─────
-# Now:    GPT-4o-mini              → defaults to PRIMARY credentials
-# Future: Qwen3-30B-A3B via mlx-lm → set ANALYSIS_API_URL + ANALYSIS_API_KEY + ANALYSIS_MODEL
-ANALYSIS_MODEL   = os.getenv("ANALYSIS_MODEL") or PRIMARY_MODEL
-ANALYSIS_API_URL = os.getenv("ANALYSIS_API_URL") or PRIMARY_API_URL
-ANALYSIS_API_KEY = os.getenv("ANALYSIS_API_KEY") or PRIMARY_API_KEY
-
 # ── Tier 3 — Reasoning model (complex queries only, cloud-gated) ─────────
 # Now:    GPT-5.1 (cloud)   → set REASONING_MODEL + optionally REASONING_API_*
 # Only reached when the router sets use_reasoning=True.
@@ -86,7 +79,6 @@ RAG_TOP_K              = int(os.getenv("RAG_TOP_K", os.getenv("QDRANT_TOP_K", "5
 RAG_SCORE_THRESHOLD    = float(os.getenv("RAG_SCORE_THRESHOLD", "0.4"))
 
 # ── Features ──────────────────────────────────────────────────────────────
-ENABLE_ANALYSIS  = os.getenv("ENABLE_ANALYSIS", "true").lower() == "true"
 SELF_MEMORY_PATH = os.getenv("SELF_MEMORY_PATH", "/app/data/jarvis-self.json")
 EMBED_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
@@ -103,7 +95,7 @@ BRIEFING_TIMEZONE = os.getenv("BRIEFING_TIMEZONE", "Europe/Paris")
 
 # ── Proto-self reflection loop ─────────────────────────────────────────────
 REFLECTION_INTERVAL_HOURS = int(os.getenv("REFLECTION_INTERVAL_HOURS", "6"))
-
+MAX_REFLECTION_TOKENS=1000 
 # ── Autocoding — prompt self-modification ─────────────────────────────────
 # Number of times a knowledge gap must be flagged before a prompt-refine is triggered
 REFINE_PROMPT_THRESHOLD = int(os.getenv("REFINE_PROMPT_THRESHOLD", "3"))
@@ -126,6 +118,29 @@ RECALL_MEMORY_SIMILARITY_THRESHOLD = 0.7
 AUTOBIO_IMPORTANCE_THRESHOLD      = 0.6
 NOVELTY_THRESHOLD                 = 0.15
 PROJECT_THRESHOLD                 = 0.6
+
+# Fenêtre de récence pour le scoring des souvenirs autobiographiques dans search_memory().
+# Les souvenirs épisodiques utilisent une fenêtre de 30 jours (hardcodée).
+# Les autobiographiques (milestones durables) méritent une fenêtre plus longue pour rester
+# pertinents dans le score de rappel même après plusieurs mois.
+AUTOBIO_RECENCY_WINDOW_DAYS = int(os.getenv("AUTOBIO_RECENCY_WINDOW_DAYS", "365"))
+
+# Seuil de similarité cosine au-dessus duquel un nouvel événement autobiographique est
+# considéré comme un doublon et ignoré (pas de stockage Qdrant).
+# 0.85 = très similaire en sens mais formulation différente tolérée.
+# Augmenter vers 0.95 pour être plus permissif (moins de dédup).
+AUTOBIO_DEDUP_THRESHOLD = float(os.getenv("AUTOBIO_DEDUP_THRESHOLD", "0.85"))
+
+# Durée de rétention des projets "done" dans la liste Redis active (en jours).
+# Passé ce délai, un projet terminé est retiré automatiquement au prochain update.
+# Les projets importants sont de toute façon consolidés vers Qdrant (mémoire autobiographique)
+# lors du nightly review, donc l'information n'est pas perdue.
+DONE_PROJECT_TTL_DAYS = int(os.getenv("DONE_PROJECT_TTL_DAYS", "180"))
+
+# Nombre maximum d'entrées conservées dans le journal de croissance (growth_log) de jarvis-self.json.
+# Chaque entrée représente un résumé quotidien par utilisateur (1 entrée/utilisateur/jour).
+# Avec 2 utilisateurs actifs, 180 = environ 3 mois de journal avant rotation.
+GROWTH_LOG_MAX_ENTRIES = int(os.getenv("GROWTH_LOG_MAX_ENTRIES", "180"))
 
 
 # ══════════════════════════════════════════════════
@@ -153,6 +168,9 @@ except json.JSONDecodeError as _e:
 # ── Derived dicts (backward-compatible with existing code) ────────────────
 # code → firstname
 USER_CODES: dict[str, str] = {code: u["firstname"] for code, u in USERS.items()}
+
+# codes with admin: true — allowed to approve/reject prompt proposals
+USER_ADMINS: set[str] = {code for code, u in USERS.items() if u.get("admin") is True}
 
 # code → email (empty string = no email delivery)
 USER_EMAILS: dict[str, str] = {code: u.get("mail", "") for code, u in USERS.items()}

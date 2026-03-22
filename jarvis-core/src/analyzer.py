@@ -35,10 +35,10 @@ message long / détaillé
 import json
 
 from config import (
-    ANALYSIS_API_KEY,
-    ANALYSIS_API_URL,
-    ANALYSIS_MODEL,
     IMPORTANCE_THRESHOLD,
+    PRIMARY_API_KEY,
+    PRIMARY_API_URL,
+    PRIMARY_MODEL,
 )
 from helpers import call_llm_async, extract_llm_json, get_logger
 from prompts import get_prompt
@@ -63,9 +63,9 @@ async def analyze_exchange(user_msg: str, assistant_msg: str, existing_projects:
 
         content = await call_llm_async(
             [{"role": "user", "content": prompt}],
-            model=ANALYSIS_MODEL,
-            api_url=ANALYSIS_API_URL,
-            api_key=ANALYSIS_API_KEY,
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
             temperature=0.1,
             max_tokens=500,
             json_response=True,

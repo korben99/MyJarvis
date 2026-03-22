@@ -13,7 +13,7 @@
 
 ---
 
-## Socle (v1–v6) — Terminé
+## Socle (v1–v7) — Terminé
 
 - [x] API FastAPI + Docker Compose (Qdrant, Redis, OpenWebUI)
 - [x] Multi-utilisateurs avec codes d'accès
@@ -48,6 +48,13 @@
 - [x] `_curative_profile_cleanup()` — LLM identifie les clés à supprimer
 - [x] Sortie `{"keys_to_delete": [...]}` — exécution HDEL sécurisée
 - [x] Intégré dans `consolidate_memories()`
+
+### Injection profil dans le prompt — à faire
+- [ ] **Injection context-aware du profil** : aujourd'hui `build_memory_context()` injecte toutes les clés
+      (cappé à 20 actuellement), sans priorisation par rapport au sujet de la conversation.
+      Amélioration : scorer les clés Redis par pertinence sémantique avec le message en cours,
+      et n'injecter que les N les plus pertinentes (ex: hobby:kart prioritaire si l'utilisateur parle de voitures).
+      Nécessite un embed léger des clés profil à chaque requête ou un cache de vecteurs par clé.
 
 ### Projets
 - [x] Statut `in_progress` / `done` (migration du `"active"` legacy)
@@ -113,19 +120,19 @@
 - [ ] Action `done` pour que le LLM sorte proprement de la chaîne
 - [ ] Exemple : `read_file` → `analyse` → `propose_change`
 
-### Étape B — Boucle avec budget
+### Étape A bis — Boucle avec budget
 - [ ] `max_iterations` configurable (défaut : 5)
 - [ ] Compteur de tokens consommés par cycle
 - [ ] Utiliser le router model pour les décisions internes (économie)
 - [ ] Log de chaque itération dans Redis
 
-### Étape C — Accès lecture au code source
+### Étape D — Accès lecture au code source
 - [ ] Action `read_file` — lire ses propres `.py` (lecture seule)
 - [ ] Action `search_web` — recherche web sanitisée (lecture seule)
 - [ ] Garde-fou : sanitisation du contenu web avant injection dans le contexte LLM
   (protection contre l'injection de prompt via des pages malveillantes)
 
-### Étape D — Auto-modification supervisée
+### Étape C — Auto-modification supervisée
 - [ ] Action `propose_code_change` — génère un diff, ne l'applique pas
 - [ ] Le diff est envoyé par push + email pour validation humaine
 - [ ] Action `write_file` — uniquement après confirmation explicite de l'utilisateur
@@ -133,8 +140,10 @@
 
 > **Principe immuable** : Jarvis pense seul, agit seul sur les actions réversibles.
 > Toute écriture de code nécessite une approbation humaine. Toujours.
-
+Ce qui manque dans la roadmap
+Un mécanisme de mémoire de la boucle elle-même. Si Jarvis exécute une chaîne read_file → analyse → propose_change et que tu rejettes la proposition, il va re-proposer la même chose au cycle suivant. Il n'y a pas de persistance du résultat des chaînes passées — seulement du résultat des actions individuelles. Il faudrait stocker dans Redis les chaînes complètes (inputs → outputs → human_decision) pour que Jarvis apprenne de ses propositions rejetées.
 ---
+## LoRa Adapter (v9 — futur)
 
 ## Nettoyage technique (dette)
 

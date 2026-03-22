@@ -80,10 +80,6 @@ services:
       - PRIMARY_API_KEY=${PRIMARY_API_KEY:-}
       - PRIMARY_TIMEOUT=${PRIMARY_TIMEOUT:-60}
 
-      # ── Tier 2b — Analysis model ───────────────────────────────────────────
-      - ANALYSIS_MODEL=${ANALYSIS_MODEL:-}
-      - ANALYSIS_API_URL=${ANALYSIS_API_URL:-}
-      - ANALYSIS_API_KEY=${ANALYSIS_API_KEY:-}
 
       # ── Tier 3 — Reasoning model (complex queries only) ────────────────────
       - REASONING_MODEL=${REASONING_MODEL:-}
@@ -117,7 +113,6 @@ services:
       - GOOGLE_CALENDAR_ID=${GOOGLE_CALENDAR_ID:-primary}
 
       # ── Features ───────────────────────────────────────────────────────────
-      - ENABLE_ANALYSIS=${ENABLE_ANALYSIS:-true}
       - SELF_MEMORY_PATH=/app/data/jarvis-self.json
       - BRIEFING_ENABLED=${BRIEFING_ENABLED:-true}
       - BRIEFING_TIME=${BRIEFING_TIME:-07:30}

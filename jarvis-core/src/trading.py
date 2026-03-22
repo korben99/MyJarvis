@@ -703,7 +703,7 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
             temperature=0.2,
             max_tokens=1000,
             json_response=True,
-            no_think=True,
+            no_think=False,
             timeout=60.0,
         )
         result = json.loads(content)

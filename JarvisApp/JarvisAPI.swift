@@ -96,16 +96,8 @@ class JarvisAPI: ObservableObject {
     func sendMessage(_ text: String, image: UIImage? = nil, voiceMode: Bool = false) async {
         guard !text.isEmpty || image != nil else { return }
 
-        // Resize + compress on a background thread — UIGraphicsImageRenderer on a large
-        // photo can block the main thread for up to 300 ms (noticeable frame drop).
-        let imageData: Data?
-        if let img = image {
-            imageData = await Task.detached(priority: .userInitiated) {
-                JarvisAPI.resized(img, maxDimension: 1280).jpegData(compressionQuality: 0.7)
-            }.value
-        } else {
-            imageData = nil
-        }
+        // Compress to JPEG (≤ 1 MB target via 0.7 quality).
+        let imageData = image?.jpegData(compressionQuality: 0.7)
         let imageBase64 = imageData.map { $0.base64EncodedString() }
 
         messages.append(ChatMessage(role: .user, content: text, imageData: imageData))
@@ -137,14 +129,19 @@ class JarvisAPI: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        // try! is safe: ChatRequest contains only String/Bool/Int/Optional — cannot fail.
-        // Silencing the error with try? would send a nil body and produce a cryptic server error.
-        request.httpBody = try! JSONEncoder().encode(
+        guard let body = try? JSONEncoder().encode(
             ChatRequest(message: text, session_id: sessionID,
                         user_code: UserDefaults.standard.string(forKey: "userCode"),
                         model: nil, stream: true, voice_mode: voiceMode,
                         image_base64: imageBase64)
-        )
+        ) else {
+            if let pos = messages.firstIndex(where: { $0.id == assistantID }) {
+                messages[pos].content = "Error: failed to encode request"
+                messages[pos].isStreaming = false
+            }
+            return
+        }
+        request.httpBody = body
 
         do {
             let (bytes, response) = try await sseSession.bytes(for: request)
@@ -203,40 +200,25 @@ class JarvisAPI: ObservableObject {
 
     // MARK: - Private helpers
 
-    /// Tries local first (2 s timeout), then VPN.
-    /// Returns (baseURL, route, /status response body) for the first candidate
-    /// that responds without a network error — status code validation is left to
-    /// checkConnection() which decodes the body.
+    /// Probes local and VPN in parallel — if local is unreachable the VPN probe
+    /// is already in-flight, so the result comes back immediately after the 2 s
+    /// local timeout instead of after an additional 2 s.  Prefers local on a tie.
     private func resolveActiveURL() async -> (url: String, route: NetworkRoute, data: Data)? {
-        let candidates: [(String, NetworkRoute)] = [
-            (localServerURL, .local),
-            (vpnServerURL,   .vpn)
-        ]
-        for (candidate, route) in candidates {
-            guard !candidate.isEmpty,
-                  let url = URL(string: "\(candidate)/status") else { continue }
-            guard let (data, _) = try? await probeSession.data(from: url) else { continue }
-            return (candidate, route, data)
-        }
+        async let localResult = probe(base: localServerURL, route: .local)
+        async let vpnResult   = probe(base: vpnServerURL,   route: .vpn)
+        if let r = await localResult { return r }
+        if let r = await vpnResult   { return r }
         return nil
+    }
+
+    private func probe(base: String, route: NetworkRoute) async -> (url: String, route: NetworkRoute, data: Data)? {
+        guard !base.isEmpty, let url = URL(string: "\(base)/status") else { return nil }
+        guard let (data, _) = try? await probeSession.data(from: url) else { return nil }
+        return (base, route, data)
     }
 
     var lastAssistantMessage: String? {
         messages.last(where: { $0.role == .assistant })?.content
-    }
-
-    /// Scales `image` down so its longest side is ≤ `maxDimension`.
-    /// Returns the original if it already fits, avoiding a pointless redraw.
-    /// nonisolated — UIGraphicsImageRenderer is thread-safe on iOS 10+, so this
-    /// can be called from a background Task without a MainActor hop.
-    private nonisolated static func resized(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
-        let size = image.size
-        guard size.width > maxDimension || size.height > maxDimension else { return image }
-        let scale   = maxDimension / max(size.width, size.height)
-        let newSize = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
-        return UIGraphicsImageRenderer(size: newSize).image { _ in
-            image.draw(in: CGRect(origin: .zero, size: newSize))
-        }
     }
 
     /// Clears local messages and server-side conversation history.

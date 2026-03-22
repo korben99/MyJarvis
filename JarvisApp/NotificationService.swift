@@ -33,7 +33,7 @@ final class NotificationService: NSObject, ObservableObject {
     var vpnServerURL:   String = ""
 
     private var pollTimer: Timer?
-    private let pollInterval: TimeInterval = 15 * 60   // 15 min foreground interval
+    private let pollInterval: TimeInterval = 30 * 60   // 30 min foreground interval
     private var isPolling = false   // prevents concurrent polls delivering duplicate notifications
 
     // Short-timeout session: background tasks have limited execution time (~30 s),
@@ -90,7 +90,7 @@ final class NotificationService: NSObject, ObservableObject {
     /// Schedule the next background refresh. Call after each execution and on app background.
     func scheduleBackgroundRefresh() {
         let request = BGAppRefreshTaskRequest(identifier: Self.taskID)
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)   // iOS may delay this
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 30 * 60)   // iOS may delay this
         try? BGTaskScheduler.shared.submit(request)
     }
 
@@ -114,8 +114,7 @@ final class NotificationService: NSObject, ObservableObject {
 
     // MARK: - URL resolution
 
-    /// Tries localServerURL first (2 s timeout), then vpnServerURL.
-    /// Returns the first base URL that responds, or nil if neither is reachable.
+    /// Probes local and VPN in parallel — mirrors JarvisAPI.resolveActiveURL().
     /// On a cold background launch the in-memory URLs are empty (no UI ever rendered),
     /// so we fall back to the @AppStorage values persisted by AppSettings.
     private func resolveURL() async -> String? {
@@ -125,15 +124,19 @@ final class NotificationService: NSObject, ObservableObject {
         let vpn = vpnServerURL.isEmpty
             ? (UserDefaults.standard.string(forKey: "vpnServerURL") ?? "")
             : vpnServerURL
+        async let localResult = probe(candidate: local)
+        async let vpnResult   = probe(candidate: vpn)
+        if let r = await localResult { return r }
+        if let r = await vpnResult   { return r }
+        return nil
+    }
 
-        for candidate in [local, vpn] {
-            guard !candidate.isEmpty,
-                  let url = URL(string: "\(candidate)/status") else { continue }
-            // 2 s per candidate — matches JarvisAPI's probeSession and keeps us well
-            // inside the ~30 s BGAppRefreshTask execution budget.
-            let request = URLRequest(url: url, timeoutInterval: 2)
-            if (try? await session.data(for: request)) != nil { return candidate }
-        }
+    /// 2 s timeout — matches JarvisAPI's probeSession and stays well inside the
+    /// ~30 s BGAppRefreshTask execution budget.
+    private func probe(candidate: String) async -> String? {
+        guard !candidate.isEmpty, let url = URL(string: "\(candidate)/status") else { return nil }
+        let request = URLRequest(url: url, timeoutInterval: 2)
+        if (try? await session.data(for: request)) != nil { return candidate }
         return nil
     }
 

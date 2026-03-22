@@ -72,18 +72,26 @@ Retourne un objet JSON avec exactement ces champs :
 
 "topics"          : liste de 1 à 3 mots-clés (minuscules, langue de la conversation)
 "mood"            : humeur de l'utilisateur — UNIQUEMENT une valeur parmi : happy, neutral, focused, stressed, frustrated, curious, tired
-"user_facts"      : nouveaux faits appris sur l'utilisateur — liste de {{"key":"...","value":"..."}}
-                    value dans la langue de la conversation.
+"user_facts"      : nouveaux faits stables appris sur l'utilisateur — liste de {{"key":"...","value":"..."}}
+                    ⚠ RÈGLE FONDAMENTALE : la valeur DOIT apporter une information que la clé ne contient pas déjà.
+                    Mauvais : {{"key":"placement:livret_a","value":"livret A"}}  ← la valeur répète la clé, inutile
+                    Mauvais : {{"key":"hobby:tennis","value":"tennis"}}          ← idem
+                    Bon     : {{"key":"placement:livret_a","value":"12 000€, taux 3%"}}
+                    Bon     : {{"key":"hobby:tennis","value":"joue le week-end en club"}}
+                    Bon     : {{"key":"profession","value":"stratège cybersécurité chez Fortinet"}}
+                    Si tu ne connais pas le détail, ne crée pas le fait — mieux vaut rien qu'une valeur vide de sens.
+                    Ne jamais stocker une négation ("non", "pas de X", "ne fait pas") — l'absence d'un trait n'est pas un fait.
+                    Ne jamais stocker un fait temporaire (symptôme, humeur du moment, état passager) — uniquement ce qui reste vrai dans le temps.
+                    Vérifier que le fait concerne bien l'utilisateur, pas un tiers ou un animal mentionné dans la conversation.
                     ⚠ RÈGLE ABSOLUE — RÉUTILISER LES CLÉS EXISTANTES :
                     Clés déjà présentes dans le profil : [{existing_profile_keys}]
                     Si le fait correspond à l'une de ces clés, utilise EXACTEMENT ce nom de clé.
                     Ne crée une nouvelle clé QUE si le fait est genuinement absent du profil.
                     RÈGLE DE NOMMAGE (pour les faits genuinement nouveaux seulement) :
                     • Fait scalaire (une seule valeur possible) → clé simple :
-                      {{"key":"profession","value":"ingénieur"}}, {{"key":"location","value":"Paris"}}
+                      {{"key":"profession","value":"ingénieur backend chez Acme depuis 2019"}}
                     • Fait multi-valeur (plusieurs items dans une même catégorie) → format "categorie:item" :
-                      {{"key":"hobby:kart","value":"kart"}}, {{"key":"hobby:tennis","value":"tennis"}},
-                      {{"key":"skill:python","value":"Python"}}, {{"key":"langue:anglais","value":"anglais"}}
+                      {{"key":"hobby:kart","value":"compétition en circuit, niveau amateur"}}
                     • Catégories courantes : hobby, skill, langue, sport, outil, technologie
                     • Toujours utiliser des minuscules sans accents pour la catégorie et l'item dans la clé
                     • Ne jamais créer hobby:X ET interest:X pour le même sujet — choisir hobby:X
@@ -139,9 +147,11 @@ Return a JSON routing decision for this message.
   calendar  : agenda, appointments, schedule, upcoming events.
   briefing  : user explicitly asks for their morning briefing or daily summary.
   portfolio : stock portfolio, share prices, P&L, dividends, trading alerts, bourse/finance.
-  self      : user EXPLICITLY asks Jarvis about its own internal state, goals, or feelings.
-              Fire ONLY for direct introspective questions ("quel est ton focus",
-              "comment te sens-tu", "what are your goals").
+  self      : user asks Jarvis about its own internal state, goals, or feelings,
+              OR issues a system management command (proposals, prompts, configuration).
+              Fire for: "quel est ton focus", "comment te sens-tu", "what are your goals",
+              "montre les propositions", "liste les propositions", "propositions en attente",
+              "accepte la proposition", "rejette la proposition", "show proposals".
               Do NOT fire for casual greetings or compliments.
 
   Multiple intents allowed.
@@ -304,7 +314,15 @@ OBJECTIFS : {goals}
 SANTÉ SYSTÈME : {health}
 ACTIVITÉ UTILISATEURS (24h) : {activity}
 LACUNES CONNAISSANCE : {gaps}
+PROPOSITIONS EN ATTENTE : {pending_proposals}
 DERNIÈRE RÉFLEXION : {last_reflection}
+PATTERNS COMPORTEMENTAUX (20 derniers cycles) :
+{behavioral_patterns}
+ÉTAT ÉMOTIONNEL : {emotional_state}
+NOTES PERSONNELLES (5 dernières) :
+{self_notes}
+OPINIONS (5 dernières) :
+{opinions}
 RELATIONS UTILISATEURS : {user_relations}
 
 PROFILS UTILISATEURS (clés Redis actuelles) :
@@ -341,7 +359,7 @@ Règles :
 - queue_push : uniquement si le message a une valeur réelle maintenant. Respecte le cooldown (1 push/2h).
 - send_notification : email uniquement si la valeur pour l'utilisateur est claire et durable (pas de doublon avec queue_push).
 - update_trade_threshold : uniquement si le cours s'est fortement éloigné du seuil existant. ISIN exact requis.
-- refine_prompt : uniquement si un sujet revient souvent dans les lacunes (≥ 3 fois). L'utilisateur approuve avant application.
+- refine_prompt : uniquement si un sujet revient souvent dans les lacunes (≥ 3 fois). Interdit si une proposition est déjà en attente pour ce prompt (voir PROPOSITIONS EN ATTENTE). L'utilisateur approuve avant application.
 - Textes (focus, reason, question, message, note) en français.
 - "nothing" si aucune action significative n'est nécessaire.
 
@@ -405,20 +423,24 @@ REFINE_PROMPT_SYSTEM = """\
 Tu es Jarvis en mode auto-amélioration.
 Tu analyses un prompt existant et tu proposes une version améliorée ciblée.
 Réponds UNIQUEMENT en JSON valide : {"proposed_text": "...", "rationale": "..."}
-Ne reformule pas tout — modifie uniquement ce qui est nécessaire pour adresser la lacune."""
+RÈGLE ABSOLUE : proposed_text doit contenir le TEXTE INTÉGRAL ET COMPLET du prompt modifié.
+Ce n'est PAS un diff, PAS une instruction d'ajout, PAS une note — c'est le texte final prêt à remplacer l'original.
+Ne change que ce qui est nécessaire pour adresser la lacune. Copie tout le reste à l'identique.
+Les prompts SYSTEM doivent rester courts et denses : une instruction = une ligne. Pas de listes numérotées, pas d'étapes détaillées."""
 
 REFINE_PROMPT_USER = """\
 PROMPT : {prompt_name}
 LACUNE DÉTECTÉE : {topic}
 CONTEXTE : {context}
 
-TEXTE ACTUEL :
+TEXTE ACTUEL (à modifier) :
 {current_text}
 
-Propose une version améliorée qui adresse cette lacune sans altérer le reste.
-Conserve la structure, le ton et la langue d'origine.
+Retourne le texte COMPLET du prompt modifié dans proposed_text — pas seulement les lignes ajoutées.
+Conserve la structure, le ton et la langue d'origine. Modifie uniquement ce qui adresse la lacune.
+Si le prompt est de type SYSTEM : intègre au maximum 1-2 phrases courtes, jamais de protocole en étapes.
 
-{{"proposed_text": "...", "rationale": "..."}}"""
+{{"proposed_text": "<texte intégral du prompt modifié>", "rationale": "..."}}"""
 
 
 # ══════════════════════════════════════════════════════════════════════════

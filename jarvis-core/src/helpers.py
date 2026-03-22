@@ -77,7 +77,9 @@ _logging_configured = False
 
 def setup_logging(log_file: str = "/app/logs/jarvis-api.log") -> None:
     """
-    Configure the root Jarvis logger once: console + rotating file handler.
+    Configure the root Jarvis logger once: console + rotating file handlers.
+    - jarvis-api.log  : INFO+  (5 MB × 3, operational)
+    - jarvis-debug.log: DEBUG+ (10 MB × 2, verbose — for review)
     Safe to call multiple times (no-op after first call).
     """
     global _logging_configured
@@ -87,18 +89,29 @@ def setup_logging(log_file: str = "/app/logs/jarvis-api.log") -> None:
 
     fmt = logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT)
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(logging.DEBUG)
 
-    # Console
+    # Console — INFO only
     sh = logging.StreamHandler()
+    sh.setLevel(logging.INFO)
     sh.setFormatter(fmt)
     root.addHandler(sh)
 
-    # Rotating file: 5 MB × 3 backups
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    log_dir = os.path.dirname(log_file)
+    os.makedirs(log_dir, exist_ok=True)
+
+    # INFO+ rotating file: 5 MB × 3 backups
     fh = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    fh.setLevel(logging.INFO)
     fh.setFormatter(fmt)
     root.addHandler(fh)
+
+    # DEBUG+ rotating file: 10 MB × 2 backups
+    debug_file = os.path.join(log_dir, "jarvis-debug.log")
+    dfh = RotatingFileHandler(debug_file, maxBytes=10 * 1024 * 1024, backupCount=2, encoding="utf-8")
+    dfh.setLevel(logging.DEBUG)
+    dfh.setFormatter(fmt)
+    root.addHandler(dfh)
 
     # Quiet noisy third-party loggers
     for noisy in ("httpx", "httpcore", "primp", "sentence_transformers",

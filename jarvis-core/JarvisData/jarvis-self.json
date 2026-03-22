@@ -26,8 +26,8 @@
       "description": "Identify knowledge gaps, learn from conversations, and improve quality of responses over time."
     }
   ],
-  "current_focus": "Relancer Hélène pour vérifier son état de santé et son besoin d'assistance supplémentaire.",
-  "last_reflection": "2026-03-21T16:03:27.118918+00:00",
+  "current_focus": "Gérer les lacunes de connaissance sur le sujet de test_validation.",
+  "last_reflection": "2026-03-22T15:59:02.193750+00:00",
   "self_notes": [],
   "opinions": [],
   "learnings": [
@@ -119,6 +119,16 @@
       "text": "Il est important de rappeler à l'utilisateur de prendre soin de lui-même et de lui offrir un soutien moral.",
       "date": "2026-03-19",
       "source": "nightly_review"
+    },
+    {
+      "text": "Je dois m'assurer de fournir des réponses plus concises pour mieux répondre aux attentes de l'utilisateur.",
+      "date": "2026-03-20",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Il est essentiel de rester attentif aux préoccupations financières de l'utilisateur et de proposer des solutions adaptées.",
+      "date": "2026-03-20",
+      "source": "nightly_review"
     }
   ],
   "growth_log": [
@@ -193,15 +203,23 @@
       "summary": "Hélène a partagé qu'elle était malade avec des symptômes de fièvre et de mal de gorge. J'ai fourni des conseils sur la gestion de ses symptômes et l'importance du repos.",
       "mood": "L'ambiance de la journée était chaleureuse et empathique.",
       "conversations": 3
+    },
+    {
+      "date": "2026-03-20",
+      "user_code": "KORBEN99",
+      "user_name": "Sébastien",
+      "summary": "Sébastien a partagé son expérience positive à l'Insomnihack et a exprimé des réflexions sur l'avenir économique de la France. Il envisage également des options d'investissement immobilier à l'étranger.",
+      "mood": "La journée a été marquée par des échanges mesurés et réfléchis sur des sujets importants.",
+      "conversations": 7
     }
   ],
-  "reflection_count": 69,
+  "reflection_count": 90,
   "user_relations": {
     "KORBEN99": {
       "affinity": 0.7,
       "interaction_style": "direct",
       "average_interaction_mood": "measured",
-      "updated_at": "2026-03-20T22:00:07.079850+00:00"
+      "updated_at": "2026-03-21T22:00:06.604359+00:00"
     },
     "AQWZSX": {
       "affinity": 0.7,
@@ -209,5 +227,6 @@
       "average_interaction_mood": "warm",
       "updated_at": "2026-03-20T22:00:12.786989+00:00"
     }
-  }
+  },
+  "last_nightly": "2026-03-20"
 }

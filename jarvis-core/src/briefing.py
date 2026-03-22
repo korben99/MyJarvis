@@ -279,6 +279,7 @@ async def _fetch_news(interests: list[str]) -> list[str]:
                 logger.info("News fetched (%d results) for query: %r", len(results), query)
             return [
                 f"{r['title']} — {r.get('body','')[:120]} ({r.get('source','')})"
+                for r in results
             ]
         except Exception as exc:
             logger.warning("News fetch failed for %r: %s", query, type(exc).__name__)

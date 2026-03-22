@@ -41,16 +41,19 @@ from qdrant_client.models import PointIdsList
 from sentence_transformers import SentenceTransformer
 
 from config import (
-    ANALYSIS_API_KEY,
-    ANALYSIS_API_URL,
-    ANALYSIS_MODEL,
+    AUTOBIO_DEDUP_THRESHOLD,
     AUTOBIO_IMPORTANCE_THRESHOLD,
+    AUTOBIO_RECENCY_WINDOW_DAYS,
     CHAT_LOG_TTL,
+    DONE_PROJECT_TTL_DAYS,
     CHAT_MAX_MESSAGES,
     EMBED_MODEL_NAME,
-    ENABLE_ANALYSIS,
     IMPORTANCE_THRESHOLD,
     NOVELTY_THRESHOLD,
+    PRIMARY_API_KEY,
+    PRIMARY_API_URL,
+    PRIMARY_MODEL,
+    PRIMARY_TIMEOUT,
     QDRANT_COLLECTION,
     QDRANT_MEMORY_COLLECTION,
     RAG_SCORE_THRESHOLD,
@@ -332,52 +335,35 @@ def get_interest_weights(user_code: str) -> dict[str, float]:
     return {k: float(v) for k, v in raw.items()}
 
 
-# simplification possible quand tous les projets seront migrés dans le nouveau format
 def get_user_projects(user_code: str) -> list:
-    """Get list of user's active projects."""
-    projects = redis_get_json(f"user:{user_code}:projects", default=[])
-    if not projects:
-        return []
-
-    normalized = []
-    changed = False
-
-    for p in projects:
-        if isinstance(p, str):
-            p = {"name": p}
-            changed = True
-
-        # Normalization migration
-        if "status" not in p:
-            p["status"] = "active"
-            changed = True
-        if "first_mentioned" not in p:
-            p["first_mentioned"] = None
-            changed = True
-        if "last_update" not in p:
-            p["last_update"] = None
-            changed = True
-        normalized.append(p)
-
-    if changed:
-        redis_set_json(f"user:{user_code}:projects", normalized)
-
-    return normalized
+    """Return the user's project list from Redis."""
+    return redis_get_json(f"user:{user_code}:projects", default=[])
 
 
 def update_user_projects(user_code: str, projects: list):
-    """Update active projects list."""
-    normalized = []
+    """Persist the project list.
+    Done projects older than DONE_PROJECT_TTL_DAYS are dropped.
+    Schema: {name, status, first_mentioned, last_update, description?}
+    """
+    cutoff = datetime.now(timezone.utc).timestamp() - DONE_PROJECT_TTL_DAYS * 86400
+    result = []
     for p in projects:
-        if isinstance(p, str):
-            p = {"name": p}
-        normalized.append({
-            "name": p.get("name"),
-            "status": p.get("status", "active"),
+        if p.get("status") == "done" and p.get("last_update"):
+            try:
+                if datetime.fromisoformat(p["last_update"]).timestamp() < cutoff:
+                    continue
+            except (ValueError, TypeError):
+                pass
+        entry = {
+            "name":            p["name"],
+            "status":          p.get("status", "in_progress"),
             "first_mentioned": p.get("first_mentioned"),
-            "last_update": p.get("last_update"),
-        })
-    redis_set_json(f"user:{user_code}:projects", normalized)
+            "last_update":     p.get("last_update"),
+        }
+        if p.get("description"):
+            entry["description"] = p["description"]
+        result.append(entry)
+    redis_set_json(f"user:{user_code}:projects", result)
 
 
 def get_user_preferences(user_code: str) -> dict:
@@ -634,12 +620,34 @@ def store_memory_vector(user_code: str, entry: dict):
 def store_autobiographical_event(user_code: str, summary: str, importance: float):
     """
     Store a major life / project milestone for the user.
+
+    Skips storage if a semantically identical autobiographical memory already exists
+    (cosine similarity ≥ AUTOBIO_DEDUP_THRESHOLD) to prevent the collection from
+    accumulating redundant variants of the same fact over time.
     """
     try:
         model = get_embed_model()
         qdrant = get_qdrant()
 
         vector = model.encode(summary, normalize_embeddings=True).tolist()
+
+        # Dedup check: skip if a very similar autobio already exists
+        existing = qdrant.query_points(
+            collection_name=QDRANT_MEMORY_COLLECTION,
+            query=vector,
+            limit=1,
+            query_filter={
+                "must": [
+                    {"key": "user_code",    "match": {"value": user_code}},
+                    {"key": "memory_type",  "match": {"value": "autobiographical"}},
+                ]
+            },
+        ).points
+        if existing and existing[0].score >= AUTOBIO_DEDUP_THRESHOLD:
+            logger.debug(
+                "Autobio dedup: skipping '%s' (similar=%.2f)", summary[:60], existing[0].score
+            )
+            return
 
         qdrant.upsert(
             collection_name=QDRANT_MEMORY_COLLECTION,
@@ -688,14 +696,20 @@ def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str 
                 ]
             }
 
+        user_filter = {"key": "user_code", "match": {"value": user_code}}
+        if memory_scope in ("episodic", "autobiographical"):
+            query_filter = {"must": [user_filter, type_filter["must"][0]]}
+        else:
+            query_filter = {
+                "must": [user_filter],
+                "should": type_filter["should"],
+            }
+
         results = qdrant.query_points(
             collection_name=QDRANT_MEMORY_COLLECTION,
             query=vector,
             limit=limit * 3,
-            query_filter={
-                "must": [{"key": "user_code", "match": {"value": user_code}}],
-                **type_filter,
-            },
+            query_filter=query_filter,
         ).points
 
         memories = []
@@ -707,10 +721,17 @@ def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str 
                 continue
             payload = r.payload
 
-            # recall memory per recency 30 days window
+            # Recency window: 30 days for episodic, AUTOBIO_RECENCY_WINDOW_DAYS for autobiographical.
+            # Autobiographical memories are durable milestones — they stay relevant for months.
             timestamp = payload.get("timestamp", now)
             recency = now - timestamp
-            recency_bonus = max(0, min(1, 1 - recency / (60 * 60 * 24 * 30)))
+            mem_type = payload.get("memory_type", "episodic")
+            recency_window = (
+                AUTOBIO_RECENCY_WINDOW_DAYS * 86400
+                if mem_type == "autobiographical"
+                else 30 * 86400
+            )
+            recency_bonus = max(0, min(1, 1 - recency / recency_window))
             # Weighted blend: semantic similarity (primary) + importance + recency
             # All weights sum to 1.0 so the score stays in ~[0, 1]
             final_score = (
@@ -971,41 +992,66 @@ def build_memory_context(session_id: str, user_code: str) -> str:
             dt = datetime.fromtimestamp(event["timestamp"]).strftime("%Y-%m")
             parts.append(f"{dt}: {event['text']}")
 
+    # Tomorrow suggestions — written by nightly review, consumed today
+    try:
+        raw = get_redis().get(f"jarvis:{user_code}:tomorrow_suggestions")
+        suggestions = json.loads(raw) if raw else []
+    except Exception:
+        suggestions = []
+    if suggestions:
+        parts.append("\n=== SUJETS À ABORDER AUJOURD'HUI ===")
+        for s in suggestions:
+            parts.append(f"- {s}")
+
+    # User relation — affinity, interaction style, average mood
+    _default_relation = {"affinity": 0.5, "interaction_style": "direct", "average_interaction_mood": "measured"}
+    relations = get_self_memory().get("user_relations", {})
+    rel = {**_default_relation, **relations.get(user_code, {})}
+    parts.append("\n=== RELATION AVEC CET UTILISATEUR ===")
+    parts.append(f"- Affinité : {rel['affinity']:.1f}/1.0")
+    parts.append(f"- Style de communication préféré : {rel['interaction_style']}")
+    parts.append(f"- Humeur moyenne des échanges : {rel['average_interaction_mood']}")
+
     return "\n".join(parts) if parts else ""
 
 
 # ══════════════════════════════════════════════════
 #  MEMORY COMPRESSION / CLEANING. CALLED BY NIGHTLY SCRIPT
 # ══════════════════════════════════════════════════
-def _consolidate_user_memories(user_code: str, max_items: int = 20):
+def _consolidate_user_memories(user_code: str, batch_size: int = 50):
+    """
+    Consolidate all episodic memories for a user into autobiographical milestones.
 
-    try:
-        qdrant = get_qdrant()
+    Runs in a loop, processing batches of `batch_size` oldest episodic points until
+    fewer than 5 remain (not enough to form a meaningful summary). This ensures a full
+    catch-up on the first run after a period of inactivity, not just a fixed-size pass.
+    """
+    qdrant = get_qdrant()
+    total_deleted = 0
 
-        results = qdrant.scroll(
-            collection_name=QDRANT_MEMORY_COLLECTION,
-            scroll_filter={
-                "must": [
-                    {"key": "user_code", "match": {"value": user_code}},
-                    {"key": "memory_type", "match": {"value": "episodic"}},
-                ]
-            },
-            order_by={
-                "key": "timestamp",
-                "direction": "asc"
-            },
-            limit=max_items,
-        )[0]
+    while True:
+        try:
+            results = qdrant.scroll(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                scroll_filter={
+                    "must": [
+                        {"key": "user_code", "match": {"value": user_code}},
+                        {"key": "memory_type", "match": {"value": "episodic"}},
+                    ]
+                },
+                order_by={"key": "timestamp", "direction": "asc"},
+                limit=batch_size,
+            )[0]
 
-        point_ids = [r.id for r in results]
-        texts = [r.payload["text"] for r in results if r.payload.get("text")]
+            point_ids = [r.id for r in results]
+            texts = [r.payload["text"] for r in results if r.payload.get("text")]
 
-        if len(texts) < 5:
-            return
+            if len(texts) < 5:
+                break  # Nothing left worth consolidating
 
-        combined = "\n".join(texts)
+            combined = "\n".join(texts)
 
-        summary_prompt = f"""
+            summary_prompt = f"""
 Résume les souvenirs suivants concernant un utilisateur en un fait durable.
 
 Souvenirs :
@@ -1014,30 +1060,40 @@ Souvenirs :
 Retourne une seule phrase en français décrivant un fait stable sur l'utilisateur.
 """
 
-        summary = call_llm(
-            [{"role": "user", "content": summary_prompt}],
-            model=ANALYSIS_MODEL,
-            api_url=ANALYSIS_API_URL,
-            api_key=ANALYSIS_API_KEY,
-            temperature=0.1,
-            max_tokens=120,
-            json_response=False,
-            timeout=30.0,
-        )
+            summary = call_llm(
+                [{"role": "user", "content": summary_prompt}],
+                model=PRIMARY_MODEL,
+                api_url=PRIMARY_API_URL,
+                api_key=PRIMARY_API_KEY,
+                temperature=0.1,
+                max_tokens=120,
+                json_response=False,
+                no_think=False,
+                timeout=30.0,
+            )
 
-        store_autobiographical_event(user_code, summary, 0.9)
+            # Strip whitespace, remove surrounding quotes, truncate to 300 chars
+            summary = summary.strip().strip('"').strip("'")
+            if not summary:
+                break
+            summary = summary[:300]
 
-        # Delete the episodic points that were just consolidated so they
-        # are not re-processed on the next nightly run.
-        qdrant.delete(
-            collection_name=QDRANT_MEMORY_COLLECTION,
-            points_selector=PointIdsList(points=point_ids),
-        )
+            store_autobiographical_event(user_code, summary, 0.9)
 
-        logger.info("[%s] Memory consolidation: %s (%d episodic points deleted)", user_code, summary, len(point_ids))
+            qdrant.delete(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                points_selector=PointIdsList(points=point_ids),
+            )
 
-    except Exception as e:
-        logger.error("Memory consolidation failed for %s: %s", user_code, e)
+            total_deleted += len(point_ids)
+            logger.info("[%s] Consolidation batch: %s (%d points deleted)", user_code, summary, len(point_ids))
+
+        except Exception as e:
+            logger.error("Memory consolidation failed for %s: %s", user_code, e)
+            break
+
+    if total_deleted:
+        logger.info("[%s] Memory consolidation complete: %d episodic points total", user_code, total_deleted)
 
 
 def _curative_profile_cleanup(user_code: str):
@@ -1075,9 +1131,9 @@ def _curative_profile_cleanup(user_code: str):
 
         parsed = extract_llm_json(call_llm(
             [{"role": "user", "content": prompt}],
-            model=ANALYSIS_MODEL,
-            api_url=ANALYSIS_API_URL,
-            api_key=ANALYSIS_API_KEY,
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
             temperature=0.0,
             max_tokens=120,
             no_think=True,

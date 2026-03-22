@@ -70,6 +70,17 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
   ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
   │ Tomorrow suggestions                           │ Redis TTL 24h                        │ jarvis:{user_code}:tomorrow_suggestions                 │
   └────────────────────────────────────────────────┴──────────────────────────────────────┴─────────────────────────────────────────────────────────┘
+  ┌────────────────────┬────────────────────────────────────────────────────────────────────┬───────────────────────────────┐   
+  │       Modèle       │                                Rôle                                │           no_think            │   
+  ├────────────────────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤   
+  │ Qwen7B (router)    │ routing, dédup profil, judge web                                   │ True                          │   
+  ├────────────────────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤   
+  │ Qwen30B (primary)  │ briefing, analyse conv, refine prompt, réflexion, nightly review,  │ False sur les tâches          │   
+  │                    │ trading                                                            │ analytiques                   │   
+  ├────────────────────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤   
+  │ GPT 5.2            │ mode expert uniquement (use_reasoning=True via router)             │ —                             │   
+  │ (reasoning)        │                                                                    │                               │   
+  └────────────────────┴────────────────────────────────────────────────────────────────────┴───────────────────────────────┘
 
 
 
@@ -203,12 +214,59 @@ Projects are stored as JSON objects with `name`, `status` (`in_progress` / `done
 final_score = semantic_similarity × 0.65 + importance × 0.25 + recency_bonus × 0.10
 ```
 
-The context injected into each prompt (`build_memory_context`) surfaces the **top 5 autobiographical events by importance + recency** (importance weight 0.7, recency 0.3 over a 1-year window) rather than the 5 most recent — so a critical event from months ago is not displaced by routine recent exchanges.
+The recency window is **type-aware**: episodic memories use a 30-day window, autobiographical memories use a 365-day window (`AUTOBIO_RECENCY_WINDOW_DAYS`). Without this distinction, a stable milestone from 6 months ago (e.g. "Sébastien gave a talk at Insomnihack") would always score `recency_bonus = 0` and be outranked by trivial recent events.
+
+`build_memory_context()` surfaces the **top 5 autobiographical events by importance + recency** (importance weight 0.7, recency 0.3 over a 1-year window) rather than the 5 most recent — so a critical event from months ago is not displaced by routine recent exchanges.
+
+#### Autobiographical Memory Deduplication
+
+Before any call to `store_autobiographical_event()`, Jarvis queries Qdrant for the most similar existing autobiographical point. If the cosine similarity exceeds `AUTOBIO_DEDUP_THRESHOLD` (default: 0.85), the new entry is silently skipped. This prevents the collection from accumulating dozens of near-identical variants of the same fact (e.g. "Sébastien s'intéresse à la bourse" stored 15 times with slightly different wording). The threshold is tunable: raise toward 0.95 to allow more variations, lower toward 0.75 to be stricter.
+
+### System Prompt Assembly
+
+Every request builds the system prompt from three blocks assembled in `build_system_prompt()` (called via `asyncio.to_thread` to avoid blocking the FastAPI event loop during Qdrant I/O):
+
+```
+SYSTEM_BASE_FR          (~1 400 chars — Jarvis personality, tool rules)
+    ↓
+MEMORY_HEADER_FR        (~90 chars — section separator)
+    ↓
+build_memory_context()  — injected only if memory is available
+    ↓
+VOICE_SUFFIX_FR         (~80 chars — only if voice_mode=True)
+```
+
+**`build_memory_context()` — sections injected in order:**
+
+| Section | Source | Always injected? |
+|---------|--------|-----------------|
+| `PROFIL UTILISATEUR` | Redis hash `user:{code}:profile` — grouped by namespace | Only if profile exists |
+| `PRÉFÉRENCES` | Redis hash `user:{code}:preferences` | Only if prefs exist |
+| `PROJETS ACTIFS` | Redis `user:{code}:projects` — status `in_progress` only | Only if projects exist |
+| `SUJETS RÉCENTS (24h)` | Topics from last 10 conversations in Redis | Only if topics exist |
+| `ÉTAT ÉMOTIONNEL` | Redis `jarvis:emotional_state` | Only if mood ≠ neutral |
+| `APPRENTISSAGES RÉCENTS` | `jarvis-self.json → learnings[-5:]` | Only if learnings exist |
+| `FRISE CHRONOLOGIQUE` | Top 5 autobio Qdrant points by importance+recency | Only if autobio exists |
+| `SUJETS À ABORDER AUJOURD'HUI` | Redis `jarvis:{code}:tomorrow_suggestions` (TTL 24h, written by nightly review) | Only if key exists |
+| `RELATION AVEC CET UTILISATEUR` | `jarvis-self.json → user_relations[user_code]` | Always (with defaults) |
+
+The `RELATION` section is always present so the LLM always has a tonal directive. Default values: affinity 0.5 / style direct / mood measured.
+
+**Context budgets** (applied to dynamic blocks fetched during the request, not to the system prompt itself):
+
+| Block | Budget | Per-item cap |
+|-------|--------|-------------|
+| Mémoire vectorielle (`search_memory`) | 2 500 chars | — |
+| RAG documents | 4 000 chars | 800 chars/chunk |
+| Recherche web | 2 000 chars | — |
+| Gmail + Calendar | 3 000 chars combined | — |
+| **Total** | **10 000 chars hard ceiling** | — |
 
 ### Request Flow
 
 ```
 User message
+    → asyncio.to_thread(build_system_prompt)      ← non-blocking Qdrant I/O
     → Tier 1 Router (intents + memory_scope + conversation_type + use_reasoning)
     → if conversation_type=conversational: skip RAG
     → Parallel context gathering (memory[scope] + RAG + web + Google + self + portfolio)
@@ -216,8 +274,10 @@ User message
     → Self context injected: internal state (focus, goals, last action)
                            + per-user relation (affinity, style, tonal directives)
     → Tier 2 PRIMARY or Tier 3 REASONING (full context → streaming response)
+    →   streaming via shared per-timeout httpx.AsyncClient (connection pool reused)
     → Conversation analyzer / ANALYSIS_MODEL (extract facts, mood, topics, ESS)
     → Memory storage: ESS > 0.35 → Qdrant episodic | ESS > 0.60 → autobiographical
+    →   store_autobiographical_event: dedup check first (cosine ≥ 0.85 → skip)
 ```
 
 ---
@@ -388,6 +448,14 @@ All variables go in `/opt/jarvis/.env`.
 | `IOS_MAX_MESSAGES` | `50` | Default history limit returned to iOS clients |
 | `CHAT_LOG_TTL_DAYS` | `90` | Days before inactive session logs are expired |
 
+### Memory Thresholds
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTOBIO_RECENCY_WINDOW_DAYS` | `365` | Recency scoring window (days) for autobiographical memories in `search_memory()`. Episodic memories use a fixed 30-day window. Longer window keeps old milestones relevant in the re-ranking score. |
+| `AUTOBIO_DEDUP_THRESHOLD` | `0.85` | Cosine similarity threshold above which a new autobiographical event is considered a duplicate and not stored. Raise toward 0.95 to allow more variation; lower toward 0.75 to be stricter. |
+| `GROWTH_LOG_MAX_ENTRIES` | `180` | Maximum entries kept in `jarvis-self.json → growth_log[]` (Jarvis's day diary). At 2 active users, 180 ≈ 3 months rolling. Older entries are trimmed during nightly review. |
+
 ### Trading
 
 | Variable | Default | Description |
@@ -483,22 +551,45 @@ Jarvis maintains two autonomous cognitive cycles:
 
 **Reflection loop** (every 2 h) — global self-observation. Jarvis reviews system health, user activity, and knowledge gaps, then picks one action from the catalog. At the end of each cycle Jarvis also runs a per-user **proactive push** check. Outcome and new focus are persisted to `jarvis-self.json`.
 
-**Nightly review** (23:00) — per-user conversation review. For each user who had conversations that day, Jarvis extracts durable user facts (→ Qdrant autobiographical), self-improvement notes (→ `learnings[]`), and updates the **user relation** for that user.
+**Nightly review** (23:00) — per-user conversation review. Conversations from the day are sorted by importance score descending before being passed to the LLM (up to 6 000 chars), so the most significant exchanges are always visible even on high-volume days. For each user Jarvis extracts durable user facts (→ Qdrant autobiographical, dedup-checked), self-improvement notes (→ `learnings[]`), updates the **user relation**, and writes `tomorrow_suggestions` to Redis (TTL 24 h) for injection in the next day's system prompt.
+
+**Reflection context** — what the LLM sees at each reflection cycle (`gather_context()`):
+
+| Field | Source | Notes |
+|-------|--------|-------|
+| `identity`, `goals`, `current_focus` | `jarvis-self.json` | Static identity + current active goal |
+| `health` | Live service checks | Qdrant / Redis / Google / Qdrant ping |
+| `user_activity` | Redis episodic sorted set | Per-user conversation count + topics (24 h) |
+| `knowledge_gaps` | Redis counter hash | Top 5 flagged topics by frequency |
+| `pending_proposals` | `prompt_proposals.json` | Prevents duplicate refine_prompt proposals |
+| `last_reflection` | Redis sorted set (1 entry) | Previous action + outcome |
+| `behavioral_patterns` | Computed from last 20 reflection log entries | Action frequency, nothing-clustering by hour, recurring focus keywords |
+| `emotional_state` | Redis `jarvis:emotional_state` | Current mood (neutral / curious / concerned…) |
+| `self_notes[-5:]` | `jarvis-self.json` | Last 5 personal observations written by `update_self_note` |
+| `opinions[-5:]` | `jarvis-self.json` | Last 5 topic opinions written by `add_self_opinion` |
+| `user_relations` | `jarvis-self.json` | Affinity + style per user |
+| `user_profiles` | Redis hash per user | Capped at 20 keys/user for token budget |
+
+**`behavioral_patterns`** is computed deterministically (no LLM) from the reflection log: action frequency (≥ 20 % of cycles), time-of-day clustering for "nothing" choices (night/evening pattern), and recurring keywords in past focus fields (seen ≥ 3 times). Up to 5 bullet points.
 
 **Reflection action catalog** — actions the LLM can choose during each reflection cycle:
 
 | Action | Description |
 |--------|-------------|
 | `nothing` | Explicit no-op with reason |
-| `store_insight` | Save a learning about a user to `jarvis-self.json` |
+| `store_insight` | Save a durable fact about a user to Qdrant autobiographical |
 | `flag_knowledge_gap` | Log a topic Jarvis answered poorly (increments a per-topic counter) |
 | `send_notification` | Send a Gmail to one user (rate-limited to 1/user/day) |
 | `queue_push` | Queue an iOS push notification for one user (rate-limited to 1/user/2h) |
-| `update_self_note` | Write a personal observation to `self_notes` |
-| `consolidate_memory` | Trigger memory compression for a user |
+| `ask_user` | Send a clarification question via push; user answers in chat, memory updates |
+| `update_self_note` | Write a personal observation to `self_notes[]` in `jarvis-self.json` |
+| `correct_profile` | Delete or correct a Redis profile key (value=null to delete) |
+| `consolidate_memory` | Trigger full memory compression for a user (loops until all episodic cleared) |
 | `check_health` | Verify all services and log status |
 | `update_trade_threshold` | Update `threshold_high` / `threshold_low` for a portfolio position autonomously |
 | `refine_prompt` | Propose an improved version of a prompt (see Prompt Self-Modification below) |
+
+**Memory consolidation** — `_consolidate_user_memories()` processes episodic points in batches of 50 (oldest first), summarises each batch into one autobiographical milestone via LLM, deletes the processed points, and loops until fewer than 5 points remain. This means a full catch-up runs in a single nightly call regardless of how many points have accumulated.
 
 #### Proactive Push Notifications (Phase 1 — polling)
 
@@ -670,6 +761,42 @@ curl -X PUT http://localhost:8000/portfolio/position/KORBEN99/FR0000120578 \
   -H "Content-Type: application/json" \
   -d '{"threshold_high": "90.00", "threshold_low": "70.00"}'
 ```
+
+---
+
+## Data Growth & Caps
+
+All storage is bounded. The table below shows what grows, where it's capped, and what happens when the cap is hit.
+
+### Redis
+
+| Key pattern | Type | Cap | Behaviour at cap |
+|-------------|------|-----|-----------------|
+| `chat:{code}:{session}` | List | `CHAT_MAX_MESSAGES` (100) | Oldest messages trimmed at each write |
+| `episodic:{code}:conversations` | Sorted set (score = timestamp) | 1 000 entries | Oldest entries removed at each write |
+| `user:{code}:profile` | Hash | None (Redis) — nightly cleanup via `_curative_profile_cleanup()` | LLM identifies and deletes duplicate/obsolete keys |
+| `jarvis:self:reflection_log` | Sorted set | 30 entries | Oldest entries trimmed at each write |
+| `jarvis:{code}:tomorrow_suggestions` | String | TTL 24 h | Auto-expires — no manual cleanup needed |
+| `jarvis:push:pending:{code}` | List | Cooldown 1 push/2 h | No write if cooldown active |
+
+### jarvis-self.json
+
+| Field | Cap | Notes |
+|-------|-----|-------|
+| `learnings[]` | 100 entries | Trimmed to `[-100:]` after nightly review |
+| `self_notes[]` | 50 entries | Trimmed to `[-50:]` after each `update_self_note` action |
+| `opinions[]` | 50 entries | Trimmed to `[-50:]` after each `add_self_opinion` call; same-topic opinions are updated in place |
+| `growth_log[]` | `GROWTH_LOG_MAX_ENTRIES` (180) | Trimmed to `[-180:]` after nightly review |
+| `user_relations{}` | 1 entry/user | Updated in place — no growth |
+
+### Qdrant (`jarvis_memory` collection)
+
+| Memory type | Growth rate | Consolidation | Long-term behaviour |
+|-------------|-------------|---------------|---------------------|
+| `episodic` | ~7 points/user/day (importance ≥ 0.35) | Nightly (day 1 of month by default, or on-demand via `consolidate_memory` action): batch of 50, loops until < 5 remain | Stable — cleared each consolidation run |
+| `autobiographical` | ~2 points/user/day + consolidation output | Dedup check (cosine ≥ `AUTOBIO_DEDUP_THRESHOLD`) before each write | Grows slowly — ~500 points/user/year after dedup |
+
+**Note on autobiographical growth:** no deletion mechanism exists for autobiographical points today. After several years of use, a cleanup pass may be needed. The dedup threshold and the `_consolidate_user_memories` LLM summary already reduce the rate significantly.
 
 ---
 

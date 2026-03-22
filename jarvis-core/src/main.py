@@ -132,13 +132,11 @@ from trading import (
 
 # config file load
 from config import (
-    ANALYSIS_MODEL,
     BRIEFING_ENABLED,
     BRIEFING_TIME,
     BRIEFING_TIMEZONE,
     EMAIL_TO_CODE,
     EMBED_MODEL_NAME,
-    ENABLE_ANALYSIS,
     IOS_MAX_MESSAGES,
     OPENAI_API_KEY,
     OPENAI_API_URL,
@@ -337,6 +335,15 @@ logger = get_logger("jarvis-api")
 # ── Lazy-loaded components ──
 
 HTTP_CLIENT = httpx.AsyncClient(timeout=30.0)
+
+# Per-timeout streaming clients — reuse connection pools across requests.
+_STREAM_CLIENTS: dict[float, httpx.AsyncClient] = {}
+
+
+def _get_stream_client(timeout: float) -> httpx.AsyncClient:
+    if timeout not in _STREAM_CLIENTS:
+        _STREAM_CLIENTS[timeout] = httpx.AsyncClient(timeout=timeout)
+    return _STREAM_CLIENTS[timeout]
 REDIS_CLIENT = get_redis()
 QDRANT_CLIENT = get_qdrant()
 
@@ -411,7 +418,7 @@ async def lifespan(app: FastAPI):
     setup_logging()
 
     logger.info(
-        f"Jarvis API v7 starting — router: {ROUTER_MODEL}, reasoning: {REASONING_MODEL}, memory: {HAS_MEMORY}, analysis: {ENABLE_ANALYSIS and HAS_MEMORY}"
+        f"Jarvis API v7 starting — router: {ROUTER_MODEL}, reasoning: {REASONING_MODEL}, memory: {HAS_MEMORY}"
     )
     logger.info(
         f"RAG: {QDRANT_URL}, collection: {QDRANT_COLLECTION}, top_k: {RAG_TOP_K}"
@@ -481,6 +488,8 @@ async def lifespan(app: FastAPI):
     if scheduler:
         scheduler.shutdown(wait=False)
     await HTTP_CLIENT.aclose()
+    for _sc in _STREAM_CLIENTS.values():
+        await _sc.aclose()
 
 
 app = FastAPI(title="Jarvis API", version="6.0", lifespan=lifespan)
@@ -665,10 +674,8 @@ async def stream_openai(
 ) -> AsyncGenerator[str, None]:
 
     try:
-        # Use a dedicated client with the correct per-tier timeout.
-        # (HTTP_CLIENT is a shared 30s singleton — too short for large models.)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream(
+        client = _get_stream_client(timeout)
+        async with client.stream(
                 "POST",
                 f"{api_url}/chat/completions",
                 headers={
@@ -1102,8 +1109,13 @@ async def device_register(req: DeviceRegisterRequest):
     if not req.device_token:
         raise HTTPException(400, "device_token required")
 
-    REDIS_CLIENT.set(f"jarvis:device:token:{req.user_code}", req.device_token)
-    logger.info("Device registered for %s", req.user_code)
+    token_key = f"jarvis:device:token:{req.user_code}"
+    existing  = REDIS_CLIENT.get(token_key)
+    if existing and existing == req.device_token:
+        logger.debug("Device re-registered (no-op) for %s", req.user_code)
+    else:
+        REDIS_CLIENT.set(token_key, req.device_token)
+        logger.info("Device registered for %s", req.user_code)
     return {"status": "ok", "user_code": req.user_code}
 
 
@@ -1228,7 +1240,7 @@ async def chat(req: ChatRequest):
         user_name = USER_CODES[req.user_code]
 
     # Build system prompt (with memory if available)
-    system_prompt = build_system_prompt(req.session_id, req.voice_mode, user_code)
+    system_prompt = await asyncio.to_thread(build_system_prompt, req.session_id, req.voice_mode, user_code)
     if user_name:
         system_prompt += f"\n\nL'utilisateur avec qui tu parles s'appelle {user_name}."
 
@@ -1284,6 +1296,8 @@ async def chat(req: ChatRequest):
         # ── Proposal management commands (short-circuit before LLM) ──
         proposal_resp = handle_proposal_command(req.message, user_code)
         if proposal_resp is not None:
+            append_conversation_message(user_code, req.session_id, "user", req.message)
+            append_conversation_message(user_code, req.session_id, "assistant", proposal_resp)
             if req.stream:
                 async def _proposal_stream():
                     yield f"data: {json.dumps({'content': proposal_resp})}\n\n"
@@ -1320,8 +1334,8 @@ async def chat(req: ChatRequest):
         _event = await extract_calendar_event_llm(req.message)
         if _event:
             try:
-                _start_dt = build_iso_dt(_event["date"], _event["start_time"], BRIEFING_TIMEZONE)
-                _end_dt   = build_iso_dt(_event["date"], _event["end_time"],   BRIEFING_TIMEZONE)
+                _start_dt = build_iso_dt(_event["date"], _event["start_time"], USER_TIMEZONES.get(user_code, BRIEFING_TIMEZONE))
+                _end_dt   = build_iso_dt(_event["date"], _event["end_time"],   USER_TIMEZONES.get(user_code, BRIEFING_TIMEZONE))
                 _pending_data = json.dumps({
                     "title":       _event["title"],
                     "start_dt":    _start_dt,
@@ -1544,17 +1558,6 @@ async def chat(req: ChatRequest):
         context_parts.append(self_ctx)
         logger.info("self context injected for %s (affinity=%.2f style=%s mood=%s)", user_code, affinity, style, mood)
 
-    # 8. IMAGE (always last — directly about this message)
-    if image_description:
-        context_parts.append(
-            f"=== IMAGE ENVOYÉE PAR L'UTILISATEUR ===\n"
-            f"L'utilisateur a joint une image à ce message. "
-            f"Voici son contenu analysé par le modèle de vision :\n\n"
-            f"{image_description}\n\n"
-            f"Réponds à la question de l'utilisateur en te basant sur cette analyse."
-        )
-        logger.info("Vision: image description injected into context")
-
     if context_parts:
         assembled = "\n\n".join(context_parts)
         if len(assembled) > TOTAL_CONTEXT_BUDGET:
@@ -1581,7 +1584,14 @@ async def chat(req: ChatRequest):
     messages = [{"role": "system", "content": system_prompt}]
     for m in hist[-20:]:  # limitation de l'historique à 20 message
         messages.append({"role": m["role"], "content": m["content"]})
-    messages.append({"role": "user", "content": req.message})
+    user_content = req.message
+    if image_description:
+        user_content = (
+            f"{req.message}\n\n"
+            f"--- Image jointe, décrite ci-dessous ---\n"
+            f"{image_description}"
+        )
+    messages.append({"role": "user", "content": user_content})
 
     start = time.time()
 
@@ -1594,8 +1604,6 @@ async def chat(req: ChatRequest):
                     full += chunk
                     yield f"data: {json.dumps({'content': chunk})}\n\n"
 
-                # hist.append({"role": "user", "content": req.message})
-                # hist.append({"role": "assistant", "content": full})
                 append_conversation_message(
                     user_code, req.session_id, "user", req.message
                 )
@@ -1605,7 +1613,7 @@ async def chat(req: ChatRequest):
                 ms = int((time.time() - start) * 1000)
                 _safe_web = [] if web_results == INTERNET_ERROR else web_results
                 yield f"data: {json.dumps({'done': True, 'model': use_model, 'duration_ms': ms, 'rag_sources': [{'source': c['source'], 'score': c['score']} for c in rag_chunks], 'web_sources': [{'title': w['title'], 'url': w['url']} for w in _safe_web]})}\n\n"
-                if ENABLE_ANALYSIS and HAS_MEMORY:
+                if HAS_MEMORY:
                     asyncio.create_task(
                         post_analysis(req.session_id, user_code, req.message, full)
                     )
@@ -1631,13 +1639,11 @@ async def chat(req: ChatRequest):
             raise HTTPException(502, f"OpenAI error: {data}")
         resp = data["choices"][0]["message"]["content"]
 
-        # hist.append({"role": "user", "content": req.message})
-        # hist.append({"role": "assistant", "content": resp})
         append_conversation_message(user_code, req.session_id, "user", req.message)
         append_conversation_message(user_code, req.session_id, "assistant", resp)
         ms = int((time.time() - start) * 1000)
 
-        if ENABLE_ANALYSIS and HAS_MEMORY:
+        if HAS_MEMORY:
             asyncio.create_task(
                 post_analysis(req.session_id, user_code, req.message, resp)
             )
@@ -1661,7 +1667,7 @@ async def chat(req: ChatRequest):
 async def get_history(session_id: str, user_code: str, limit: int = IOS_MAX_MESSAGES):
     if user_code not in USER_CODES:
         raise HTTPException(403)
-    logger.info(f"History request user={user_code} session={session_id} limit={limit}")
+    logger.debug(f"History request user={user_code} session={session_id} limit={limit}")
     key = f"chat:{user_code}:{session_id}"
     entries = REDIS_CLIENT.lrange(key, -limit, -1)
     return [json.loads(e) for e in entries]
