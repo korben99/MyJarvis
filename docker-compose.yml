@@ -111,6 +111,10 @@ services:
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_REFRESH_TOKEN=${GOOGLE_REFRESH_TOKEN}
       - GOOGLE_CALENDAR_ID=${GOOGLE_CALENDAR_ID:-primary}
+      # Per-user tokens — add one line per user with "google": true in users_list.json
+      - GOOGLE_REFRESH_TOKEN_KORBEN99=${GOOGLE_REFRESH_TOKEN_KORBEN99:-}
+      - GOOGLE_REFRESH_TOKEN_AQWZSX=${GOOGLE_REFRESH_TOKEN_AQWZSX:-}
+      - GOOGLE_REFRESH_TOKEN_ZSXEDC=${GOOGLE_REFRESH_TOKEN_ZSXEDC:-}
 
       # ── Features ───────────────────────────────────────────────────────────
       - SELF_MEMORY_PATH=/app/data/jarvis-self.json

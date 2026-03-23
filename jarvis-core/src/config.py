@@ -190,3 +190,17 @@ USER_TIMEZONES: dict[str, str] = {code: u.get("timezone", "Europe/Paris") for co
 
 # codes with trading enabled
 USER_TRADING: list[str] = [code for code, u in USERS.items() if u.get("trading", False)]
+
+# codes with a connected Google account (Gmail + Calendar access)
+# Only these users receive calendar/Gmail data in briefings and chat.
+USER_GOOGLE: set[str] = {code for code, u in USERS.items() if u.get("google", False)}
+
+# Per-user Google OAuth refresh tokens.
+# Loaded from GOOGLE_REFRESH_TOKEN_<CODE> env vars for each user with "google": true.
+# No fallback — each user must have their own token (prevents cross-account calendar leaks).
+# To enable a user: set "google": true in users_list.json AND add their token to .env.
+GOOGLE_USER_TOKENS: dict[str, str] = {}
+for _code in USER_GOOGLE:
+    _tok = os.getenv(f"GOOGLE_REFRESH_TOKEN_{_code}", "")
+    if _tok:
+        GOOGLE_USER_TOKENS[_code] = _tok

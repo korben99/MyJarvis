@@ -1206,7 +1206,7 @@ async def chat(req: ChatRequest):
             _event_id = await asyncio.to_thread(
                 create_calendar_event,
                 _pending["title"], _pending["start_dt"], _pending["end_dt"],
-                _pending.get("description", ""), _pending.get("location", ""),
+                _pending.get("description", ""), _pending.get("location", ""), None, user_code,
             )
             _cal_reply = (
                 f"C'est fait ! J'ai ajouté « {_pending['title']} » à ton agenda."
@@ -1246,7 +1246,7 @@ async def chat(req: ChatRequest):
 
     # LLM router — uses ROUTER_MODEL if set, PRIMARY_MODEL otherwise.
     # Falls back to embedding router only on actual LLM failure (timeout / parse error).
-    llm_result = await llm_route(req.message, google_available=is_google_available())
+    llm_result = await llm_route(req.message, google_available=is_google_available(user_code))
 
     if llm_result:
         use_memory        = llm_result.use_memory
@@ -1330,7 +1330,7 @@ async def chat(req: ChatRequest):
     # self intent: state is injected as context below — no short-circuit
 
     # ── Calendar write ────────────────────────────────────────────────────
-    if is_calendar_write(req.message) and is_google_available():
+    if is_calendar_write(req.message) and is_google_available(user_code):
         _event = await extract_calendar_event_llm(req.message)
         if _event:
             try:
@@ -1392,10 +1392,10 @@ async def chat(req: ChatRequest):
         # Web/weather search — weather intent takes priority and bypasses generic web search
         search_weather(_weather_query) if use_weather_auto else
         search_web(optimize_web_query(req.message), original_message=req.message) if (req.use_web or use_web_auto) else _empty(),
-        # Gmail
-        asyncio.to_thread(fetch_gmail_messages, gmail_query) if use_gmail else _empty(),
-        # Calendar
-        asyncio.to_thread(fetch_calendar_events, cal_days) if use_calendar else _empty(),
+        # Gmail — only if user has a connected Google account
+        asyncio.to_thread(fetch_gmail_messages, gmail_query, 10, user_code) if use_gmail and is_google_available(user_code) else _empty(),
+        # Calendar — only if user has a connected Google account
+        asyncio.to_thread(fetch_calendar_events, cal_days, None, None, user_code) if use_calendar and is_google_available(user_code) else _empty(),
     )
 
     # Update memory Redis

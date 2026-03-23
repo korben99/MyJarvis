@@ -39,7 +39,7 @@ from config import (
     GOOGLE_CALENDAR_ID,
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
-    GOOGLE_REFRESH_TOKEN,
+    GOOGLE_USER_TOKENS,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
@@ -68,84 +68,91 @@ _CALENDAR_MAX_RESULTS = 50
 _EMAIL_BODY_MAX = 400   # chars per email
 _SUBJECT_MAX = 120
 
-# ── Singletons ──
-_credentials: Credentials | None = None
-_gmail_service = None
-_calendar_service = None
+# ── Per-user credential / service caches ──
+_credentials_cache: dict[str, Credentials] = {}
+_gmail_service_cache: dict[str, object] = {}
+_calendar_service_cache: dict[str, object] = {}
 _creds_lock = threading.Lock()
-_service_lock = threading.Lock()
 
 
 # ══════════════════════════════════════════════════
 #  AVAILABILITY CHECK
 # ══════════════════════════════════════════════════
 
-def is_google_available() -> bool:
-    """True only when all required credentials are present in the environment."""
-    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN)
+def is_google_available(user_code: str | None = None) -> bool:
+    """
+    True when Google credentials are present and ready.
+    - user_code provided → check that specific user has a token.
+    - user_code=None     → True if at least one user has a token (status endpoint).
+    """
+    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET):
+        return False
+    if user_code is not None:
+        return user_code in GOOGLE_USER_TOKENS
+    return bool(GOOGLE_USER_TOKENS)
 
 
 # ══════════════════════════════════════════════════
-#  CREDENTIALS  (thread-safe refresh)
+#  CREDENTIALS  (thread-safe per-user refresh)
 # ══════════════════════════════════════════════════
 
-def _get_credentials() -> Credentials:
+def _get_credentials(user_code: str) -> Credentials:
     """
-    Return a valid Credentials object, refreshing the access token when needed.
-    Lock prevents concurrent refresh races in async/threaded contexts.
-    Credential values are never written to logs.
+    Return a valid Credentials object for user_code, refreshing when needed.
+    Lock prevents concurrent refresh races. Credential values are never logged.
     """
-    global _credentials
+    refresh_token = GOOGLE_USER_TOKENS.get(user_code, "")
+    if not refresh_token:
+        raise RuntimeError(f"No Google token for user {user_code}")
 
     with _creds_lock:
-        if _credentials is None:
-            _credentials = Credentials(
+        creds = _credentials_cache.get(user_code)
+        if creds is None:
+            creds = Credentials(
                 token=None,
-                refresh_token=GOOGLE_REFRESH_TOKEN,
+                refresh_token=refresh_token,
                 client_id=GOOGLE_CLIENT_ID,
                 client_secret=GOOGLE_CLIENT_SECRET,
                 token_uri="https://oauth2.googleapis.com/token",
                 scopes=_SCOPES,
             )
+            _credentials_cache[user_code] = creds
 
-        if not _credentials.valid:
+        if not creds.valid:
             try:
-                _credentials.refresh(Request())
-                logger.info("Google access token refreshed")
+                creds.refresh(Request())
+                logger.info("Google access token refreshed for %s", user_code)
             except (GoogleAuthError, TransportError) as exc:
-                # Log only the exception type — never the token or secret values
-                logger.error("Google credential refresh failed: %s", type(exc).__name__)
+                logger.error("Google credential refresh failed for %s: %s", user_code, type(exc).__name__)
                 raise RuntimeError("Google authentication failed") from exc
 
-        return _credentials
+        return creds
 
 
 # ══════════════════════════════════════════════════
-#  SERVICE SINGLETONS
+#  SERVICE CACHE (per user)
 # ══════════════════════════════════════════════════
 
-def _get_gmail_service():
-    global _gmail_service
-    if _gmail_service is None:
-        with _service_lock:
-            if _gmail_service is None:
-                creds = _get_credentials()
-                _gmail_service = build(
+def _get_gmail_service(user_code: str):
+    if user_code not in _gmail_service_cache:
+        with _creds_lock:
+            if user_code not in _gmail_service_cache:
+                creds = _get_credentials(user_code)
+                _gmail_service_cache[user_code] = build(
                     "gmail", "v1", credentials=creds, cache_discovery=False
                 )
-    return _gmail_service
+    return _gmail_service_cache[user_code]
 
 
-def _get_calendar_service():
-    global _calendar_service
-    if _calendar_service is None:
-        with _service_lock:
-            if _calendar_service is None:
-                creds = _get_credentials()
-                _calendar_service = build(
+def _get_calendar_service(user_code: str):
+    if user_code not in _calendar_service_cache:
+        with _creds_lock:
+            if user_code not in _calendar_service_cache:
+                creds = _get_credentials(user_code)
+                _calendar_service_cache[user_code] = build(
                     "calendar", "v3", credentials=creds, cache_discovery=False
                 )
-    return _calendar_service
+    return _calendar_service_cache[user_code]
 
 
 # ══════════════════════════════════════════════════
@@ -228,24 +235,24 @@ def _decode_email_body(payload: dict) -> str:
     return plain or html_fallback
 
 
-def fetch_gmail_messages(query: str, max_results: int = _GMAIL_MAX_RESULTS) -> list[dict]:
+def fetch_gmail_messages(query: str, max_results: int = _GMAIL_MAX_RESULTS, user_code: str = "") -> list[dict]:
     """
     Search Gmail across ALL folders and labels (including Sent, Archive, Spam).
     Returns list of {subject, from, date, snippet}.
     Results are cached in Redis for _GMAIL_CACHE_TTL seconds.
     """
-    if not is_google_available():
+    if not is_google_available(user_code or None):
         return []
 
     max_results = max(1, min(max_results, _GMAIL_MAX_RESULTS))
-    cache_key = _cache_key("gmail", query, str(max_results))
+    cache_key = _cache_key("gmail", user_code, query, str(max_results))
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.debug("Gmail cache hit")
         return cached
 
     try:
-        service = _get_gmail_service()
+        service = _get_gmail_service(user_code)
 
         # includeSpamTrash=False + no label filter = ALL folders except Trash & spam
         list_resp = (
@@ -312,7 +319,7 @@ def fetch_gmail_messages(query: str, max_results: int = _GMAIL_MAX_RESULTS) -> l
 #  CALENDAR
 # ══════════════════════════════════════════════════
 
-def fetch_calendar_events(days: int = 7, date: date_type | None = None, tz_name: str | None = None) -> list[dict]:
+def fetch_calendar_events(days: int = 7, date: date_type | None = None, tz_name: str | None = None, user_code: str = "") -> list[dict]:
     """
     Fetch calendar events across all calendars.
 
@@ -321,16 +328,16 @@ def fetch_calendar_events(days: int = 7, date: date_type | None = None, tz_name:
     tz_name=None    → falls back to BRIEFING_TIMEZONE
     Results cached in Redis for _CALENDAR_CACHE_TTL seconds.
     """
-    if not is_google_available():
+    if not is_google_available(user_code or None):
         return []
 
     effective_tz = tz_name or BRIEFING_TIMEZONE
 
     if date is not None:
-        cache_key = _cache_key("calendar_today", date.strftime("%Y-%m-%d"), effective_tz)
+        cache_key = _cache_key("calendar_today", user_code, date.strftime("%Y-%m-%d"), effective_tz)
     else:
         days = max(1, min(days, 90))
-        cache_key = _cache_key("calendar", str(days))
+        cache_key = _cache_key("calendar", user_code, str(days))
 
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -338,7 +345,7 @@ def fetch_calendar_events(days: int = 7, date: date_type | None = None, tz_name:
         return cached
 
     try:
-        service = _get_calendar_service()
+        service = _get_calendar_service(user_code)
 
         if date is not None:
             tz = pytz.timezone(effective_tz)
@@ -406,18 +413,18 @@ def fetch_calendar_events(days: int = 7, date: date_type | None = None, tz_name:
 #  GMAIL SEND
 # ══════════════════════════════════════════════════
 
-def send_gmail_message(to: str, subject: str, html_body: str, text_body: str = "") -> bool:
+def send_gmail_message(to: str, subject: str, html_body: str, text_body: str = "", user_code: str = "") -> bool:
     """
-    Send an email via the authenticated Gmail account.
+    Send an email via the authenticated Gmail account of user_code.
     Returns True on success, False on any error.
     Sends a multipart/alternative message (plain text + HTML).
     """
-    if not is_google_available():
-        logger.warning("Gmail send skipped — Google not configured")
+    if not is_google_available(user_code or None):
+        logger.warning("Gmail send skipped — Google not configured for %s", user_code)
         return False
 
     try:
-        service = _get_gmail_service()
+        service = _get_gmail_service(user_code)
 
         msg = email.mime.multipart.MIMEMultipart("alternative")
         msg["To"] = to
@@ -543,19 +550,20 @@ def create_calendar_event(
     description: str = "",
     location: str = "",
     calendar_id: str | None = None,
+    user_code: str = "",
 ) -> str | None:
     """
-    Create an event in Google Calendar.
+    Create an event in Google Calendar of user_code.
     start_dt / end_dt: ISO 8601 with timezone, e.g. "2026-03-25T14:00:00+01:00".
     Returns the event ID on success, None on failure.
     """
-    if not is_google_available():
-        logger.warning("Calendar write skipped — Google not configured")
+    if not is_google_available(user_code or None):
+        logger.warning("Calendar write skipped — Google not configured for %s", user_code)
         return None
 
     cal_id = calendar_id or GOOGLE_CALENDAR_ID
     try:
-        service = _get_calendar_service()
+        service = _get_calendar_service(user_code)
         body: dict = {
             "summary": title,
             "start": {"dateTime": start_dt},

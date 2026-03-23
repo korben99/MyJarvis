@@ -26,8 +26,8 @@
       "description": "Identify knowledge gaps, learn from conversations, and improve quality of responses over time."
     }
   ],
-  "current_focus": "Gérer les lacunes de connaissance sur le sujet de test_validation.",
-  "last_reflection": "2026-03-22T16:37:10.036174+00:00",
+  "current_focus": "Gérer l'inactivité de Hélène (AQWZSX) qui n'a pas eu de conversation depuis plus de 48h.",
+  "last_reflection": "2026-03-23T06:37:10.805912+00:00",
   "self_notes": [],
   "opinions": [],
   "learnings": [
@@ -129,6 +129,36 @@
       "text": "Il est essentiel de rester attentif aux préoccupations financières de l'utilisateur et de proposer des solutions adaptées.",
       "date": "2026-03-20",
       "source": "nightly_review"
+    },
+    {
+      "text": "Je dois continuer à être proactif en offrant des suggestions sur des projets ou des activités qui intéressent l'utilisateur.",
+      "date": "2026-03-21",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Il est important de rester attentif aux détails financiers de l'utilisateur et de lui fournir des analyses pertinentes.",
+      "date": "2026-03-21",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Je dois m'assurer de donner des réponses claires et concises pour faciliter la compréhension de l'utilisateur.",
+      "date": "2026-03-21",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Je dois continuer à être attentif aux préoccupations émotionnelles de l'utilisateur concernant ses animaux.",
+      "date": "2026-03-21",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Il est important de fournir des informations claires et pratiques sur l'alimentation des poules pour rassurer l'utilisateur.",
+      "date": "2026-03-21",
+      "source": "nightly_review"
+    },
+    {
+      "text": "Je devrais poser des questions plus ciblées pour mieux comprendre les problèmes spécifiques rencontrés par l'utilisateur dans ses loisirs.",
+      "date": "2026-03-21",
+      "source": "nightly_review"
     }
   ],
   "growth_log": [
@@ -211,22 +241,38 @@
       "summary": "Sébastien a partagé son expérience positive à l'Insomnihack et a exprimé des réflexions sur l'avenir économique de la France. Il envisage également des options d'investissement immobilier à l'étranger.",
       "mood": "La journée a été marquée par des échanges mesurés et réfléchis sur des sujets importants.",
       "conversations": 7
+    },
+    {
+      "date": "2026-03-21",
+      "user_code": "KORBEN99",
+      "user_name": "Sébastien",
+      "summary": "Aujourd'hui, Sébastien a pris des décisions financières importantes en ouvrant un compte en dollars et en planifiant des projets variés, notamment du karting avec ses enfants. Il a également mis à jour ses projets en cours et a ajouté un rendez-vous pour jouer au tennis.",
+      "mood": "La journée a été marquée par un mélange de satisfaction et de réflexion sur des décisions financières et personnelles.",
+      "conversations": 20
+    },
+    {
+      "date": "2026-03-21",
+      "user_code": "AQWZSX",
+      "user_name": "Hélène",
+      "summary": "Aujourd'hui, Hélène a partagé des préoccupations concernant la santé de ses poules et a demandé des conseils sur leur alimentation. Elle a également évoqué un problème avec un élément du jeu Gravitrax, montrant son intérêt pour ce loisir.",
+      "mood": "L'ambiance de la journée était chaleureuse et engageante.",
+      "conversations": 10
     }
   ],
-  "reflection_count": 91,
+  "reflection_count": 98,
   "user_relations": {
     "KORBEN99": {
-      "affinity": 0.7,
+      "affinity": 0.8,
       "interaction_style": "direct",
       "average_interaction_mood": "measured",
-      "updated_at": "2026-03-21T22:00:06.604359+00:00"
+      "updated_at": "2026-03-22T22:00:06.816629+00:00"
     },
     "AQWZSX": {
-      "affinity": 0.7,
+      "affinity": 0.8,
       "interaction_style": "gentle",
       "average_interaction_mood": "warm",
-      "updated_at": "2026-03-20T22:00:12.786989+00:00"
+      "updated_at": "2026-03-22T22:00:12.513541+00:00"
     }
   },
-  "last_nightly": "2026-03-20"
+  "last_nightly": "2026-03-21"
 }

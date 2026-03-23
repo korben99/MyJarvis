@@ -10,7 +10,12 @@ logs/
 models/
 RAGData/
 TradeData/
+RouterData/
 JarvisConfig
 jarvis-core/reflections/
 jarvis-core/JarvisData/model_cache/
 *.pyc
+
+#SECRETS#
+.env
+scripts/client_secret.json

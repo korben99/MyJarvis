@@ -369,8 +369,9 @@ async def gather_briefing(user_code: str) -> BriefingResult:
 
     # Parallel data gathering — date= gives midnight→midnight fetch across all calendars
     today = today_user(user_code)
-    calendar_task  = asyncio.to_thread(fetch_calendar_events, 1, today, tz_name) if is_google_available() else asyncio.sleep(0, result=[])
-    gmail_task     = asyncio.to_thread(fetch_gmail_messages, "is:unread newer_than:1d", 5) if is_google_available() else asyncio.sleep(0, result=[])
+    has_google = is_google_available(user_code)
+    calendar_task  = asyncio.to_thread(fetch_calendar_events, 1, today, tz_name, user_code) if has_google else asyncio.sleep(0, result=[])
+    gmail_task     = asyncio.to_thread(fetch_gmail_messages, "is:unread newer_than:1d", 5, user_code) if has_google else asyncio.sleep(0, result=[])
     weather_task   = _fetch_weather(city, tz_name)
     news_task      = _fetch_news(interests)
     portfolio_task = asyncio.to_thread(get_portfolio_summary_text, user_code)
@@ -430,7 +431,7 @@ def deliver_briefing(user_code: str, result: BriefingResult) -> None:
 
     date_label = now_user(user_code).strftime("%d/%m/%Y")
     subject = f"Jarvis — Briefing du {date_label}"
-    success = send_gmail_message(to=to, subject=subject, html_body=result.html, text_body=result.text)
+    success = send_gmail_message(to=to, subject=subject, html_body=result.html, text_body=result.text, user_code=user_code)
 
     if success:
         r.setex(sent_key, _BRIEFING_TTL, today)
