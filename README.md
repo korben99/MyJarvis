@@ -1,4 +1,4 @@
-# Jarvis v7 — On-Premise Personal AI Assistant
+# Jarvis v8 — On-Premise Personal AI Assistant
 
 Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonomous reflection, and integration with Gmail, Google Calendar, web search, and a document knowledge base.
 
@@ -88,13 +88,19 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
 
 | Component | Technology | Role |
 |-----------|-----------|------|
-| **Jarvis API** | FastAPI, Python 3.11 | Main orchestration, routing, response generation |
+| **Jarvis API** | FastAPI, Python 3.11 | Main orchestration — bootstrap only (261 lines) |
 | **Open WebUI** | Docker, port 3000 | Chat interface, connects via `/v1/chat/completions` |
 | **Qdrant** | Docker, port 6333 | Vector DB for RAG document search and episodic memory |
 | **Redis** | Docker, port 6379 | Working memory, session context, conversation cache |
+| **`deps.py`** | Python module | Shared runtime singletons: Redis, Qdrant, embed model, HTTP clients, context budgets |
+| **`llm_client.py`** | Python module | LLM HTTP client: streaming SSE, model tier selection, vision pipeline |
+| **`rag.py`** | Python module | Qdrant document retrieval (embed query → search → score filter) |
+| **`pipeline.py`** | Python module | System prompt construction, 7-source context assembly, post-exchange analysis |
+| **`routes/chat.py`** | Python module | Main chat pipeline: routing → context gather → LLM → SSE stream |
+| **`routes/proxy.py`** | Python module | OpenAI-compatible proxy `/v1/*` for Open WebUI and iOS |
 | **`prompts.py`** | Python module | Single source of truth for all LLM prompts — supports live overrides via `get_prompt()` |
 | **`web_search.py`** | Python module | All external search backends: Open-Meteo weather, DDG news, 3-stage deep text pipeline |
-| **`helpers.py`** | Python module | Shared utilities: LLM HTTP clients, logging setup, Redis/Qdrant singletons, JSON parsing |
+| **`helpers.py`** | Python module | Shared utilities: LLM HTTP clients, logging setup, Redis/Qdrant factory, JSON parsing |
 
 ### Four-Tier LLM Architecture
 
@@ -162,7 +168,7 @@ The router returns a structured JSON decision consumed by the chat pipeline:
 - `conversational` — greetings, thanks, chitchat: RAG document search is bypassed, faster response
 - `task` / `question` — full retrieval pipeline runs normally
 
-If the LLM router is unavailable or fails, the embedding-based semantic router takes over with `memory_scope=auto` and `conversation_type` defaulting to full retrieval — no degradation in correctness.
+If the LLM router is unavailable or fails (timeout / parse error), all `use_*` flags default to `False` — no context is fetched and the LLM answers from the system prompt alone. This is the safe fallback; the embedding-based semantic router has been removed.
 
 ### Five-Layer Memory System
 
@@ -189,6 +195,19 @@ After each exchange, `analyzer.py` computes an importance score in `[0, 1]` that
 Storage thresholds (set in `config.py`):
 - **`IMPORTANCE_THRESHOLD` (0.35)** — stored as episodic vector in Qdrant
 - **`AUTOBIO_IMPORTANCE_THRESHOLD` (0.60)** — additionally stored as autobiographical event
+
+#### Importance Score Reference
+
+Every autobiographical point stored in Qdrant carries an `importance` field. This value determines both retrieval ranking and long-term decay behaviour. Here is the complete list of values assigned across the codebase:
+
+| Score | Source | Decay behaviour |
+|-------|--------|-----------------|
+| `1.0` (`MEMORY_CONSOLIDATION_IMPORTANCE`) | Monthly consolidation (`_consolidate_user_memories`) — LLM summary of a batch of episodic memories | **Permanent — exempt from decay** (`== MEMORY_DECAY_DURABLE_MIN`) |
+| `0.60–1.0` (clamped) | Analyzer ESS score, via `complete_memory_to_qdrant()` — only stored if score `> AUTOBIO_IMPORTANCE_THRESHOLD` | Decays monthly; exempt only if score reaches `1.0` (requires LLM remember + 3 facts + emotion + depth simultaneously) |
+| `0.80` | Jarvis self-reflection insight (`run_self_reflection`) | Decays monthly |
+| `0.70` | Nightly review user insight (`run_nightly_interaction_review`) | Decays monthly |
+
+**Key invariant:** `MEMORY_CONSOLIDATION_IMPORTANCE` must equal `MEMORY_DECAY_DURABLE_MIN`. If you change one, change the other. Breaking this invariant would either make consolidation milestones decay (if `CONSOLIDATION_IMPORTANCE < DURABLE_MIN`) or promote ordinary memories to permanent status (if `DURABLE_MIN` is lowered).
 
 #### Profile Key Deduplication
 
@@ -221,6 +240,26 @@ The recency window is **type-aware**: episodic memories use a 30-day window, aut
 #### Autobiographical Memory Deduplication
 
 Before any call to `store_autobiographical_event()`, Jarvis queries Qdrant for the most similar existing autobiographical point. If the cosine similarity exceeds `AUTOBIO_DEDUP_THRESHOLD` (default: 0.85), the new entry is silently skipped. This prevents the collection from accumulating dozens of near-identical variants of the same fact (e.g. "Sébastien s'intéresse à la bourse" stored 15 times with slightly different wording). The threshold is tunable: raise toward 0.95 to allow more variations, lower toward 0.75 to be stricter.
+
+#### Autobiographical Memory Decay
+
+On the 1st of each month, `consolidate_memories()` runs a decay pass on every autobiographical point via `_decay_autobiographical_memories()`:
+
+1. **Exempt** — points with `importance >= MEMORY_DECAY_DURABLE_MIN` (default `1.0`) are never touched. In practice this means only monthly consolidation milestones.
+2. **Decay** — for all other points: `decayed_importance = importance × MEMORY_DECAY_FACTOR ^ age_months`. With the default factor of `0.85`, each point loses ~15 % of its importance per elapsed month.
+3. **Delete** — if `decayed_importance < MEMORY_DECAY_THRESHOLD` (default `0.15`), the point is permanently deleted from Qdrant. Otherwise the payload is updated in place with the new (lower) importance.
+
+Approximate lifespans with default settings:
+
+| Initial importance | Source | Approx. lifespan |
+|--------------------|--------|------------------|
+| `1.0` | Monthly consolidation | **Permanent** |
+| `0.80` | Self-reflection | ~11 months |
+| `0.70` | Nightly user insight | ~9 months |
+| `0.60` | Low-signal analyzer event | ~7 months |
+
+To retain memories longer: raise `MEMORY_DECAY_FACTOR` toward `1.0` (slower decay) or lower `MEMORY_DECAY_THRESHOLD` toward `0.05` (higher tolerance before deletion).
+To forget faster: lower `MEMORY_DECAY_FACTOR` toward `0.70` or raise `MEMORY_DECAY_THRESHOLD` toward `0.30`.
 
 ### System Prompt Assembly
 
@@ -454,6 +493,10 @@ All variables go in `/opt/jarvis/.env`.
 |----------|---------|-------------|
 | `AUTOBIO_RECENCY_WINDOW_DAYS` | `365` | Recency scoring window (days) for autobiographical memories in `search_memory()`. Episodic memories use a fixed 30-day window. Longer window keeps old milestones relevant in the re-ranking score. |
 | `AUTOBIO_DEDUP_THRESHOLD` | `0.85` | Cosine similarity threshold above which a new autobiographical event is considered a duplicate and not stored. Raise toward 0.95 to allow more variation; lower toward 0.75 to be stricter. |
+| `MEMORY_DECAY_FACTOR` | `0.85` | Monthly multiplier applied to `importance` during the decay pass (~15 % loss/month). Raise toward `1.0` to slow forgetting; lower toward `0.70` to accelerate it. |
+| `MEMORY_DECAY_THRESHOLD` | `0.15` | Importance floor below which a decayed autobiographical point is deleted from Qdrant. Raise toward `0.30` to delete sooner; lower toward `0.05` to keep memories longer. |
+| `MEMORY_DECAY_DURABLE_MIN` | `1.0` | Points with `importance >= this value` are exempt from decay. **Must equal `MEMORY_CONSOLIDATION_IMPORTANCE`** — see invariant in the Importance Score Reference section. |
+| `MEMORY_CONSOLIDATION_IMPORTANCE` | `1.0` | Importance score assigned to autobiographical milestones produced by monthly consolidation. **Must equal `MEMORY_DECAY_DURABLE_MIN`** to keep these milestones permanent. |
 | `GROWTH_LOG_MAX_ENTRIES` | `180` | Maximum entries kept in `jarvis-self.json → growth_log[]` (Jarvis's day diary). At 2 active users, 180 ≈ 3 months rolling. Older entries are trimmed during nightly review. |
 
 ### Trading
@@ -569,6 +612,7 @@ Jarvis maintains two autonomous cognitive cycles:
 | `opinions[-5:]` | `jarvis-self.json` | Last 5 topic opinions written by `add_self_opinion` |
 | `user_relations` | `jarvis-self.json` | Affinity + style per user |
 | `user_profiles` | Redis hash per user | Capped at 20 keys/user for token budget |
+| `push_availability` | Redis `jarvis:device:token:{code}` | Real-time per-user iOS push status — prevents wasting cycles on users with no registered device |
 
 **`behavioral_patterns`** is computed deterministically (no LLM) from the reflection log: action frequency (≥ 20 % of cycles), time-of-day clustering for "nothing" choices (night/evening pattern), and recurring keywords in past focus fields (seen ≥ 3 times). Up to 5 bullet points.
 
@@ -578,7 +622,7 @@ Jarvis maintains two autonomous cognitive cycles:
 |--------|-------------|
 | `nothing` | Explicit no-op with reason |
 | `store_insight` | Save a durable fact about a user to Qdrant autobiographical |
-| `flag_knowledge_gap` | Log a topic Jarvis answered poorly (increments a per-topic counter) |
+| `flag_knowledge_gap` | Log a topic Jarvis answered poorly (increments a per-topic counter). Requires a concrete observed failure as context — generic phrases are rejected. 7-day cooldown per topic. Blocked if a proposal already exists for the topic. |
 | `send_notification` | Send a Gmail to one user (rate-limited to 1/user/day) |
 | `queue_push` | Queue an iOS push notification for one user (rate-limited to 1/user/2h) |
 | `ask_user` | Send a clarification question via push; user answers in chat, memory updates |
@@ -589,7 +633,10 @@ Jarvis maintains two autonomous cognitive cycles:
 | `update_trade_threshold` | Update `threshold_high` / `threshold_low` for a portfolio position autonomously |
 | `refine_prompt` | Propose an improved version of a prompt (see Prompt Self-Modification below) |
 
-**Memory consolidation** — `_consolidate_user_memories()` processes episodic points in batches of 50 (oldest first), summarises each batch into one autobiographical milestone via LLM, deletes the processed points, and loops until fewer than 5 points remain. This means a full catch-up runs in a single nightly call regardless of how many points have accumulated.
+**Memory consolidation** — `consolidate_memories()` is the single entry point. It runs on the 1st of each month (nightly review scheduler) and on demand via the `consolidate_memory` self-action. It executes three steps in order for each user:
+1. `_consolidate_user_memories()` — processes episodic points in batches of 50 (oldest first), summarises each batch into one autobiographical milestone via LLM (stored at `importance = MEMORY_CONSOLIDATION_IMPORTANCE = 1.0`), deletes the processed points, loops until fewer than 5 remain.
+2. `_decay_autobiographical_memories()` — decays and prunes autobiographical points (see Autobiographical Memory Decay section above).
+3. `_curative_profile_cleanup()` — asks the LLM to identify and delete duplicate or obsolete keys from the Redis user profile hash.
 
 #### Proactive Push Notifications (Phase 1 — polling)
 
@@ -793,10 +840,8 @@ All storage is bounded. The table below shows what grows, where it's capped, and
 
 | Memory type | Growth rate | Consolidation | Long-term behaviour |
 |-------------|-------------|---------------|---------------------|
-| `episodic` | ~7 points/user/day (importance ≥ 0.35) | Nightly (day 1 of month by default, or on-demand via `consolidate_memory` action): batch of 50, loops until < 5 remain | Stable — cleared each consolidation run |
-| `autobiographical` | ~2 points/user/day + consolidation output | Dedup check (cosine ≥ `AUTOBIO_DEDUP_THRESHOLD`) before each write | Grows slowly — ~500 points/user/year after dedup |
-
-**Note on autobiographical growth:** no deletion mechanism exists for autobiographical points today. After several years of use, a cleanup pass may be needed. The dedup threshold and the `_consolidate_user_memories` LLM summary already reduce the rate significantly.
+| `episodic` | ~7 points/user/day (importance ≥ 0.35) | Monthly (day 1), or on-demand via `consolidate_memory` action: batch of 50, loops until < 5 remain | Stable — cleared each consolidation run |
+| `autobiographical` | ~2 points/user/day + consolidation output | Dedup check (cosine ≥ `AUTOBIO_DEDUP_THRESHOLD`) before write; monthly decay pass deletes points below `MEMORY_DECAY_THRESHOLD` | Stable long-term — decay prevents unbounded growth; only consolidation milestones (`importance = 1.0`) are permanent |
 
 ---
 
@@ -956,10 +1001,17 @@ Reflection cycle detects repeated knowledge gap
 
 | Guard | Where | Description |
 |-------|-------|-------------|
+| Concrete context required | `_action_flag_knowledge_gap()` | Context must describe a specific observed failure (min 30 chars, generic phrases rejected) |
+| Per-topic cooldown | `_action_flag_knowledge_gap()` | Same topic cannot be re-flagged within 7 days (`jarvis:self:gap_cooldown:{slug}` Redis TTL) |
+| Proposal block | `_action_flag_knowledge_gap()` | Blocked if a pending proposal exists for the topic, or an approved one is < 30 days old |
 | Hard threshold check | `_action_refine_prompt()` | Refuses to run if gap count < `REFINE_PROMPT_THRESHOLD` — LLM cannot bypass this |
 | Duplicate prevention | `_action_refine_prompt()` | Only one pending proposal per prompt at a time |
 | Rejection cooldown | `_action_refine_prompt()` | Same prompt cannot be re-proposed within 7 days of a rejection |
+| Approval cooldown | `_action_refine_prompt()` | Same prompt cannot be re-proposed within 30 days of an approval |
 | Human approval | `approve_proposal()` | Override is never written without explicit "accepte la proposition [id]" |
+| Full gap reset on approval | `approve_proposal()` | Counter, sorted-set entries, and a 30-day cooldown are all cleared for the topic |
+| Prompt size budget | `_action_refine_prompt()` | `current_text` capped at 6 000 chars input, `max_tokens=4000` output — prevents truncated proposals |
+| Email notification | `_notify_proposal()` | Sends diff to admin email via Gmail OAuth; logs a warning if send fails |
 
 ### In-chat commands (trigger via `self` intent)
 

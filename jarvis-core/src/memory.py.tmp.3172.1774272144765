@@ -1,5 +1,5 @@
 """
-PROJECT JARVIS v8
+PROJECT JARVIS v7
 Jarvis Memory System
 ====================
 - Working memory: Redis (current session, mood, active context)
@@ -43,16 +43,15 @@ from sentence_transformers import SentenceTransformer
 from config import (
     AUTOBIO_DEDUP_THRESHOLD,
     AUTOBIO_IMPORTANCE_THRESHOLD,
+    MEMORY_DECAY_FACTOR,
+    MEMORY_DECAY_THRESHOLD,
+    MEMORY_DECAY_DURABLE_MIN,
     AUTOBIO_RECENCY_WINDOW_DAYS,
     CHAT_LOG_TTL,
     DONE_PROJECT_TTL_DAYS,
     CHAT_MAX_MESSAGES,
     EMBED_MODEL_NAME,
     IMPORTANCE_THRESHOLD,
-    MEMORY_DECAY_FACTOR,
-    MEMORY_DECAY_THRESHOLD,
-    MEMORY_DECAY_DURABLE_MIN,
-    MEMORY_CONSOLIDATION_IMPORTANCE,
     NOVELTY_THRESHOLD,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
@@ -1064,7 +1063,7 @@ Retourne une seule phrase en français décrivant un fait stable sur l'utilisate
                 break
             summary = summary[:300]
 
-            store_autobiographical_event(user_code, summary, MEMORY_CONSOLIDATION_IMPORTANCE)
+            store_autobiographical_event(user_code, summary, 0.9)
 
             qdrant.delete(
                 collection_name=QDRANT_MEMORY_COLLECTION,
@@ -1138,104 +1137,27 @@ def _curative_profile_cleanup(user_code: str):
         logger.error("Curative profile cleanup failed for %s: %s", user_code, exc)
 
 
-def _decay_autobiographical_memories(user_code: str) -> int:
-    """
-    Monthly decay pass on autobiographical memories.
-
-    For each autobiographical memory:
-    - If importance >= MEMORY_DECAY_DURABLE_MIN → exempt (milestone permanent).
-    - Otherwise: decayed = importance * (MEMORY_DECAY_FACTOR ^ age_months).
-      - If decayed < MEMORY_DECAY_THRESHOLD → deleted from Qdrant.
-      - Else → payload updated with the new (lower) importance.
-
-    Returns the number of memories deleted.
-    """
-    qdrant    = get_qdrant()
-    now_ts    = time.time()
-    deleted   = 0
-    updated   = 0
-    offset    = None
-
-    while True:
-        results, next_offset = qdrant.scroll(
-            collection_name=QDRANT_MEMORY_COLLECTION,
-            scroll_filter={
-                "must": [
-                    {"key": "user_code",   "match": {"value": user_code}},
-                    {"key": "memory_type", "match": {"value": "autobiographical"}},
-                ]
-            },
-            limit=100,
-            offset=offset,
-            with_payload=True,
-            with_vectors=False,
-        )
-
-        if not results:
-            break
-
-        to_delete = []
-        for point in results:
-            importance = float(point.payload.get("importance", 0.7))
-
-            # Durable milestones are never decayed
-            if importance >= MEMORY_DECAY_DURABLE_MIN:
-                continue
-
-            stored_at  = float(point.payload.get("timestamp", now_ts))
-            age_months = (now_ts - stored_at) / (30 * 86400)
-            decayed    = importance * (MEMORY_DECAY_FACTOR ** age_months)
-
-            if decayed < MEMORY_DECAY_THRESHOLD:
-                to_delete.append(point.id)
-            elif decayed < importance - 0.01:
-                qdrant.set_payload(
-                    collection_name=QDRANT_MEMORY_COLLECTION,
-                    payload={"importance": round(decayed, 4)},
-                    points=[point.id],
-                )
-                updated += 1
-
-        if to_delete:
-            qdrant.delete(
-                collection_name=QDRANT_MEMORY_COLLECTION,
-                points_selector=PointIdsList(points=to_delete),
-            )
-            deleted += len(to_delete)
-            logger.info("[%s] Autobio decay: %d stale memories deleted", user_code, len(to_delete))
-
-        offset = next_offset
-        if offset is None:
-            break
-
-    if deleted or updated:
-        logger.info(
-            "[%s] Autobio decay complete: %d deleted, %d importance updated",
-            user_code, deleted, updated,
-        )
-    return deleted
-
-
 def consolidate_memories(user_code: str = None, max_items: int = 20):
     """
-    Monthly memory consolidation. Single public entry point — called on day 1 of each month
-    by the nightly review scheduler, and on demand by the LLM self-action 'consolidate_memory'.
+    Nightly memory consolidation.
 
     If user_code is provided -> consolidate only this user.
     If user_code is None -> iterate over all users.
 
     Steps per user:
-    1. Episodic consolidation  → compress episodic memories into autobiographical milestones
-    2. Autobiographical decay  → reduce importance over time, delete stale memories
-    3. Curative profile cleanup → remove duplicate / stale Redis profile keys
+    1. Episodic memory consolidation → autobiographical summary
+    2. Curative profile cleanup → remove duplicate / stale Redis profile keys
     """
-    users = [user_code] if user_code else list(USER_CODES.keys())
-    for uc in users:
-        logger.info("Memory consolidation starting for user %s", uc)
-        try:
+    try:
+        if user_code:
+            _consolidate_user_memories(user_code, max_items)
+            _curative_profile_cleanup(user_code)
+            return
+
+        for uc in USER_CODES.keys():
+            logger.info("Memory consolidation for user %s", uc)
             _consolidate_user_memories(uc, max_items)
-            _decay_autobiographical_memories(uc)
             _curative_profile_cleanup(uc)
-            logger.info("Memory consolidation done for user %s", uc)
-        except Exception as e:
-            logger.error("Memory consolidation failed for user %s: %s", uc, e)
+
+    except Exception as e:
+        logger.error("Global memory consolidation failed: %s", e)

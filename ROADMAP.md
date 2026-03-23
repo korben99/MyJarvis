@@ -13,7 +13,7 @@
 
 ---
 
-## Socle (v1–v7) — Terminé
+## Socle (v1–v7) — Terminé ✓
 
 - [x] API FastAPI + Docker Compose (Qdrant, Redis, OpenWebUI)
 - [x] Multi-utilisateurs avec codes d'accès
@@ -26,7 +26,7 @@
 
 ---
 
-## Mémoire intelligente (v7 — en cours)
+## Mémoire intelligente (v7 — terminé ✓)
 
 ### Identification multi-utilisateurs
 - [x] Header `X-OpenWebUI-User-Email` → reverse index `EMAIL_TO_CODE`
@@ -62,7 +62,7 @@
 
 ---
 
-## Notifications iOS (v7 — en cours)
+## Notifications iOS (v7 — terminé ✓)
 
 - [x] Phase 1 : polling BGAppRefreshTask (sans APNs)
 - [x] `NotificationService.swift` — foreground timer + background task
@@ -72,10 +72,10 @@
 
 ---
 
-## Proto-self — Boucle de réflexion autonome (v7)
+## Proto-self — Boucle de réflexion autonome (v7 — terminé ✓)
 
 - [x] `self.py` — cycle toutes les 2h (APScheduler)
-- [x] `gather_context()` — santé système, activité, lacunes, relations, **profils**
+- [x] `gather_context()` — santé système, activité, lacunes, relations, profils, **disponibilité push iOS**
 - [x] Catalogue d'actions : `nothing`, `store_insight`, `flag_knowledge_gap`,
       `send_notification`, `queue_push`, `update_self_note`, `consolidate_memory`,
       `check_health`, `update_trade_threshold`, `refine_prompt`,
@@ -87,7 +87,7 @@
 
 ---
 
-## Recherche web (v7 — terminé)
+## Recherche web (v7 — terminé ✓)
 
 - [x] `web_search.py` extrait de `main.py` — module indépendant
 - [x] Routage automatique : météo (Open-Meteo) · actualités (DDG news) · général (pipeline profond)
@@ -98,7 +98,7 @@
 
 ---
 
-## Robustesse et infrastructure (v7 — terminé)
+## Robustesse et infrastructure (v7 — terminé ✓)
 
 - [x] Logging centralisé dans `helpers.py` (`setup_logging` + `get_logger`)
 - [x] Fichier tournant `/opt/jarvis/logs/jarvis-api.log` (5 MB × 3, bind-mount host)
@@ -109,22 +109,28 @@
 
 ---
 
-## Boucle agentique (v8 — futur)
+## Boucle agentique (v8 — en cours)
 
 > Faire passer Jarvis d'une réflexion ponctuelle à une boucle itérative
 > où chaque résultat devient le contexte de l'itération suivante.
 
-### Étape A — Chaînes d'actions séquentielles
-- [ ] Permettre jusqu'à 3 actions par cycle de réflexion (au lieu d'une seule)
-- [ ] Contexte cumulatif : chaque résultat alimente l'itération suivante
-- [ ] Action `done` pour que le LLM sorte proprement de la chaîne
-- [ ] Exemple : `read_file` → `analyse` → `propose_change`
+### Étape A — Chaînes d'actions séquentielles — TERMINÉ (2026-03-23)
+- [x] Permettre jusqu'à N actions par cycle (`MAX_CHAIN_ITERATIONS`, défaut 3)
+- [x] Contexte cumulatif : chaque résultat alimente l'itération suivante
+- [x] Sortie propre via `nothing` (fusionne "rien à faire" et "j'ai terminé")
+- [ ] Exemple futur : `read_file` → `analyse` → `propose_change`
 
-### Étape A bis — Boucle avec budget
-- [ ] `max_iterations` configurable (défaut : 5)
+### Étape A bis — Boucle avec budget — PARTIELLEMENT TERMINÉ (2026-03-23)
+- [x] `MAX_CHAIN_ITERATIONS` configurable via env var (défaut : 3)
+- [x] Log de chaque itération dans Redis (champ `steps` dans l'entrée de log)
 - [ ] Compteur de tokens consommés par cycle
 - [ ] Utiliser le router model pour les décisions internes (économie)
-- [ ] Log de chaque itération dans Redis
+
+### Mémoire propre — nettoyage de la self-memory — TERMINÉ (2026-03-23)
+- [x] Action `prune_self_memory` — Jarvis identifie et supprime les entrées obsolètes/redondantes
+      dans `self_notes`, `opinions`, `learnings` via un appel LLM Primary dédié
+- [x] Prompt dédié `PRUNE_SELF_MEMORY_SYSTEM/USER` — critères clairs (redondances, banalités, dépassé)
+- [x] Garde-fous : max 50 % d'une liste par passage, cooldown 24h, protection liste à 1 élément
 
 ### Étape D — Accès lecture au code source
 - [ ] Action `read_file` — lire ses propres `.py` (lecture seule)
@@ -140,65 +146,97 @@
 
 > **Principe immuable** : Jarvis pense seul, agit seul sur les actions réversibles.
 > Toute écriture de code nécessite une approbation humaine. Toujours.
-Ce qui manque dans la roadmap
-Un mécanisme de mémoire de la boucle elle-même. Si Jarvis exécute une chaîne read_file → analyse → propose_change et que tu rejettes la proposition, il va re-proposer la même chose au cycle suivant. Il n'y a pas de persistance du résultat des chaînes passées — seulement du résultat des actions individuelles. Il faudrait stocker dans Redis les chaînes complètes (inputs → outputs → human_decision) pour que Jarvis apprenne de ses propositions rejetées.
+
+### Robustesse du proto-self — TERMINÉ (2026-03-23)
+- [x] `flag_knowledge_gap` : contexte concret obligatoire (généralités rejetées par le code)
+- [x] `flag_knowledge_gap` : cooldown 7 jours par topic (`jarvis:self:gap_cooldown:{slug}` Redis TTL)
+- [x] `flag_knowledge_gap` : bloqué si une proposal est pending ou approuvée < 30 jours
+- [x] `approve_proposal` : reset complet du topic (counter + sorted set + cooldown 30 jours)
+- [x] `refine_prompt` : `max_tokens` porté à 4000 + `current_text` cappé à 6000 chars — évite les propositions tronquées
+- [x] `_notify_proposal` : `user_code` passé à `send_gmail_message` (bug silencieux corrigé) + log d'avertissement si envoi échoue
+- [x] Disponibilité push iOS injectée dans le contexte de réflexion — Jarvis ne tente plus de push sur un utilisateur sans device
+
+> **Note** : il manque un mécanisme de mémoire de la boucle elle-même.
+> Si Jarvis propose un changement et que tu le rejettes, il va re-proposer la même chose au cycle suivant.
+> À terme : stocker dans Redis les chaînes complètes (inputs → outputs → human_decision)
+> pour que Jarvis apprenne de ses propositions rejetées.
 ---
 ## LoRa Adapter (v9 — futur)
 
 ## Nettoyage technique (dette)
 
-### Refactoring main.py (2 000 lignes → modules cohérents)
+### Refactoring main.py — TERMINÉ (2026-03-23)
 
-> **Prérequis recommandé** : supprimer d'abord le routeur sémantique (voir section ci-dessous)
-> pour économiser ~200 lignes avant de découper — le refactoring sera plus propre.
->
-> **Décisions ouvertes à trancher avant d'implémenter :**
-> - `deps.py` ou imports depuis `main.py` pour les singletons partagés ?
-> - `intent_router.py` temporaire ou suppression directe lors du refactoring ?
-> - `build_context()` extrait dans `pipeline.py` (beaucoup de paramètres) ou inline dans `chat.py` ?
+`main.py` est passé de ~2 000 lignes à **261 lignes** (bootstrap uniquement).
 
-**Structure cible :**
+**Structure finale :**
 
-| Fichier | Contenu | Lignes est. |
-|---------|---------|-------------|
-| `main.py` | Bootstrap uniquement : globals, lifespan, app, include_router | ~120 |
-| `deps.py` | Singletons partagés : REDIS_CLIENT, QDRANT_CLIENT, EMBED_MODEL, HTTP_CLIENT, _STREAM_CLIENTS, HAS_MEMORY | ~60 |
-| `llm_client.py` | stream_openai, select_model, trim_chunks, describe_images, openai_headers | ~280 |
-| `rag.py` | search_documents | ~55 |
-| `pipeline.py` | build_system_prompt, post_analysis, assemblage contexte (7 sources + budgets) | ~300 |
-| `intent_router.py` | INTENT_EXAMPLES_FR, semantic_route_query — **marqué à supprimer** | ~200 |
-| `routes/chat.py` | ChatRequest + endpoint chat() principal | ~400 |
-| `routes/proxy.py` | /v1/chat/completions OpenAI-compat | ~175 |
-| `routes/portfolio.py` | 6 endpoints trading | ~150 |
-| `routes/system.py` | /status, /models, /search, /web, history, clear | ~80 |
-| `routes/briefing.py` | 2 endpoints + job scheduler | ~65 |
-| `routes/device.py` | register, pending, push/test | ~65 |
-| `routes/memory.py` | 5 endpoints mémoire | ~40 |
-| `routes/self.py` | 3 endpoints proto-self | ~35 |
+| Fichier | Contenu | Lignes |
+|---------|---------|--------|
+| `main.py` | Bootstrap : lifespan, app, include_router, 5 endpoints utilitaires | 261 |
+| `deps.py` | Singletons partagés : REDIS_CLIENT, QDRANT_CLIENT, EMBED_MODEL, budgets | 48 |
+| `llm_client.py` | stream_openai, select_model, trim_chunks, describe_images | 205 |
+| `rag.py` | search_documents | 65 |
+| `pipeline.py` | build_system_prompt, build_context (7 sources), post_analysis | 235 |
+| `routes/chat.py` | ChatRequest + endpoint chat() principal | 399 |
+| `routes/proxy.py` | /v1/chat/completions OpenAI-compat | 171 |
+| `routes/portfolio.py` | 6 endpoints trading | 139 |
+| `routes/briefing_routes.py` | 2 endpoints + job scheduler | 69 |
+| `routes/device.py` | register, pending, push/test | 72 |
+| `routes/memory_routes.py` | 5 endpoints mémoire | 52 |
+| `routes/self_routes.py` | 3 endpoints proto-self | 38 |
 
-**Ordre d'implémentation (chaque étape est déployable indépendamment) :**
-- [ ] 1. Créer `deps.py` — zéro dépendances locales
-- [ ] 2. Créer `llm_client.py` et `rag.py` — dépendent uniquement de `deps.py` + config
-- [ ] 3. Créer `intent_router.py` — dépend de `deps.py` ; marqué "à supprimer"
-- [ ] 4. Créer `pipeline.py` — dépend de llm_client, rag, intent_router, memory, analyzer
-- [ ] 5. Créer `routes/chat.py` avec APIRouter — hub central
-- [ ] 6. Créer les routes périphériques (briefing, self, device, memory, portfolio, system, proxy)
-- [ ] 7. Réduire `main.py` à son rôle de bootstrap (~120 lignes)
+### Suppression du routeur sémantique — TERMINÉ
 
-**Bugs à corriger lors du refactoring :**
-- `USER_TIMEZONES` utilisé L.1337-1338 mais absent de `from config import (...)` dans main.py
-- `from fastapi import UploadFile, File` et `import shutil` importés en milieu de fichier (L.1738) → déplacer en tête de `routes/portfolio.py`
-- `from prompts import get_prompt` importé tardivement (L.352) → normaliser
+- [x] Suppression `INTENT_EXAMPLES_FR`, `INTENT_EMBEDDINGS`, `_load_intent_embeddings()`, `semantic_route_query()`
+- [x] Suppression `_build_google_queries_llm()` (remplacé par LLM router)
+- [x] `google_services.py` — suppression `build_gmail_query()` et `detect_calendar_range()`
+- [x] `prompts.py` — suppression `SYSTEM_BASE_EN`
+- [x] Fallback LLM router : defaults sûrs (tous `use_*=False`) au lieu du routeur embedding
 
-### Suppression du routeur sémantique (fallback embedding)
-> Prérequis : LLM router considéré stable et toujours disponible.
+---
 
-- [ ] `main.py` — supprimer `INTENT_EXAMPLES_FR` (~105 lignes), `INTENT_EMBEDDINGS`, `_load_intent_embeddings()`, `semantic_route_query()`, 8 constantes `ROUTER_*_THRESHOLD`, appel lifespan, bloc `else` dans `chat()` → 3 lignes de defaults
-- [ ] `main.py` — supprimer `_build_google_queries_llm()` et ses TODO (fallback Google query builder, remplacé par le LLM router)
-- [ ] `main.py` — supprimer 5 lignes de code commenté (`# hist.append(...)` × 4, `# hist = conversation_history...`)
-- [ ] `google_services.py` — supprimer `build_gmail_query()` et `detect_calendar_range()` (section "DEPRECATED", non appelées)
-- [ ] `prompts.py` — supprimer `SYSTEM_BASE_EN` (constante anglaise non utilisée, seul `SYSTEM_BASE_FR` est actif)
-- [ ] `llm_router.py` — supprimer commentaire `# CHECK IF 250 IS ENOUGH` (question résolue)
+## Mémoire cognitive (v8 — en cours)
+
+> Rapprocher la mémoire de Jarvis du modèle cognitif humain :
+> oubli, renforcement, intention, cohérence narrative.
+
+### Décroissance mémorielle — TERMINÉ (2026-03-23)
+- [x] Passe mensuelle (1er du mois) dans `consolidate_memories()` → `_decay_autobiographical_memories()`
+- [x] `importance` décroît de `MEMORY_DECAY_FACTOR` (0.85) par mois écoulé — environ -15 %/mois
+- [x] Seuil de suppression `MEMORY_DECAY_THRESHOLD` (0.15) : en dessous, le point Qdrant est supprimé
+- [x] Exempt de décroissance : souvenirs avec `importance >= MEMORY_DECAY_DURABLE_MIN` (1.0) — uniquement les milestones de consolidation mensuelle
+- [x] `MEMORY_CONSOLIDATION_IMPORTANCE = 1.0` — score assigné aux milestones, doit toujours égaler `DECAY_DURABLE_MIN`
+- [x] Bilan prévu juin 2026 pour calibrer les seuils sur données réelles
+
+### Renforcement par l'accès
+- [ ] Quand un chunk mémoire est récupéré et injecté dans le contexte, augmenter légèrement son `importance`
+      (ex: +0.05, plafonné à 1.0) — les souvenirs souvent rappelés se consolident
+- [ ] Logguer les accès mémoire pour identifier les souvenirs les plus "vivants"
+
+### Mémoire prospective
+- [ ] Liste Redis `jarvis:{user}:intentions` — intentions à durée de vie configurable
+      (ex : "dans 3 jours demander où en est ClaimSentry")
+- [ ] Alimentée par le nightly review et par l'action `queue_intention` du proto-self
+- [ ] Consultée au démarrage de chaque conversation — Jarvis mentionne naturellement
+      ce qu'il "avait prévu de dire"
+- [ ] TTL par intention (défaut 7 jours), marquable comme accomplie
+
+### Cohérence narrative du soi
+- [ ] Consolidation autobiographique trimestrielle : le LLM synthétise les `growth_log`
+      en une narration cohérente de l'évolution de Jarvis avec chaque utilisateur
+- [ ] Stockée dans `jarvis-self.json` sous `user_narratives: {user_code: "..."}`
+- [ ] Remplace progressivement les `growth_log` anciens dans le contexte de réflexion
+
+### Mémoire implicite / procédurale
+- [ ] Les `learnings` comportementaux les plus fréquents (≥ 3 occurrences similaires)
+      sont consolidés dans `SYSTEM_BASE_FR` via le mécanisme `refine_prompt` existant
+      → transformation d'un apprentissage textuel en comportement ancré
+
+### Associations inter-souvenirs
+- [ ] Lors du stockage d'un nouveau souvenir autobiographique, rechercher les souvenirs
+      proches (score cosinus > 0.85) et les lier via un champ `related_ids`
+- [ ] Lors du recall, remonter aussi les souvenirs liés (1 niveau de profondeur)
 
 ---
 
@@ -209,4 +247,4 @@ Un mécanisme de mémoire de la boucle elle-même. Si Jarvis exécute une chaîn
 - [ ] Support Android (remplace le polling iOS par un mécanisme web)
 - [ ] Mémoire conversationnelle agentique (Couche 3) — Jarvis émet des commandes
       mémoire structurées pendant la conversation, pas seulement via l'analyser
-- [ ] Compression mémoire mensuelle (résumés autobiographiques sur longue durée)
+- [x] Compression mémoire mensuelle (résumés autobiographiques sur longue durée) — `consolidate_memories()` TERMINÉ (2026-03-23)

@@ -95,7 +95,8 @@ BRIEFING_TIMEZONE = os.getenv("BRIEFING_TIMEZONE", "Europe/Paris")
 
 # ── Proto-self reflection loop ─────────────────────────────────────────────
 REFLECTION_INTERVAL_HOURS = int(os.getenv("REFLECTION_INTERVAL_HOURS", "6"))
-MAX_REFLECTION_TOKENS=1000 
+MAX_REFLECTION_TOKENS     = 1000
+MAX_CHAIN_ITERATIONS      = int(os.getenv("MAX_CHAIN_ITERATIONS", "3"))  # max actions per reflection cycle
 # ── Autocoding — prompt self-modification ─────────────────────────────────
 # Number of times a knowledge gap must be flagged before a prompt-refine is triggered
 REFINE_PROMPT_THRESHOLD = int(os.getenv("REFINE_PROMPT_THRESHOLD", "3"))
@@ -129,7 +130,18 @@ AUTOBIO_RECENCY_WINDOW_DAYS = int(os.getenv("AUTOBIO_RECENCY_WINDOW_DAYS", "365"
 # considéré comme un doublon et ignoré (pas de stockage Qdrant).
 # 0.85 = très similaire en sens mais formulation différente tolérée.
 # Augmenter vers 0.95 pour être plus permissif (moins de dédup).
-AUTOBIO_DEDUP_THRESHOLD = float(os.getenv("AUTOBIO_DEDUP_THRESHOLD", "0.85"))
+AUTOBIO_DEDUP_THRESHOLD  = float(os.getenv("AUTOBIO_DEDUP_THRESHOLD",  "0.85"))
+
+# Décroissance mémorielle mensuelle des souvenirs autobiographiques.
+# DECAY_FACTOR        : multiplicateur appliqué à importance à chaque passe (0.85 = -15 %/mois).
+# DECAY_THRESHOLD     : en dessous, le souvenir est supprimé de Qdrant.
+# DECAY_DURABLE_MIN   : importance initiale >= cette valeur → exempt de décroissance.
+# CONSOLIDATION_IMPORTANCE : score assigné aux milestones issus de la consolidation mensuelle.
+#                            Doit être == DECAY_DURABLE_MIN pour que ces souvenirs soient permanents.
+MEMORY_DECAY_FACTOR           = float(os.getenv("MEMORY_DECAY_FACTOR",           "0.85"))
+MEMORY_DECAY_THRESHOLD        = float(os.getenv("MEMORY_DECAY_THRESHOLD",        "0.15"))
+MEMORY_DECAY_DURABLE_MIN      = float(os.getenv("MEMORY_DECAY_DURABLE_MIN",      "1.0"))
+MEMORY_CONSOLIDATION_IMPORTANCE = float(os.getenv("MEMORY_CONSOLIDATION_IMPORTANCE", "1.0"))
 
 # Durée de rétention des projets "done" dans la liste Redis active (en jours).
 # Passé ce délai, un projet terminé est retiré automatiquement au prochain update.

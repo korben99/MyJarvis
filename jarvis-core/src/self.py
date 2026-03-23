@@ -43,6 +43,7 @@ import pytz
 
 from config import (
     GROWTH_LOG_MAX_ENTRIES,
+    MAX_CHAIN_ITERATIONS,
     MAX_REFLECTION_TOKENS,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
@@ -111,6 +112,29 @@ def _update_self_fields(**fields) -> None:
         data = get_self_memory()
         data.update(fields)
         save_self_memory(data)
+
+
+def _upsert_opinion_inplace(data: dict, topic: str, opinion: str, date: str) -> None:
+    """Upsert an opinion into an already-loaded self-memory dict (no lock — caller holds it)."""
+    topic = topic.strip().lower()
+    opinions = data.setdefault("opinions", [])
+    existing = next((o for o in opinions if o["topic"] == topic), None)
+    if existing:
+        existing["opinion"] = opinion
+        existing["updated"] = date
+    else:
+        opinions.append({"topic": topic, "opinion": opinion, "created": date})
+    data["opinions"] = opinions[-50:]
+
+
+def add_self_opinion(topic: str, opinion: str) -> None:
+    """Add or update a Jarvis opinion. Thread-safe — acquires self_memory_lock."""
+    date = datetime.now(timezone.utc).isoformat()
+    with self_memory_lock:
+        data = get_self_memory()
+        _upsert_opinion_inplace(data, topic, opinion, date)
+        save_self_memory(data)
+    logger.info("Opinion upserted: %s", topic)
 
 
 # ══════════════════════════════════════════════════
@@ -316,6 +340,7 @@ def gather_context() -> dict:
         "reflection_count":    self_data.get("reflection_count", 0),
         "user_relations":      self_data.get("user_relations", {}),
         "user_profiles":       _fmt_user_profiles(),
+        "push_availability":   _fmt_push_availability(),
         "behavioral_patterns": _extract_behavioral_patterns(20),
         "emotional_state":     get_emotional_state(),
         "self_notes":          self_data.get("self_notes", [])[-5:],
@@ -377,12 +402,42 @@ def _fmt_user_profiles() -> str:
     return "\n".join(lines) or "  No profiles."
 
 
+def _fmt_push_availability() -> str:
+    """Check Redis device tokens and return a push availability summary per user."""
+    r = get_redis()
+    with_push, without_push = [], []
+    for code, name in USER_CODES.items():
+        if r.exists(f"jarvis:device:token:{code}"):
+            with_push.append(f"{name} ({code})")
+        else:
+            without_push.append(f"{name} ({code})")
+    lines = []
+    if with_push:
+        lines.append(f"  Push iOS disponible : {', '.join(with_push)}")
+    if without_push:
+        lines.append(f"  Push iOS indisponible : {', '.join(without_push)} — email uniquement ou attendre qu'ils initient une conversation")
+    return "\n".join(lines)
+
+
 # ─────────────────────────────────────────────────────────────────────────
 
-async def _call_reflection_llm(context: dict) -> dict | None:
-    """Call the LLM to produce a reflection result."""
+async def _call_reflection_llm(context: dict, previous_steps: list[dict] | None = None) -> dict | None:
+    """Call the LLM to produce a reflection result.
+
+    previous_steps: steps already executed this cycle, each with keys
+                    {iteration, action, reason, outcome}.
+    """
     bp = context.get("behavioral_patterns", [])
     behavioral_patterns = "\n".join(f"  • {p}" for p in bp) if bp else "  aucun pattern identifié"
+
+    if previous_steps:
+        prev_lines = [
+            f"  [{s['iteration']}] {s['action']} → {s['outcome']}"
+            for s in previous_steps
+        ]
+        prev_fmt = "\n".join(prev_lines)
+    else:
+        prev_fmt = "  aucune (première itération)"
 
     prompt = get_prompt("REFLECTION_PROMPT").format(
         timestamp            = context["timestamp"],
@@ -399,6 +454,8 @@ async def _call_reflection_llm(context: dict) -> dict | None:
         opinions             = _fmt_opinions(context.get("opinions", [])),
         user_relations       = json.dumps(context["user_relations"], ensure_ascii=False),
         user_profiles        = context["user_profiles"],
+        push_availability    = context["push_availability"],
+        previous_steps       = prev_fmt,
     )
 
     try:
@@ -442,19 +499,56 @@ def _action_store_insight(params: dict) -> str:
     return f"stored insight for {user_code}"
 
 
+_GAP_GENERIC_PHRASES = {
+    "lacune de connaissance identifiée dans les capacités d'assistance",
+    "lacune identifiée dans les capacités",
+    "knowledge gap identified",
+}
+_GAP_COOLDOWN_TTL = 7 * 86400   # 7 days per topic
+
+
 def _action_flag_knowledge_gap(params: dict) -> str:
     topic   = params.get("topic", "").strip()
     context = params.get("context", "").strip()
     if not topic:
         return "flag_knowledge_gap: missing topic"
 
-    r = get_redis()
+    # Guard 1 — context must be substantive (not generic filler)
+    if len(context) < 30 or context.lower().rstrip(".") in _GAP_GENERIC_PHRASES:
+        return (
+            f"flag_knowledge_gap: context too generic for '{topic}' — "
+            "describe a specific observed failure, not a general statement"
+        )
+
+    slug      = re.sub(r"\s+", "_", topic.lower())[:40]
+    r         = get_redis()
+    cooldown_key = f"jarvis:self:gap_cooldown:{slug}"
+
+    # Guard 2 — per-topic cooldown (7 days)
+    if r.exists(cooldown_key):
+        ttl = r.ttl(cooldown_key)
+        return f"flag_knowledge_gap: '{topic}' already flagged recently — cooldown active ({ttl//3600}h remaining)"
+
+    # Guard 3 — block if a proposal already exists for this topic (pending or approved < 30 days)
+    now_ts = datetime.now(timezone.utc).timestamp()
+    cutoff  = now_ts - 30 * 86400
+    for p in _load_proposals():
+        p_slug = re.sub(r"\s+", "_", p.get("topic", "").lower())[:40]
+        if p_slug != slug:
+            continue
+        if p.get("status") == "pending":
+            return f"flag_knowledge_gap: proposal already pending for '{topic}' — no need to re-flag"
+        if p.get("status") == "approved":
+            approved_ts = datetime.fromisoformat(p.get("approved_at", "2000-01-01T00:00:00+00:00")).timestamp()
+            if approved_ts > cutoff:
+                return f"flag_knowledge_gap: proposal for '{topic}' approved recently — cooldown active (30 days)"
+
+    r.setex(cooldown_key, _GAP_COOLDOWN_TTL, "1")
+
     entry = json.dumps({"topic": topic, "context": context, "date": datetime.now(timezone.utc).isoformat()})
     r.zadd(_KNOWLEDGE_GAPS_KEY, {entry: time.time()})
     r.zremrangebyrank(_KNOWLEDGE_GAPS_KEY, 0, -51)   # keep last 50
 
-    # Increment per-topic counter (used by reflection LLM to decide when to refine a prompt)
-    slug  = re.sub(r"\s+", "_", topic.lower())[:40]
     count = int(r.hincrby(_GAP_COUNTS_KEY, slug, 1) or 0)
 
     logger.info("Self action: knowledge gap flagged — %s (count=%d)", topic, count)
@@ -594,10 +688,9 @@ def _action_consolidate_memory(params: dict) -> str:
     user_code = params.get("user_code", "")
     if not user_code or user_code not in USER_CODES:
         return "consolidate_memory: invalid user_code"
-    # Import here to avoid circular dependency
     try:
-        from memory import _consolidate_user_memories
-        _consolidate_user_memories(user_code)
+        from memory import consolidate_memories
+        consolidate_memories(user_code)
         logger.info("Self action: memory consolidation triggered for %s", user_code)
         return f"memory consolidation triggered for {user_code}"
     except Exception as exc:
@@ -622,6 +715,9 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
 
     data = get_self_memory()
     recent_self_reflections = [l["text"] for l in data.get("learnings", [])[-5:]]
+    recent_opinions = [
+        f"{o['topic']}: {o['opinion']}" for o in data.get("opinions", [])[-10:]
+    ]
     current_relation = get_user_relation(user_code)
 
     prompt = get_prompt("NIGHTLY_PROMPT").format(
@@ -631,6 +727,7 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
         count=len(conversations),
         conv_text=conv_text[:6000] or "(no conversation content)",
         recent_self_reflections=json.dumps(recent_self_reflections, ensure_ascii=False),
+        recent_opinions=json.dumps(recent_opinions, ensure_ascii=False) if recent_opinions else "aucune",
         current_relation=json.dumps(current_relation, ensure_ascii=False),
     )
 
@@ -713,8 +810,9 @@ async def run_nightly_interaction_review() -> None:
         # Lock here: no await is held while the lock is active.
         summary      = review.get("daily_summary", "")
         self_refls   = [s for s in review.get("self_reflections", []) if s]
+        new_opinions = [o for o in review.get("jarvis_opinions", []) if isinstance(o, dict) and o.get("topic") and o.get("opinion")]
         rel_update   = review.get("user_relation_update", {})
-        if self_refls or summary or rel_update:
+        if self_refls or summary or rel_update or new_opinions:
             with self_memory_lock:
                 data = get_self_memory()
                 for refl in self_refls:
@@ -723,6 +821,9 @@ async def run_nightly_interaction_review() -> None:
                         "date":   review_date,
                         "source": "nightly_review",
                     })
+                for op in new_opinions:
+                    _upsert_opinion_inplace(data, op["topic"], op["opinion"].strip(), review_date)
+                    logger.info("Nightly opinion: %s → %s", op["topic"], op["opinion"][:60])
                 if summary:
                     data.setdefault("growth_log", []).append({
                         "date":          review_date,
@@ -766,8 +867,8 @@ async def run_nightly_interaction_review() -> None:
         # Monthly memory consolidation on day 1
         if now.day == 1:
             try:
-                from memory import _consolidate_user_memories
-                await asyncio.to_thread(_consolidate_user_memories, user_code)
+                from memory import consolidate_memories
+                await asyncio.to_thread(consolidate_memories, user_code)
                 logger.info("Monthly memory consolidation done for %s", user_code)
             except Exception as exc:
                 logger.warning("Monthly consolidation failed for %s: %s", user_code, type(exc).__name__)
@@ -890,12 +991,24 @@ def approve_proposal(proposal_id: str) -> str:
     found["approved_at"] = datetime.now(timezone.utc).isoformat()
     _save_proposals(proposals)
 
-    # Reset the knowledge gap counter for this topic so the reflection loop
-    # doesn't re-trigger refine_prompt at the next cycle.
+    # Full knowledge-gap reset for this topic:
+    # 1. counter hash   — so refine_prompt threshold is not immediately re-crossed
+    # 2. sorted set     — remove all entries for this topic so it no longer appears in LACUNES
+    # 3. cooldown key   — prevent re-flagging for 30 days after approval
     topic_slug = re.sub(r"\s+", "_", found.get("topic", "").lower())[:40]
     if topic_slug:
         try:
-            get_redis().hdel(_GAP_COUNTS_KEY, topic_slug)
+            r = get_redis()
+            r.hdel(_GAP_COUNTS_KEY, topic_slug)
+            # Remove all sorted-set entries whose JSON topic slug matches
+            all_entries = r.zrange(_KNOWLEDGE_GAPS_KEY, 0, -1)
+            to_remove = [
+                e for e in all_entries
+                if re.sub(r"\s+", "_", json.loads(e).get("topic", "").lower())[:40] == topic_slug
+            ]
+            if to_remove:
+                r.zrem(_KNOWLEDGE_GAPS_KEY, *to_remove)
+            r.setex(f"jarvis:self:gap_cooldown:{topic_slug}", 30 * 86400, "1")
         except Exception:
             pass
 
@@ -963,12 +1076,15 @@ def _notify_proposal(user_code: str, proposal: dict) -> None:
         f"Pour rejeter : dis à Jarvis <strong>« rejette la proposition {pid} »</strong></p>"
         f"<p><em>— Jarvis</em></p>"
     )
-    send_gmail_message(
+    success = send_gmail_message(
         to=to,
         subject=f"Jarvis — Proposition de prompt #{pid} ({name})",
         html_body=html,
         text_body=text,
+        user_code=user_code,
     )
+    if not success:
+        logger.warning("_notify_proposal: email not sent for %s (Gmail unavailable?)", user_code)
 
 
 def _action_refine_prompt(params: dict) -> str:
@@ -1033,7 +1149,7 @@ def _action_refine_prompt(params: dict) -> str:
         prompt_name  = prompt_name,
         topic        = topic,
         context      = context_str or "aucun contexte supplémentaire",
-        current_text = current_text[:2000],
+        current_text = current_text[:6000],
     )
 
     try:
@@ -1046,7 +1162,7 @@ def _action_refine_prompt(params: dict) -> str:
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.4,
-            max_tokens=1500,
+            max_tokens=4000,
             json_response=True,
             no_think=False,
             timeout=PRIMARY_TIMEOUT,
@@ -1142,6 +1258,92 @@ def handle_proposal_command(message: str, user_code: str) -> str | None:
     return None
 
 
+_PRUNE_COOLDOWN_KEY = "jarvis:self:last_prune"
+_PRUNE_COOLDOWN_TTL = 86400   # 24h — one prune pass per day max
+
+
+def _action_prune_self_memory(params: dict) -> str:
+    """
+    Call the Primary LLM to identify obsolete/redundant entries in self_notes,
+    opinions, and learnings, then delete them from jarvis-self.json.
+    Runs synchronously (called via asyncio.to_thread from run_self_reflection).
+    """
+    r = get_redis()
+    if r.exists(_PRUNE_COOLDOWN_KEY):
+        return "prune_self_memory: cooldown active (24h)"
+
+    with self_memory_lock:
+        data = get_self_memory()
+
+    self_notes = data.get("self_notes", [])
+    opinions   = data.get("opinions",   [])
+    learnings  = data.get("learnings",  [])
+
+    if max(len(self_notes), len(opinions), len(learnings)) < 2:
+        return "prune_self_memory: nothing to prune (all lists have < 2 entries)"
+
+    def _fmt(items: list) -> str:
+        if not items:
+            return "  (vide)"
+        lines = []
+        for i, item in enumerate(items):
+            text = item.get("text", str(item)) if isinstance(item, dict) else str(item)
+            date = f" ({item['date']})" if isinstance(item, dict) and "date" in item else ""
+            lines.append(f"  [{i}] {text}{date}")
+        return "\n".join(lines)
+
+    user_prompt = get_prompt("PRUNE_SELF_MEMORY_USER").format(
+        self_notes = _fmt(self_notes),
+        opinions   = _fmt(opinions),
+        learnings  = _fmt(learnings),
+    )
+
+    try:
+        content = call_llm(
+            [
+                {"role": "system", "content": get_prompt("PRUNE_SELF_MEMORY_SYSTEM")},
+                {"role": "user",   "content": user_prompt},
+            ],
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
+            temperature=0.2,
+            max_tokens=400,
+            json_response=True,
+            timeout=30.0,
+        )
+    except Exception as exc:
+        logger.error("prune_self_memory LLM call failed: %s", type(exc).__name__)
+        return f"prune_self_memory: LLM call failed ({type(exc).__name__})"
+
+    result = extract_llm_json(content)
+    if not result or "to_delete" not in result:
+        return "prune_self_memory: invalid LLM response"
+
+    to_delete = result["to_delete"]
+    total_deleted = 0
+
+    with self_memory_lock:
+        data = get_self_memory()
+        for field in ("self_notes", "opinions", "learnings"):
+            raw_indices = to_delete.get(field, [])
+            if not raw_indices:
+                continue
+            lst = data.get(field, [])
+            cap = max(0, len(lst) // 2)   # never delete more than 50 %
+            indices = sorted(set(int(i) for i in raw_indices if 0 <= int(i) < len(lst)))[:cap]
+            for i in reversed(indices):
+                lst.pop(i)
+            data[field] = lst
+            if indices:
+                total_deleted += len(indices)
+                logger.info("prune_self_memory: deleted %d from %s: %s", len(indices), field, indices)
+        save_self_memory(data)
+
+    r.setex(_PRUNE_COOLDOWN_KEY, _PRUNE_COOLDOWN_TTL, "1")
+    return f"prune_self_memory: deleted {total_deleted} entries total"
+
+
 _ACTION_CATALOG = {
     "nothing":                  _action_nothing,
     "store_insight":            _action_store_insight,
@@ -1155,6 +1357,7 @@ _ACTION_CATALOG = {
     "check_health":             _action_check_health,
     "update_trade_threshold":   _action_update_trade_threshold,
     "refine_prompt":            _action_refine_prompt,
+    "prune_self_memory":        _action_prune_self_memory,
     # nightly_review is scheduled automatically — not in LLM action catalog
 }
 
@@ -1318,28 +1521,48 @@ async def generate_proactive_push(user_code: str) -> str:
 async def run_self_reflection() -> dict:
     """
     Jarvis system self-reflection cycle. Called by APScheduler every REFLECTION_INTERVAL_HOURS.
-    Observes system health and user activity, decides one autonomous action, persists focus.
-    Returns the reflection result dict.
+    Runs an agentic chain of up to MAX_CHAIN_ITERATIONS actions; the LLM exits with "nothing"
+    when it has nothing more to do. Each step result is fed back into the next LLM call.
+    Returns a log entry with the full chain under the "steps" key.
     """
-    logger.info("=== Jarvis self-reflection starting ===")
+    logger.info("=== Jarvis self-reflection starting (max %d steps) ===", MAX_CHAIN_ITERATIONS)
 
     context = gather_context()
-    result  = await _call_reflection_llm(context)
+    steps: list[dict] = []
+    focus = ""
 
-    if result is None:
-        result = {"focus": "reflection failed", "action": "nothing", "reason": "LLM call failed", "params": {}}
+    for i in range(MAX_CHAIN_ITERATIONS):
+        result = await _call_reflection_llm(context, previous_steps=steps)
 
-    focus  = result.get("focus",  "").strip()
-    action = result.get("action", "nothing").strip()
-    reason = result.get("reason", "").strip()
-    params = result.get("params", {})
+        if result is None:
+            logger.warning("Reflection LLM call failed at step %d — stopping chain", i + 1)
+            break
 
-    # Clamp to catalog
-    if action not in _ACTION_CATALOG:
-        action = "nothing"
-        params = {"reason": f"unknown action requested: {result.get('action')}"}
+        focus  = result.get("focus",  "").strip()
+        action = result.get("action", "nothing").strip()
+        reason = result.get("reason", "").strip()
+        params = result.get("params", {})
 
-    outcome = await asyncio.to_thread(_execute_action, action, params)
+        if action not in _ACTION_CATALOG:
+            logger.warning("Self: unknown action %r at step %d — defaulting to nothing", action, i + 1)
+            action = "nothing"
+            params = {"reason": f"unknown action requested: {result.get('action')}"}
+
+        outcome = await asyncio.to_thread(_execute_action, action, params)
+
+        step = {
+            "iteration": i + 1,
+            "focus":     focus,
+            "action":    action,
+            "reason":    reason,
+            "params":    params,
+            "outcome":   outcome,
+        }
+        steps.append(step)
+        logger.info("Chain step %d/%d: action=%s outcome=%s", i + 1, MAX_CHAIN_ITERATIONS, action, outcome)
+
+        if action == "nothing":
+            break
 
     # Persist focus + reflection metadata
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -1350,18 +1573,23 @@ async def run_self_reflection() -> dict:
         data["reflection_count"] = data.get("reflection_count", 0) + 1
         save_self_memory(data)
 
+    # Backward-compat top-level fields reflect the last step
+    last = steps[-1] if steps else {"action": "nothing", "reason": "no steps executed", "outcome": ""}
     log_entry = {
         "timestamp": now_iso,
         "focus":     focus,
-        "action":    action,
-        "reason":    reason,
-        "params":    params,
-        "outcome":   outcome,
+        "action":    last["action"],   # for _extract_behavioral_patterns
+        "reason":    last["reason"],
+        "outcome":   last["outcome"],
+        "steps":     steps,            # full chain
         "health":    context["health"],
     }
     log_reflection(log_entry)
 
-    logger.info("=== Reflection complete: focus=%r action=%s outcome=%s ===", focus, action, outcome)
+    logger.info(
+        "=== Reflection complete: %d step(s), final=%s ===",
+        len(steps), last["action"],
+    )
 
     # Proactive push: per-user LLM call — fully guarded (device check + cooldown)
     for code in USER_CODES:
