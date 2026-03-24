@@ -27,10 +27,14 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 
 from google.auth.exceptions import GoogleAuthError, TransportError
+import httplib2
+import google_auth_httplib2
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+_GOOGLE_API_TIMEOUT = 15   # seconds for all Google API calls
 
 import pytz
 
@@ -72,7 +76,7 @@ _SUBJECT_MAX = 120
 _credentials_cache: dict[str, Credentials] = {}
 _gmail_service_cache: dict[str, object] = {}
 _calendar_service_cache: dict[str, object] = {}
-_creds_lock = threading.Lock()
+_creds_lock = threading.RLock()   # reentrant: _get_calendar_service → _get_credentials both hold this lock
 
 
 # ══════════════════════════════════════════════════
@@ -133,13 +137,22 @@ def _get_credentials(user_code: str) -> Credentials:
 #  SERVICE CACHE (per user)
 # ══════════════════════════════════════════════════
 
+def _make_authorized_http(creds) -> google_auth_httplib2.AuthorizedHttp:
+    """Build an AuthorizedHttp with a per-call timeout."""
+    return google_auth_httplib2.AuthorizedHttp(
+        creds, http=httplib2.Http(timeout=_GOOGLE_API_TIMEOUT)
+    )
+
+
 def _get_gmail_service(user_code: str):
     if user_code not in _gmail_service_cache:
         with _creds_lock:
             if user_code not in _gmail_service_cache:
                 creds = _get_credentials(user_code)
                 _gmail_service_cache[user_code] = build(
-                    "gmail", "v1", credentials=creds, cache_discovery=False
+                    "gmail", "v1",
+                    http=_make_authorized_http(creds),
+                    cache_discovery=False,
                 )
     return _gmail_service_cache[user_code]
 
@@ -150,7 +163,9 @@ def _get_calendar_service(user_code: str):
             if user_code not in _calendar_service_cache:
                 creds = _get_credentials(user_code)
                 _calendar_service_cache[user_code] = build(
-                    "calendar", "v3", credentials=creds, cache_discovery=False
+                    "calendar", "v3",
+                    http=_make_authorized_http(creds),
+                    cache_discovery=False,
                 )
     return _calendar_service_cache[user_code]
 
@@ -455,32 +470,33 @@ def send_gmail_message(to: str, subject: str, html_body: str, text_body: str = "
 
 _CALENDAR_WRITE_KEYWORDS = (
     # crée
-    "crée un", "créer un", "crée une", "créer une", "crée moi",
+    "crée un rendez-vous", 
     # ajoute
-    "ajoute un", "ajouter un", "ajoute une", "ajouter une",
-    "ajoute moi", "ajoute-moi", "ajoutes-moi",
-    "ajoute dans", "ajouter dans",
+    "ajoutes un rendez-vous", 
+    "ajoutes un rendez vous", 
+    "ajoutes un rdv", 
+    "ajoutes dans mon agenda", 
+    "ajoutes a mon agenda", 
+    "ajoutes à mon agenda", 
+    "ajoutes une réunion",
+
+    "ajoute un rendez-vous", 
+    "ajoute un rendez vous", 
+    "ajoute un rdv", 
+    "ajoute dans mon agenda", 
+    "ajoute a mon agenda", 
+    "ajoute à mon agenda", 
+    "ajoute une réunion",
     # planifie
-    "planifie", "planifier",
+    "planifie une réunion",
     # mets
-    "mets dans mon agenda", "mettre dans mon agenda",
-    "mets moi un", "mets-moi un",
-    # bloque
-    "bloque le", "bloquer le", "bloque une", "bloquer une", "bloque moi",
-    # rajoute
-    "rajoute", "rajouter",
-    # inscris
-    "inscris-moi", "inscris moi",
-    # pose
-    "pose un rdv", "poser un rdv", "pose moi un",
+    "mets dans mon agenda", 
+    "mets un rdv", "mets un rendez-vous",
     # prends rdv
-    "prends rendez-vous", "prendre rendez-vous",
+    "prendre rendez-vous",
+    "dans mon agenda",
     # nouveau
     "nouveau rendez-vous", "nouvel événement", "nouvelle réunion",
-    # réserve
-    "réserve", "réserver",
-    # schedule
-    "schedule", "organise une réunion", "organiser une réunion",
 )
 
 
@@ -509,10 +525,14 @@ async def extract_calendar_event_llm(message: str) -> dict | None:
             temperature=0, max_tokens=150, json_response=True, no_think=True, timeout=8.0,
         )
         parsed = extract_llm_json(raw)
-        if "error" in parsed or not parsed.get("title") or not parsed.get("date") or not parsed.get("start_time"):
+        if not parsed.get("end_date"):
+            parsed["end_date"] = parsed.get("start_date", "")
+        if "error" in parsed or not parsed.get("title") or not parsed.get("start_date") or not parsed.get("start_time"):
+            logger.warning("Calendar extraction incomplete: %s", parsed)
             return None
         if not parsed.get("end_time"):
-            h, m = int(parsed["start_time"][:2]), int(parsed["start_time"][3:5])
+            parts = parsed["start_time"].replace("h", ":").split(":")
+            h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
             parsed["end_time"] = f"{(h + 1) % 24:02d}:{m:02d}"
         return parsed
     except Exception as exc:

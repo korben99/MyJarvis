@@ -81,7 +81,8 @@ Retourne un objet JSON avec exactement ces champs :
                     • Catégories courantes : hobby, skill, langue, sport, outil, technologie
                     • Toujours utiliser des minuscules sans accents pour la catégorie et l'item dans la clé
                     • Ne jamais créer hobby:X ET interest:X pour le même sujet — choisir hobby:X
-"projects"        : Identifie les projets de l'utilisateur. Un projet est une activité structurée avec un objectif (ex: "mon projet Jarvis")
+"projects"        : Identifie les projets de l'utilisateur. Un projet est une activité structurée avec un objectif sur plusieurs jours/semaines (ex: "mon projet Jarvis", "refonte site web").
+                    ❌ N'est PAS un projet : un rendez-vous, un événement ponctuel, un week-end, un voyage, une création d'agenda.
                     Pour chaque projet détecté, retourne:
                     - si c'est un nouveau projet "create:nom du projet"
                     - si c'est une mise à jour du projet (avancement) "update:nom du projet"
@@ -110,11 +111,90 @@ Jarvis : {assistant_message}"""
 # ══════════════════════════════════════════════════════════════════════════
 
 ROUTER_SYSTEM = """\
-You are the routing layer for a personal AI assistant called Jarvis.
-Analyse the user message and return a JSON routing decision.
-Never answer the question, only output the JSON."""
+Tu es le routeur de Jarvis.
+Analyse le message utilisateur et retourne UNIQUEMENT un JSON valide.
+Ne réponds jamais à la question."""
 
 ROUTER_USER = """\
+Analyse le message utilisateur et retourne une décision de routage.
+
+INTENTS (liste) :
+
+- memory
+  Contexte utilisateur uniquement (préférences, historique, small talk).
+  Ne pas utiliser pour des questions générales.
+
+- rag
+  Référence à des documents utilisateur (explicite ou implicite), et mention "RAG".
+
+- web
+  Infos externes ou à jour (actualité, prix, lieux, données incertaines).
+  En cas de doute → utiliser web.
+
+- weather
+  Météo uniquement.
+
+- gmail
+  Emails.
+
+- calendar
+  Agenda.
+
+- briefing
+  Résumé quotidien.
+
+- portfolio
+  Bourse, actions.
+
+- self
+  Commandes internes uniquement.
+
+Plusieurs intents possibles.
+Par défaut : ["memory"]
+
+PARAMÈTRES :
+
+weather_location : ville ou null
+gmail_query : string ou null
+calendar_days : int (7 ou 30) ou null
+
+use_reasoning :
+true si demande explicite "mode expert, expert" ou problème complexe (médical, physique, mathématique, phylosophique)
+sinon false
+
+memory_scope :
+episodic | autobiographical | profile | auto
+
+conversation_type :
+conversational | task | question
+
+EXEMPLES :
+
+"salut"
+→ {{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false,"memory_scope":"auto","conversation_type":"conversational"}}
+
+"il va pleuvoir à Paris ?"
+→ {{"intents":["weather"],"weather_location":"Paris","gmail_query":null,"calendar_days":null,"use_reasoning":false,"memory_scope":"auto","conversation_type":"question"}}
+
+"résume mes mails"
+→ {{"intents":["gmail"],"weather_location":null,"gmail_query":"is:unread","calendar_days":null,"use_reasoning":false,"memory_scope":"auto","conversation_type":"task"}}
+
+"j’ai un pdf sur le zero trust"
+→ {{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false,"memory_scope":"auto","conversation_type":"task"}}
+
+"cours Tesla aujourd’hui"
+→ {{"intents":["web","portfolio"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false,"memory_scope":"auto","conversation_type":"question"}}
+
+"explique AES"
+→ {{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false,"memory_scope":"auto","conversation_type":"question"}}
+
+INPUT :
+{message}
+
+JSON uniquement.
+"""
+
+ROUTER_USER_EN = """\
 Return a JSON routing decision for this message.
 
 ─── intents (list) ── which data sources are needed ───────────────────────
@@ -164,7 +244,6 @@ Return a JSON routing decision for this message.
   1. User EXPLICITLY requests it — trigger phrases (any language):
        "mode expert" · "mode raisonnement" · "mode intelligent"
        "réfléchis bien" · "prends le temps de réfléchir" · "analyse approfondie"
-       "utilise ton meilleur modèle" · "expert mode" · "deep analysis"
   2. Task genuinely requires it: medical/legal/regulatory analysis,
        hard multi-step logic, complex cross-file debugging, deep scientific reasoning.
   false for everything else — the standard model handles most requests well.
@@ -194,16 +273,24 @@ Example: {{"intents":["gmail"],"weather_location":null,"gmail_query":"is:unread"
 # ══════════════════════════════════════════════════════════════════════════
 
 WEB_RELEVANCE_JUDGE = """\
-User question: {question}
+Question : {question}
 
-Search results:
+Résultats :
 {snippets}
 
-Do these results contain enough specific information to directly answer the user's question?
-Be strict: snippets that are vague, off-topic, or only tangentially related are NOT sufficient.
+Les résultats permettent-ils de répondre directement et précisément à la question ?
 
-JSON only: {{"sufficient": true, "reason": "one sentence"}}
-       or: {{"sufficient": false, "reason": "one sentence explaining what is missing"}}"""
+Règles :
+- false si vague, incomplet ou hors sujet
+- false si info manquante pour répondre clairement
+- true seulement si la réponse peut être donnée sans supposition
+
+Réponds en JSON :
+
+{{"sufficient": true, "reason": "courte explication"}}
+ou
+{{"sufficient": false, "reason": "ce qui manque"}}
+"""
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -211,15 +298,31 @@ JSON only: {{"sufficient": true, "reason": "one sentence"}}
 # ══════════════════════════════════════════════════════════════════════════
 
 GOOGLE_QUERY_PROMPT = """\
-Build Gmail/Calendar query parameters for this message.
-Return JSON with exactly two fields:
+Analyse le message et génère les paramètres Gmail / Agenda.
 
-gmail_query   : Gmail search string (or null). Syntax: from:x · subject:y · is:unread · newer_than:Nd · has:attachment
-calendar_days : integer (7=week, 30=month) or null.
+Règles :
 
-Message: {message}
+- gmail_query :
+  Utiliser si le message parle d'emails.
+  Exemples :
+  - "mails non lus" → "is:unread"
+  - "mails récents" → "newer_than:7d"
+  - "factures" → "subject:facture"
 
-JSON only: {{"gmail_query": null, "calendar_days": null}}"""
+- calendar_days :
+  Utiliser si le message parle d'agenda.
+  - "cette semaine" → 7
+  - "ce mois" → 30
+
+Sinon → null
+
+Message :
+{message}
+
+Réponds uniquement en JSON :
+
+{{"gmail_query": null, "calendar_days": null}}
+"""
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -498,22 +601,47 @@ Si le prompt est de type SYSTEM : intègre au maximum 1-2 phrases courtes, jamai
 # ══════════════════════════════════════════════════════════════════════════
 
 CALENDAR_WRITE_EXTRACT = """\
-Extract the calendar event details from this user message.
-Today's date is {today}. Timezone: {timezone}.
+Extrais les informations d’un événement calendrier depuis le message.
 
-User message: {message}
+Date actuelle : {today}
+Fuseau horaire : {timezone}
 
-Return JSON only. No explanation.
-Fields:
-  title       : event name
-  date        : "YYYY-MM-DD"
-  start_time  : "HH:MM" (24h)
-  end_time    : "HH:MM" (24h) — if not specified, add 1 hour to start_time
-  location    : string or ""
-  description : string or ""
+Message :
+{message}
 
-If date or start_time cannot be determined, return {{"error": "missing_info"}}.
-Example: {{"title":"Dentiste","date":"2026-03-25","start_time":"14:00","end_time":"15:00","location":"","description":""}}"""
+Règles :
+
+- start_date → format YYYY-MM-DD (obligatoire)
+- end_date   → format YYYY-MM-DD (= start_date si événement sur 1 jour)
+- start_time / end_time → format HH:MM (24h)
+- si heure sans minutes → ajouter :00 (ex: 14h → 14:00)
+- si end_time absent → +1h après start_time
+- comprendre les dates relatives : "demain", "vendredi prochain", etc.
+- événements multi-jours : "du 14 mai au 17 mai" → start_date=2026-05-14, end_date=2026-05-17
+
+Champs à retourner :
+title, start_date, end_date, start_time, end_time, location, description
+
+- location / description → "" si absent
+
+Si start_date ou start_time manquant → {{"error":"missing_info"}}
+
+EXEMPLES :
+
+"RDV dentiste demain à 14h"
+→ {{"title":"Dentiste","start_date":"2026-03-25","end_date":"2026-03-25","start_time":"14:00","end_time":"15:00","location":"","description":""}}
+
+"Réunion équipe vendredi prochain 9h-10h salle 3"
+→ {{"title":"Réunion équipe","start_date":"2026-03-27","end_date":"2026-03-27","start_time":"09:00","end_time":"10:00","location":"salle 3","description":""}}
+
+"Week End Saint-Raymond le 14 mai à 9h jusqu’au 17 mai à 17h"
+→ {{"title":"Week End Saint-Raymond","start_date":"2026-05-14","end_date":"2026-05-17","start_time":"09:00","end_time":"17:00","location":"","description":""}}
+
+"Déj avec Marc lundi"
+→ {{"error":"missing_info"}}
+
+JSON uniquement.
+"""
 
 
 # ══════════════════════════════════════════════════════════════════════════

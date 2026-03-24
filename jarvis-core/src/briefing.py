@@ -119,9 +119,9 @@ def get_stored_briefing(user_code: str) -> BriefingResult | None:
 # ── Data gathering ────────────────────────────────────────────────────────
 
 _INTEREST_KEYS = (
-    "interests", "interest", "hobbies", "topics", "passions",
-    "work", "profession", "employer", "current_employer",
-    "current_project", "expertise",
+    "interests", "interest", "hobbies", "hobby", "topics", "passions",
+    "sport", "loisir", "loisirs",
+    "work", "profession", "expertise",
 )
 # Words too generic to be useful in a news query
 _STOP_WORDS = {
@@ -246,10 +246,14 @@ async def _fetch_weather(city: str, tz_name: str = "Europe/Paris") -> str:
         return ""
 
 
-def _ddg_news_sync(query: str) -> list[dict]:
+def _ddg_news_sync(query: str, max_results: int = 4) -> list[dict]:
     """Synchronous DDG news fetch — run via asyncio.to_thread."""
     with DDGS() as ddgs:
-        return list(ddgs.news(query, region="fr-fr", max_results=5))
+        # timelimit="d" = last 24h only; fall back to "w" if nothing found
+        results = list(ddgs.news(query, region="fr-fr", timelimit="d", max_results=max_results))
+        if not results:
+            results = list(ddgs.news(query, region="fr-fr", timelimit="w", max_results=max_results))
+        return results
 
 
 def _unwrap(val, default):
@@ -262,29 +266,56 @@ def _unwrap(val, default):
 
 async def _fetch_news(interests: list[str]) -> list[str]:
     """
-    Fetch top headlines personalised by user interests.
-    Uses a space-separated keyword query (no OR — DDGS news is unreliable with operators).
-    Falls back to 'actualités france' if no interests or first query fails.
+    Fetch recent headlines: 2 parallel queries (professional + general).
+    - Pro query: top 1-2 interest keywords, timelimit=day
+    - General query: "actualités france", timelimit=day
+    Results are interleaved (alternating) so neither dominates.
     """
-    # Build a simple keyword query from the top 3 interests
-    queries = []
-    if interests:
-        queries.append(" ".join(interests[:3]))
-    queries.append("actualités france")   # fallback
+    # Use last word of each interest phrase — more generic than the full phrase
+    # e.g. "stratège cybersécurité" → "cybersécurité", "Fortinet" → "Fortinet"
+    pro_keywords = [kw.split()[-1] for kw in interests[:2]]
+    pro_query = " ".join(pro_keywords) if interests else ""
+    general_query = "actualités france"
 
-    for query in queries:
+    async def _fetch_one(query: str, n: int) -> list[dict]:
         try:
-            results = await asyncio.to_thread(_ddg_news_sync, query)
+            results = await asyncio.to_thread(_ddg_news_sync, query, n)
             if results:
                 logger.info("News fetched (%d results) for query: %r", len(results), query)
-            return [
-                f"{r['title']} — {r.get('body','')[:120]} ({r.get('source','')})"
-                for r in results
-            ]
+            return results
         except Exception as exc:
             logger.warning("News fetch failed for %r: %s", query, type(exc).__name__)
+            return []
 
-    return []
+    if pro_query:
+        pro_results, gen_results = await asyncio.gather(
+            _fetch_one(pro_query, 3),
+            _fetch_one(general_query, 4),
+        )
+    else:
+        gen_results = await _fetch_one(general_query, 6)
+        pro_results = []
+
+    # Interleave: 1 pro, 1 general, 1 pro, 1 general...
+    seen_titles: set = set()
+    merged = []
+    for pair in zip(pro_results, gen_results):
+        for r in pair:
+            t = r.get("title", "")
+            if t not in seen_titles:
+                seen_titles.add(t)
+                merged.append(r)
+    # Append remaining items from the longer list
+    for r in (pro_results if len(pro_results) > len(gen_results) else gen_results)[len(merged) // 2:]:
+        t = r.get("title", "")
+        if t not in seen_titles:
+            seen_titles.add(t)
+            merged.append(r)
+
+    return [
+        f"{r['title']} — {r.get('body','')[:120]} ({r.get('source','')})"
+        for r in merged[:6]
+    ]
 
 
 # ── LLM assembly ──────────────────────────────────────────────────────────
@@ -376,10 +407,17 @@ async def gather_briefing(user_code: str) -> BriefingResult:
     news_task      = _fetch_news(interests)
     portfolio_task = asyncio.to_thread(get_portfolio_summary_text, user_code)
 
-    results = await asyncio.gather(
-        calendar_task, gmail_task, weather_task, news_task, portfolio_task,
-        return_exceptions=True,
-    )
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                calendar_task, gmail_task, weather_task, news_task, portfolio_task,
+                return_exceptions=True,
+            ),
+            timeout=25.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Briefing data gather timed out after 25s — using empty sources")
+        results = [[], [], "", [], ""]
 
     calendar  = _unwrap(results[0], [])
     gmail     = _unwrap(results[1], [])

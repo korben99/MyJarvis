@@ -8,8 +8,8 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                     Open WebUI (port 3000)               │
-│                     Chat interface / clients             │
+│                      -Open WebUI (port 3000)               │
+│                     - Chat interface / clients             │
 └────────────────────────┬────────────────────────────────┘
                          │ OpenAI-compatible API
 ┌────────────────────────▼────────────────────────────────┐

@@ -43,7 +43,7 @@ from config import (
     USER_CODES,
     USER_TRADING,
 )
-from deps import HAS_MEMORY, HTTP_CLIENT, _STREAM_CLIENTS, QDRANT_CLIENT
+from deps import HTTP_CLIENT, _STREAM_CLIENTS, QDRANT_CLIENT
 from google_services import is_google_available
 from helpers import get_logger, setup_logging
 from llm_client import openai_headers
@@ -72,13 +72,12 @@ async def lifespan(app: FastAPI):
     setup_logging()
 
     logger.info(
-        "Jarvis API v8 starting — router: %s, reasoning: %s, memory: %s",
-        ROUTER_MODEL, REASONING_MODEL, HAS_MEMORY,
+        "Jarvis API v8 starting — router: %s, reasoning: %s",
+        ROUTER_MODEL, REASONING_MODEL,
     )
     logger.info("RAG: %s, collection: %s, top_k: %d", QDRANT_URL, QDRANT_COLLECTION, RAG_TOP_K)
 
-    if HAS_MEMORY:
-        deps.EMBED_MODEL = get_embed_model()
+    deps.EMBED_MODEL = get_embed_model()
 
     scheduler = None
     try:
@@ -204,12 +203,11 @@ async def status():
         },
     }
 
-    if HAS_MEMORY:
-        emotion = get_emotional_state()
-        services["memory"] = {
-            "status": "online",
-            "emotional_state": emotion.get("mood", "unknown"),
-        }
+    emotion = get_emotional_state()
+    services["memory"] = {
+        "status": "online",
+        "emotional_state": emotion.get("mood", "unknown"),
+    }
 
     services["google"] = {
         "status": "configured" if is_google_available() else "not_configured",

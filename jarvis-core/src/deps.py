@@ -16,8 +16,6 @@ from helpers import get_logger, get_qdrant, get_redis
 
 logger = get_logger("jarvis-deps")
 
-HAS_MEMORY = True
-
 # ── Context budgets (max chars per source injected into the system prompt) ──
 MEMORY_CHAR_BUDGET   = int(os.getenv("MEMORY_CHAR_BUDGET",   "2500"))
 RAG_CHAR_BUDGET      = int(os.getenv("RAG_CHAR_BUDGET",      "4000"))

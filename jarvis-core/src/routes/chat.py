@@ -29,7 +29,7 @@ from config import (
     USER_TIMEZONES,
     VISION_MODEL,
 )
-from deps import HAS_MEMORY, REDIS_CLIENT
+from deps import REDIS_CLIENT
 from google_services import (
     create_calendar_event,
     extract_calendar_event_llm,
@@ -118,19 +118,31 @@ async def chat(req: ChatRequest):
 
     hist = get_conversation(user_code, req.session_id)
 
-    # ── Pending calendar action: confirm or cancel ────────────────────────
+    # ════════════════════════════════════════════════════════════════════════
+    # KEYWORD DISPATCH — fast paths, no LLM router cost
+    # Order: pure-keyword checks first, then router for everything else.
+    # ════════════════════════════════════════════════════════════════════════
+
+    # ── 1. Pending calendar action: confirm or cancel ─────────────────────
     _pending_key = f"jarvis:{user_code}:pending_calendar_action"
     _pending_raw = REDIS_CLIENT.get(_pending_key)
     if _pending_raw:
         _words = set(req.message.lower().split())
-        if _words & {"oui", "ok", "confirme", "yes", "go", "allez", "parfait", "ouais", "yep", "exact"}:
+        if _words & {"confirme"}:
             _pending = json.loads(_pending_raw)
             REDIS_CLIENT.delete(_pending_key)
-            _event_id = await asyncio.to_thread(
-                create_calendar_event,
-                _pending["title"], _pending["start_dt"], _pending["end_dt"],
-                _pending.get("description", ""), _pending.get("location", ""), None, user_code,
-            )
+            try:
+                _event_id = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        create_calendar_event,
+                        _pending["title"], _pending["start_dt"], _pending["end_dt"],
+                        _pending.get("description", ""), _pending.get("location", ""), None, user_code,
+                    ),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("create_calendar_event timed out for %s", user_code)
+                _event_id = None
             _cal_reply = (
                 f"C'est fait ! J'ai ajouté « {_pending['title']} » à ton agenda."
                 if _event_id else
@@ -145,7 +157,7 @@ async def chat(req: ChatRequest):
                 return StreamingResponse(_cal_confirm_stream(), media_type="text/event-stream")
             return {"response": _cal_reply, "model": PRIMARY_MODEL, "session_id": req.session_id, "duration_ms": 0}
 
-        elif _words & {"non", "annule", "annuler", "cancel", "stop", "no", "nope"}:
+        elif _words & {"non", "annule", "annuler"}:
             REDIS_CLIENT.delete(_pending_key)
             _cancel_reply = "D'accord, j'annule. L'événement n'a pas été créé."
             append_conversation_message(user_code, req.session_id, "user", req.message)
@@ -156,18 +168,70 @@ async def chat(req: ChatRequest):
                     yield f"data: {json.dumps({'done': True, 'model': PRIMARY_MODEL, 'duration_ms': 0})}\n\n"
                 return StreamingResponse(_cal_cancel_stream(), media_type="text/event-stream")
             return {"response": _cancel_reply, "model": PRIMARY_MODEL, "session_id": req.session_id, "duration_ms": 0}
-        # neither confirm nor cancel → fall through, let LLM handle
+        # neither confirm nor cancel → fall through to router
 
-    # Resolve user identity
+    # ── 2. Calendar write (keyword → LLM extraction, no router needed) ────
+    if is_calendar_write(req.message) and is_google_available(user_code):
+        _event = await extract_calendar_event_llm(req.message)
+        if _event:
+            try:
+                _tz = USER_TIMEZONES.get(user_code, BRIEFING_TIMEZONE)
+                _start_dt = build_iso_dt(_event["start_date"], _event["start_time"], _tz)
+                _end_dt   = build_iso_dt(_event["end_date"],   _event["end_time"],   _tz)
+                _pending_data = json.dumps({
+                    "title":       _event["title"],
+                    "start_dt":    _start_dt,
+                    "end_dt":      _end_dt,
+                    "description": _event.get("description", ""),
+                    "location":    _event.get("location", ""),
+                })
+                REDIS_CLIENT.setex(f"jarvis:{user_code}:pending_calendar_action", 600, _pending_data)
+                _loc_line = f"\n📍 {_event['location']}" if _event.get("location") else ""
+                _multi = _event["start_date"] != _event["end_date"]
+                _date_line = (
+                    f"📅 {_event['start_date']} {_event['start_time']} → {_event['end_date']} {_event['end_time']}"
+                    if _multi else
+                    f"📅 {_event['start_date']} · {_event['start_time']} → {_event['end_time']}"
+                )
+                _confirm_msg = (
+                    f"Je vais créer : **{_event['title']}**\n"
+                    f"{_date_line}"
+                    f"{_loc_line}\n\nConfirmes ? (réponds \"confirme\" ou \"annule\")"
+                )
+                append_conversation_message(user_code, req.session_id, "user", req.message)
+                append_conversation_message(user_code, req.session_id, "assistant", _confirm_msg)
+                if req.stream:
+                    async def _cal_write_stream():
+                        yield f"data: {json.dumps({'content': _confirm_msg})}\n\n"
+                        yield f"data: {json.dumps({'done': True, 'model': PRIMARY_MODEL, 'duration_ms': 0})}\n\n"
+                    return StreamingResponse(_cal_write_stream(), media_type="text/event-stream")
+                return {"response": _confirm_msg, "model": PRIMARY_MODEL, "session_id": req.session_id, "duration_ms": 0}
+            except Exception as exc:
+                logger.warning("Calendar write prep failed: %s", type(exc).__name__)
+        else:
+            # Missing date/time — ask without going to LLM or router
+            _missing_msg = "Je n'ai pas trouvé la date ou l'heure du rendez-vous. Peux-tu préciser ?"
+            append_conversation_message(user_code, req.session_id, "user", req.message)
+            append_conversation_message(user_code, req.session_id, "assistant", _missing_msg)
+            if req.stream:
+                async def _cal_missing_stream():
+                    yield f"data: {json.dumps({'content': _missing_msg})}\n\n"
+                    yield f"data: {json.dumps({'done': True, 'model': PRIMARY_MODEL, 'duration_ms': 0})}\n\n"
+                return StreamingResponse(_cal_missing_stream(), media_type="text/event-stream")
+            return {"response": _missing_msg, "model": PRIMARY_MODEL, "session_id": req.session_id, "duration_ms": 0}
+
+    # ════════════════════════════════════════════════════════════════════════
+    # LLM ROUTER — parallel with system prompt build
+    # ════════════════════════════════════════════════════════════════════════
+
     user_name = USER_CODES.get(user_code)
 
-    # Build system prompt (with memory if available)
-    system_prompt = await asyncio.to_thread(build_system_prompt, req.session_id, req.voice_mode, user_code)
+    system_prompt, llm_result = await asyncio.gather(
+        asyncio.to_thread(build_system_prompt, req.session_id, req.voice_mode, user_code),
+        llm_route(req.message, google_available=is_google_available(user_code)),
+    )
     if user_name:
         system_prompt += f"\n\nL'utilisateur avec qui tu parles s'appelle {user_name}."
-
-    # LLM router
-    llm_result = await llm_route(req.message, google_available=is_google_available(user_code))
 
     if llm_result:
         use_memory        = llm_result.use_memory
@@ -247,39 +311,6 @@ async def chat(req: ChatRequest):
 
     # self intent: state is injected as context below — no short-circuit
 
-    # ── Calendar write ────────────────────────────────────────────────────
-    if is_calendar_write(req.message) and is_google_available(user_code):
-        _event = await extract_calendar_event_llm(req.message)
-        if _event:
-            try:
-                _start_dt = build_iso_dt(_event["date"], _event["start_time"], USER_TIMEZONES.get(user_code, BRIEFING_TIMEZONE))
-                _end_dt   = build_iso_dt(_event["date"], _event["end_time"],   USER_TIMEZONES.get(user_code, BRIEFING_TIMEZONE))
-                _pending_data = json.dumps({
-                    "title":       _event["title"],
-                    "start_dt":    _start_dt,
-                    "end_dt":      _end_dt,
-                    "description": _event.get("description", ""),
-                    "location":    _event.get("location", ""),
-                })
-                REDIS_CLIENT.setex(f"jarvis:{user_code}:pending_calendar_action", 600, _pending_data)
-                _loc_line = f"\n📍 {_event['location']}" if _event.get("location") else ""
-                _confirm_msg = (
-                    f"Je vais créer : **{_event['title']}**\n"
-                    f"📅 {_event['date']} · {_event['start_time']} → {_event['end_time']}"
-                    f"{_loc_line}\n\nConfirmes ?"
-                )
-                append_conversation_message(user_code, req.session_id, "user", req.message)
-                append_conversation_message(user_code, req.session_id, "assistant", _confirm_msg)
-                if req.stream:
-                    async def _cal_write_stream():
-                        yield f"data: {json.dumps({'content': _confirm_msg})}\n\n"
-                        yield f"data: {json.dumps({'done': True, 'model': PRIMARY_MODEL, 'duration_ms': 0})}\n\n"
-                    return StreamingResponse(_cal_write_stream(), media_type="text/event-stream")
-                return {"response": _confirm_msg, "model": PRIMARY_MODEL, "session_id": req.session_id, "duration_ms": 0}
-            except Exception as exc:
-                logger.warning("Calendar write prep failed: %s", type(exc).__name__)
-                # Fall through to normal LLM
-
     # ── Parallel context fetch ─────────────────────────────────────────────
     _is_conversational = llm_result is not None and llm_result.conversation_type == "conversational"
     _memory_scope      = llm_result.memory_scope if llm_result is not None else "auto"
@@ -291,16 +322,25 @@ async def chat(req: ChatRequest):
     cal_days       = _llm_cal_days or 7
     _weather_query = _llm_weather_location or USER_CITIES.get(user_code, "Paris")
 
+    _google_available = is_google_available(user_code)
+
+    async def _timed_thread(fn, *args, timeout=15.0):
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(fn, *args), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Google API call timed out: %s", fn.__name__)
+            return []
+
     rag_chunks, memory_chunks, web_results, gmail_results, calendar_results = await asyncio.gather(
         search_documents(req.message) if (req.use_rag or use_rag) and not _is_conversational else _empty(),
-        asyncio.to_thread(search_memory, user_code, req.message, 5, _memory_scope) if HAS_MEMORY and use_memory else _empty(),
+        asyncio.to_thread(search_memory, user_code, req.message, 5, _memory_scope) if use_memory else _empty(),
         search_weather(_weather_query) if use_weather_auto else
         search_web(optimize_web_query(req.message), original_message=req.message) if (req.use_web or use_web_auto) else _empty(),
-        asyncio.to_thread(fetch_gmail_messages, gmail_query, 10, user_code) if use_gmail and is_google_available(user_code) else _empty(),
-        asyncio.to_thread(fetch_calendar_events, cal_days, None, None, user_code) if use_calendar and is_google_available(user_code) else _empty(),
+        _timed_thread(fetch_gmail_messages, gmail_query, 10, user_code) if use_gmail and _google_available else _empty(),
+        _timed_thread(fetch_calendar_events, cal_days, None, None, user_code) if use_calendar and _google_available else _empty(),
     )
 
-    if user_name and HAS_MEMORY:
+    if user_name:
         update_user_profile(user_code, "name", user_name)
 
     # ── Context assembly ──────────────────────────────────────────────────
@@ -352,8 +392,7 @@ async def chat(req: ChatRequest):
                 ms = int((time.time() - start) * 1000)
                 _safe_web = [] if web_results == INTERNET_ERROR else web_results
                 yield f"data: {json.dumps({'done': True, 'model': use_model, 'duration_ms': ms, 'rag_sources': [{'source': c['source'], 'score': c['score']} for c in rag_chunks], 'web_sources': [{'title': w['title'], 'url': w['url']} for w in _safe_web]})}\n\n"
-                if HAS_MEMORY:
-                    asyncio.create_task(post_analysis(req.session_id, user_code, req.message, full))
+                asyncio.create_task(post_analysis(req.session_id, user_code, req.message, full))
             except asyncio.CancelledError:
                 logger.info("Client disconnected")
 
@@ -376,8 +415,7 @@ async def chat(req: ChatRequest):
     append_conversation_message(user_code, req.session_id, "assistant", resp)
     ms = int((time.time() - start) * 1000)
 
-    if HAS_MEMORY:
-        asyncio.create_task(post_analysis(req.session_id, user_code, req.message, resp))
+    asyncio.create_task(post_analysis(req.session_id, user_code, req.message, resp))
 
     return {
         "response":    resp,

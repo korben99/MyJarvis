@@ -13,7 +13,6 @@ Public functions:
 from analyzer import analyze_exchange
 from deps import (
     GOOGLE_CHAR_BUDGET,
-    HAS_MEMORY,
     MEMORY_CHAR_BUDGET,
     RAG_CHAR_BUDGET,
     TOTAL_CONTEXT_BUDGET,
@@ -51,10 +50,9 @@ def build_system_prompt(
 ) -> str:
     prompt = get_prompt("SYSTEM_BASE_FR")
 
-    if HAS_MEMORY:
-        memory_ctx = build_memory_context(session_id, user_code)
-        if memory_ctx:
-            prompt += f"{get_prompt('MEMORY_HEADER_FR')}\n{memory_ctx}"
+    memory_ctx = build_memory_context(session_id, user_code)
+    if memory_ctx:
+        prompt += f"{get_prompt('MEMORY_HEADER_FR')}\n{memory_ctx}"
 
     opinions = get_self_memory().get("opinions", [])
     if opinions:
@@ -257,8 +255,6 @@ async def post_analysis(
     session_id: str, user_code: str, user_msg: str, assistant_msg: str
 ):
     """Run after each exchange: extract topics, mood, facts. Non-blocking."""
-    if not HAS_MEMORY:
-        return
     try:
         existing_projects = get_user_projects(user_code)
         existing_profile_keys = list(get_user_profile(user_code).keys())

@@ -45,6 +45,49 @@ VISION_API_URL = os.getenv("VISION_API_URL") or OPENAI_API_URL
 VISION_API_KEY = os.getenv("VISION_API_KEY") or OPENAI_API_KEY
 VISION_TIMEOUT = float(os.getenv("VISION_TIMEOUT") or "30")
 
+# ── Local LLM mode — Apple Silicon / mlx-lm (M4 Pro) ─────────────────────
+# Activé par LLM_LOCAL=yes dans .env.
+# Écrase Router et Primary pour pointer vers les serveurs mlx-lm locaux.
+# Le Reasoning reste sur cloud (cas rares, latence acceptable).
+#
+# Sur le Mac (deux terminaux) :
+#   python -m mlx_lm.server --model $LOCAL_ROUTER_MODEL  --port $LOCAL_ROUTER_PORT
+#   python -m mlx_lm.server --model $LOCAL_PRIMARY_MODEL --port $LOCAL_PRIMARY_PORT
+#
+# Mémoire unifiée conseillée :
+#   24 GB → Qwen2.5-7B  (router) + Qwen2.5-14B  (primary)
+#   48 GB → Qwen2.5-7B  (router) + Qwen2.5-32B  (primary)
+LLM_LOCAL = os.getenv("LLM_LOCAL", "").lower() in ("yes", "true", "1")
+
+if LLM_LOCAL:
+    _local_host         = os.getenv("LOCAL_LLM_HOST", "").rstrip("/")
+    _local_router_port  = os.getenv("LOCAL_ROUTER_PORT",  "8080")
+    _local_primary_port = os.getenv("LOCAL_PRIMARY_PORT", "8081")
+
+    if not _local_host:
+        logger.warning("LLM_LOCAL=yes mais LOCAL_LLM_HOST non défini — utilise http://localhost")
+        _local_host = "http://localhost"
+
+    _local_vision_port  = os.getenv("LOCAL_VISION_PORT",  "8082")
+
+    ROUTER_MODEL   = os.getenv("ROUTER_MODEL_LOCAL",  "mlx-community/Qwen3-8B-4bit")
+    ROUTER_API_URL = f"{_local_host}:{_local_router_port}/v1"
+    ROUTER_API_KEY = "mlx"
+
+    PRIMARY_MODEL   = os.getenv("PRIMARY_MODEL_LOCAL", "mlx-community/Qwen3-30B-A3B-4bit")
+    PRIMARY_API_URL = f"{_local_host}:{_local_primary_port}/v1"
+    PRIMARY_API_KEY = "mlx"
+
+    VISION_MODEL   = os.getenv("VISION_MODEL_LOCAL",  "mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
+    VISION_API_URL = f"{_local_host}:{_local_vision_port}/v1"
+    VISION_API_KEY = "mlx"
+
+    logger.info(
+        "Mode LLM local activé — router: %s:%s  primary: %s:%s  vision: %s:%s",
+        ROUTER_MODEL, _local_router_port, PRIMARY_MODEL, _local_primary_port,
+        VISION_MODEL, _local_vision_port,
+    )
+
 # ── Model compatibility helpers ───────────────────────────────────────────
 
 def is_qwen(model: str) -> bool:
