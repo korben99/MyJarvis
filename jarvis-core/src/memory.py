@@ -44,6 +44,7 @@ from config import (
     AUTOBIO_DEDUP_THRESHOLD,
     AUTOBIO_IMPORTANCE_THRESHOLD,
     AUTOBIO_RECENCY_WINDOW_DAYS,
+    EPISODIC_RETENTION_DAYS,
     CHAT_LOG_TTL,
     DONE_PROJECT_TTL_DAYS,
     CHAT_MAX_MESSAGES,
@@ -412,10 +413,10 @@ def log_conversation(
     }
     # Store in a sorted set by timestamp for easy retrieval
     score = time.time()
-    r.zadd(f"episodic:{user_code}:conversations", {json.dumps(entry): score})
+    r.zadd(f"convlog:{user_code}", {json.dumps(entry): score})
 
     # Keep only last 1000 exchanges (prevent unbounded growth)
-    r.zremrangebyrank(f"episodic:{user_code}:conversations", 0, -1001)
+    r.zremrangebyrank(f"convlog:{user_code}", 0, -1001)
     # Storage as embedded to Qdrant , is importance high enough (VARIABLE TO ADJUST)
 
     if entry.get("importance", 0) > IMPORTANCE_THRESHOLD:
@@ -432,7 +433,7 @@ def get_recent_conversations(user_code: str, hours: int = 24, limit: int = 20) -
     r = get_redis()
     cutoff = time.time() - (hours * 3600)
     entries = r.zrangebyscore(
-        f"episodic:{user_code}:conversations", cutoff, "+inf", start=0, num=limit
+        f"convlog:{user_code}", cutoff, "+inf", start=0, num=limit
     )
     return [json.loads(e) for e in entries]
 
@@ -441,7 +442,7 @@ def get_conversation_summary(user_code: str, days: int = 7) -> str:
     """Get a text summary of recent conversations."""
     r = get_redis()
     cutoff = time.time() - (days * 86400)
-    entries = r.zrangebyscore(f"episodic:{user_code}:conversations", cutoff, "+inf")
+    entries = r.zrangebyscore(f"convlog:{user_code}", cutoff, "+inf")
     parsed = [json.loads(e) for e in entries]
 
     if not parsed:
@@ -651,9 +652,22 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
             },
         ).points
         if existing and existing[0].score >= AUTOBIO_DEDUP_THRESHOLD:
-            logger.debug(
-                "Autobio dedup: skipping '%s' (similar=%.2f)", summary[:60], existing[0].score
-            )
+            # Reinforce the existing memory if the new submission carries higher importance
+            existing_importance = float(existing[0].payload.get("importance", 0))
+            if importance > existing_importance:
+                qdrant.set_payload(
+                    collection_name=QDRANT_MEMORY_COLLECTION,
+                    payload={"importance": round(importance, 4)},
+                    points=[existing[0].id],
+                )
+                logger.debug(
+                    "Autobio dedup: reinforced '%s' %.2f → %.2f",
+                    summary[:60], existing_importance, importance,
+                )
+            else:
+                logger.debug(
+                    "Autobio dedup: skipping '%s' (similar=%.2f)", summary[:60], existing[0].score
+                )
             return
 
         qdrant.upsert(
@@ -756,12 +770,50 @@ def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str 
                     "text": payload["text"],
                     "timestamp": timestamp,
                     "score": final_score,
+                    "_id":       r.id,
+                    "_sim":      r.score,       # raw semantic similarity — used for reconsolidation gate
+                    "_mem_type": mem_type,
+                    "_importance": payload.get("importance", 0),
                 }
             )
         # cognitive ranking
         memories.sort(key=lambda x: x["score"], reverse=True)
+        top = memories[:limit]
 
-        return memories[:limit]
+        # Reconsolidation: recalling a memory reinforces it (neuroscience analogy).
+        # Conditions (both must hold):
+        #   1. autobiographical only — episodic memories are transient by design; boosting them
+        #      would delay consolidation and bloat the episodic collection.
+        #   2. raw semantic similarity > 0.82 — only strongly relevant recalls count;
+        #      vaguely related memories (0.70–0.82) are not reinforced.
+        # Cap at MEMORY_DECAY_DURABLE_MIN - 0.05 = 0.95 so they remain subject to monthly decay.
+        _REINFORCE_SIM_THRESHOLD = 0.82
+        _reinforce_cap = MEMORY_DECAY_DURABLE_MIN - 0.05
+        try:
+            for m in top:
+                if m["_mem_type"] != "autobiographical":
+                    continue
+                if m["_sim"] < _REINFORCE_SIM_THRESHOLD:
+                    continue
+                old_imp = m["_importance"]
+                new_imp = min(round(old_imp + 0.05, 4), _reinforce_cap)
+                if new_imp > old_imp:
+                    qdrant.set_payload(
+                        collection_name=QDRANT_MEMORY_COLLECTION,
+                        payload={"importance": new_imp},
+                        points=[m["_id"]],
+                    )
+        except Exception as _e:
+            logger.debug("Memory reinforcement failed (non-blocking): %s", _e)
+
+        # Strip internal fields before returning
+        for m in top:
+            m.pop("_id", None)
+            m.pop("_sim", None)
+            m.pop("_mem_type", None)
+            m.pop("_importance", None)
+
+        return top
 
     except Exception as e:
         logger.error("Memory search failed: %s", e)
@@ -867,6 +919,9 @@ def add_self_learning(learning: str):
 def get_user_timeline(user_code: str, limit: int = 20):
     """
     Retrieve the user's autobiographical timeline.
+
+    Scrolls up to 200 points to ensure the top-N by importance+recency are
+    correctly identified — scroll() returns in arbitrary Qdrant order.
     """
     try:
         qdrant = get_qdrant()
@@ -879,7 +934,7 @@ def get_user_timeline(user_code: str, limit: int = 20):
                     {"key": "memory_type", "match": {"value": "autobiographical"}},
                 ]
             },
-            limit=limit,
+            limit=200,  # over-fetch then rank — scroll order is arbitrary
         )[0]
 
         now_ts = time.time()
@@ -1001,6 +1056,15 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
         for s in suggestions:
             parts.append(f"- {s}")
 
+    # User relation — always injected so every conversation has a tonal directive.
+    # self_mem is already loaded at the top of this function (no extra I/O).
+    _default_rel = {"affinity": 0.5, "interaction_style": "direct", "average_interaction_mood": "measured"}
+    rel = {**_default_rel, **self_mem.get("user_relations", {}).get(user_code, {})}
+    parts.append("\n=== RELATION AVEC CET UTILISATEUR ===")
+    parts.append(f"- Affinité : {rel['affinity']:.1f}/1.0")
+    parts.append(f"- Style de communication préféré : {rel['interaction_style']}")
+    parts.append(f"- Humeur moyenne des échanges : {rel['average_interaction_mood']}")
+
     return "\n".join(parts) if parts else ""
 
 
@@ -1011,12 +1075,15 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
     """
     Consolidate all episodic memories for a user into autobiographical milestones.
 
-    Runs in a loop, processing batches of `batch_size` oldest episodic points until
-    fewer than 5 remain (not enough to form a meaningful summary). This ensures a full
-    catch-up on the first run after a period of inactivity, not just a fixed-size pass.
+    Only memories older than EPISODIC_RETENTION_DAYS are eligible — recent episodic
+    memories are preserved as a short-term context window (default: 45 days).
+
+    Runs in a loop, processing batches of `batch_size` oldest eligible points until
+    fewer than 5 remain (not enough to form a meaningful summary).
     """
     qdrant = get_qdrant()
     total_deleted = 0
+    cutoff_ts = time.time() - EPISODIC_RETENTION_DAYS * 86400
 
     while True:
         try:
@@ -1024,8 +1091,9 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
                 collection_name=QDRANT_MEMORY_COLLECTION,
                 scroll_filter={
                     "must": [
-                        {"key": "user_code", "match": {"value": user_code}},
+                        {"key": "user_code",   "match": {"value": user_code}},
                         {"key": "memory_type", "match": {"value": "episodic"}},
+                        {"key": "timestamp",   "range": {"lt": cutoff_ts}},
                     ]
                 },
                 order_by={"key": "timestamp", "direction": "asc"},
@@ -1187,9 +1255,10 @@ def _decay_autobiographical_memories(user_code: str) -> int:
             if importance >= MEMORY_DECAY_DURABLE_MIN:
                 continue
 
-            stored_at  = float(point.payload.get("timestamp", now_ts))
-            age_months = (now_ts - stored_at) / (30 * 86400)
-            decayed    = importance * (MEMORY_DECAY_FACTOR ** age_months)
+            # One multiplicative step per monthly run — avoids double-counting decay
+            # since importance is already the post-previous-run value.
+            # Human analogy: each month, memory fades by a fixed % of its current strength.
+            decayed = importance * MEMORY_DECAY_FACTOR
 
             if decayed < MEMORY_DECAY_THRESHOLD:
                 to_delete.append(point.id)

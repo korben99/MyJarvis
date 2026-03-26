@@ -1,4 +1,4 @@
-# Jarvis v8 — On-Premise Personal AI Assistant
+# Jarvis v9 — On-Premise Personal AI Assistant
 
 Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonomous reflection, and integration with Gmail, Google Calendar, web search, and a document knowledge base.
 
@@ -19,6 +19,7 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
 │  ┌──────────────┐  ┌───────────┐  ┌──────────────────┐  │
 │  │  LLM Router  │  │  Memory   │  │  Proto-Self /    │  │
 │  │  (Tier 1)    │  │  System   │  │  Reflection Loop │  │
+│  │ Qwen2.5-3B   │  │ 5 layers  │  │  Autonomous      │  │
 │  └──────────────┘  └───────────┘  └──────────────────┘  │
 │  ┌──────────────┐  ┌───────────┐  ┌──────────────────┐  │
 │  │  RAG Engine  │  │ Briefing  │  │ Google Services  │  │
@@ -73,13 +74,13 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
   ┌────────────────────┬────────────────────────────────────────────────────────────────────┬───────────────────────────────┐   
   │       Modèle       │                                Rôle                                │           no_think            │   
   ├────────────────────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤   
-  │ Qwen7B (router)    │ routing, dédup profil, judge web                                   │ True                          │   
-  ├────────────────────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤   
-  │ Qwen30B (primary)  │ briefing, analyse conv, refine prompt, réflexion, nightly review,  │ False sur les tâches          │   
-  │                    │ trading                                                            │ analytiques                   │   
-  ├────────────────────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤   
-  │ GPT 5.2            │ mode expert uniquement (use_reasoning=True via router)             │ —                             │   
-  │ (reasoning)        │                                                                    │                               │   
+  │ Qwen2.5-3B (router)│ routing, dédup profil, judge web                                   │ True                          │
+  ├────────────────────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤
+  │ Qwen3-30B-A3B      │ briefing, analyse conv, refine prompt, réflexion, nightly review,  │ False sur les tâches          │
+  │ (primary)          │ trading, calendrier, extraction                                    │ analytiques                   │
+  ├────────────────────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤
+  │ Claude Sonnet /    │ mode expert uniquement (use_reasoning=True via router)             │ —                             │
+  │ GPT-5.x (reasoning)│                                                                    │                               │
   └────────────────────┴────────────────────────────────────────────────────────────────────┴───────────────────────────────┘
 
 
@@ -88,7 +89,7 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
 
 | Component | Technology | Role |
 |-----------|-----------|------|
-| **Jarvis API** | FastAPI, Python 3.11 | Main orchestration — bootstrap only (261 lines) |
+| **Jarvis API** | FastAPI, Python 3.13 | Main orchestration — bootstrap only (261 lines) |
 | **Open WebUI** | Docker, port 3000 | Chat interface, connects via `/v1/chat/completions` |
 | **Qdrant** | Docker, port 6333 | Vector DB for RAG document search and episodic memory |
 | **Redis** | Docker, port 6379 | Working memory, session context, conversation cache |
@@ -108,18 +109,15 @@ Jarvis routes every request through a layered model stack. Each tier has its own
 
 ```
 Tier 1 — ROUTER      Fast intent classifier, JSON only
-         Default: gpt-4.1-nano  →  future: Qwen3-7B (local)
+         Target: Qwen2.5-3B-Instruct Q8 (local, ~3.5 GB, 80-100 tok/s)
+         Cloud fallback: gpt-4.1-nano
 
 Tier 2 — PRIMARY     All standard responses: chat, questions, summaries,
-         Default: gpt-4o-mini      trading alerts, self-reflection, briefing
-                              →  future: Qwen3-30B-A3B (local)
+         Target: Qwen3-30B-A3B Q4 (local, ~17 GB, 35-50 tok/s, MoE)
+         Cloud fallback: gpt-4o-mini
 
-Tier 2b — ANALYSIS   Post-exchange conversation analysis (fact/mood extraction)
-          Default: same as PRIMARY  →  future: Qwen3-30B-A3B (local)
-
-Tier 3 — REASONING   Complex queries only: medical/legal/regulatory analysis,
-         Default: gpt-5.1          hard multi-step logic, deep scientific reasoning
-                              →  stays cloud (OpenAI / Anthropic)
+Tier 3 — REASONING   Complex queries only — use_reasoning=True
+         Cloud: Claude Sonnet / GPT-5.x (stays cloud, rare ~15% of requests)
 ```
 
 **Routing logic:**
@@ -151,22 +149,13 @@ The router returns a structured JSON decision consumed by the chat pipeline:
 
 | Field | Values | Purpose |
 |-------|--------|---------|
-| `intents` | `memory`, `rag`, `web`, `gmail`, `calendar`, `briefing`, `self`, `portfolio` | Which data sources to activate |
+| `intents` | `memory`, `rag`, `web`, `weather`, `gmail`, `calendar`, `briefing`, `self`, `portfolio` | Which data sources to activate |
 | `gmail_query` | Gmail search string or null | Pre-built query passed directly to Gmail API |
 | `calendar_days` | integer (1–90) or null | Days ahead to fetch from Calendar |
+| `weather_location` | city name or null | Location override for weather queries |
 | `use_reasoning` | boolean | Route to Tier-3 reasoning model when true |
-| `memory_scope` | `episodic`, `autobiographical`, `profile`, `auto` | Which Qdrant memory layer to search |
-| `conversation_type` | `conversational`, `task`, `question` | Message classification — RAG is skipped for `conversational` |
 
-**`memory_scope` behaviour:**
-- `episodic` — recent conversation summaries only (past sessions, events)
-- `autobiographical` — long-term milestones and stable facts only
-- `profile` — static preferences already injected via Redis; Qdrant search skipped entirely
-- `auto` — search both episodic and autobiographical (default)
-
-**`conversation_type` behaviour:**
-- `conversational` — greetings, thanks, chitchat: RAG document search is bypassed, faster response
-- `task` / `question` — full retrieval pipeline runs normally
+`memory_scope` and `conversation_type` were removed — the intent system already encodes these decisions cleanly. RAG fires when the router includes `rag` in intents; memory always searches both episodic and autobiographical layers.
 
 If the LLM router is unavailable or fails (timeout / parse error), all `use_*` flags default to `False` — no context is fetched and the LLM answers from the system prompt alone. This is the safe fallback; the embedding-based semantic router has been removed.
 
@@ -186,7 +175,7 @@ After each exchange, `analyzer.py` computes an importance score in `[0, 1]` that
 
 | Signal | Weight | Notes |
 |--------|--------|-------|
-| LLM flags `should_remember` | +0.40 | Primary signal — alone clears the storage threshold |
+| LLM flags `memory_summary` (non-null) | +0.40 | Primary signal — alone clears the storage threshold |
 | User fact revealed (max 3) | +0.20 each | Profile facts, preferences, life events |
 | Project / goal mentioned (max 2) | +0.15 each | Active work context |
 | Strong emotional mood | +0.10–0.15 | Stressed/frustrated weighted slightly higher |
@@ -237,16 +226,22 @@ The recency window is **type-aware**: episodic memories use a 30-day window, aut
 
 `build_memory_context()` surfaces the **top 5 autobiographical events by importance + recency** (importance weight 0.7, recency 0.3 over a 1-year window) rather than the 5 most recent — so a critical event from months ago is not displaced by routine recent exchanges.
 
-#### Autobiographical Memory Deduplication
+#### Autobiographical Memory Deduplication and Reinforcement
 
-Before any call to `store_autobiographical_event()`, Jarvis queries Qdrant for the most similar existing autobiographical point. If the cosine similarity exceeds `AUTOBIO_DEDUP_THRESHOLD` (default: 0.85), the new entry is silently skipped. This prevents the collection from accumulating dozens of near-identical variants of the same fact (e.g. "Sébastien s'intéresse à la bourse" stored 15 times with slightly different wording). The threshold is tunable: raise toward 0.95 to allow more variations, lower toward 0.75 to be stricter.
+Before any call to `store_autobiographical_event()`, Jarvis queries Qdrant for the most similar existing autobiographical point. If the cosine similarity exceeds `AUTOBIO_DEDUP_THRESHOLD` (default: 0.85), the new entry is not duplicated. However, if the new submission carries a **higher importance** than the existing point, the existing point is reinforced (importance updated upward). This models the human phenomenon of a recurring important fact becoming more firmly anchored over time.
+
+The threshold is tunable: raise toward 0.95 to allow more variations, lower toward 0.75 to be stricter.
+
+#### Memory Reconsolidation on Recall
+
+Each time `search_memory()` returns a result, every recalled memory receives a small importance boost (`+0.05`, capped at `MEMORY_DECAY_DURABLE_MIN - 0.05 = 0.95`). This models the neuroscience principle of reconsolidation: the act of recalling a memory strengthens it. A memory accessed frequently resists decay; a memory never accessed fades at the normal rate.
 
 #### Autobiographical Memory Decay
 
 On the 1st of each month, `consolidate_memories()` runs a decay pass on every autobiographical point via `_decay_autobiographical_memories()`:
 
 1. **Exempt** — points with `importance >= MEMORY_DECAY_DURABLE_MIN` (default `1.0`) are never touched. In practice this means only monthly consolidation milestones.
-2. **Decay** — for all other points: `decayed_importance = importance × MEMORY_DECAY_FACTOR ^ age_months`. With the default factor of `0.85`, each point loses ~15 % of its importance per elapsed month.
+2. **Decay** — for all other points: `decayed_importance = importance × MEMORY_DECAY_FACTOR`. One multiplicative step per monthly run — with the default factor of `0.85`, each point loses ~15 % of its current importance per month (incremental, not age-based, to avoid double-counting across runs).
 3. **Delete** — if `decayed_importance < MEMORY_DECAY_THRESHOLD` (default `0.15`), the point is permanently deleted from Qdrant. Otherwise the payload is updated in place with the new (lower) importance.
 
 Approximate lifespans with default settings:
@@ -287,9 +282,7 @@ VOICE_SUFFIX_FR         (~80 chars — only if voice_mode=True)
 | `APPRENTISSAGES RÉCENTS` | `jarvis-self.json → learnings[-5:]` | Only if learnings exist |
 | `FRISE CHRONOLOGIQUE` | Top 5 autobio Qdrant points by importance+recency | Only if autobio exists |
 | `SUJETS À ABORDER AUJOURD'HUI` | Redis `jarvis:{code}:tomorrow_suggestions` (TTL 24h, written by nightly review) | Only if key exists |
-| `RELATION AVEC CET UTILISATEUR` | `jarvis-self.json → user_relations[user_code]` | Always (with defaults) |
-
-The `RELATION` section is always present so the LLM always has a tonal directive. Default values: affinity 0.5 / style direct / mood measured.
+| `RELATION AVEC CET UTILISATEUR` | `jarvis-self.json → user_relations[user_code]` | Always — affinity, style, mood (compact). On `intent=self`, enriched with full tonal directives via `build_context`. |
 
 **Context budgets** (applied to dynamic blocks fetched during the request, not to the system prompt itself):
 
@@ -305,18 +298,19 @@ The `RELATION` section is always present so the LLM always has a tonal directive
 
 ```
 User message
-    → asyncio.to_thread(build_system_prompt)      ← non-blocking Qdrant I/O
-    → Tier 1 Router (intents + memory_scope + conversation_type + use_reasoning)
-    → if conversation_type=conversational: skip RAG
-    → Parallel context gathering (memory[scope] + RAG + web + Google + self + portfolio)
+    → asyncio.to_thread(build_system_prompt)  ┐  run in parallel
+    → Tier 1 Router (intents + use_reasoning) ┘  (~300-400 ms saved)
+    → Keyword dispatch: calendar write / confirm / cancel short-circuit here
+    → Parallel context gathering (memory + RAG + web + Google + self + portfolio)
     → Pending trade alerts injected if any are queued
     → Self context injected: internal state (focus, goals, last action)
                            + per-user relation (affinity, style, tonal directives)
     → Tier 2 PRIMARY or Tier 3 REASONING (full context → streaming response)
     →   streaming via shared per-timeout httpx.AsyncClient (connection pool reused)
-    → Conversation analyzer / ANALYSIS_MODEL (extract facts, mood, topics, ESS)
-    → Memory storage: ESS > 0.35 → Qdrant episodic | ESS > 0.60 → autobiographical
-    →   store_autobiographical_event: dedup check first (cosine ≥ 0.85 → skip)
+    → Conversation analyzer / PRIMARY_MODEL (extract facts, mood, topics, importance, memory_summary)
+    → Memory storage: importance > 0.35 → Qdrant episodic | importance > 0.60 → autobiographical
+    →   store_autobiographical_event: dedup check (cosine ≥ 0.85 → skip or reinforce)
+    →   search_memory recalls: +0.05 reconsolidation boost on returned points
 ```
 
 ---

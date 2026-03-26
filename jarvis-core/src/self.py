@@ -266,7 +266,7 @@ def _get_user_activity(hours: int = 24) -> dict:
 
     for code, name in USER_CODES.items():
         entries_raw = r.zrangebyscore(
-            f"episodic:{code}:conversations", cutoff, "+inf"
+            f"convlog:{code}", cutoff, "+inf"
         )
         topics: set[str] = set()
         for raw in entries_raw:
@@ -779,7 +779,7 @@ async def run_nightly_interaction_review() -> None:
             logger.info("Nightly review already done for %s on %s — skipping", user_code, review_date)
             continue
 
-        entries_raw = r.zrangebyscore(f"episodic:{user_code}:conversations", start_ts, end_ts)
+        entries_raw = r.zrangebyscore(f"convlog:{user_code}", start_ts, end_ts)
         if not entries_raw:
             logger.info("No conversations for %s on %s — skipping", user_code, review_date)
             continue
@@ -1443,7 +1443,7 @@ def _last_conversation_ts(user_code: str) -> float:
     """Return Unix timestamp of the most recent episodic conversation, or 0."""
     r = get_redis()
     entries = r.zrevrangebyscore(
-        f"episodic:{user_code}:conversations", "+inf", "-inf",
+        f"convlog:{user_code}", "+inf", "-inf",
         start=0, num=1, withscores=True,
     )
     return entries[0][1] if entries else 0.0
@@ -1478,7 +1478,7 @@ async def generate_proactive_push(user_code: str) -> str:
 
     # ── Path A: recent conversations (last 24h) ──────────────────────────
     cutoff      = now - 24 * 3600
-    entries_raw = r.zrangebyscore(f"episodic:{user_code}:conversations", cutoff, "+inf")
+    entries_raw = r.zrangebyscore(f"convlog:{user_code}", cutoff, "+inf")
 
     conv_lines: list[str] = []
     for raw in entries_raw[-10:]:

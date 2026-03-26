@@ -169,6 +169,13 @@ PROJECT_THRESHOLD                 = 0.6
 # pertinents dans le score de rappel même après plusieurs mois.
 AUTOBIO_RECENCY_WINDOW_DAYS = int(os.getenv("AUTOBIO_RECENCY_WINDOW_DAYS", "365"))
 
+# Fenêtre de rétention épisodique : les souvenirs épisodiques plus récents que cette valeur
+# sont EXEMPTÉS de la consolidation mensuelle — ils restent accessibles en recall pendant
+# cette période avant d'être compressés en autobio.
+# 45 jours = fenêtre confortable (6 semaines de contexte moyen terme).
+# Min raisonnable : 30j. Max : 60j.
+EPISODIC_RETENTION_DAYS = int(os.getenv("EPISODIC_RETENTION_DAYS", "45"))
+
 # Seuil de similarité cosine au-dessus duquel un nouvel événement autobiographique est
 # considéré comme un doublon et ignoré (pas de stockage Qdrant).
 # 0.85 = très similaire en sens mais formulation différente tolérée.
