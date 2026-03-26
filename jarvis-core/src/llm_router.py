@@ -64,8 +64,6 @@ class RouterResult:
     gmail_query:      str
     calendar_days:    int
     weather_location: str = field(default="")
-    memory_scope:     str = field(default="auto")
-    conversation_type: str = field(default="conversational")
 
 
 
@@ -111,8 +109,6 @@ def _log_routing_sample(
             "calendar_days":    result.calendar_days,
             "weather_location": result.weather_location,
             "use_reasoning":    result.use_reasoning,
-            "memory_scope":     result.memory_scope,
-            "conversation_type": result.conversation_type,
         },
         "model": model,
         "ok":    None,  # null = not yet reviewed by human
@@ -194,15 +190,6 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
 
     calendar_days = max(1, min(calendar_days, 90))
 
-    _VALID_SCOPES     = {"episodic", "autobiographical", "profile", "auto"}
-    _VALID_CONV_TYPES = {"conversational", "task", "question"}
-
-    raw_scope     = parsed.get("memory_scope", "auto")
-    memory_scope: str = raw_scope if raw_scope in _VALID_SCOPES else "auto"
-
-    raw_conv_type = parsed.get("conversation_type", "conversational")
-    conversation_type: str = raw_conv_type if raw_conv_type in _VALID_CONV_TYPES else "conversational"
-
     result = RouterResult(
         use_memory        = "memory"    in intents,
         use_rag           = "rag"       in intents,
@@ -217,14 +204,11 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
         gmail_query       = gmail_query,
         calendar_days     = calendar_days,
         weather_location  = weather_location,
-        memory_scope      = memory_scope,
-        conversation_type = conversation_type,
     )
 
     logger.info(
-        "LLM router [%s]: intents=%s weather_location=%r gmail_query=%r calendar_days=%d use_reasoning=%s memory_scope=%s conv_type=%s",
+        "LLM router [%s]: intents=%s weather_location=%r gmail_query=%r calendar_days=%d use_reasoning=%s",
         model, intents, weather_location, gmail_query, calendar_days, use_reasoning,
-        memory_scope, conversation_type,
     )
     _log_routing_sample(message, result, model)
     return result

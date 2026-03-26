@@ -352,7 +352,7 @@ def gather_context() -> dict:
 #  LLM REFLECTION CALL
 # ══════════════════════════════════════════════════
 
-from prompts import get_prompt
+from prompts import get_prompt, PROMPT_TOKEN_BUDGETS
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -1145,11 +1145,16 @@ def _action_refine_prompt(params: dict) -> str:
     if recently_approved:
         return f"refine_prompt: {prompt_name} was approved recently — cooldown active (30 days)"
 
+    max_budget = PROMPT_TOKEN_BUDGETS.get(prompt_name, 600)
+    current_token_count = len(current_text) // 4  # approximation : 1 token ≈ 4 chars
+
     refine_prompt_text = get_prompt("REFINE_PROMPT_USER").format(
-        prompt_name  = prompt_name,
-        topic        = topic,
-        context      = context_str or "aucun contexte supplémentaire",
-        current_text = current_text[:6000],
+        prompt_name         = prompt_name,
+        topic               = topic,
+        context             = context_str or "aucun contexte supplémentaire",
+        current_text        = current_text[:6000],
+        current_token_count = current_token_count,
+        max_token_budget    = max_budget,
     )
 
     try:
@@ -1177,6 +1182,54 @@ def _action_refine_prompt(params: dict) -> str:
 
     if not proposed_text:
         return "refine_prompt: LLM returned empty proposed_text"
+
+    # Guard: reject if proposed text exceeds the token budget — retry once with explicit feedback
+    proposed_token_count = len(proposed_text) // 4
+    if proposed_token_count > max_budget:
+        logger.warning(
+            "refine_prompt: proposed text for %s is ~%d tokens (budget=%d) — retrying with feedback",
+            prompt_name, proposed_token_count, max_budget,
+        )
+        retry_messages = [
+            {"role": "system", "content": get_prompt("REFINE_PROMPT_SYSTEM")},
+            {"role": "user",   "content": refine_prompt_text},
+            {"role": "assistant", "content": content},
+            {"role": "user", "content": (
+                f"Ton proposed_text fait ~{proposed_token_count} tokens mais le budget maximum "
+                f"est {max_budget} tokens. Tu dois le raccourcir. "
+                f"Retourne uniquement le JSON avec le proposed_text raccourci."
+            )},
+        ]
+        try:
+            content = call_llm(
+                retry_messages,
+                model=PRIMARY_MODEL,
+                api_url=PRIMARY_API_URL,
+                api_key=PRIMARY_API_KEY,
+                temperature=0.3,
+                max_tokens=4000,
+                json_response=True,
+                no_think=False,
+                timeout=PRIMARY_TIMEOUT,
+            )
+            result = extract_llm_json(content)
+            proposed_text = result.get("proposed_text", "").strip()
+            rationale     = result.get("rationale", rationale).strip()
+        except Exception as exc:
+            logger.error("refine_prompt: retry failed: %s", exc)
+            return f"refine_prompt: proposed text too long and retry failed ({type(exc).__name__})"
+
+        proposed_token_count = len(proposed_text) // 4
+        if not proposed_text or proposed_token_count > max_budget:
+            logger.warning(
+                "refine_prompt: retry still too long (%d tokens) — proposal rejected",
+                proposed_token_count,
+            )
+            return (
+                f"refine_prompt: proposed text still too long after retry "
+                f"(~{proposed_token_count} tokens, budget={max_budget}) — proposal rejected"
+            )
+        logger.info("refine_prompt: retry succeeded (%d tokens)", proposed_token_count)
 
     proposal = {
         "id":            uuid.uuid4().hex[:8],

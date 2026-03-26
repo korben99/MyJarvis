@@ -26,8 +26,8 @@
       "description": "Identify knowledge gaps, learn from conversations, and improve quality of responses over time."
     }
   ],
-  "current_focus": "Gérer l'inactivité de Mathilde et relancer son engagement",
-  "last_reflection": "2026-03-26T18:43:28.796721+00:00",
+  "current_focus": "Gérer l'inactivité de Mathilde et relancer son engagement.",
+  "last_reflection": "2026-03-26T18:53:03.389684+00:00",
   "self_notes": [],
   "opinions": [
     {
@@ -342,7 +342,7 @@
       "conversations": 15
     }
   ],
-  "reflection_count": 197,
+  "reflection_count": 198,
   "user_relations": {
     "KORBEN99": {
       "affinity": 0.8,

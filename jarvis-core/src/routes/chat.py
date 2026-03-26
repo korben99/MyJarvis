@@ -312,8 +312,7 @@ async def chat(req: ChatRequest):
     # self intent: state is injected as context below — no short-circuit
 
     # ── Parallel context fetch ─────────────────────────────────────────────
-    _is_conversational = llm_result is not None and llm_result.conversation_type == "conversational"
-    _memory_scope      = llm_result.memory_scope if llm_result is not None else "auto"
+    # memory_scope/conversation_type removed — router intents handle routing decisions.
 
     async def _empty() -> list:
         return []
@@ -332,8 +331,8 @@ async def chat(req: ChatRequest):
             return []
 
     rag_chunks, memory_chunks, web_results, gmail_results, calendar_results = await asyncio.gather(
-        search_documents(req.message) if (req.use_rag or use_rag) and not _is_conversational else _empty(),
-        asyncio.to_thread(search_memory, user_code, req.message, 5, _memory_scope) if use_memory else _empty(),
+        search_documents(req.message) if (req.use_rag or use_rag) else _empty(),
+        asyncio.to_thread(search_memory, user_code, req.message, 5) if use_memory else _empty(),
         search_weather(_weather_query) if use_weather_auto else
         search_web(optimize_web_query(req.message), original_message=req.message) if (req.use_web or use_web_auto) else _empty(),
         _timed_thread(fetch_gmail_messages, gmail_query, 10, user_code) if use_gmail and _google_available else _empty(),
