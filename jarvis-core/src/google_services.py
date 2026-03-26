@@ -364,7 +364,9 @@ def fetch_calendar_events(days: int = 7, date: date_type | None = None, tz_name:
 
         if date is not None:
             tz = pytz.timezone(effective_tz)
-            start = datetime(date.year, date.month, date.day, tzinfo=tz)
+            # tz.localize() is required with pytz — datetime(..., tzinfo=tz) uses
+            # the historical LMT offset (+00:09:21 for Paris) instead of CET/CEST.
+            start = tz.localize(datetime(date.year, date.month, date.day))
             time_min = start.isoformat()
             time_max = (start + timedelta(days=1)).isoformat()
         else:

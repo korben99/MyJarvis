@@ -179,7 +179,8 @@ def fmt_event_time(iso: str, user_code: str, fmt: str = "%d/%m %H:%M") -> str:
         return iso  # all-day event — no time component
 
     try:
-        dt = datetime.fromisoformat(iso)
+        # Python < 3.11 does not accept "Z" as UTC in fromisoformat — normalize first.
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=_UTC)
         return dt.astimezone(get_user_tz(user_code)).strftime(fmt)

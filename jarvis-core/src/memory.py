@@ -535,16 +535,20 @@ def apply_project_updates(user_code: str, project_events: list[str]):
 # ══════════════════════════════════════════════════
 
 
-def compute_memory_novelty(user_code: str, text: str, limit: int = 5):
+def compute_memory_novelty(user_code: str, text: str, vector: list | None = None, limit: int = 5):
     """
     Estimate novelty of a memory by comparing it with recent vector memories.
     Returns a value between 0 and 1.
+
+    Pass a pre-computed *vector* to avoid re-encoding the text when the caller
+    already has the embedding (e.g. store_memory_vector).
     """
     try:
         model = get_embed_model()
         qdrant = get_qdrant()
 
-        vector = model.encode(text, normalize_embeddings=True).tolist()
+        if vector is None:
+            vector = model.encode(text, normalize_embeddings=True).tolist()
 
         results = qdrant.query_points(
             collection_name=QDRANT_MEMORY_COLLECTION,
@@ -553,10 +557,12 @@ def compute_memory_novelty(user_code: str, text: str, limit: int = 5):
             query_filter={
                 "must": [
                     {"key": "user_code", "match": {"value": user_code}},
-                ],
-                "should": [
-                    {"key": "memory_type", "match": {"value": "episodic"}},
-                    {"key": "memory_type", "match": {"value": "autobiographical"}},
+                    {
+                        "should": [
+                            {"key": "memory_type", "match": {"value": "episodic"}},
+                            {"key": "memory_type", "match": {"value": "autobiographical"}},
+                        ]
+                    },
                 ],
             },
         ).points
@@ -565,10 +571,7 @@ def compute_memory_novelty(user_code: str, text: str, limit: int = 5):
             return 1.0
 
         max_similarity = max(r.score for r in results)
-
-        novelty = 1 - max_similarity
-
-        return max(0, min(1, novelty))
+        return max(0, min(1, 1 - max_similarity))
 
     except Exception as e:
         logger.error("Novelty computation failed: %s", e)
@@ -591,11 +594,11 @@ def store_memory_vector(user_code: str, entry: dict):
         model = get_embed_model()
         qdrant = get_qdrant()
         logger.info("Vector memory candidate: %s", text[:80])
-        novelty = compute_memory_novelty(user_code, text)
+        vector = model.encode(text, normalize_embeddings=True).tolist()
+        novelty = compute_memory_novelty(user_code, text, vector=vector)
         if novelty < NOVELTY_THRESHOLD:
             return
 
-        vector = model.encode(text, normalize_embeddings=True).tolist()
         qdrant.upsert(
             collection_name=QDRANT_MEMORY_COLLECTION,
             points=[
@@ -704,9 +707,13 @@ def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str 
         if memory_scope in ("episodic", "autobiographical"):
             query_filter = {"must": [user_filter, type_filter["must"][0]]}
         else:
+            # Nested should inside must: user_code MUST match AND memory_type must be
+            # episodic OR autobiographical (explicit — points without memory_type excluded).
             query_filter = {
-                "must": [user_filter],
-                "should": type_filter["should"],
+                "must": [
+                    user_filter,
+                    {"should": type_filter["should"]},
+                ]
             }
 
         results = qdrant.query_points(
@@ -905,8 +912,14 @@ def get_user_timeline(user_code: str, limit: int = 20):
         return []
 
 
-def build_memory_context(session_id: str, user_code: str) -> str:
-    """Build a memory context string to inject into the system prompt."""
+def build_memory_context(session_id: str, user_code: str, self_mem: dict | None = None) -> str:
+    """Build a memory context string to inject into the system prompt.
+
+    Pass an already-loaded *self_mem* dict to avoid a redundant JSON read when
+    the caller (build_system_prompt) has already called get_self_memory().
+    """
+    if self_mem is None:
+        self_mem = get_self_memory()
     parts = []
 
     # User profile — namespaced keys (hobby:kart) are grouped by category for readability
@@ -960,7 +973,6 @@ def build_memory_context(session_id: str, user_code: str) -> str:
         parts.append(f"Humeur actuelle : {emotion['mood']}")
 
     # Self identity
-    self_mem = get_self_memory()
     if self_mem.get("learnings"):
         recent_learnings = self_mem["learnings"][-5:]
         parts.append("\n=== APPRENTISSAGES RÉCENTS ===")
@@ -988,15 +1000,6 @@ def build_memory_context(session_id: str, user_code: str) -> str:
         parts.append("\n=== SUJETS À ABORDER AUJOURD'HUI ===")
         for s in suggestions:
             parts.append(f"- {s}")
-
-    # User relation — affinity, interaction style, average mood
-    _default_relation = {"affinity": 0.5, "interaction_style": "direct", "average_interaction_mood": "measured"}
-    relations = get_self_memory().get("user_relations", {})
-    rel = {**_default_relation, **relations.get(user_code, {})}
-    parts.append("\n=== RELATION AVEC CET UTILISATEUR ===")
-    parts.append(f"- Affinité : {rel['affinity']:.1f}/1.0")
-    parts.append(f"- Style de communication préféré : {rel['interaction_style']}")
-    parts.append(f"- Humeur moyenne des échanges : {rel['average_interaction_mood']}")
 
     return "\n".join(parts) if parts else ""
 
@@ -1037,34 +1040,33 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
 
             combined = "\n".join(texts)
 
-            summary_prompt = f"""
-Résume les souvenirs suivants concernant un utilisateur en un fait durable.
+            summary_prompt = f"""Voici des souvenirs de conversations avec un utilisateur :
 
-Souvenirs :
 {combined}
 
-Retourne une seule phrase en français décrivant un fait stable sur l'utilisateur.
-"""
+Identifie les faits durables et distincts sur cet utilisateur (habitudes, préférences, projets, traits de caractère…).
+Retourne une liste JSON de phrases en français, chacune décrivant un fait stable.
+S'il n'y a aucun fait durable à extraire, retourne une liste vide.
+Réponds uniquement avec le JSON, rien d'autre : ["fait 1", "fait 2"]"""
 
-            summary = call_llm(
+            raw = call_llm(
                 [{"role": "user", "content": summary_prompt}],
                 model=PRIMARY_MODEL,
                 api_url=PRIMARY_API_URL,
                 api_key=PRIMARY_API_KEY,
                 temperature=0.1,
-                max_tokens=120,
+                max_tokens=400,
                 json_response=False,
-                no_think=False,
+                no_think=True,
                 timeout=30.0,
             )
 
-            # Strip whitespace, remove surrounding quotes, truncate to 300 chars
-            summary = summary.strip().strip('"').strip("'")
-            if not summary:
-                break
-            summary = summary[:300]
+            parsed = extract_llm_json(raw)
+            facts = parsed if isinstance(parsed, list) else []
+            facts = [f.strip().strip('"\'')[:300] for f in facts if isinstance(f, str) and f.strip()]
 
-            store_autobiographical_event(user_code, summary, MEMORY_CONSOLIDATION_IMPORTANCE)
+            for fact in facts:
+                store_autobiographical_event(user_code, fact, MEMORY_CONSOLIDATION_IMPORTANCE)
 
             qdrant.delete(
                 collection_name=QDRANT_MEMORY_COLLECTION,
@@ -1072,7 +1074,10 @@ Retourne une seule phrase en français décrivant un fait stable sur l'utilisate
             )
 
             total_deleted += len(point_ids)
-            logger.info("[%s] Consolidation batch: %s (%d points deleted)", user_code, summary, len(point_ids))
+            logger.info(
+                "[%s] Consolidation batch: %d facts stored, %d points deleted",
+                user_code, len(facts), len(point_ids),
+            )
 
         except Exception as e:
             logger.error("Memory consolidation failed for %s: %s", user_code, e)

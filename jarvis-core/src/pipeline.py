@@ -50,11 +50,14 @@ def build_system_prompt(
 ) -> str:
     prompt = get_prompt("SYSTEM_BASE_FR")
 
-    memory_ctx = build_memory_context(session_id, user_code)
+    # Load once — reused by build_memory_context and opinions below
+    self_mem = get_self_memory()
+
+    memory_ctx = build_memory_context(session_id, user_code, self_mem=self_mem)
     if memory_ctx:
         prompt += f"{get_prompt('MEMORY_HEADER_FR')}\n{memory_ctx}"
 
-    opinions = get_self_memory().get("opinions", [])
+    opinions = self_mem.get("opinions", [])
     if opinions:
         ops_lines = "\n".join(f"- {o['topic']} : {o['opinion']}" for o in opinions[-10:])
         prompt += f"\n\n=== TES OPINIONS ===\n{ops_lines}"
