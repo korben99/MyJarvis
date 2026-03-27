@@ -10,6 +10,8 @@ Public functions:
   post_analysis(session_id, user_code, user_msg, assistant_msg)
 """
 
+import asyncio
+
 from analyzer import analyze_exchange
 from deps import (
     GOOGLE_CHAR_BUDGET,
@@ -26,6 +28,7 @@ from memory import (
     get_user_profile,
     get_user_projects,
     log_conversation,
+    retract_autobiographical_event,
     set_interest_weight,
     update_emotional_state,
     update_user_profile,
@@ -280,15 +283,26 @@ async def post_analysis(
         if projects:
             apply_project_updates(user_code, projects)
 
+        # Profile + interest writes: update_user_profile may call the router LLM
+        # (sync) for key normalisation — run in thread to avoid blocking the loop.
         for fact in analysis.get("user_facts", []):
             if "key" in fact and "value" in fact:
-                update_user_profile(user_code, fact["key"], fact["value"] or None)
+                await asyncio.to_thread(
+                    update_user_profile, user_code, fact["key"], fact["value"] or None
+                )
+
+        for retraction in analysis.get("retractions") or []:
+            if isinstance(retraction, str) and retraction.strip():
+                await asyncio.to_thread(retract_autobiographical_event, user_code, retraction)
 
         for iw in analysis.get("interest_weights") or []:
             if "term" in iw and "weight" in iw:
                 set_interest_weight(user_code, iw["term"], float(iw["weight"]))
 
-        log_conversation(
+        # log_conversation → store_memory_vector / store_autobiographical_event use
+        # sync Qdrant calls — run in thread to keep the event loop free.
+        await asyncio.to_thread(
+            log_conversation,
             user_code=user_code,
             session_id=session_id,
             user_msg=user_msg,

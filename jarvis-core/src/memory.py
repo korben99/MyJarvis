@@ -389,6 +389,20 @@ def update_user_preference(user_code: str, key: str, value: str):
 # ══════════════════════════════════════════════════
 
 
+_SAT_POSITIVE = ("merci", "parfait", "super", "excellent", "exactement", "nickel", "génial", "top", "c'est ça")
+_SAT_NEGATIVE = ("non,", "non.", "c'est pas ça", "tu n'as pas", "pas compris", "faux", "incorrect", "erreur")
+
+
+def _detect_satisfaction(user_msg: str) -> str:
+    """Detect implicit satisfaction signal from the user's message (proxy on previous response)."""
+    lower = user_msg.lower().strip()
+    if any(lower.startswith(p) or f" {p}" in lower for p in _SAT_POSITIVE):
+        return "positive"
+    if any(lower.startswith(n) or f" {n}" in lower for n in _SAT_NEGATIVE):
+        return "negative"
+    return "unknown"
+
+
 def log_conversation(
     user_code: str,
     session_id: str,
@@ -401,8 +415,9 @@ def log_conversation(
 ):
     """Log a conversation exchange to episodic memory."""
     r = get_redis()
+    _now = time.time()  # single call — score and timestamp stay consistent
     entry = {
-        "timestamp": time.time(),
+        "timestamp": _now,
         "session_id": session_id,
         "user": user_msg[:500],  # Truncate for storage
         "assistant": assistant_msg[:500],
@@ -410,10 +425,10 @@ def log_conversation(
         "topics": topics or [],
         "importance": importance,
         "memory_summary": memory_summary,
+        "satisfaction": _detect_satisfaction(user_msg),
     }
     # Store in a sorted set by timestamp for easy retrieval
-    score = time.time()
-    r.zadd(f"convlog:{user_code}", {json.dumps(entry): score})
+    r.zadd(f"convlog:{user_code}", {json.dumps(entry): _now})
 
     # Keep only last 1000 exchanges (prevent unbounded growth)
     r.zremrangebyrank(f"convlog:{user_code}", 0, -1001)
@@ -435,7 +450,13 @@ def get_recent_conversations(user_code: str, hours: int = 24, limit: int = 20) -
     entries = r.zrangebyscore(
         f"convlog:{user_code}", cutoff, "+inf", start=0, num=limit
     )
-    return [json.loads(e) for e in entries]
+    result = []
+    for e in entries:
+        try:
+            result.append(json.loads(e))
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("Skipping corrupted convlog entry for %s", user_code)
+    return result
 
 
 def get_conversation_summary(user_code: str, days: int = 7) -> str:
@@ -443,7 +464,12 @@ def get_conversation_summary(user_code: str, days: int = 7) -> str:
     r = get_redis()
     cutoff = time.time() - (days * 86400)
     entries = r.zrangebyscore(f"convlog:{user_code}", cutoff, "+inf")
-    parsed = [json.loads(e) for e in entries]
+    parsed = []
+    for e in entries:
+        try:
+            parsed.append(json.loads(e))
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("Skipping corrupted convlog entry for %s", user_code)
 
     if not parsed:
         return "No recent conversations."
@@ -499,6 +525,9 @@ def apply_project_updates(user_code: str, project_events: list[str]):
         except ValueError:
             continue
 
+        if not name:
+            continue
+
         # Exact match first, then fuzzy — prevents name drift duplicates
         resolved = name if name in project_map else (_fuzzy_project_name(name, project_map) or name)
 
@@ -528,6 +557,22 @@ def apply_project_updates(user_code: str, project_events: list[str]):
             if resolved in project_map:
                 project_map[resolved]["status"] = "done"
                 project_map[resolved]["last_update"] = now
+
+        elif action == "rename":
+            # Format: "rename:ancien nom->nouveau nom"
+            if "->" not in name:
+                continue
+            old_raw, new_name = name.split("->", 1)
+            old_raw = old_raw.strip()
+            new_name = new_name.strip()
+            if not new_name:
+                continue
+            old_resolved = old_raw if old_raw in project_map else (_fuzzy_project_name(old_raw, project_map) or old_raw)
+            if old_resolved in project_map:
+                entry = project_map.pop(old_resolved)
+                entry["name"] = new_name
+                entry["last_update"] = now
+                project_map[new_name] = entry
 
     update_user_projects(user_code, list(project_map.values()))
 
@@ -688,9 +733,42 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
         )
 
         logger.info("Autobiographical memory stored: %s", summary)
+        _invalidate_timeline_cache(user_code)
 
     except Exception as e:
         logger.error("Autobiographical memory failed: %s", e)
+
+
+def retract_autobiographical_event(user_code: str, query: str, threshold: float = 0.88) -> int:
+    """Delete autobiographical memories semantically matching the query.
+    Returns the number of deleted points. Used when the user corrects a past fact."""
+    try:
+        model = get_embed_model()
+        qdrant = get_qdrant()
+        vector = model.encode(query, normalize_embeddings=True).tolist()
+        results = qdrant.query_points(
+            collection_name=QDRANT_MEMORY_COLLECTION,
+            query=vector,
+            limit=5,
+            query_filter={
+                "must": [
+                    {"key": "user_code",   "match": {"value": user_code}},
+                    {"key": "memory_type", "match": {"value": "autobiographical"}},
+                ]
+            },
+        ).points
+        to_delete = [r.id for r in results if r.score >= threshold]
+        if to_delete:
+            qdrant.delete(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                points_selector=PointIdsList(points=to_delete),
+            )
+            _invalidate_timeline_cache(user_code)
+            logger.info("Autobio retracted %d point(s) for '%s'", len(to_delete), query[:60])
+        return len(to_delete)
+    except Exception as e:
+        logger.error("retract_autobiographical_event failed: %s", e)
+        return 0
 
 
 def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str = "auto"):
@@ -916,13 +994,29 @@ def add_self_learning(learning: str):
 # ══════════════════════════════════════════════════
 
 
+_TIMELINE_CACHE_TTL = 300  # 5 minutes — invalidated on new autobio store
+
+
 def get_user_timeline(user_code: str, limit: int = 20):
     """
     Retrieve the user's autobiographical timeline.
 
     Scrolls up to 200 points to ensure the top-N by importance+recency are
     correctly identified — scroll() returns in arbitrary Qdrant order.
+
+    Result is cached in Redis for 5 minutes to avoid a 200-point Qdrant scroll
+    on every chat request. Invalidated whenever a new autobiographical memory
+    is stored (store_autobiographical_event calls _invalidate_timeline_cache).
     """
+    cache_key = f"cache:timeline:{user_code}"
+    r = get_redis()
+    try:
+        cached = r.get(cache_key)
+        if cached:
+            return json.loads(cached)[:limit]
+    except Exception:
+        pass
+
     try:
         qdrant = get_qdrant()
 
@@ -940,15 +1034,15 @@ def get_user_timeline(user_code: str, limit: int = 20):
         now_ts = time.time()
         timeline = []
 
-        for r in results:
-            ts = r.payload.get("timestamp", now_ts)
-            imp = r.payload.get("importance", 0)
+        for r_ in results:
+            ts = r_.payload.get("timestamp", now_ts)
+            imp = r_.payload.get("importance", 0)
             # Recency bonus normalised over a 1-year window
             recency = max(0.0, 1.0 - (now_ts - ts) / (86400 * 365))
             rank = imp * 0.7 + recency * 0.3
             timeline.append(
                 {
-                    "text": r.payload["text"],
+                    "text": r_.payload["text"],
                     "timestamp": ts,
                     "importance": imp,
                     "_rank": rank,
@@ -960,11 +1054,25 @@ def get_user_timeline(user_code: str, limit: int = 20):
         for e in timeline:
             e.pop("_rank", None)
 
-        return timeline
+        # Cache top-50 (more than enough for any prompt injection)
+        try:
+            r.setex(cache_key, _TIMELINE_CACHE_TTL, json.dumps(timeline[:50], ensure_ascii=False))
+        except Exception:
+            pass
+
+        return timeline[:limit]
 
     except Exception as e:
         logger.error("Timeline retrieval failed: %s", e)
         return []
+
+
+def _invalidate_timeline_cache(user_code: str) -> None:
+    """Called after a new autobiographical memory is stored."""
+    try:
+        get_redis().delete(f"cache:timeline:{user_code}")
+    except Exception:
+        pass
 
 
 def build_memory_context(session_id: str, user_code: str, self_mem: dict | None = None) -> str:
@@ -1001,15 +1109,13 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
         for k, v in prefs.items():
             parts.append(f"- {k}: {v}")
 
-    # Active projects
+    # Active projects only — done projects are not useful context for chat
     projects = get_user_projects(user_code)
-    if projects:
+    active_projects = [p for p in projects if isinstance(p, dict) and p.get("status") != "done"]
+    if active_projects:
         parts.append("\n=== PROJETS ACTIFS ===")
-        for p in projects:
-            if isinstance(p, dict):
-                parts.append(f"- {p.get('name', 'sans nom')}: {p.get('status', '')}")
-            else:
-                parts.append(f"- {p}")
+        for p in active_projects:
+            parts.append(f"- {p.get('name', 'sans nom')}")
 
     # Recent conversation topics (last 24h)
     recent = get_recent_conversations(user_code, hours=24, limit=10)
@@ -1113,9 +1219,8 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
 {combined}
 
 Identifie les faits durables et distincts sur cet utilisateur (habitudes, préférences, projets, traits de caractère…).
-Retourne une liste JSON de phrases en français, chacune décrivant un fait stable.
-S'il n'y a aucun fait durable à extraire, retourne une liste vide.
-Réponds uniquement avec le JSON, rien d'autre : ["fait 1", "fait 2"]"""
+Retourne uniquement du JSON : {{"facts": ["fait 1", "fait 2"]}}
+Si aucun fait durable : {{"facts": []}}"""
 
             raw = call_llm(
                 [{"role": "user", "content": summary_prompt}],
@@ -1124,13 +1229,13 @@ Réponds uniquement avec le JSON, rien d'autre : ["fait 1", "fait 2"]"""
                 api_key=PRIMARY_API_KEY,
                 temperature=0.1,
                 max_tokens=400,
-                json_response=False,
+                json_response=True,
                 no_think=True,
                 timeout=30.0,
             )
 
             parsed = extract_llm_json(raw)
-            facts = parsed if isinstance(parsed, list) else []
+            facts = parsed.get("facts", []) if isinstance(parsed, dict) else []
             facts = [f.strip().strip('"\'')[:300] for f in facts if isinstance(f, str) and f.strip()]
 
             for fact in facts:

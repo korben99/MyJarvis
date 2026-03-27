@@ -191,7 +191,7 @@ def _get_active_projects(user_code: str) -> list[str]:
 async def _fetch_weather(city: str, tz_name: str = "Europe/Paris") -> str:
     """Fetch today's weather summary for the city via Open-Meteo (geocoding + forecast)."""
     try:
-        async with httpx.AsyncClient(timeout=8) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=12.0)) as client:
             geo = await client.get(
                 "https://geocoding-api.open-meteo.com/v1/search",
                 params={"name": city, "count": 1, "language": "fr", "format": "json"},
@@ -204,18 +204,27 @@ async def _fetch_weather(city: str, tz_name: str = "Europe/Paris") -> str:
             loc = results[0]
             lat, lon = loc["latitude"], loc["longitude"]
 
-            wx = await client.get(
-                "https://api.open-meteo.com/v1/forecast",
-                params={
-                    "latitude": lat,
-                    "longitude": lon,
-                    "current": "temperature_2m,weather_code",
-                    "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code",
-                    "timezone": tz_name,
-                    "forecast_days": 1,
-                },
-            )
-            wx.raise_for_status()
+            wx_params = {
+                "latitude": lat,
+                "longitude": lon,
+                "current": "temperature_2m,weather_code",
+                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code",
+                "timezone": tz_name,
+                "forecast_days": 1,
+            }
+            # Retry once on timeout — Open-Meteo can be slow at dawn
+            for _attempt in range(2):
+                try:
+                    wx = await client.get(
+                        "https://api.open-meteo.com/v1/forecast",
+                        params=wx_params,
+                    )
+                    wx.raise_for_status()
+                    break
+                except httpx.TimeoutException:
+                    if _attempt == 1:
+                        raise
+                    logger.debug("Weather forecast timeout — retrying once")
             data = wx.json()
 
             cur  = data.get("current", {})
@@ -413,10 +422,10 @@ async def gather_briefing(user_code: str) -> BriefingResult:
                 calendar_task, gmail_task, weather_task, news_task, portfolio_task,
                 return_exceptions=True,
             ),
-            timeout=25.0,
+            timeout=35.0,
         )
     except asyncio.TimeoutError:
-        logger.warning("Briefing data gather timed out after 25s — using empty sources")
+        logger.warning("Briefing data gather timed out after 35s — using empty sources")
         results = [[], [], "", [], ""]
 
     calendar  = _unwrap(results[0], [])

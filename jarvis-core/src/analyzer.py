@@ -87,11 +87,11 @@ async def analyze_exchange(user_msg: str, assistant_msg: str, existing_projects:
         # LLM's own judgment is the primary signal: 0.4 alone clears
         # IMPORTANCE_THRESHOLD so any exchange the LLM deems worth
         # remembering is captured, even with no other signals.
-        # Only count the bonus when the LLM provided an actual summary
-        # sentence — a bare boolean true gives no usable memory_summary.
-        remember_text = result.get("should_remember")
+        # The field is "memory_summary" (renamed from "should_remember" in prompt v2).
+        memory_summary_text = result.get("memory_summary")
+        _has_summary = isinstance(memory_summary_text, str) and bool(memory_summary_text.strip())
 
-        if isinstance(remember_text, str) and remember_text.strip():
+        if _has_summary:
             importance += 0.40
 
         # Personal facts revealed by the user
@@ -108,22 +108,20 @@ async def analyze_exchange(user_msg: str, assistant_msg: str, existing_projects:
             importance += 0.15
 
         # Message depth (minor signal — long messages often carry more info)
-        if len(user_msg) > 80:
+        if len(user_msg) > 200:
             importance += 0.05
 
         # Clamp score
         importance = min(importance, 1.0)
         result["importance"] = round(importance, 3)
 
-        # Convert "should_remember" sentence into boolean
-        remember_text = result.get("should_remember")
-
-        if remember_text and isinstance(remember_text, str):
-            result["memory_summary"] = remember_text
-            result["should_remember"] = result["importance"] > IMPORTANCE_THRESHOLD
-        else:
+        # should_remember: ESS cleared threshold AND LLM provided a concrete summary
+        result["should_remember"] = (
+            result["importance"] > IMPORTANCE_THRESHOLD and _has_summary
+        )
+        # Normalise memory_summary: None if missing/empty (LLM may omit field or send null)
+        if not _has_summary:
             result["memory_summary"] = None
-            result["should_remember"] = False
 
         return result
 

@@ -36,6 +36,7 @@ import os
 import re
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -269,16 +270,21 @@ def _get_user_activity(hours: int = 24) -> dict:
             f"convlog:{code}", cutoff, "+inf"
         )
         topics: set[str] = set()
+        sat: Counter = Counter()
         for raw in entries_raw:
             try:
                 e = json.loads(raw)
                 topics.update(e.get("topics", []))
+                s = e.get("satisfaction", "unknown")
+                if s in ("positive", "negative"):
+                    sat[s] += 1
             except Exception:
                 pass
         activity[code] = {
             "name": name,
             "conversations": len(entries_raw),
             "topics": sorted(topics)[:8],
+            "satisfaction": dict(sat),
         }
 
     return activity
@@ -368,7 +374,14 @@ def _fmt_activity(activity: dict) -> str:
     lines = []
     for code, info in activity.items():
         topics = ", ".join(info["topics"]) or "none"
-        lines.append(f"  {info['name']} ({code}): {info['conversations']} conversations | topics: {topics}")
+        sat = info.get("satisfaction", {})
+        sat_parts = []
+        if sat.get("positive"):
+            sat_parts.append(f"+{sat['positive']}")
+        if sat.get("negative"):
+            sat_parts.append(f"-{sat['negative']}")
+        sat_str = f" | satisfaction: {' '.join(sat_parts)}" if sat_parts else ""
+        lines.append(f"  {info['name']} ({code}): {info['conversations']} conversations | topics: {topics}{sat_str}")
     return "\n".join(lines) or "  No activity."
 
 
@@ -714,7 +727,7 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
         conv_text += f"User: {c.get('user', '')[:200]}\nJarvis: {c.get('assistant', '')[:200]}\nMood: {c.get('mood', '?')}\n\n"
 
     data = get_self_memory()
-    recent_self_reflections = [l["text"] for l in data.get("learnings", [])[-5:]]
+    recent_self_reflections = [l["text"] for l in data.get("learnings", [])[-12:]]
     recent_opinions = [
         f"{o['topic']}: {o['opinion']}" for o in data.get("opinions", [])[-10:]
     ]

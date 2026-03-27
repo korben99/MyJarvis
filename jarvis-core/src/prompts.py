@@ -219,11 +219,12 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
     Minuscules sans accents pour catégorie et item.
   - Si incertain → ne rien ajouter
 
-"projects" : liste de "create:nom", "update:nom" ou "done:nom"
+"projects" : liste de "create:nom", "update:nom", "done:nom" ou "rename:ancien->nouveau"
   Un projet = activité structurée sur plusieurs jours/semaines.
   PAS un projet : RDV, événement ponctuel, voyage, week-end.
   Projets connus : {existing_projects}
   → Ne pas dupliquer. Préférer "update" si ambiguïté.
+  → Utiliser "rename:ancien->nouveau" si l'utilisateur change le nom d'un projet existant.
   Noms explicites de 2 à 4 mots.
 
 "interest_weights" : liste ou []
@@ -236,6 +237,11 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
 "memory_summary"  : phrase utile à retenir (français) ou null
   null obligatoire pour : météo, cours, scores, actualités éphémères
   Retenir uniquement ce qui reste vrai dans le temps.
+
+"retractions" : liste de faits passés à supprimer, ou []
+  Uniquement si l'utilisateur corrige explicitement un fait antérieur.
+  Exemples : "je ne travaille plus chez X", "on n'a finalement pas fait ça"
+  Format : phrase courte décrivant le fait à effacer, en français.
 
 JSON uniquement, en français.
 

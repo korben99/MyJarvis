@@ -179,7 +179,7 @@ After each exchange, `analyzer.py` computes an importance score in `[0, 1]` that
 | User fact revealed (max 3) | +0.20 each | Profile facts, preferences, life events |
 | Project / goal mentioned (max 2) | +0.15 each | Active work context |
 | Strong emotional mood | +0.10–0.15 | Stressed/frustrated weighted slightly higher |
-| Long message (> 80 chars) | +0.05 | Minor depth signal |
+| Long message (> 200 chars) | +0.05 | Minor depth signal |
 
 Storage thresholds (set in `config.py`):
 - **`IMPORTANCE_THRESHOLD` (0.35)** — stored as episodic vector in Qdrant
@@ -231,6 +231,24 @@ The recency window is **type-aware**: episodic memories use a 30-day window, aut
 Before any call to `store_autobiographical_event()`, Jarvis queries Qdrant for the most similar existing autobiographical point. If the cosine similarity exceeds `AUTOBIO_DEDUP_THRESHOLD` (default: 0.85), the new entry is not duplicated. However, if the new submission carries a **higher importance** than the existing point, the existing point is reinforced (importance updated upward). This models the human phenomenon of a recurring important fact becoming more firmly anchored over time.
 
 The threshold is tunable: raise toward 0.95 to allow more variations, lower toward 0.75 to be stricter.
+
+#### Autobiographical Memory — Fact Correction
+
+When a user explicitly corrects a past fact ("je ne travaille plus chez X", "on n'a finalement pas fait ça"), `ANALYSIS_PROMPT` extracts a `retractions` list. Each entry is a short phrase describing the fact to erase. `post_analysis()` calls `retract_autobiographical_event(user_code, query, threshold=0.88)` for each one: the function encodes the query, searches Qdrant, and deletes any autobiographical point with cosine similarity ≥ 0.88. The timeline cache is invalidated on deletion.
+
+The threshold (0.88, slightly above dedup at 0.85) avoids collateral deletions when the retraction query is semantically close to *related but different* facts.
+
+#### Implicit Satisfaction Signal
+
+Each `convlog` entry carries a `satisfaction` field detected deterministically from the user's message (lagged proxy: signal in message N reflects satisfaction with the response to message N−1):
+
+| Value | Detection pattern |
+|-------|------------------|
+| `positive` | Message starts with or contains: `merci`, `parfait`, `super`, `exactement`, `nickel`, `génial`, `top`, `c'est ça` |
+| `negative` | Message starts with or contains: `non,`, `non.`, `c'est pas ça`, `tu n'as pas`, `pas compris`, `faux`, `incorrect`, `erreur` |
+| `unknown` | Default — no pattern matched |
+
+`_get_user_activity()` aggregates these signals per user over the last 24 hours and exposes them in the reflection prompt as `satisfaction: +N -M`. This gives the autonomous reflection loop an observable quality signal it previously lacked.
 
 #### Memory Reconsolidation on Recall
 
@@ -311,6 +329,8 @@ User message
     → Memory storage: importance > 0.35 → Qdrant episodic | importance > 0.60 → autobiographical
     →   store_autobiographical_event: dedup check (cosine ≥ 0.85 → skip or reinforce)
     →   search_memory recalls: +0.05 reconsolidation boost on returned points
+    →   retractions from ANALYSIS_PROMPT → retract_autobiographical_event (semantic delete, threshold 0.88)
+    →   satisfaction signal written to convlog entry (positive/negative/unknown — proxy on previous response)
 ```
 
 ---

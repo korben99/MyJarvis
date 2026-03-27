@@ -226,10 +226,17 @@ async def chat(req: ChatRequest):
 
     user_name = USER_CODES.get(user_code)
 
-    system_prompt, llm_result = await asyncio.gather(
+    _gather1 = await asyncio.gather(
         asyncio.to_thread(build_system_prompt, req.session_id, req.voice_mode, user_code),
         llm_route(req.message, google_available=is_google_available(user_code)),
+        return_exceptions=True,
     )
+    system_prompt = _gather1[0] if not isinstance(_gather1[0], BaseException) else ""
+    llm_result    = _gather1[1] if not isinstance(_gather1[1], BaseException) else None
+    if isinstance(_gather1[0], BaseException):
+        logger.error("build_system_prompt failed: %s", _gather1[0])
+    if isinstance(_gather1[1], BaseException):
+        logger.error("llm_route failed: %s", _gather1[1])
     if user_name:
         system_prompt += f"\n\nL'utilisateur avec qui tu parles s'appelle {user_name}."
 
@@ -330,16 +337,24 @@ async def chat(req: ChatRequest):
             logger.warning("Google API call timed out: %s", fn.__name__)
             return []
 
-    rag_chunks, memory_chunks, web_results, gmail_results, calendar_results = await asyncio.gather(
+    _gather2 = await asyncio.gather(
         search_documents(req.message) if (req.use_rag or use_rag) else _empty(),
         asyncio.to_thread(search_memory, user_code, req.message, 5) if use_memory else _empty(),
         search_weather(_weather_query) if use_weather_auto else
         search_web(optimize_web_query(req.message), original_message=req.message) if (req.use_web or use_web_auto) else _empty(),
         _timed_thread(fetch_gmail_messages, gmail_query, 10, user_code) if use_gmail and _google_available else _empty(),
         _timed_thread(fetch_calendar_events, cal_days, None, None, user_code) if use_calendar and _google_available else _empty(),
+        return_exceptions=True,
     )
+    _ctx_names = ("rag", "memory", "web", "gmail", "calendar")
+    rag_chunks, memory_chunks, web_results, gmail_results, calendar_results = [
+        (logger.error("Context source '%s' failed: %s", _ctx_names[i], v) or [])
+        if isinstance(v, BaseException) else v
+        for i, v in enumerate(_gather2)
+    ]
 
-    if user_name:
+    # Only write once — avoids HKEYS + LLM normalisation on every request
+    if user_name and not REDIS_CLIENT.hget(f"user:{user_code}:profile", "name"):
         update_user_profile(user_code, "name", user_name)
 
     # ── Context assembly ──────────────────────────────────────────────────
@@ -433,4 +448,10 @@ async def get_history(session_id: str, user_code: str, limit: int = IOS_MAX_MESS
     logger.debug("History request user=%s session=%s limit=%d", user_code, session_id, limit)
     key = f"chat:{user_code}:{session_id}"
     entries = REDIS_CLIENT.lrange(key, -limit, -1)
-    return [json.loads(e) for e in entries]
+    result = []
+    for e in entries:
+        try:
+            result.append(json.loads(e))
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("Skipping corrupted history entry session=%s", session_id)
+    return result
