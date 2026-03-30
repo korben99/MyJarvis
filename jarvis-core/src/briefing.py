@@ -24,8 +24,6 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-import httpx
-from ddgs import DDGS
 
 from config import (
     PRIMARY_API_KEY,
@@ -37,7 +35,6 @@ from config import (
     USER_TIMEZONES,
 )
 from helpers import (
-    WEATHER_CODES,
     call_llm_async,
     fmt_event_time,
     get_logger,
@@ -52,6 +49,7 @@ from google_services import (
     is_google_available,
     send_gmail_message,
 )
+from web_search import search_news, search_weather
 from memory import get_interest_weights, get_user_profile, get_user_projects
 from prompts import get_prompt
 from trading import get_portfolio_summary_text
@@ -188,83 +186,6 @@ def _get_active_projects(user_code: str) -> list[str]:
 
 
 
-async def _fetch_weather(city: str, tz_name: str = "Europe/Paris") -> str:
-    """Fetch today's weather summary for the city via Open-Meteo (geocoding + forecast)."""
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=12.0)) as client:
-            geo = await client.get(
-                "https://geocoding-api.open-meteo.com/v1/search",
-                params={"name": city, "count": 1, "language": "fr", "format": "json"},
-            )
-            geo.raise_for_status()
-            results = geo.json().get("results", [])
-            if not results:
-                logger.warning("Weather: city not found: %s", city)
-                return ""
-            loc = results[0]
-            lat, lon = loc["latitude"], loc["longitude"]
-
-            wx_params = {
-                "latitude": lat,
-                "longitude": lon,
-                "current": "temperature_2m,weather_code",
-                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code",
-                "timezone": tz_name,
-                "forecast_days": 1,
-            }
-            # Retry once on timeout — Open-Meteo can be slow at dawn
-            for _attempt in range(2):
-                try:
-                    wx = await client.get(
-                        "https://api.open-meteo.com/v1/forecast",
-                        params=wx_params,
-                    )
-                    wx.raise_for_status()
-                    break
-                except httpx.TimeoutException:
-                    if _attempt == 1:
-                        raise
-                    logger.debug("Weather forecast timeout — retrying once")
-            data = wx.json()
-
-            cur  = data.get("current", {})
-            daily = data.get("daily", {})
-
-            tmax  = (daily.get("temperature_2m_max") or [None])[0]
-            tmin  = (daily.get("temperature_2m_min") or [None])[0]
-            rain  = (daily.get("precipitation_sum") or [0])[0] or 0
-            code  = cur.get("weather_code") or (daily.get("weather_code") or [-1])[0]
-            t_now = cur.get("temperature_2m")
-
-            if tmax is None:
-                return ""
-
-            condition = WEATHER_CODES.get(int(code), "")
-            parts = [f"{city}"]
-            if t_now is not None:
-                parts.append(f"actuellement {t_now:.0f}°C")
-            parts.append(f"min {tmin:.0f}°C / max {tmax:.0f}°C")
-            if condition:
-                parts.append(condition)
-            if rain > 1:
-                parts.append(f"pluie {rain:.0f}mm")
-
-            return ", ".join(parts)
-    except Exception as exc:
-        logger.warning("Weather fetch failed: %s", type(exc).__name__)
-        return ""
-
-
-def _ddg_news_sync(query: str, max_results: int = 4) -> list[dict]:
-    """Synchronous DDG news fetch — run via asyncio.to_thread."""
-    with DDGS() as ddgs:
-        # timelimit="d" = last 24h only; fall back to "w" if nothing found
-        results = list(ddgs.news(query, region="fr-fr", timelimit="d", max_results=max_results))
-        if not results:
-            results = list(ddgs.news(query, region="fr-fr", timelimit="w", max_results=max_results))
-        return results
-
-
 def _unwrap(val, default):
     """Unwrap an asyncio.gather result, returning default on exception."""
     if isinstance(val, BaseException):
@@ -288,9 +209,9 @@ async def _fetch_news(interests: list[str]) -> list[str]:
 
     async def _fetch_one(query: str, n: int) -> list[dict]:
         try:
-            results = await asyncio.to_thread(_ddg_news_sync, query, n)
-            if results:
-                logger.info("News fetched (%d results) for query: %r", len(results), query)
+            results = await search_news(query, n, region="fr-fr", timelimit="d")
+            if not results:
+                results = await search_news(query, n, region="fr-fr", timelimit="w")
             return results
         except Exception as exc:
             logger.warning("News fetch failed for %r: %s", query, type(exc).__name__)
@@ -322,7 +243,7 @@ async def _fetch_news(interests: list[str]) -> list[str]:
             merged.append(r)
 
     return [
-        f"{r['title']} — {r.get('body','')[:120]} ({r.get('source','')})"
+        f"{r['title']} — {r.get('body', '')[:120]}"
         for r in merged[:6]
     ]
 
@@ -412,7 +333,7 @@ async def gather_briefing(user_code: str) -> BriefingResult:
     has_google = is_google_available(user_code)
     calendar_task  = asyncio.to_thread(fetch_calendar_events, 1, today, tz_name, user_code) if has_google else asyncio.sleep(0, result=[])
     gmail_task     = asyncio.to_thread(fetch_gmail_messages, "is:unread newer_than:1d", 5, user_code) if has_google else asyncio.sleep(0, result=[])
-    weather_task   = _fetch_weather(city, tz_name)
+    weather_task   = search_weather(city)
     news_task      = _fetch_news(interests)
     portfolio_task = asyncio.to_thread(get_portfolio_summary_text, user_code)
 
@@ -428,11 +349,12 @@ async def gather_briefing(user_code: str) -> BriefingResult:
         logger.warning("Briefing data gather timed out after 35s — using empty sources")
         results = [[], [], "", [], ""]
 
-    calendar  = _unwrap(results[0], [])
-    gmail     = _unwrap(results[1], [])
-    weather   = _unwrap(results[2], "")
-    news      = _unwrap(results[3], [])
-    portfolio = _unwrap(results[4], "")
+    calendar     = _unwrap(results[0], [])
+    gmail        = _unwrap(results[1], [])
+    weather_hits = _unwrap(results[2], [])
+    weather      = weather_hits[0]["body"] if weather_hits else ""
+    news         = _unwrap(results[3], [])
+    portfolio    = _unwrap(results[4], "")
 
     sections = {
         "calendar":  calendar,

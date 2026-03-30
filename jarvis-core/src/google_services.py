@@ -26,7 +26,7 @@ from datetime import date as date_type
 from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 
-from google.auth.exceptions import GoogleAuthError, TransportError
+from google.auth.exceptions import GoogleAuthError, RefreshError, TransportError
 import httplib2
 import google_auth_httplib2
 from google.auth.transport.requests import Request
@@ -325,8 +325,14 @@ def fetch_gmail_messages(query: str, max_results: int = _GMAIL_MAX_RESULTS, user
     except RuntimeError:
         # Auth failure already logged in _get_credentials
         return []
+    except RefreshError as exc:
+        logger.error("Gmail list: OAuth token refresh failed for %s: %s", user_code, exc)
+        with _creds_lock:
+            _credentials_cache.pop(user_code, None)
+            _gmail_service_cache.pop(user_code, None)
+        return []
     except Exception as exc:
-        logger.error("Gmail unexpected error: %s", type(exc).__name__)
+        logger.error("Gmail unexpected error: %s: %s", type(exc).__name__, exc)
         return []
 
 
@@ -421,8 +427,14 @@ def fetch_calendar_events(days: int = 7, date: date_type | None = None, tz_name:
         return []
     except RuntimeError:
         return []
+    except RefreshError as exc:
+        logger.error("Calendar: OAuth token refresh failed for %s: %s", user_code, exc)
+        with _creds_lock:
+            _credentials_cache.pop(user_code, None)
+            _calendar_service_cache.pop(user_code, None)
+        return []
     except Exception as exc:
-        logger.error("Calendar unexpected error: %s", type(exc).__name__)
+        logger.error("Calendar unexpected error: %s: %s", type(exc).__name__, exc)
         return []
 
 
@@ -461,8 +473,15 @@ def send_gmail_message(to: str, subject: str, html_body: str, text_body: str = "
         return False
     except RuntimeError:
         return False
+    except RefreshError as exc:
+        # Token revoked or expired — evict cache so next call rebuilds credentials
+        logger.error("Gmail send: OAuth token refresh failed for %s: %s", user_code, exc)
+        with _creds_lock:
+            _credentials_cache.pop(user_code, None)
+            _gmail_service_cache.pop(user_code, None)
+        return False
     except Exception as exc:
-        logger.error("Gmail send unexpected error: %s", type(exc).__name__)
+        logger.error("Gmail send unexpected error: %s: %s", type(exc).__name__, exc)
         return False
 
 

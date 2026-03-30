@@ -198,6 +198,7 @@ JSON uniquement."""
 # de prompt sans problème.
 
 ANALYSIS_PROMPT = """\
+Date courante : {current_date}.
 Analyse cet échange entre un utilisateur et Jarvis.
 Retourne UNIQUEMENT un JSON valide avec ces champs :
 
@@ -237,6 +238,8 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
 "memory_summary"  : phrase utile à retenir (français) ou null
   null obligatoire pour : météo, cours, scores, actualités éphémères
   Retenir uniquement ce qui reste vrai dans le temps.
+  Débuter par : "depuis [mois] [année]," (état durable) · "en [mois] [année]," (passé) · "le [date]," (futur précis) · "récemment," (date floue).
+  Ne jamais inventer de date — référence = date courante en tête de prompt.
 
 "retractions" : liste de faits passés à supprimer, ou []
   Uniquement si l'utilisateur corrige explicitement un fait antérieur.
@@ -513,7 +516,7 @@ RELATION ACTUELLE AVEC CET UTILISATEUR :
 Réponds avec ce JSON :
 {{
   "daily_summary":        "résumé 2-3 phrases de la journée",
-  "user_insights":        ["fait durable sur l'utilisateur", "..."],
+  "user_insights":        ["fait durable sur l'utilisateur — commencer par un ancrage temporel : \"depuis [mois] [année], ...\" pour un état durable ou \"en [mois] [année], ...\" pour un événement", "..."],
   "self_reflections":     ["amélioration de comportement Jarvis", "..."],
   "jarvis_opinions":      [{{"topic": "mot_clé_court", "opinion": "ton point de vue en 1-2 phrases"}}, "..."],
   "tomorrow_suggestions": ["sujet proactif à mentionner demain", "..."],

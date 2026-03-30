@@ -11,9 +11,9 @@ models/
 RAGData/
 TradeData/
 RouterData/
-JarvisConfig
-jarvis-core/reflections/
-jarvis-core/JarvisData/model_cache/
+DOCS/
+jarvis-core/test/
+jarvis-core/JarvisData/
 *.pyc
 
 #SECRETS#

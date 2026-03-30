@@ -220,10 +220,15 @@ def _is_news_query(query: str) -> bool:
     return any(k in q for k in _NEWS_KEYWORDS)
 
 
-def _ddg_news_sync(query: str, max_results: int) -> list[dict]:
+def _ddg_news_sync(query: str, max_results: int, region: str = "", timelimit: str = "") -> list[dict]:
     results = []
+    kwargs: dict = {"max_results": max_results}
+    if region:
+        kwargs["region"] = region
+    if timelimit:
+        kwargs["timelimit"] = timelimit
     with DDGS() as ddgs:
-        for r in ddgs.news(query, max_results=max_results):
+        for r in ddgs.news(query, **kwargs):
             body   = r.get("body", "")
             date   = r.get("date", "")
             source = r.get("source", "")
@@ -236,10 +241,10 @@ def _ddg_news_sync(query: str, max_results: int) -> list[dict]:
     return results
 
 
-async def search_news(query: str, max_results: int = 5) -> list[dict]:
+async def search_news(query: str, max_results: int = 5, region: str = "", timelimit: str = "") -> list[dict]:
     try:
         loop    = asyncio.get_running_loop()
-        results = await loop.run_in_executor(None, _ddg_news_sync, query, max_results)
+        results = await loop.run_in_executor(None, _ddg_news_sync, query, max_results, region, timelimit)
         logger.info("News: %d articles for: %s", len(results), query[:50])
         return results
     except Exception as exc:

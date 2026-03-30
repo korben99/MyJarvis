@@ -43,6 +43,7 @@ import httpx
 import pytz
 
 from config import (
+    BRIEFING_TIMEZONE,
     GROWTH_LOG_MAX_ENTRIES,
     MAX_CHAIN_ITERATIONS,
     MAX_REFLECTION_TOKENS,
@@ -59,10 +60,11 @@ from config import (
     USER_ADMINS,
     USER_CODES,
     USER_EMAILS,
+    USER_TIMEZONES,
     USERS,
 )
 from google_services import is_google_available, send_gmail_message
-from helpers import call_llm, call_llm_async, extract_llm_json, get_logger, get_qdrant, get_redis
+from helpers import call_llm, call_llm_async, extract_llm_json, fmt_now_fr, get_logger, get_qdrant, get_redis
 from memory import atomic_json_write, append_conversation_message, get_emotional_state, get_self_memory, save_self_memory, self_memory_lock, store_autobiographical_event
 from trade_keys import idx_key, pos_key
 
@@ -334,7 +336,7 @@ def gather_context() -> dict:
     last_ref   = get_last_reflection()
 
     return {
-        "timestamp":           datetime.now(timezone.utc).isoformat(),
+        "timestamp":           fmt_now_fr(BRIEFING_TIMEZONE),
         "identity":            self_data.get("identity", {}),
         "goals":               self_data.get("goals", []),
         "current_focus":       self_data.get("current_focus", ""),
@@ -420,15 +422,18 @@ def _fmt_push_availability() -> str:
     r = get_redis()
     with_push, without_push = [], []
     for code, name in USER_CODES.items():
+        tz_name = USER_TIMEZONES.get(code, "Europe/Paris")
+        local_time = fmt_now_fr(tz_name)
+        label = f"{name} ({code}) — heure locale : {local_time}"
         if r.exists(f"jarvis:device:token:{code}"):
-            with_push.append(f"{name} ({code})")
+            with_push.append(label)
         else:
-            without_push.append(f"{name} ({code})")
+            without_push.append(label)
     lines = []
     if with_push:
-        lines.append(f"  Push iOS disponible : {', '.join(with_push)}")
+        lines.append(f"  Push iOS disponible :\n" + "\n".join(f"    • {l}" for l in with_push))
     if without_push:
-        lines.append(f"  Push iOS indisponible : {', '.join(without_push)} — email uniquement ou attendre qu'ils initient une conversation")
+        lines.append(f"  Push iOS indisponible (email ou attente) :\n" + "\n".join(f"    • {l}" for l in without_push))
     return "\n".join(lines)
 
 

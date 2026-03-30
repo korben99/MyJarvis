@@ -33,6 +33,7 @@ message long / détaillé
 """
 
 import json
+from datetime import date
 
 from config import (
     IMPORTANCE_THRESHOLD,
@@ -55,6 +56,7 @@ async def analyze_exchange(user_msg: str, assistant_msg: str, existing_projects:
         )
         profile_keys_str = ", ".join(existing_profile_keys) if existing_profile_keys else "aucune"
         prompt = get_prompt("ANALYSIS_PROMPT").format(
+            current_date=date.today().isoformat(),
             user_message=user_msg[:1000],
             assistant_message=assistant_msg[:1000],
             existing_projects=projects_context,

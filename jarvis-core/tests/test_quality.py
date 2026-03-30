@@ -70,6 +70,7 @@ def _make_config_module():
     m.USER_CODES = {"KORBEN99": "Sébastien", "AQWZSX": "Alice"}
     m.USER_EMAILS = {"KORBEN99": "test@test.com", "AQWZSX": "alice@test.com"}
     m.USERS = {}  # required by self.py
+    m.USER_TIMEZONES = {"KORBEN99": "Europe/Paris", "AQWZSX": "Europe/Paris"}  # required by pipeline.py
     m.GROWTH_LOG_MAX_ENTRIES = 50
     m.MAX_CHAIN_ITERATIONS = 5
     m.MAX_REFLECTION_TOKENS = 1000

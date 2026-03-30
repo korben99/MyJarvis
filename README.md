@@ -250,6 +250,20 @@ Each `convlog` entry carries a `satisfaction` field detected deterministically f
 
 `_get_user_activity()` aggregates these signals per user over the last 24 hours and exposes them in the reflection prompt as `satisfaction: +N -M`. This gives the autonomous reflection loop an observable quality signal it previously lacked.
 
+#### Temporal Awareness
+
+Time is injected at three levels to prevent date hallucination and give the LLM accurate temporal context:
+
+| Layer | What is injected | Where |
+|-------|-----------------|-------|
+| **System prompt** | Current datetime in French, user's timezone (e.g. `"lundi 30 mars 2026, 14:32"`) via `fmt_now_fr()` | `build_system_prompt()` — every chat request |
+| **Memory chunks** | French relative timestamp prepended to each retrieved memory (e.g. `"(il y a 3 jours) ..."`) via `rel_time_fr()` | `build_context()` — injected before `trim_chunks()` |
+| **Conversation analyzer** | Current date in ISO 8601 (`2026-03-30`) at the top of `ANALYSIS_PROMPT` | `analyze_exchange()` — prevents the LLM from inventing dates for `memory_summary` anchors |
+| **Self-reflection** | Server local time in French (`fmt_now_fr(BRIEFING_TIMEZONE)`) replaces raw UTC ISO in `gather_context()` | `gather_context()` — reflection LLM knows actual local time |
+| **Push availability** | Per-user local time shown next to each push-capable device | `_fmt_push_availability()` — reflection LLM can decide not to push at 23h45 |
+
+`fmt_now_fr(tz_name)` is defined in `helpers.py` and shared by `pipeline.py` and `self.py`.
+
 #### Memory Reconsolidation on Recall
 
 Each time `search_memory()` returns a result, every recalled memory receives a small importance boost (`+0.05`, capped at `MEMORY_DECAY_DURABLE_MIN - 0.05 = 0.95`). This models the neuroscience principle of reconsolidation: the act of recalling a memory strengthens it. A memory accessed frequently resists decay; a memory never accessed fades at the normal rate.
@@ -281,6 +295,8 @@ Every request builds the system prompt from three blocks assembled in `build_sys
 ```
 SYSTEM_BASE_FR          (~1 400 chars — Jarvis personality, tool rules)
     ↓
+Date et heure actuelles — formatted in French in the user's timezone (e.g. "lundi 30 mars 2026, 14:32")
+    ↓
 MEMORY_HEADER_FR        (~90 chars — section separator)
     ↓
 build_memory_context()  — injected only if memory is available
@@ -298,7 +314,7 @@ VOICE_SUFFIX_FR         (~80 chars — only if voice_mode=True)
 | `SUJETS RÉCENTS (24h)` | Topics from last 10 conversations in Redis | Only if topics exist |
 | `ÉTAT ÉMOTIONNEL` | Redis `jarvis:emotional_state` | Only if mood ≠ neutral |
 | `APPRENTISSAGES RÉCENTS` | `jarvis-self.json → learnings[-5:]` | Only if learnings exist |
-| `FRISE CHRONOLOGIQUE` | Top 5 autobio Qdrant points by importance+recency | Only if autobio exists |
+| `FRISE CHRONOLOGIQUE` | Top 5 autobio Qdrant points by importance+recency — each prefixed with a French relative timestamp (`il y a 3 jours`, `il y a 2 semaines`, …) | Only if autobio exists |
 | `SUJETS À ABORDER AUJOURD'HUI` | Redis `jarvis:{code}:tomorrow_suggestions` (TTL 24h, written by nightly review) | Only if key exists |
 | `RELATION AVEC CET UTILISATEUR` | `jarvis-self.json → user_relations[user_code]` | Always — affinity, style, mood (compact). On `intent=self`, enriched with full tonal directives via `build_context`. |
 
@@ -326,6 +342,7 @@ User message
     → Tier 2 PRIMARY or Tier 3 REASONING (full context → streaming response)
     →   streaming via shared per-timeout httpx.AsyncClient (connection pool reused)
     → Conversation analyzer / PRIMARY_MODEL (extract facts, mood, topics, importance, memory_summary)
+    →   current date (ISO 8601) injected into ANALYSIS_PROMPT — prevents date hallucination in memory_summary anchors
     → Memory storage: importance > 0.35 → Qdrant episodic | importance > 0.60 → autobiographical
     →   store_autobiographical_event: dedup check (cosine ≥ 0.85 → skip or reinforce)
     →   search_memory recalls: +0.05 reconsolidation boost on returned points
@@ -481,6 +498,8 @@ All variables go in `/opt/jarvis/.env`.
 | `GOOGLE_CLIENT_SECRET` | OAuth 2.0 client secret |
 | `GOOGLE_REFRESH_TOKEN` | Refresh token for persistent access |
 | `GOOGLE_CALENDAR_ID` | Calendar to read (e.g. `primary`) |
+
+**OAuth token lifecycle:** Access tokens expire after ~1 hour. `AuthorizedHttp` refreshes them transparently via the stored refresh token. If a `RefreshError` occurs (token revoked, `invalid_grant`, network failure), the per-user credentials and service are evicted from the in-process cache so the next call rebuilds cleanly. The full error message is logged at `ERROR` level. To regenerate a revoked token: `python scripts/generate_google_token.py`.
 
 ### Scheduling & Features
 

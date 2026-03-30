@@ -188,6 +188,47 @@ def fmt_event_time(iso: str, user_code: str, fmt: str = "%d/%m %H:%M") -> str:
         return iso
 
 
+_JOURS_FR = ("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
+_MOIS_FR  = ("", "janvier", "février", "mars", "avril", "mai", "juin",
+             "juillet", "août", "septembre", "octobre", "novembre", "décembre")
+
+
+def fmt_now_fr(tz_name: str) -> str:
+    """Return current datetime formatted in French for the given IANA timezone.
+
+    Example: 'lundi 30 mars 2026, 14:32'
+    """
+    now = datetime.now(pytz.timezone(tz_name))
+    jour = _JOURS_FR[now.weekday()]
+    return f"{jour} {now.day} {_MOIS_FR[now.month]} {now.year}, {now.strftime('%H:%M')}"
+
+
+def rel_time_fr(ts: float) -> str:
+    """Return a French relative time string for a Unix timestamp.
+
+    Examples: 'il y a 3 jours', 'il y a 2 semaines', 'il y a 1 mois'
+    """
+    import time as _time
+    delta = _time.time() - ts
+    if delta < 3600:
+        m = max(1, int(delta / 60))
+        return f"il y a {m} min"
+    if delta < 86400:
+        h = int(delta / 3600)
+        return f"il y a {h}h"
+    if delta < 7 * 86400:
+        d = int(delta / 86400)
+        return f"il y a {d} jour{'s' if d > 1 else ''}"
+    if delta < 30 * 86400:
+        w = int(delta / (7 * 86400))
+        return f"il y a {w} semaine{'s' if w > 1 else ''}"
+    if delta < 365 * 86400:
+        mo = int(delta / (30 * 86400))
+        return f"il y a {mo} mois"
+    y = int(delta / (365 * 86400))
+    return f"il y a {y} an{'s' if y > 1 else ''}"
+
+
 # ══════════════════════════════════════════════════
 #  CONNECTIONS — Redis + Qdrant
 # ══════════════════════════════════════════════════

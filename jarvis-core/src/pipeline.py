@@ -13,6 +13,7 @@ Public functions:
 import asyncio
 
 from analyzer import analyze_exchange
+from config import USER_TIMEZONES
 from deps import (
     GOOGLE_CHAR_BUDGET,
     MEMORY_CHAR_BUDGET,
@@ -20,7 +21,7 @@ from deps import (
     TOTAL_CONTEXT_BUDGET,
     WEB_CHAR_BUDGET,
 )
-from helpers import fmt_event_time, get_logger
+from helpers import fmt_event_time, fmt_now_fr, get_logger, rel_time_fr
 from llm_client import trim_chunks
 from memory import (
     apply_project_updates,
@@ -48,10 +49,12 @@ logger = get_logger("jarvis-pipeline")
 
 # ── System prompt ──────────────────────────────────────────────────────────────
 
+
 def build_system_prompt(
     session_id: str, voice_mode: bool = False, user_code: str = "default"
 ) -> str:
     prompt = get_prompt("SYSTEM_BASE_FR")
+    prompt += f"\n\nDate et heure actuelles : {fmt_now_fr(USER_TIMEZONES.get(user_code, 'Europe/Paris'))}."
 
     # Load once — reused by build_memory_context and opinions below
     self_mem = get_self_memory()
@@ -130,6 +133,10 @@ def build_context(
 
     # 3. MEMORY
     if memory_chunks:
+        # Prepend relative timestamp before trimming so the LLM knows when each memory occurred
+        for m in memory_chunks:
+            if m.get("timestamp"):
+                m["text"] = f"({rel_time_fr(m['timestamp'])}) {m['text']}"
         selected_memories = trim_chunks(memory_chunks, MEMORY_CHAR_BUDGET)
         if selected_memories:
             context_parts.append("=== SOUVENIRS PERTINENTS ===")

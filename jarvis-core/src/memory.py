@@ -72,7 +72,7 @@ from config import (
     USER_CODES,
 )
 
-from helpers import call_llm, extract_llm_json, get_logger, get_qdrant, get_redis, redis_get_json, redis_set_json
+from helpers import call_llm, extract_llm_json, get_logger, get_qdrant, get_redis, redis_get_json, redis_set_json, rel_time_fr
 
 
 logger = get_logger("jarvis-memory")
@@ -1148,8 +1148,8 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
 
         # timeline is already sorted by importance+recency desc — take the top 5
         for event in timeline[:5]:
-            dt = datetime.fromtimestamp(event["timestamp"]).strftime("%Y-%m")
-            parts.append(f"{dt}: {event['text']}")
+            rel = rel_time_fr(event["timestamp"])
+            parts.append(f"({rel}) {event['text']}")
 
     # Tomorrow suggestions — written by nightly review, consumed today
     try:
