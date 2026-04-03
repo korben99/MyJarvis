@@ -70,7 +70,9 @@ if LLM_LOCAL:
     ROUTER_MODEL = os.getenv(
         "ROUTER_MODEL_LOCAL", "mlx-community/Qwen2.5-3B-Instruct-8bit"
     )
-    PRIMARY_MODEL = os.getenv("PRIMARY_MODEL_LOCAL", "Qwen/Qwen3-30B-A3B-MLX-4bit")
+    PRIMARY_MODEL = os.getenv(
+        "PRIMARY_MODEL_LOCAL", "inferencerlabs/Qwen3.5-35B-A3B-MLX-5.5bit"
+    )
     VISION_MODEL = os.getenv(
         "VISION_MODEL_LOCAL", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"
     )
