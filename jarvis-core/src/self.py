@@ -585,7 +585,7 @@ def _action_send_notification(params: dict) -> str:
     if not to:
         return f"send_notification: no email configured for {user_code}"
 
-    if not is_google_available():
+    if not is_google_available(user_code):
         return "send_notification: Google not configured"
 
     # One notification per user per day guard (uses user's local timezone)
@@ -600,12 +600,14 @@ def _action_send_notification(params: dict) -> str:
 
     user_name = USER_CODES[user_code]
     html = f"<p>Bonjour {user_name},</p><p>{message}</p><p><em>— Jarvis</em></p>"
-    success = send_gmail_message(to=to, subject=f"Jarvis — {subject}", html_body=html, text_body=message)
+    success = send_gmail_message(to=to, subject=f"Jarvis — {subject}", html_body=html, text_body=message, user_code=user_code)
 
     if success:
         r.setex(notif_key, _NOTIF_TTL, "1")
         logger.info("Self action: notification sent to %s (%s)", user_code, to)
         return f"notification sent to {user_code}"
+    # Guard: mark as attempted today even on failure to avoid retry loops in the chain
+    r.setex(notif_key, _NOTIF_TTL, "failed")
     return "send_notification: delivery failed"
 
 
@@ -759,9 +761,9 @@ async def _nightly_review_user(user_code: str, user_name: str, conversations: li
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.3,
-            max_tokens=600,
+            max_tokens=3000,
             json_response=True,
-            timeout=60.0,
+            timeout=90.0,
         )
         return extract_llm_json(content)
     except Exception as exc:
@@ -1567,12 +1569,11 @@ async def generate_proactive_push(user_code: str) -> str:
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.7,
-            max_tokens=80,
+            max_tokens=1000,
             json_response=True,
-            no_think=True,
-            timeout=20.0,
+            timeout=30.0,
         )
-        message = json.loads(content).get("message")
+        message = extract_llm_json(content).get("message")
     except Exception as exc:
         logger.warning("generate_proactive_push: LLM call failed for %s: %s", user_code, type(exc).__name__)
         return "LLM call failed"

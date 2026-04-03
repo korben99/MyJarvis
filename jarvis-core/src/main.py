@@ -13,7 +13,7 @@ Endpoints découpés en modules dans routes/ :
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import deps
 import httpx
@@ -27,6 +27,7 @@ from config import (
     BRIEFING_ENABLED,
     BRIEFING_TIME,
     BRIEFING_TIMEZONE,
+    LLM_LOCAL,
     OPENAI_API_KEY,
     OPENAI_API_URL,
     PRIMARY_API_URL,
@@ -43,6 +44,9 @@ from config import (
     USER_CODES,
     USER_TRADING,
 )
+
+if LLM_LOCAL:
+    from llm_local import preload_models
 from deps import HTTP_CLIENT, _STREAM_CLIENTS, QDRANT_CLIENT
 from google_services import is_google_available
 from helpers import get_logger, setup_logging
@@ -75,6 +79,9 @@ async def lifespan(app: FastAPI):
         "Jarvis API v8 starting — router: %s, reasoning: %s",
         ROUTER_MODEL, REASONING_MODEL,
     )
+
+    if LLM_LOCAL:
+        await asyncio.to_thread(preload_models)
     logger.info("RAG: %s, collection: %s, top_k: %d", QDRANT_URL, QDRANT_COLLECTION, RAG_TOP_K)
 
     deps.EMBED_MODEL = get_embed_model()
@@ -90,7 +97,7 @@ async def lifespan(app: FastAPI):
             trigger="interval",
             hours=REFLECTION_INTERVAL_HOURS,
             id="self_reflection",
-            next_run_time=datetime.now(tz),
+            next_run_time=datetime.now(tz) + timedelta(minutes=5),
         )
         scheduler.add_job(
             run_nightly_interaction_review,
@@ -118,7 +125,7 @@ async def lifespan(app: FastAPI):
             trigger="interval",
             hours=1,
             id="trade_check",
-            next_run_time=datetime.now(tz),
+            next_run_time=datetime.now(tz) + timedelta(minutes=5),
         )
         logger.info("Trading surveillance scheduled every 1 h")
 

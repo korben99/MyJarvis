@@ -78,7 +78,7 @@ from helpers import call_llm, extract_llm_json, get_logger, get_qdrant, get_redi
 logger = get_logger("jarvis-memory")
 
 # ── Embedding model — local-first, HF fallback ───────────────────────────
-MODEL_CACHE_DIR = os.getenv("MODEL_CACHE_DIR", "/app/data/model_cache")
+MODEL_CACHE_DIR = os.getenv("MODEL_CACHE_DIR", "/opt/jarvis/jarvis-core/JarvisData/model_cache")
 _embed_model = None
 _embed_lock = Lock()
 def get_embed_model():
@@ -495,7 +495,12 @@ def get_conversation_summary(user_code: str, days: int = 7) -> str:
 def _fuzzy_project_name(name: str, project_map: dict) -> str | None:
     """
     Find the best matching project name by word overlap (≥60% threshold).
-    Handles minor variations: "Jarvis" matches "Jarvis v7", case-insensitive.
+
+    Two scores are computed and the max is taken:
+    - General overlap : overlap / max(|A|, |B|)  — classic Jaccard-like
+    - Subset score    : overlap / min(|A|, |B|)  — catches versioned names
+      e.g. "Jarvis" (1 word) vs "Jarvis v9" (2 words):
+           general = 1/2 = 0.5 (would miss), subset = 1/1 = 1.0 (matches ✓)
     """
     words_new = set(name.lower().split())
     best_match: str | None = None
@@ -505,7 +510,9 @@ def _fuzzy_project_name(name: str, project_map: dict) -> str | None:
         overlap = len(words_new & words_ex)
         if overlap == 0:
             continue
-        score = overlap / max(len(words_new), len(words_ex))
+        general = overlap / max(len(words_new), len(words_ex))
+        subset  = overlap / min(len(words_new), len(words_ex))
+        score   = max(general, subset)
         if score > best_score and score >= 0.6:
             best_score = score
             best_match = existing_name

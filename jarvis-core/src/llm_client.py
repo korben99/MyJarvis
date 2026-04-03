@@ -17,6 +17,7 @@ from typing import AsyncGenerator
 import httpx
 
 from config import (
+    LLM_LOCAL,
     OPENAI_API_KEY,
     OPENAI_API_URL,
     PRIMARY_API_KEY,
@@ -27,14 +28,20 @@ from config import (
     REASONING_API_URL,
     REASONING_MODEL,
     REASONING_TIMEOUT,
+    ROUTER_MODEL,
     VISION_API_KEY,
     VISION_API_URL,
     VISION_MODEL,
     VISION_TIMEOUT,
     tokens_param,
 )
+
+_LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL} if LLM_LOCAL else set()
 from deps import get_stream_client
 from helpers import get_logger
+
+if LLM_LOCAL:
+    from llm_local import stream_local
 
 logger = get_logger("jarvis-llm")
 
@@ -85,7 +92,13 @@ async def stream_openai(
     api_url: str = OPENAI_API_URL,
     api_key: str = OPENAI_API_KEY,
     timeout: float = 30.0,
+    no_think: bool = False,
 ) -> AsyncGenerator[str, None]:
+    if LLM_LOCAL and model in _LOCAL_MODELS:
+        async for chunk in stream_local(messages, model, no_think=no_think):
+            yield chunk
+        return
+
     try:
         client = get_stream_client(timeout)
         async with client.stream(

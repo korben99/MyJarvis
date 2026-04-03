@@ -24,7 +24,6 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-
 from config import (
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
@@ -34,30 +33,30 @@ from config import (
     USER_EMAILS,
     USER_TIMEZONES,
 )
-from helpers import (
-    call_llm_async,
-    fmt_event_time,
-    get_logger,
-    get_redis,
-    get_user_tz,
-    now_user,
-    today_user,
-)
 from google_services import (
     fetch_calendar_events,
     fetch_gmail_messages,
     is_google_available,
     send_gmail_message,
 )
-from web_search import search_news, search_weather
+from helpers import (
+    call_llm_async,
+    extract_llm_json,
+    fmt_event_time,
+    get_logger,
+    get_redis,
+    now_user,
+    today_user,
+)
 from memory import get_interest_weights, get_user_profile, get_user_projects
 from prompts import get_prompt
 from trading import get_portfolio_summary_text
+from web_search import search_news, search_weather
 
 logger = get_logger("jarvis-briefing")
 
 # ── Redis key helpers ─────────────────────────────────────────────────────
-_BRIEFING_TTL = 28 * 3600   # 28h — survives until next morning
+_BRIEFING_TTL = 28 * 3600  # 28h — survives until next morning
 
 
 def _briefing_key(user_code: str) -> str:
@@ -70,27 +69,32 @@ def _sent_key(user_code: str) -> str:
 
 # ── Result dataclass ──────────────────────────────────────────────────────
 
+
 @dataclass
 class BriefingResult:
     user_code: str
     user_name: str
-    generated_at: str                    # ISO 8601
-    text: str                            # Conversational version for chat
-    html: str                            # Rich HTML for email
-    sections: dict = field(default_factory=dict)   # Raw section data
+    generated_at: str  # ISO 8601
+    text: str  # Conversational version for chat
+    html: str  # Rich HTML for email
+    sections: dict = field(default_factory=dict)  # Raw section data
 
 
 # ── Redis store/retrieve ──────────────────────────────────────────────────
 
+
 def store_briefing(user_code: str, result: BriefingResult) -> None:
     try:
-        payload = json.dumps({
-            "user_code": result.user_code,
-            "user_name": result.user_name,
-            "generated_at": result.generated_at,
-            "text": result.text,
-            "html": result.html,
-        }, ensure_ascii=False)
+        payload = json.dumps(
+            {
+                "user_code": result.user_code,
+                "user_name": result.user_name,
+                "generated_at": result.generated_at,
+                "text": result.text,
+                "html": result.html,
+            },
+            ensure_ascii=False,
+        )
         get_redis().setex(_briefing_key(user_code), _BRIEFING_TTL, payload)
         logger.info("Briefing stored for %s", user_code)
     except Exception as exc:
@@ -117,15 +121,47 @@ def get_stored_briefing(user_code: str) -> BriefingResult | None:
 # ── Data gathering ────────────────────────────────────────────────────────
 
 _INTEREST_KEYS = (
-    "interests", "interest", "hobbies", "hobby", "topics", "passions",
-    "sport", "loisir", "loisirs",
-    "work", "profession", "expertise",
+    "interests",
+    "interest",
+    "hobbies",
+    "hobby",
+    "topics",
+    "passions",
+    "sport",
+    "loisir",
+    "loisirs",
+    "work",
+    "profession",
+    "expertise",
 )
 # Words too generic to be useful in a news query
 _STOP_WORDS = {
-    "informatique", "it", "the", "and", "or", "de", "du", "la", "le",
-    "les", "des", "une", "pour", "avec", "dans", "sur", "par", "que",
-    "qui", "est", "son", "ses", "mes", "mon", "notre", "votre",
+    "informatique",
+    "it",
+    "the",
+    "and",
+    "or",
+    "de",
+    "du",
+    "la",
+    "le",
+    "les",
+    "des",
+    "une",
+    "pour",
+    "avec",
+    "dans",
+    "sur",
+    "par",
+    "que",
+    "qui",
+    "est",
+    "son",
+    "ses",
+    "mes",
+    "mon",
+    "notre",
+    "votre",
 }
 
 
@@ -179,11 +215,10 @@ def _get_active_projects(user_code: str) -> list[str]:
     """
     projects = get_user_projects(user_code)
     return [
-        f"{p['name']}: {p.get('description','')}"
+        f"{p['name']}: {p.get('description', '')}"
         for p in projects
         if p.get("status") in ("active", "in_progress")
     ][:4]
-
 
 
 def _unwrap(val, default):
@@ -236,19 +271,19 @@ async def _fetch_news(interests: list[str]) -> list[str]:
                 seen_titles.add(t)
                 merged.append(r)
     # Append remaining items from the longer list
-    for r in (pro_results if len(pro_results) > len(gen_results) else gen_results)[len(merged) // 2:]:
+    for r in (pro_results if len(pro_results) > len(gen_results) else gen_results)[
+        len(merged) // 2 :
+    ]:
         t = r.get("title", "")
         if t not in seen_titles:
             seen_titles.add(t)
             merged.append(r)
 
-    return [
-        f"{r['title']} — {r.get('body', '')[:120]}"
-        for r in merged[:6]
-    ]
+    return [f"{r['title']} — {r.get('body', '')[:120]}" for r in merged[:6]]
 
 
 # ── LLM assembly ──────────────────────────────────────────────────────────
+
 
 async def _assemble_with_llm(
     user_name: str,
@@ -258,27 +293,41 @@ async def _assemble_with_llm(
     """Call the LLM to write the final briefing text and HTML."""
     date_str = now_user(user_code).strftime("%A %d %B %Y")
 
-    calendar_text = "\n".join(
-        (
-            f"- {e['start']} : {e['summary']}" + (f" ({e['location']})" if e.get("location") else "")
-            if e.get("all_day") else
-            f"- {fmt_event_time(e['start'], user_code, '%H:%M')} : {e['summary']}" + (f" ({e['location']})" if e.get("location") else "")
+    calendar_text = (
+        "\n".join(
+            (
+                f"- {e['start']} : {e['summary']}"
+                + (f" ({e['location']})" if e.get("location") else "")
+                if e.get("all_day")
+                else f"- {fmt_event_time(e['start'], user_code, '%H:%M')} : {e['summary']}"
+                + (f" ({e['location']})" if e.get("location") else "")
+            )
+            for e in sections.get("calendar", [])
         )
-        for e in sections.get("calendar", [])
-    ) or "Aucun événement aujourd'hui."
+        or "Aucun événement aujourd'hui."
+    )
 
-    gmail_text = "\n".join(
-        f"- De {m['from']} | {m['subject']}"
-        for m in sections.get("gmail", [])[:5]
-    ) or "Aucun email non lu."
+    gmail_text = (
+        "\n".join(
+            f"- De {m['from']} | {m['subject']}" for m in sections.get("gmail", [])[:5]
+        )
+        or "Aucun email non lu."
+    )
 
     weather_text = sections.get("weather", "") or "Données météo indisponibles."
     news_items = sections.get("news", [])
-    news_text = "\n".join(f"- {n}" for n in news_items) or "Aucune actualité disponible."
+    news_text = (
+        "\n".join(f"- {n}" for n in news_items) or "Aucune actualité disponible."
+    )
     interests_text = ", ".join(sections.get("interests", [])) or "généralistes"
-    projects_text = "\n".join(f"- {p}" for p in sections.get("projects", [])) or "Aucun projet rappelé."
+    projects_text = (
+        "\n".join(f"- {p}" for p in sections.get("projects", []))
+        or "Aucun projet rappelé."
+    )
 
-    portfolio_text = sections.get("portfolio") or "Aucune donnée de portefeuille disponible."
+    portfolio_text = (
+        sections.get("portfolio") or "Aucune donnée de portefeuille disponible."
+    )
 
     prompt = get_prompt("BRIEFING_USER").format(
         user_name=user_name,
@@ -295,13 +344,24 @@ async def _assemble_with_llm(
     try:
         content = await call_llm_async(
             [
-                {"role": "system", "content": get_prompt("BRIEFING_SYSTEM").format(user_name=user_name)},
+                {
+                    "role": "system",
+                    "content": get_prompt("BRIEFING_SYSTEM").format(
+                        user_name=user_name
+                    ),
+                },
                 {"role": "user", "content": prompt},
             ],
-            model=PRIMARY_MODEL, api_url=PRIMARY_API_URL, api_key=PRIMARY_API_KEY,
-            temperature=0.6, max_tokens=1200, json_response=True, no_think=True, timeout=30.0,
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
+            temperature=0.6,
+            max_tokens=1200,
+            json_response=True,
+            no_think=True,
+            timeout=30.0,
         )
-        result = json.loads(content)
+        result = extract_llm_json(content)
         return result.get("text", ""), result.get("html", "")
     except Exception as exc:
         logger.error("Briefing LLM assembly failed: %s", type(exc).__name__)
@@ -312,6 +372,7 @@ async def _assemble_with_llm(
 
 
 # ── Main entry point ──────────────────────────────────────────────────────
+
 
 async def gather_briefing(user_code: str) -> BriefingResult:
     """
@@ -331,16 +392,28 @@ async def gather_briefing(user_code: str) -> BriefingResult:
     # Parallel data gathering — date= gives midnight→midnight fetch across all calendars
     today = today_user(user_code)
     has_google = is_google_available(user_code)
-    calendar_task  = asyncio.to_thread(fetch_calendar_events, 1, today, tz_name, user_code) if has_google else asyncio.sleep(0, result=[])
-    gmail_task     = asyncio.to_thread(fetch_gmail_messages, "is:unread newer_than:1d", 5, user_code) if has_google else asyncio.sleep(0, result=[])
-    weather_task   = search_weather(city)
-    news_task      = _fetch_news(interests)
+    calendar_task = (
+        asyncio.to_thread(fetch_calendar_events, 1, today, tz_name, user_code)
+        if has_google
+        else asyncio.sleep(0, result=[])
+    )
+    gmail_task = (
+        asyncio.to_thread(fetch_gmail_messages, "is:unread newer_than:1d", 5, user_code)
+        if has_google
+        else asyncio.sleep(0, result=[])
+    )
+    weather_task = search_weather(city)
+    news_task = _fetch_news(interests)
     portfolio_task = asyncio.to_thread(get_portfolio_summary_text, user_code)
 
     try:
         results = await asyncio.wait_for(
             asyncio.gather(
-                calendar_task, gmail_task, weather_task, news_task, portfolio_task,
+                calendar_task,
+                gmail_task,
+                weather_task,
+                news_task,
+                portfolio_task,
                 return_exceptions=True,
             ),
             timeout=35.0,
@@ -349,20 +422,20 @@ async def gather_briefing(user_code: str) -> BriefingResult:
         logger.warning("Briefing data gather timed out after 35s — using empty sources")
         results = [[], [], "", [], ""]
 
-    calendar     = _unwrap(results[0], [])
-    gmail        = _unwrap(results[1], [])
+    calendar = _unwrap(results[0], [])
+    gmail = _unwrap(results[1], [])
     weather_hits = _unwrap(results[2], [])
-    weather      = weather_hits[0]["body"] if weather_hits else ""
-    news         = _unwrap(results[3], [])
-    portfolio    = _unwrap(results[4], "")
+    weather = weather_hits[0]["body"] if weather_hits else ""
+    news = _unwrap(results[3], [])
+    portfolio = _unwrap(results[4], "")
 
     sections = {
-        "calendar":  calendar,
-        "gmail":     gmail,
-        "weather":   weather,
-        "news":      news,
+        "calendar": calendar,
+        "gmail": gmail,
+        "weather": weather,
+        "news": news,
         "interests": interests,
-        "projects":  projects,
+        "projects": projects,
         "portfolio": portfolio,
     }
 
@@ -377,11 +450,17 @@ async def gather_briefing(user_code: str) -> BriefingResult:
         sections=sections,
     )
 
-    logger.info("Briefing ready for %s (%d chars text, %d chars html)", user_name, len(text), len(html))
+    logger.info(
+        "Briefing ready for %s (%d chars text, %d chars html)",
+        user_name,
+        len(text),
+        len(html),
+    )
     return result
 
 
 # ── Email delivery ────────────────────────────────────────────────────────
+
 
 def deliver_briefing(user_code: str, result: BriefingResult) -> None:
     """Send the briefing by email if an address is configured for this user."""
@@ -400,7 +479,13 @@ def deliver_briefing(user_code: str, result: BriefingResult) -> None:
 
     date_label = now_user(user_code).strftime("%d/%m/%Y")
     subject = f"Jarvis — Briefing du {date_label}"
-    success = send_gmail_message(to=to, subject=subject, html_body=result.html, text_body=result.text, user_code=user_code)
+    success = send_gmail_message(
+        to=to,
+        subject=subject,
+        html_body=result.html,
+        text_body=result.text,
+        user_code=user_code,
+    )
 
     if success:
         r.setex(sent_key, _BRIEFING_TTL, today)

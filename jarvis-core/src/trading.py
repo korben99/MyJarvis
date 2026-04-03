@@ -52,7 +52,7 @@ from config import (
     REDIS_URL,
 )
 from trade_keys import idx_key, pos_key, import_ts_key, price_cache_key, alert_queue_key
-from helpers import call_llm_async, get_logger, get_redis
+from helpers import call_llm_async, extract_llm_json, get_logger, get_redis
 
 logger = get_logger("jarvis-trading")
 
@@ -528,12 +528,15 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0,
-            max_tokens=200,
+            max_tokens=1000,
             json_response=True,
             no_think=True,
             timeout=20.0,
         )
-        result = json.loads(content)
+        if not content or not content.strip():
+            logger.warning("Alert evaluation: empty LLM response, skipping")
+            return
+        result = extract_llm_json(content)
         should_alert = bool(result.get("alert", False))
         message      = result.get("message", "")
 
@@ -701,12 +704,12 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.2,
-            max_tokens=1000,
+            max_tokens=3000,
             json_response=True,
             no_think=False,
-            timeout=60.0,
+            timeout=90.0,
         )
-        result = json.loads(content)
+        result = extract_llm_json(content)
     except Exception as exc:
         logger.error("LLM threshold suggestion failed for %s: %s", user_code, exc)
         return {}

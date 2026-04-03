@@ -50,9 +50,25 @@ logger = get_logger("jarvis-analyzer")
 async def analyze_exchange(user_msg: str, assistant_msg: str, existing_projects: list = None, existing_profile_keys: list = None) -> dict:
     """Analyze a conversation exchange using the LLM."""
     try:
+        # Show in_progress projects clearly + recent done projects (last 90 days)
+        # so the LLM can avoid re-creating finished or versioned projects.
+        import time as _t
+        _now_ts = _t.time()
+        _90d = 90 * 86400
+        def _proj_label(p):
+            if p.get("status") == "done":
+                return f"{p['name']} (terminé)"
+            return p["name"]
         projects_context = (
-            ", ".join(p["name"] for p in existing_projects if isinstance(p, dict) and p.get("name") and p.get("status") != "done")
-            if existing_projects else "aucun"
+            ", ".join(
+                _proj_label(p) for p in existing_projects
+                if isinstance(p, dict) and p.get("name") and (
+                    p.get("status") != "done" or (
+                        p.get("last_update") and
+                        (_now_ts - _t.mktime(_t.strptime(p["last_update"][:19], "%Y-%m-%dT%H:%M:%S"))) < _90d
+                    )
+                )
+            ) or "aucun"
         )
         profile_keys_str = ", ".join(existing_profile_keys) if existing_profile_keys else "aucune"
         prompt = get_prompt("ANALYSIS_PROMPT").format(

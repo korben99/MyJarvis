@@ -64,7 +64,12 @@ import pytz
 import redis
 from qdrant_client import QdrantClient
 
-from config import QDRANT_URL, REDIS_URL, USERS, no_think_suffix, tokens_param
+from config import LLM_LOCAL, PRIMARY_MODEL, ROUTER_MODEL, QDRANT_URL, REDIS_URL, USERS, no_think_suffix, tokens_param
+
+if LLM_LOCAL:
+    from llm_local import call_llm_local, call_llm_local_async
+
+_LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL} if LLM_LOCAL else set()
 
 # ══════════════════════════════════════════════════
 #  LOGGING SETUP
@@ -75,7 +80,7 @@ _LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 _logging_configured = False
 
 
-def setup_logging(log_file: str = "/app/logs/jarvis-api.log") -> None:
+def setup_logging(log_file: str = "/opt/jarvis/logs/jarvis-api.log") -> None:
     """
     Configure the root Jarvis logger once: console + rotating file handlers.
     - jarvis-api.log  : INFO+  (5 MB × 3, operational)
@@ -115,7 +120,8 @@ def setup_logging(log_file: str = "/app/logs/jarvis-api.log") -> None:
 
     # Quiet noisy third-party loggers
     for noisy in ("httpx", "httpcore", "primp", "sentence_transformers",
-                  "apscheduler", "urllib3", "asyncio"):
+                  "apscheduler", "urllib3", "asyncio",
+                  "rustls", "hyper_util", "h2", "reqwest", "hyper"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
@@ -193,14 +199,23 @@ _MOIS_FR  = ("", "janvier", "février", "mars", "avril", "mai", "juin",
              "juillet", "août", "septembre", "octobre", "novembre", "décembre")
 
 
-def fmt_now_fr(tz_name: str) -> str:
-    """Return current datetime formatted in French for the given IANA timezone.
+_SEASONS_FR = {
+    12: "hiver", 1: "hiver", 2: "hiver",
+    3: "printemps", 4: "printemps", 5: "printemps",
+    6: "été", 7: "été", 8: "été",
+    9: "automne", 10: "automne", 11: "automne",
+}
 
-    Example: 'lundi 30 mars 2026, 14:32'
+
+def fmt_now_fr(tz_name: str) -> str:
+    """Return current datetime + season formatted in French for the given IANA timezone.
+
+    Example: 'lundi 30 mars 2026, 14:32 (printemps)'
     """
     now = datetime.now(pytz.timezone(tz_name))
     jour = _JOURS_FR[now.weekday()]
-    return f"{jour} {now.day} {_MOIS_FR[now.month]} {now.year}, {now.strftime('%H:%M')}"
+    saison = _SEASONS_FR[now.month]
+    return f"{jour} {now.day} {_MOIS_FR[now.month]} {now.year}, {now.strftime('%H:%M')} ({saison})"
 
 
 def rel_time_fr(ts: float) -> str:
@@ -305,6 +320,9 @@ def extract_llm_json(raw: str) -> dict:
     Raises json.JSONDecodeError if all strategies fail.
     """
     raw = raw.strip()
+
+    # 0. Strip <think>...</think> blocks (Qwen3 chain-of-thought)
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
 
     # 1. Direct parse
     try:
@@ -417,13 +435,16 @@ def call_llm(
     timeout: float = 30.0,
 ) -> str:
     """
-    Synchronous OpenAI-compatible LLM call.
+    Synchronous LLM call — HTTP (cloud/mlx-lm server) ou MLX direct (LLM_LOCAL=yes).
 
-    Returns the model's raw text content (choices[0].message.content).
-    Raises httpx.HTTPStatusError on non-2xx responses.
-    Raises httpx.TimeoutException on timeout.
+    Returns the model's raw text content.
     API key is never logged.
     """
+    if LLM_LOCAL and model in _LOCAL_MODELS:
+        return call_llm_local(
+            messages, model=model, temperature=temperature,
+            max_tokens=max_tokens, no_think=no_think,
+        )
     resp = _get_llm_sync_client().post(
         f"{api_url}/chat/completions",
         headers=_llm_headers(api_key),
@@ -447,13 +468,16 @@ async def call_llm_async(
     timeout: float = 30.0,
 ) -> str:
     """
-    Async OpenAI-compatible LLM call.
+    Async LLM call — HTTP (cloud/mlx-lm server) ou MLX direct (LLM_LOCAL=yes).
 
-    Returns the model's raw text content (choices[0].message.content).
-    Raises httpx.HTTPStatusError on non-2xx responses.
-    Raises httpx.TimeoutException on timeout.
+    Returns the model's raw text content.
     API key is never logged.
     """
+    if LLM_LOCAL and model in _LOCAL_MODELS:
+        return await call_llm_local_async(
+            messages, model=model, temperature=temperature,
+            max_tokens=max_tokens, no_think=no_think,
+        )
     resp = await _get_llm_async_client().post(
         f"{api_url}/chat/completions",
         headers=_llm_headers(api_key),

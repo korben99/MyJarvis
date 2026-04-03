@@ -6,6 +6,7 @@ The main Jarvis pipeline: routing → context gathering → LLM → streaming SS
 
 import asyncio
 import json
+import re
 import time
 from typing import Optional
 
@@ -38,7 +39,7 @@ from google_services import (
     is_calendar_write,
     is_google_available,
 )
-from helpers import build_iso_dt, get_logger
+from helpers import build_iso_dt, call_llm_async, get_logger
 from llm_client import describe_images, select_model, stream_openai
 from llm_router import llm_route
 from memory import (
@@ -226,11 +227,20 @@ async def chat(req: ChatRequest):
 
     user_name = USER_CODES.get(user_code)
 
+    # ====DEBUG==== TTFT instrumentation — remove once latency is understood
+    _t0 = time.time()
+    logger.debug("[TTFT] request received — user=%s msg=%r", user_code, req.message[:60])
+    # ====DEBUG====
+
     _gather1 = await asyncio.gather(
         asyncio.to_thread(build_system_prompt, req.session_id, req.voice_mode, user_code),
         llm_route(req.message, google_available=is_google_available(user_code)),
         return_exceptions=True,
     )
+
+    # ====DEBUG====
+    logger.debug("[TTFT] gather1 done (router+sysprompt) — %.3fs", time.time() - _t0)
+    # ====DEBUG====
     system_prompt = _gather1[0] if not isinstance(_gather1[0], BaseException) else ""
     llm_result    = _gather1[1] if not isinstance(_gather1[1], BaseException) else None
     if isinstance(_gather1[0], BaseException):
@@ -264,6 +274,12 @@ async def chat(req: ChatRequest):
     use_model, _use_api_url, _use_api_key, _use_timeout = select_model(
         req.model, use_reasoning=bool(llm_result and llm_result.use_reasoning)
     )
+
+    # ── no_think pour les questions simples (mémoire/conversation pure) ────
+    # Les requêtes complexes (web, RAG, reasoning) conservent la réflexion.
+    # Économie typique : ~4s de TTFT sur les échanges conversationnels.
+    _complex_intents = use_rag or use_web_auto or (llm_result and llm_result.use_reasoning)
+    chat_no_think = not _complex_intents
 
     # ── Vision: convert iOS base64 image into standard image_part ────────
     if req.image_base64:
@@ -337,6 +353,12 @@ async def chat(req: ChatRequest):
             logger.warning("Google API call timed out: %s", fn.__name__)
             return []
 
+    # ====DEBUG====
+    logger.debug("[TTFT] gather2 start (rag=%s memory=%s web=%s gmail=%s cal=%s) — %.3fs",
+                 use_rag, use_memory, use_web_auto or req.use_web, use_gmail, use_calendar,
+                 time.time() - _t0)
+    # ====DEBUG====
+
     _gather2 = await asyncio.gather(
         search_documents(req.message) if (req.use_rag or use_rag) else _empty(),
         asyncio.to_thread(search_memory, user_code, req.message, 5) if use_memory else _empty(),
@@ -390,6 +412,12 @@ async def chat(req: ChatRequest):
         )
     messages.append({"role": "user", "content": user_content})
 
+    # ====DEBUG====
+    logger.debug("[TTFT] gather2 done (context ready) — %.3fs", time.time() - _t0)
+    logger.debug("[TTFT] messages built (%d msgs, sysprompt=%d chars) — handing off to LLM — %.3fs",
+                 len(messages), len(system_prompt), time.time() - _t0)
+    # ====DEBUG====
+
     start = time.time()
 
     # ── Streaming response ────────────────────────────────────────────────
@@ -397,33 +425,75 @@ async def chat(req: ChatRequest):
         async def sse():
             full = ""
             try:
-                async for chunk in stream_openai(messages, use_model, _use_api_url, _use_api_key, _use_timeout):
+                buf = ""
+                in_think = False
+                first_chunk = True
+                # ====DEBUG====
+                _t_stream_start = time.time()
+                logger.debug("[TTFT] stream_openai called (model=%s) — %.3fs since request",
+                             use_model, _t_stream_start - _t0)
+                # ====DEBUG====
+                async for chunk in stream_openai(messages, use_model, _use_api_url, _use_api_key, _use_timeout, no_think=chat_no_think):
                     full += chunk
-                    yield f"data: {json.dumps({'content': chunk})}\n\n"
+                    buf += chunk
+                    # Strip <think>...</think> blocks from the streamed output
+                    out = ""
+                    while buf:
+                        if in_think:
+                            end = buf.find("</think>")
+                            if end == -1:
+                                buf = ""
+                                break
+                            buf = buf[end + 8:]  # len("</think>") == 8
+                            buf = buf.lstrip("\n")  # drop newlines after </think>
+                            in_think = False
+                        else:
+                            start = buf.find("<think>")
+                            if start == -1:
+                                # Hold back potential partial tag at end of buffer
+                                partial = ""
+                                for i in range(1, 7):  # len("<think>") - 1
+                                    if buf.endswith("<think>"[:i]):
+                                        partial = buf[-i:]
+                                        break
+                                out += buf[: len(buf) - len(partial)]
+                                buf = partial
+                                break
+                            out += buf[:start]
+                            buf = buf[start + 7:]  # len("<think>") == 7
+                            in_think = True
+                    if first_chunk:
+                        out = out.lstrip("\n")  # strip leading newlines on very first chunk
+                    if out:
+                        if first_chunk:
+                            # ====DEBUG====
+                            logger.debug("[TTFT] first visible token yielded — %.3fs since request  |  %.3fs since stream_openai",
+                                         time.time() - _t0, time.time() - _t_stream_start)
+                            # ====DEBUG====
+                        first_chunk = False
+                        yield f"data: {json.dumps({'content': out})}\n\n"
 
+                full_clean = re.sub(r"<think>.*?</think>", "", full, flags=re.DOTALL).strip()
                 append_conversation_message(user_code, req.session_id, "user", req.message)
-                append_conversation_message(user_code, req.session_id, "assistant", full)
+                append_conversation_message(user_code, req.session_id, "assistant", full_clean)
                 ms = int((time.time() - start) * 1000)
                 _safe_web = [] if web_results == INTERNET_ERROR else web_results
                 yield f"data: {json.dumps({'done': True, 'model': use_model, 'duration_ms': ms, 'rag_sources': [{'source': c['source'], 'score': c['score']} for c in rag_chunks], 'web_sources': [{'title': w['title'], 'url': w['url']} for w in _safe_web]})}\n\n"
-                asyncio.create_task(post_analysis(req.session_id, user_code, req.message, full))
+                asyncio.create_task(post_analysis(req.session_id, user_code, req.message, full_clean))
             except asyncio.CancelledError:
                 logger.info("Client disconnected")
 
         return StreamingResponse(sse(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
     # ── JSON response ─────────────────────────────────────────────────────
-    async with httpx.AsyncClient(timeout=_use_timeout) as c:
-        r = await c.post(
-            f"{_use_api_url}/chat/completions",
-            headers={"Authorization": f"Bearer {_use_api_key}", "Content-Type": "application/json"},
-            json={"model": use_model, "messages": messages, "stream": False},
-        )
-    r.raise_for_status()
-    data = r.json()
-    if "choices" not in data:
-        raise HTTPException(502, f"OpenAI error: {data}")
-    resp = data["choices"][0]["message"]["content"]
+    resp = await call_llm_async(
+        messages,
+        model=use_model,
+        api_url=_use_api_url,
+        api_key=_use_api_key,
+        timeout=_use_timeout,
+        no_think=chat_no_think,
+    )
 
     append_conversation_message(user_code, req.session_id, "user", req.message)
     append_conversation_message(user_code, req.session_id, "assistant", resp)
