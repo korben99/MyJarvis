@@ -71,17 +71,17 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
   ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
   │ Tomorrow suggestions                           │ Redis TTL 24h                        │ jarvis:{user_code}:tomorrow_suggestions                 │
   └────────────────────────────────────────────────┴──────────────────────────────────────┴─────────────────────────────────────────────────────────┘
-  ┌────────────────────┬────────────────────────────────────────────────────────────────────┬───────────────────────────────┐   
-  │       Modèle       │                                Rôle                                │           no_think            │   
-  ├────────────────────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤   
-  │ Qwen2.5-3B (router)│ routing, dédup profil, judge web                                   │ True                          │
-  ├────────────────────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤
-  │ Qwen3-30B-A3B      │ briefing, analyse conv, refine prompt, réflexion, nightly review,  │ False sur les tâches          │
-  │ (primary)          │ trading, calendrier, extraction                                    │ analytiques                   │
-  ├────────────────────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤
-  │ Claude Sonnet /    │ mode expert uniquement (use_reasoning=True via router)             │ —                             │
-  │ GPT-5.x (reasoning)│                                                                    │                               │
-  └────────────────────┴────────────────────────────────────────────────────────────────────┴───────────────────────────────┘
+  ┌────────────────────────────┬────────────────────────────────────────────────────────────────┬───────────────────────────┐
+  │           Modèle           │                              Rôle                              │         no_think          │
+  ├────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────────────────┤
+  │ Qwen2.5-3B-8bit (router)   │ routing, dédup profil, judge web                               │ True                      │
+  ├────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────────────────┤
+  │ Qwen3.5-35B-A3B-5.5bit     │ briefing, analyse conv, refine prompt, réflexion, nightly      │ False pour RAG/web/reason │
+  │ (primary — local MLX)      │ review, trading, calendrier, extraction, chat standard         │ True pour chat simple     │
+  ├────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────────────────┤
+  │ Claude Sonnet / GPT-5.x    │ mode expert uniquement (use_reasoning=True via router)         │ —                         │
+  │ (reasoning — cloud)        │                                                                │                           │
+  └────────────────────────────┴────────────────────────────────────────────────────────────────┴───────────────────────────┘
 
 
 
@@ -109,15 +109,15 @@ Jarvis routes every request through a layered model stack. Each tier has its own
 
 ```
 Tier 1 — ROUTER      Fast intent classifier, JSON only
-         Target: Qwen2.5-3B-Instruct Q8 (local, ~3.5 GB, 80-100 tok/s)
+         Target: Qwen2.5-3B-Instruct-8bit (local MLX, ~3.3 GB, 80-120 tok/s)
          Cloud fallback: gpt-4.1-nano
 
-Tier 2 — PRIMARY     All standard responses: chat, questions, summaries,
-         Target: Qwen3-30B-A3B Q4 (local, ~17 GB, 35-50 tok/s, MoE)
+Tier 2 — PRIMARY     All standard responses: chat, questions, summaries
+         Target: Qwen3.5-35B-A3B-MLX-5.5bit (local MLX, ~24 GB, 30-45 tok/s, MoE)
          Cloud fallback: gpt-4o-mini
 
 Tier 3 — REASONING   Complex queries only — use_reasoning=True
-         Cloud: Claude Sonnet / GPT-5.x (stays cloud, rare ~15% of requests)
+         Cloud: Claude Sonnet / GPT-5.x (stays cloud, rare ~10% of requests)
 ```
 
 **Routing logic:**
@@ -135,13 +135,13 @@ Tier 3 — REASONING   Complex queries only — use_reasoning=True
 
 Everything else (chat, questions, summaries, portfolio, translations, writing, coding assistance, web lookups) stays on `PRIMARY_MODEL`. When in doubt → `false`.
 
-**Qwen migration readiness:**
-All tiers have independent `API_URL` / `API_KEY` variables, so you can move each tier to a local mlx-lm server independently:
-```
-ROUTER_API_URL=http://mac-mini.local:8080/v1   # point router at local Qwen3-7B
-PRIMARY_API_URL=http://mac-mini.local:8080/v1  # point primary at local Qwen3-30B-A3B
-```
-`no_think_suffix()` in `config.py` appends `/no_think` to system prompts for Qwen3 models to suppress `<think>` blocks, which would break JSON parsing.
+**Local MLX mode (`LLM_LOCAL=yes`):**
+When `LLM_LOCAL=yes`, Jarvis uses `mlx_lm` directly (no HTTP server) — models are loaded into unified memory at startup. Set `HF_HOME` to control where models are stored. Download models with `python scripts/download_models.py`.
+
+**Thinking control:**
+- `THINKING_BUDGET_TOKENS` (default 1024) — limits `<think>` block length via `thinking_budget` kwarg in the chat template. Applied per-call without modifying message content (KV-cache safe).
+- Router/analyzer calls always disable thinking (`thinking_budget=0`) — prevents `<think>` blocks from breaking JSON parsing.
+- Chat calls: `no_think=True` for simple conversation (saves ~4 s TTFT), `no_think=False` for RAG/web/reasoning.
 
 #### Router Output Fields
 
@@ -256,13 +256,13 @@ Time is injected at three levels to prevent date hallucination and give the LLM 
 
 | Layer | What is injected | Where |
 |-------|-----------------|-------|
-| **System prompt** | Current datetime in French, user's timezone (e.g. `"lundi 30 mars 2026, 14:32"`) via `fmt_now_fr()` | `build_system_prompt()` — every chat request |
+| **User message prefix** | Current datetime in French, user timezone, with season (e.g. `"vendredi 3 avril 2026, 14:32 (printemps)"`) via `fmt_now_fr()` | `build_dynamic_prefix()` — prepended to each user message; does NOT go in the system prompt (KV-cache invariant) |
 | **Memory chunks** | French relative timestamp prepended to each retrieved memory (e.g. `"(il y a 3 jours) ..."`) via `rel_time_fr()` | `build_context()` — injected before `trim_chunks()` |
 | **Conversation analyzer** | Current date in ISO 8601 (`2026-03-30`) at the top of `ANALYSIS_PROMPT` | `analyze_exchange()` — prevents the LLM from inventing dates for `memory_summary` anchors |
 | **Self-reflection** | Server local time in French (`fmt_now_fr(BRIEFING_TIMEZONE)`) replaces raw UTC ISO in `gather_context()` | `gather_context()` — reflection LLM knows actual local time |
 | **Push availability** | Per-user local time shown next to each push-capable device | `_fmt_push_availability()` — reflection LLM can decide not to push at 23h45 |
 
-`fmt_now_fr(tz_name)` is defined in `helpers.py` and shared by `pipeline.py` and `self.py`.
+`fmt_now_fr(tz_name)` is defined in `helpers.py` and includes the current season (hiver/printemps/été/automne) to prevent seasonal confusion in LLM responses.
 
 #### Memory Reconsolidation on Recall
 
@@ -290,19 +290,34 @@ To forget faster: lower `MEMORY_DECAY_FACTOR` toward `0.70` or raise `MEMORY_DEC
 
 ### System Prompt Assembly
 
-Every request builds the system prompt from three blocks assembled in `build_system_prompt()` (called via `asyncio.to_thread` to avoid blocking the FastAPI event loop during Qdrant I/O):
+The prompt is split into a **static system message** and a **per-turn dynamic prefix** injected at the start of each user message. This separation is required for MLX KV-cache prefix caching (see Performance section).
 
+**Static system message** — `build_system_prompt()` — identical every turn:
 ```
-SYSTEM_BASE_FR          (~1 400 chars — Jarvis personality, tool rules)
-    ↓
-Date et heure actuelles — formatted in French in the user's timezone (e.g. "lundi 30 mars 2026, 14:32")
-    ↓
-MEMORY_HEADER_FR        (~90 chars — section separator)
-    ↓
-build_memory_context()  — injected only if memory is available
-    ↓
-VOICE_SUFFIX_FR         (~80 chars — only if voice_mode=True)
+SYSTEM_BASE_FR          (~500 chars — Jarvis personality, tool rules)
 ```
+
+**Dynamic prefix** — `build_dynamic_prefix()` — prepended to each user message (run in thread alongside the LLM router, via `asyncio.to_thread`):
+```
+Date et heure actuelles — formatted in French, user timezone, with season
+    ↓
+Tu parles avec <user_name>.
+    ↓
+MEMORY_HEADER_FR + build_memory_context()  — only if memory is available
+    ↓
+=== TES OPINIONS ===  — only if opinions exist
+    ↓
+VOICE_SUFFIX_FR  — only if voice_mode=True
+```
+
+**Per-turn assembled context** — appended after the dynamic prefix, before the user's raw message:
+```
+=== RÉSULTATS WEB / SOUVENIRS / DOCUMENTS / AGENDA / EMAILS ===  — fetched in parallel
+    ↓
+"Analyse étape par étape..."  — only if use_reasoning=True
+```
+
+The full user message stored in Redis history = `dynamic_prefix \x00 raw_message`. The null-byte separator lets the `/history` endpoint recover the original text for display to the iOS app.
 
 **`build_memory_context()` — sections injected in order:**
 
@@ -332,23 +347,63 @@ VOICE_SUFFIX_FR         (~80 chars — only if voice_mode=True)
 
 ```
 User message
-    → asyncio.to_thread(build_system_prompt)  ┐  run in parallel
+    → build_system_prompt() [static, instant]
+    → asyncio.to_thread(build_dynamic_prefix) ┐  run in parallel
     → Tier 1 Router (intents + use_reasoning) ┘  (~300-400 ms saved)
     → Keyword dispatch: calendar write / confirm / cancel short-circuit here
     → Parallel context gathering (memory + RAG + web + Google + self + portfolio)
     → Pending trade alerts injected if any are queued
     → Self context injected: internal state (focus, goals, last action)
                            + per-user relation (affinity, style, tonal directives)
-    → Tier 2 PRIMARY or Tier 3 REASONING (full context → streaming response)
+    → user_content = dynamic_prefix + assembled_context + raw_message
+      (stored in Redis history with \x00 separator; stripped on /history endpoint)
+    → Tier 2 PRIMARY or Tier 3 REASONING (messages list + session KV cache → streaming)
+    →   MLX KV cache: only new tokens computed from turn 2 onward (session_id scoped)
     →   streaming via shared per-timeout httpx.AsyncClient (connection pool reused)
     → Conversation analyzer / PRIMARY_MODEL (extract facts, mood, topics, importance, memory_summary)
-    →   current date (ISO 8601) injected into ANALYSIS_PROMPT — prevents date hallucination in memory_summary anchors
+    →   current date (ISO 8601) injected into ANALYSIS_PROMPT — prevents date hallucination
     → Memory storage: importance > 0.35 → Qdrant episodic | importance > 0.60 → autobiographical
     →   store_autobiographical_event: dedup check (cosine ≥ 0.85 → skip or reinforce)
     →   search_memory recalls: +0.05 reconsolidation boost on returned points
     →   retractions from ANALYSIS_PROMPT → retract_autobiographical_event (semantic delete, threshold 0.88)
     →   satisfaction signal written to convlog entry (positive/negative/unknown — proxy on previous response)
 ```
+
+---
+
+## Performance (TTFT — Mac Mini M4 Pro)
+
+### Optimisations implémentées
+
+| Optimisation | Gain TTFT | Détails |
+|---|---|---|
+| **no_think conditionnel** | −4 s sur chat simple | `chat_no_think=True` sauf RAG/web/reasoning. `thinking_budget=0` via chat template (KV-safe). |
+| **THINKING_BUDGET_TOKENS=1024** | −2 à −5 s | Limite le bloc `<think>` à ~1024 tokens au lieu de l'infini. |
+| **System prompt réduit** | −0.3 s | `SYSTEM_BASE_FR` réduit de ~400 chars/~100 tokens. |
+| **KV cache prefix caching** | −1 à −3 s dès le tour 2 | Cache KV MLX par session (LRU ×5). Seuls les nouveaux tokens sont calculés à chaque tour. |
+
+### Architecture KV cache
+
+```
+Tour 1 : [SYS statique ~100 tok] + [CTX dynamique + msg1 ~600 tok]
+          ↑ tout calculé                ↑ tout calculé
+          └── mis en cache ─────────────┘
+
+Tour 2 : [SYS ~100 tok] + [CTX1+msg1+rep1 ~900 tok] + [CTX2+msg2 ~600 tok]
+          ↑ cache hit    ↑ cache hit                    ↑ seulement ça calculé
+
+Tour N : skip de (N-1) × ~900 tokens → seulement ~600 tokens nouveaux
+```
+
+Le système prompt est **token-identique** à chaque tour (SYSTEM_BASE_FR pur, sans date ni profil). Le contexte dynamique (date, profil, mémoires, opinions) est préfixé dans le message utilisateur courant, stocké en historique Redis avec séparateur `\x00`, et stripped à l'affichage.
+
+### Mesures de référence
+
+| Scénario | TTFT avant | TTFT après |
+|---|---|---|
+| Chat simple (no_think) | ~9.5 s | ~5.5 s |
+| Chat simple, tour 2+ (KV cache) | ~5.5 s | ~3–4 s (est.) |
+| Question complexe (RAG/web) | ~5.5 s | ~5.5 s (inchangé) |
 
 ---
 
@@ -368,27 +423,32 @@ cd /opt/jarvis
 cp .env.example .env   # then edit .env (see Variables section below)
 ```
 
-### 2. Start all services
+### 2. Download local models (Mac Mini / Apple Silicon only)
 
 ```bash
-docker compose up -d
+source venv/bin/activate
+python scripts/download_models.py   # downloads to HF_HOME/hub (standard HF cache)
 ```
 
-Services started:
-- `qdrant` — vector database
-- `redis` — session cache
-- `open-webui` — chat interface on port 3000
-- `jarvis-api` — main API on port 8000
+Models are stored in `HF_HOME` (default `/opt/jarvis/models`). The script skips models already present and detects interrupted downloads via `.incomplete` blobs.
 
-### 3. Verify
+### 3. Start all services
 
 ```bash
-./jarvis-status.sh
-# or
+./start.sh
+```
+
+This starts:
+- `docker compose up -d` — Qdrant, Redis, Open WebUI (port 3000)
+- `uvicorn main:app` — Jarvis API on port 8000, running **natively** (not in Docker) for direct Metal GPU access via MLX
+
+### 4. Verify
+
+```bash
 curl http://localhost:8000/status
 ```
 
-### 4. Index documents (optional)
+### 5. Index documents (optional)
 
 Place documents in `RAGData/` subdirectories (`personal/`, `work/`, `documents/`, `company/`, `reflexions/`), then run:
 
@@ -396,24 +456,27 @@ Place documents in `RAGData/` subdirectories (`personal/`, `work/`, `documents/`
 python3 scripts/upload-to-openwebui.py
 ```
 
-### 5. Import trading portfolio (optional)
+### 6. Import trading portfolio (optional)
 
 Export your Boursorama positions as CSV (*Mes comptes → Exporter*) and drop the file in `TradeData/`. Jarvis imports it automatically on the next hourly tick, or immediately on restart.
 
 ### Common Commands
 
 ```bash
-# Restart API after code change
-docker compose restart jarvis-api
+# Restart Jarvis API after code change
+./start.sh
 
-# Rebuild container after Dockerfile change
-docker compose up -d --build jarvis-api
+# Stream API logs
+tail -f /opt/jarvis/logs/jarvis.log
 
-# Stream logs
-docker compose logs -f jarvis-api
+# Restart only infra (Redis, Qdrant, Open WebUI)
+docker compose restart
 
-# Stop everything
+# Stop infra
 docker compose down
+
+# Re-download / resume a failed model download
+python scripts/download_models.py
 ```
 
 ---
@@ -473,15 +536,26 @@ All variables go in `/opt/jarvis/.env`.
 | `VISION_API_KEY` | *(OPENAI_API_KEY)* | API key for the vision model |
 | `VISION_TIMEOUT` | `30` | Timeout in seconds |
 
+### Local MLX mode (Apple Silicon)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLM_LOCAL` | `no` | Set to `yes` to use mlx_lm directly instead of HTTP OpenAI endpoints |
+| `PRIMARY_MODEL_LOCAL` | `inferencerlabs/Qwen3.5-35B-A3B-MLX-5.5bit` | Primary model HF repo ID or local path |
+| `ROUTER_MODEL_LOCAL` | `mlx-community/Qwen2.5-3B-Instruct-8bit` | Router model HF repo ID or local path |
+| `VISION_MODEL_LOCAL` | `mlx-community/Qwen2.5-VL-7B-Instruct-4bit` | Vision model HF repo ID or local path |
+| `HF_HOME` | `/opt/jarvis/models` | Root directory for HuggingFace model cache |
+| `THINKING_BUDGET_TOKENS` | `1024` | Max tokens for `<think>` block. `0` = disabled. Applied via chat template kwarg (KV-cache safe). |
+
 ### Infrastructure
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `QDRANT_URL` | `http://qdrant:6333` | Qdrant URL — hardcoded to Docker-internal network in compose |
-| `REDIS_URL` | `redis://redis:6379` | Redis URL — hardcoded to Docker-internal network in compose |
+| `QDRANT_URL` | `http://qdrant:6333` | Qdrant URL |
+| `REDIS_URL` | `redis://redis:6379` | Redis URL |
 | `QDRANT_COLLECTION` | `open-webui_knowledge` | Collection for RAG documents |
 | `QDRANT_MEMORY_COLLECTION` | `jarvis_memory` | Collection for episodic memory |
-| `HF_TOKEN` | — | HuggingFace token (required to download the multilingual embedding model on first start) |
+| `HF_TOKEN` | — | HuggingFace token (required for gated models and the multilingual embedding model) |
 
 ### RAG
 

@@ -11,53 +11,6 @@ file between restarts to tune its own behaviour without touching logic code.
 Version: 2.0  (2026-03-26)
 
 ═══════════════════════════════════════════════════════════════════════════
- ARCHITECTURE MODÈLES — M4 Pro 48 GB (273 GB/s)
-═══════════════════════════════════════════════════════════════════════════
-
- Tier      │ Modèle                    │ Quant    │ VRAM    │ tok/s  │ Rôle
- ──────────┼───────────────────────────┼──────────┼─────────┼────────┼────────────────────────────
- Router    │ Qwen2.5-3B-Instruct      │ Q8_0     │ ~3.5 GB │ 80-100 │ Classification intent + params
- Primary   │ Qwen3-30B-A3B (MoE)      │ Q4_K_M   │ ~17 GB  │ 35-50  │ Chat, analyse, briefing, réflexion, nightly, calendrier
- Vision    │ Qwen2.5-VL-7B-Instruct   │ Q4_K_M   │ ~5 GB   │ 25-35  │ Description d'images (chargé à la demande)
- Reasoning │ Claude Sonnet / GPT-4o    │ cloud    │ 0       │ —      │ Raisonnement complexe (~15% des requêtes)
-
- Total permanent en mémoire : Router + Primary ≈ 20.5 GB
- Reste disponible : ~27 GB (OS + apps + Vision à la demande)
-
- POURQUOI PAS DE MODÈLE ANALYSIS SÉPARÉ ?
- Qwen3-30B-A3B n'active que 3B de paramètres (MoE) → aussi rapide qu'un
- dense 3B mais qualité 30B. Un Qwen2.5-7B dense serait PLUS LENT et MOINS BON.
- L'analyse post-échange tourne séquentiellement après la réponse → pas besoin
- de parallélisme.
-
- .env correspondant :
-   ROUTER_MODEL=mlx-community/Qwen2.5-3B-Instruct-8bit
-   ROUTER_API_URL=http://localhost:8080/v1
-   ROUTER_API_KEY=mlx
-   ROUTER_TIMEOUT=3
-
-   PRIMARY_MODEL=mlx-community/Qwen3-30B-A3B-4bit
-   PRIMARY_API_URL=http://localhost:8080/v1
-   PRIMARY_API_KEY=mlx
-   PRIMARY_TIMEOUT=60
-
-   VISION_MODEL=mlx-community/Qwen2.5-VL-7B-Instruct-4bit
-   VISION_API_URL=http://localhost:8080/v1
-   VISION_API_KEY=mlx
-   VISION_TIMEOUT=30
-
-   REASONING_MODEL=claude-sonnet-4-20250514
-   REASONING_API_URL=https://api.anthropic.com/v1
-   REASONING_API_KEY=sk-ant-...
-   REASONING_TIMEOUT=90
-
- NOTE MLX-LM : si un seul serveur mlx_lm.server tourne, il ne peut
- servir qu'un modèle à la fois. Options :
-   a) Deux instances mlx_lm.server sur des ports différents (8080=Primary, 8081=Router)
-   b) LiteLLM devant un seul serveur avec swap automatique (plus lent au switch)
-   c) mlx-lm ≥ 0.22 avec --model-pool (charge les deux en mémoire)
- Option (a) recommandée : 20.5 GB total, swap zéro, latence minimale.
-═══════════════════════════════════════════════════════════════════════════
 """
 
 import json
@@ -68,12 +21,11 @@ import os
 # ══════════════════════════════════════════════════════════════════════════
 
 SYSTEM_BASE_FR = (
-    "Tu es Jarvis, un assistant personnel IA. "
+    "Tu es Jarvis, un assistant personnel IA français. "
     "Sois concis, direct et sympathique. Pas de remplissage inutile. "
-    "Tu parles à la première personne (\"je\") et tu tutoies l'utilisateur. "
+    'Tu parles à la première personne ("je") et tu tutoies l\'utilisateur. '
     "Tu as une personnalité assumée : humour, préférences et points de vue sont les bienvenus. "
     "Tu as accès en lecture/écriture à la boîte Gmail et au calendrier Google de l'utilisateur. "
-    "Pour créer un événement calendrier, attends toujours la confirmation explicite de l'utilisateur avant de valider. "
     "Quand tu utilises une recherche internet, cite la source. "
     "Quand tu references un souvenir, fais-le naturellement (ne dis pas 'selon ma mémoire'). "
     "Si une section === TES OPINIONS === est présente, ce sont tes propres opinions — "
@@ -88,7 +40,9 @@ MEMORY_HEADER_FR = "\n\n=== TA MÉMOIRE (utilise-la naturellement, ne la liste p
 
 # Appended to the system prompt in voice mode
 VOICE_SUFFIX_EN = "\n\nVOICE MODE: 1-2 sentences max. Natural speech, no markdown."
-VOICE_SUFFIX_FR = "\n\nMODE VOIX : réponse courte (1-2 phrases), parlé naturel, pas de markdown."
+VOICE_SUFFIX_FR = (
+    "\n\nMODE VOIX : réponse courte (1-2 phrases), parlé naturel, pas de markdown."
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -554,17 +508,17 @@ Si tu ajoutes du contenu, retire un volume équivalent de contenu moins utile.
 
 # Token budget map — used by self.py to pass limits to REFINE_PROMPT_USER
 PROMPT_TOKEN_BUDGETS = {
-    "ROUTER_SYSTEM":       100,
-    "ROUTER_USER":         500,
-    "ANALYSIS_PROMPT":     600,
-    "BRIEFING_SYSTEM":     100,
-    "BRIEFING_USER":       400,
+    "ROUTER_SYSTEM": 100,
+    "ROUTER_USER": 500,
+    "ANALYSIS_PROMPT": 600,
+    "BRIEFING_SYSTEM": 100,
+    "BRIEFING_USER": 400,
     "WEB_RELEVANCE_JUDGE": 200,
-    "REFLECTION_SYSTEM":   400,
-    "REFLECTION_PROMPT":  1500,
-    "NIGHTLY_SYSTEM":      400,
-    "NIGHTLY_PROMPT":      600,
-    "SYSTEM_BASE_FR":      500,
+    "REFLECTION_SYSTEM": 400,
+    "REFLECTION_PROMPT": 1500,
+    "NIGHTLY_SYSTEM": 400,
+    "NIGHTLY_PROMPT": 600,
+    "SYSTEM_BASE_FR": 500,
 }
 
 
@@ -625,9 +579,9 @@ JSON uniquement."""
 # Falls back to the module constant if no override is active.
 # All callers should use get_prompt("NAME") instead of the bare constant.
 
-_overrides_path: str | None = None   # resolved lazily to avoid circular import
-_override_cache: dict        = {}
-_override_mtime: float       = -1.0
+_overrides_path: str | None = None  # resolved lazily to avoid circular import
+_override_cache: dict = {}
+_override_mtime: float = -1.0
 
 
 def _resolve_overrides_path() -> str:
@@ -636,9 +590,10 @@ def _resolve_overrides_path() -> str:
     if _overrides_path is None:
         try:
             from config import PROMPT_DATA_DIR
+
             _overrides_path = os.path.join(PROMPT_DATA_DIR, "prompt_overrides.json")
         except Exception:
-            _overrides_path = ""   # mark as failed so we don't retry forever
+            _overrides_path = ""  # mark as failed so we don't retry forever
     return _overrides_path
 
 

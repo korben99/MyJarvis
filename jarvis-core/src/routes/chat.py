@@ -48,7 +48,14 @@ from memory import (
     search_memory,
     update_user_profile,
 )
-from pipeline import build_context, build_system_prompt, post_analysis
+from pipeline import (
+    augment_user_message,
+    build_context,
+    build_dynamic_prefix,
+    build_system_prompt,
+    post_analysis,
+    strip_ctx_prefix,
+)
 from rag import search_documents
 from self import handle_proposal_command
 from web_search import INTERNET_ERROR, optimize_web_query, search_weather, search_web
@@ -232,23 +239,28 @@ async def chat(req: ChatRequest):
     logger.debug("[TTFT] request received — user=%s msg=%r", user_code, req.message[:60])
     # ====DEBUG====
 
+    # System prompt is now STATIC — no thread needed.
+    # Dynamic context (date, profile, opinions) goes into the user message prefix.
+    system_prompt = build_system_prompt()
+
     _gather1 = await asyncio.gather(
-        asyncio.to_thread(build_system_prompt, req.session_id, req.voice_mode, user_code),
+        asyncio.to_thread(
+            build_dynamic_prefix,
+            req.session_id, user_code, user_name or "", req.voice_mode,
+        ),
         llm_route(req.message, google_available=is_google_available(user_code)),
         return_exceptions=True,
     )
 
     # ====DEBUG====
-    logger.debug("[TTFT] gather1 done (router+sysprompt) — %.3fs", time.time() - _t0)
+    logger.debug("[TTFT] gather1 done (router+dynamic_prefix) — %.3fs", time.time() - _t0)
     # ====DEBUG====
-    system_prompt = _gather1[0] if not isinstance(_gather1[0], BaseException) else ""
-    llm_result    = _gather1[1] if not isinstance(_gather1[1], BaseException) else None
+    dynamic_prefix = _gather1[0] if not isinstance(_gather1[0], BaseException) else ""
+    llm_result     = _gather1[1] if not isinstance(_gather1[1], BaseException) else None
     if isinstance(_gather1[0], BaseException):
-        logger.error("build_system_prompt failed: %s", _gather1[0])
+        logger.error("build_dynamic_prefix failed: %s", _gather1[0])
     if isinstance(_gather1[1], BaseException):
         logger.error("llm_route failed: %s", _gather1[1])
-    if user_name:
-        system_prompt += f"\n\nL'utilisateur avec qui tu parles s'appelle {user_name}."
 
     if llm_result:
         use_memory        = llm_result.use_memory
@@ -385,31 +397,49 @@ async def chat(req: ChatRequest):
         use_portfolio, use_self, user_code,
     )
     if assembled:
-        system_prompt += (
-            "\n\nUtilise le contexte suivant pour répondre. Cite les sources si pertinent.\n\n"
-            + assembled
-        )
         logger.info("context memory=%d rag=%d web=%d", len(memory_chunks), len(rag_chunks), len(web_results))
 
-    # ── Chain-of-thought for complex queries ──────────────────────────────
+    # ── Chain-of-thought hint ─────────────────────────────────────────────
+    reasoning_hint = ""
     if llm_result and llm_result.use_reasoning:
-        system_prompt += (
+        reasoning_hint = (
             "\n\nCette question nécessite une réflexion approfondie. "
             "Analyse-la étape par étape avant de répondre."
         )
+
+    # ── Build user content with dynamic prefix ────────────────────────────
+    # dynamic_prefix (date, profile, opinions) + assembled context + reasoning
+    # hint are prepended to the user message — NOT to the static system prompt.
+    # This keeps the system prompt token-identical across all turns so the
+    # MLX KV cache is always valid for that prefix.
+    extra_ctx_parts = []
+    if dynamic_prefix:
+        extra_ctx_parts.append(dynamic_prefix)
+    if assembled:
+        extra_ctx_parts.append(
+            "Utilise le contexte suivant pour répondre. Cite les sources si pertinent.\n\n"
+            + assembled
+        )
+    if reasoning_hint:
+        extra_ctx_parts.append(reasoning_hint.strip())
+
+    raw_user_content = req.message
+    if image_description:
+        raw_user_content = (
+            f"{req.message}\n\n"
+            f"--- Image jointe, décrite ci-dessous ---\n"
+            f"{image_description}"
+        )
+
+    full_prefix = "\n\n".join(extra_ctx_parts)
+    # augment_user_message embeds a null-byte separator so strip_ctx_prefix()
+    # can recover the original message when serving history to the iOS app.
+    user_content = augment_user_message(full_prefix, raw_user_content)
 
     # ── Build message list ────────────────────────────────────────────────
     messages = [{"role": "system", "content": system_prompt}]
     for m in hist[-20:]:
         messages.append({"role": m["role"], "content": m["content"]})
-
-    user_content = req.message
-    if image_description:
-        user_content = (
-            f"{req.message}\n\n"
-            f"--- Image jointe, décrite ci-dessous ---\n"
-            f"{image_description}"
-        )
     messages.append({"role": "user", "content": user_content})
 
     # ====DEBUG====
@@ -433,7 +463,7 @@ async def chat(req: ChatRequest):
                 logger.debug("[TTFT] stream_openai called (model=%s) — %.3fs since request",
                              use_model, _t_stream_start - _t0)
                 # ====DEBUG====
-                async for chunk in stream_openai(messages, use_model, _use_api_url, _use_api_key, _use_timeout, no_think=chat_no_think):
+                async for chunk in stream_openai(messages, use_model, _use_api_url, _use_api_key, _use_timeout, no_think=chat_no_think, session_id=req.session_id):
                     full += chunk
                     buf += chunk
                     # Strip <think>...</think> blocks from the streamed output
@@ -474,7 +504,9 @@ async def chat(req: ChatRequest):
                         yield f"data: {json.dumps({'content': out})}\n\n"
 
                 full_clean = re.sub(r"<think>.*?</think>", "", full, flags=re.DOTALL).strip()
-                append_conversation_message(user_code, req.session_id, "user", req.message)
+                # Store the AUGMENTED user message so the KV cache matches on
+                # the next turn (the common prefix must be token-identical).
+                append_conversation_message(user_code, req.session_id, "user", user_content)
                 append_conversation_message(user_code, req.session_id, "assistant", full_clean)
                 ms = int((time.time() - start) * 1000)
                 _safe_web = [] if web_results == INTERNET_ERROR else web_results
@@ -495,7 +527,7 @@ async def chat(req: ChatRequest):
         no_think=chat_no_think,
     )
 
-    append_conversation_message(user_code, req.session_id, "user", req.message)
+    append_conversation_message(user_code, req.session_id, "user", user_content)
     append_conversation_message(user_code, req.session_id, "assistant", resp)
     ms = int((time.time() - start) * 1000)
 
@@ -521,7 +553,12 @@ async def get_history(session_id: str, user_code: str, limit: int = IOS_MAX_MESS
     result = []
     for e in entries:
         try:
-            result.append(json.loads(e))
+            msg = json.loads(e)
+            # Strip the KV-cache context prefix from user messages before
+            # returning to the iOS app so only the original text is shown.
+            if msg.get("role") == "user":
+                msg = {**msg, "content": strip_ctx_prefix(msg["content"])}
+            result.append(msg)
         except (json.JSONDecodeError, ValueError):
             logger.warning("Skipping corrupted history entry session=%s", session_id)
     return result

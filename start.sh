@@ -1,19 +1,39 @@
 #!/usr/bin/env bash
 set -e
+
 cd /opt/jarvis
 
-# Kill uvicorn si déjà en cours
-pkill -f "uvicorn main:app" 2>/dev/null && echo "uvicorn précédent tué" || true
-sleep 1
+PID_FILE="/tmp/jarvis.pid"
 
-# 1. Infrastructure Docker (Redis + Qdrant + Open WebUI)
+echo "Stopping existing Jarvis..."
+
+if [ -f "$PID_FILE" ]; then
+    OLD_PID=$(cat $PID_FILE)
+    if ps -p $OLD_PID > /dev/null 2>&1; then
+        echo "Killing PID $OLD_PID"
+        kill $OLD_PID || true
+        sleep 2
+        kill -9 $OLD_PID 2>/dev/null || true
+    fi
+    rm -f $PID_FILE
+fi
+
+# Kill sécurité (au cas où)
+pkill -f "uvicorn main:app" 2>/dev/null || true
+
+echo "Starting infra..."
 docker compose up -d
 
-# 2. jarvis-api natif (MLX se charge au démarrage, ~30 s premier lancement)
+echo "Starting Jarvis..."
+
 mkdir -p /opt/jarvis/logs
 source /opt/jarvis/venv/bin/activate
 cd /opt/jarvis/jarvis-core/src
+
 uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1 \
     --log-level info &
-echo "jarvis-api démarré PID=$!"
-echo "Logs : tail -f /opt/jarvis/logs/jarvis-api.log"
+
+PID=$!
+echo $PID > $PID_FILE
+
+echo "Jarvis démarré PID=$PID"

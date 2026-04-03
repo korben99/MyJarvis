@@ -14,7 +14,11 @@ RouterData/
 DOCS/
 jarvis-core/test/
 jarvis-core/JarvisData/
+xcuserdata/
+DerivedData/
+
 *.pyc
+*.DS_Store
 
 #SECRETS#
 .env

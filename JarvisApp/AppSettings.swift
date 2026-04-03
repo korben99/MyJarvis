@@ -15,8 +15,8 @@ import Combine
 
 class AppSettings: ObservableObject {
     // Server
-    @AppStorage("localServerURL") var localServerURL: String = "http://192.168.1.53:8000"
-    @AppStorage("vpnServerURL")   var vpnServerURL:   String = "http://100.71.179.57:8000"
+    @AppStorage("localServerURL") var localServerURL: String = "http://192.168.1.50:8000"
+    @AppStorage("vpnServerURL")   var vpnServerURL:   String = "http://100.94.97.27:8000"
     @AppStorage("sessionID") var sessionID: String = "iphone-main"
 
     // Identity

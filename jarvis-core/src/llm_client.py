@@ -93,9 +93,10 @@ async def stream_openai(
     api_key: str = OPENAI_API_KEY,
     timeout: float = 30.0,
     no_think: bool = False,
+    session_id: str = "",
 ) -> AsyncGenerator[str, None]:
     if LLM_LOCAL and model in _LOCAL_MODELS:
-        async for chunk in stream_local(messages, model, no_think=no_think):
+        async for chunk in stream_local(messages, model, no_think=no_think, session_id=session_id):
             yield chunk
         return
 

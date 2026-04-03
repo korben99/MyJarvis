@@ -28,15 +28,40 @@ HF_HUB_CACHE = os.path.join(HF_HOME, "hub")
 def model_exists(model_name):
     model_id = model_name.replace("/", "--")
     path = os.path.join(HF_HUB_CACHE, f"models--{model_id}")
-    return os.path.exists(path)
+    if not os.path.exists(path):
+        return False
+    # Vérifie qu'il n'y a pas de blobs incomplets (download interrompu)
+    blobs_dir = os.path.join(path, "blobs")
+    if os.path.exists(blobs_dir):
+        for f in os.listdir(blobs_dir):
+            if f.endswith(".incomplete"):
+                return False
+    # Vérifie qu'il y a au least un fichier de poids dans les snapshots
+    snapshots_dir = os.path.join(path, "snapshots")
+    if os.path.exists(snapshots_dir):
+        for rev in os.listdir(snapshots_dir):
+            rev_path = os.path.join(snapshots_dir, rev)
+            if any(f.endswith(".safetensors") or f.endswith(".npz") or f == "model.safetensors.index.json"
+                   for f in os.listdir(rev_path)):
+                # model.safetensors.index.json without the actual shards = incomplete
+                files = set(os.listdir(rev_path))
+                if "model.safetensors.index.json" in files and not any(
+                    f.endswith(".safetensors") for f in files
+                ):
+                    return False
+                return True
+    return False
 
 
 def download_model(model_name):
     print(f"[DOWNLOAD] {model_name}")
+    # Pas de local_dir — on laisse HF utiliser HF_HUB_CACHE (structure models--org--name)
+    # Ce format est celui que mlx_lm.load() et model_exists() attendent.
     snapshot_download(
         repo_id=model_name,
-        resume_download=True,
-        token=HF_TOKEN,  # explicite = plus robuste
+        cache_dir=HF_HUB_CACHE,
+        revision="main",
+        token=HF_TOKEN,
     )
 
 

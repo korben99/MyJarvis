@@ -4,10 +4,23 @@ pipeline.py — System prompt construction, context assembly, post-analysis
 Extracted from main.py to keep chat() focused on HTTP I/O.
 
 Public functions:
-  build_system_prompt(session_id, voice_mode, user_code) -> str
+  build_system_prompt()                      -> str  (STATIC — KV-cache safe)
+  build_dynamic_prefix(session_id,
+                       user_code,
+                       user_name,
+                       voice_mode)           -> str  (per-turn, prepended to user msg)
   build_context(rag_chunks, memory_chunks, web_results, gmail_results,
                 calendar_results, use_portfolio, use_self, user_code) -> str
   post_analysis(session_id, user_code, user_msg, assistant_msg)
+
+KV-cache strategy
+─────────────────
+The system message is now STATIC (SYSTEM_BASE_FR only).  Dynamic content
+(date, user name, profile/memory, opinions, voice mode) is prepended to
+each user message as a [JARVIS_CTX] block.  Because the system message and
+all previous conversation turns are token-identical from one turn to the
+next, MLX's KV cache reuses their attention state and only the new tokens
+(the [JARVIS_CTX] block + current user message) need to be computed.
 """
 
 import asyncio
@@ -49,29 +62,73 @@ logger = get_logger("jarvis-pipeline")
 
 # ── System prompt ──────────────────────────────────────────────────────────────
 
+# Marker used to separate the injected context block from the user's raw message
+# when both are stored together in Redis history.
+_CTX_SEP = "\x00"  # null byte — never present in natural text
 
-def build_system_prompt(
-    session_id: str, voice_mode: bool = False, user_code: str = "default"
+
+def build_system_prompt() -> str:
+    """
+    Return the STATIC system prompt (SYSTEM_BASE_FR only).
+    No date, no profile, no opinions — those go into build_dynamic_prefix().
+    This string is token-identical across all turns → KV cache hit every time.
+    """
+    return get_prompt("SYSTEM_BASE_FR")
+
+
+def build_dynamic_prefix(
+    session_id: str,
+    user_code: str,
+    user_name: str = "",
+    voice_mode: bool = False,
 ) -> str:
-    prompt = get_prompt("SYSTEM_BASE_FR")
-    prompt += f"\n\nDate et heure actuelles : {fmt_now_fr(USER_TIMEZONES.get(user_code, 'Europe/Paris'))}."
+    """
+    Build the per-turn context block prepended to the current user message.
+    Contains: date/time, user name, profile/memory context, opinions, voice hint.
+    Runs in a thread (I/O: Redis reads via build_memory_context / get_self_memory).
+    """
+    tz = USER_TIMEZONES.get(user_code, "Europe/Paris")
+    parts: list[str] = [f"Date et heure : {fmt_now_fr(tz)}."]
 
-    # Load once — reused by build_memory_context and opinions below
+    if user_name:
+        parts.append(f"Tu parles avec {user_name}.")
+
     self_mem = get_self_memory()
 
     memory_ctx = build_memory_context(session_id, user_code, self_mem=self_mem)
     if memory_ctx:
-        prompt += f"{get_prompt('MEMORY_HEADER_FR')}\n{memory_ctx}"
+        parts.append(f"{get_prompt('MEMORY_HEADER_FR')}\n{memory_ctx}")
 
     opinions = self_mem.get("opinions", [])
     if opinions:
         ops_lines = "\n".join(f"- {o['topic']} : {o['opinion']}" for o in opinions[-10:])
-        prompt += f"\n\n=== TES OPINIONS ===\n{ops_lines}"
+        parts.append(f"=== TES OPINIONS ===\n{ops_lines}")
 
     if voice_mode:
-        prompt += get_prompt("VOICE_SUFFIX_FR")
+        parts.append(get_prompt("VOICE_SUFFIX_FR").strip())
 
-    return prompt
+    return "\n\n".join(parts)
+
+
+def augment_user_message(dynamic_prefix: str, raw_message: str) -> str:
+    """
+    Combine the dynamic prefix and the user's raw message for storage + LLM.
+    The null-byte separator lets strip_ctx_prefix() recover the raw message.
+    """
+    if not dynamic_prefix:
+        return raw_message
+    return f"{dynamic_prefix}{_CTX_SEP}{raw_message}"
+
+
+def strip_ctx_prefix(content: str) -> str:
+    """
+    Strip the dynamic context prefix from a stored user message.
+    Used by the history endpoint so the iOS app sees the original message.
+    """
+    sep = content.find(_CTX_SEP)
+    if sep != -1:
+        return content[sep + 1:]
+    return content
 
 
 # ── Context assembly ───────────────────────────────────────────────────────────
