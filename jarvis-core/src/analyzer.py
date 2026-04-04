@@ -47,30 +47,51 @@ from prompts import get_prompt
 logger = get_logger("jarvis-analyzer")
 
 
-async def analyze_exchange(user_msg: str, assistant_msg: str, existing_projects: list = None, existing_profile_keys: list = None) -> dict:
+async def analyze_exchange(
+    user_msg: str,
+    assistant_msg: str,
+    existing_projects: list = None,
+    existing_profile_keys: list = None,
+) -> dict:
     """Analyze a conversation exchange using the LLM."""
     try:
         # Show in_progress projects clearly + recent done projects (last 90 days)
         # so the LLM can avoid re-creating finished or versioned projects.
         import time as _t
+
         _now_ts = _t.time()
         _90d = 90 * 86400
+
         def _proj_label(p):
             if p.get("status") == "done":
                 return f"{p['name']} (terminé)"
             return p["name"]
+
         projects_context = (
             ", ".join(
-                _proj_label(p) for p in existing_projects
-                if isinstance(p, dict) and p.get("name") and (
-                    p.get("status") != "done" or (
-                        p.get("last_update") and
-                        (_now_ts - _t.mktime(_t.strptime(p["last_update"][:19], "%Y-%m-%dT%H:%M:%S"))) < _90d
+                _proj_label(p)
+                for p in existing_projects
+                if isinstance(p, dict)
+                and p.get("name")
+                and (
+                    p.get("status") != "done"
+                    or (
+                        p.get("last_update")
+                        and (
+                            _now_ts
+                            - _t.mktime(
+                                _t.strptime(p["last_update"][:19], "%Y-%m-%dT%H:%M:%S")
+                            )
+                        )
+                        < _90d
                     )
                 )
-            ) or "aucun"
+            )
+            or "aucun"
         )
-        profile_keys_str = ", ".join(existing_profile_keys) if existing_profile_keys else "aucune"
+        profile_keys_str = (
+            ", ".join(existing_profile_keys) if existing_profile_keys else "aucune"
+        )
         prompt = get_prompt("ANALYSIS_PROMPT").format(
             current_date=date.today().isoformat(),
             user_message=user_msg[:1000],
@@ -90,7 +111,7 @@ async def analyze_exchange(user_msg: str, assistant_msg: str, existing_projects:
             no_think=True,
             timeout=30.0,
         )
-
+        logger.debug(f"[ANALYZER RAW] {content[:300]}")
         try:
             result = extract_llm_json(content)
         except json.JSONDecodeError as exc:
@@ -107,7 +128,9 @@ async def analyze_exchange(user_msg: str, assistant_msg: str, existing_projects:
         # remembering is captured, even with no other signals.
         # The field is "memory_summary" (renamed from "should_remember" in prompt v2).
         memory_summary_text = result.get("memory_summary")
-        _has_summary = isinstance(memory_summary_text, str) and bool(memory_summary_text.strip())
+        _has_summary = isinstance(memory_summary_text, str) and bool(
+            memory_summary_text.strip()
+        )
 
         if _has_summary:
             importance += 0.40

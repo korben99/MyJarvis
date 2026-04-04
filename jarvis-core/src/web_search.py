@@ -117,7 +117,7 @@ def _extract_location(query: str) -> str:
         "pluie", "vent", "neige", "soleil", "nuage", "nuageux", "nuageuse",
         "orage", "brouillard", "brume", "humidité", "degrés", "degré",
         "mini", "maxi", "minimum", "maximum", "min", "max",
-        "aujourd'hui", "today", "demain", "tomorrow", "semaine", "week",
+        "aujourd'hui", "aujourdhui", "aujourd", "today", "demain", "tomorrow", "semaine", "week",
         "matin", "soir", "après-midi", "nuit", "maintenant", "now",
         "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche",
         "quelle", "quel", "quels", "quelles", "comment", "est-ce", "est",
@@ -138,70 +138,95 @@ def _extract_location(query: str) -> str:
 
 
 async def search_weather(query: str) -> list[dict]:
-    """Fetch current conditions + 3-day forecast from Open-Meteo."""
+    """Fetch current conditions + 3-day forecast from Open-Meteo.
+
+    Retries up to 3 times with a 3 s delay on network errors (ConnectError).
+    This handles the Mac Mini wake-from-sleep race where the network interface
+    isn't ready yet when the 07:30 briefing job fires.
+    """
     location = _extract_location(query)
     if not location:
         logger.warning("Weather: no location extracted")
         return []
-    try:
-        geo = await _HTTP.get(
-            "https://geocoding-api.open-meteo.com/v1/search",
-            params={"name": location, "count": 1, "language": "fr"},
-        )
-        geo.raise_for_status()
-        places = geo.json().get("results")
-        if not places:
-            logger.warning("Weather: location not found for '%s'", location)
+
+    _MAX_ATTEMPTS = 3
+    _RETRY_DELAY  = 3.0  # seconds between attempts
+
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            geo = await _HTTP.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={"name": location, "count": 1, "language": "fr"},
+            )
+            geo.raise_for_status()
+            places = geo.json().get("results")
+            if not places:
+                logger.warning("Weather: location not found for '%s'", location)
+                return []
+            place   = places[0]
+            lat     = place["latitude"]
+            lon     = place["longitude"]
+            name    = place.get("name", location)
+            country = place.get("country", "")
+
+            wx = await _HTTP.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude":  lat,
+                    "longitude": lon,
+                    "current":   "temperature_2m,apparent_temperature,weather_code,"
+                                 "wind_speed_10m,relative_humidity_2m",
+                    "daily":     "weather_code,temperature_2m_max,temperature_2m_min,"
+                                 "precipitation_sum,wind_speed_10m_max",
+                    "timezone":  "auto",
+                    "forecast_days": 3,
+                },
+            )
+            wx.raise_for_status()
+            data  = wx.json()
+            cur   = data.get("current", {})
+            daily = data.get("daily",   {})
+
+            condition = WEATHER_CODES.get(cur.get("weather_code", -1), "")
+            now_body  = (
+                f"Actuellement à {name} ({country}) : {cur.get('temperature_2m')}°C "
+                f"(ressenti {cur.get('apparent_temperature')}°C), {condition}. "
+                f"Vent {cur.get('wind_speed_10m')} km/h, "
+                f"Humidité {cur.get('relative_humidity_2m')}%."
+            )
+            days = [
+                f"{date}: {WEATHER_CODES.get(daily['weather_code'][i], '')} "
+                f"{daily['temperature_2m_min'][i]}–{daily['temperature_2m_max'][i]}°C, "
+                f"précip. {daily['precipitation_sum'][i]} mm, "
+                f"vent max {daily['wind_speed_10m_max'][i]} km/h"
+                for i, date in enumerate(daily.get("time", [])[:3])
+            ]
+            base_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+            logger.info("Weather: fetched forecast for %s (attempt %d)", name, attempt)
+            return [
+                {"title": f"Météo actuelle — {name}",     "body": now_body,          "url": base_url},
+                {"title": f"Prévisions 3 jours — {name}", "body": " | ".join(days),  "url": base_url},
+            ]
+
+        except Exception as exc:
+            retriable = _is_network_error(exc) or isinstance(exc, httpx.TimeoutException)
+            if retriable:
+                if attempt < _MAX_ATTEMPTS:
+                    logger.warning(
+                        "Weather: %s (attempt %d/%d), retrying in %.0fs",
+                        type(exc).__name__, attempt, _MAX_ATTEMPTS, _RETRY_DELAY,
+                    )
+                    await asyncio.sleep(_RETRY_DELAY)
+                    continue
+                logger.error(
+                    "Weather: all %d attempts failed — %s",
+                    _MAX_ATTEMPTS, type(exc).__name__,
+                )
+                return []
+            logger.error("Weather fetch error (%s): %s", type(exc).__name__, exc)
             return []
-        place   = places[0]
-        lat     = place["latitude"]
-        lon     = place["longitude"]
-        name    = place.get("name", location)
-        country = place.get("country", "")
 
-        wx = await _HTTP.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude":  lat,
-                "longitude": lon,
-                "current":   "temperature_2m,apparent_temperature,weather_code,"
-                             "wind_speed_10m,relative_humidity_2m",
-                "daily":     "weather_code,temperature_2m_max,temperature_2m_min,"
-                             "precipitation_sum,wind_speed_10m_max",
-                "timezone":  "auto",
-                "forecast_days": 3,
-            },
-        )
-        wx.raise_for_status()
-        data  = wx.json()
-        cur   = data.get("current", {})
-        daily = data.get("daily",   {})
-
-        condition = WEATHER_CODES.get(cur.get("weather_code", -1), "")
-        now_body  = (
-            f"Actuellement à {name} ({country}) : {cur.get('temperature_2m')}°C "
-            f"(ressenti {cur.get('apparent_temperature')}°C), {condition}. "
-            f"Vent {cur.get('wind_speed_10m')} km/h, "
-            f"Humidité {cur.get('relative_humidity_2m')}%."
-        )
-        days = [
-            f"{date}: {WEATHER_CODES.get(daily['weather_code'][i], '')} "
-            f"{daily['temperature_2m_min'][i]}–{daily['temperature_2m_max'][i]}°C, "
-            f"précip. {daily['precipitation_sum'][i]} mm, "
-            f"vent max {daily['wind_speed_10m_max'][i]} km/h"
-            for i, date in enumerate(daily.get("time", [])[:3])
-        ]
-        base_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
-        logger.info("Weather: fetched forecast for %s", name)
-        return [
-            {"title": f"Météo actuelle — {name}",    "body": now_body,           "url": base_url},
-            {"title": f"Prévisions 3 jours — {name}", "body": " | ".join(days),  "url": base_url},
-        ]
-    except Exception as exc:
-        if _is_network_error(exc):
-            raise
-        logger.error("Weather fetch error: %s", exc)
-        return []
+    return []  # unreachable but satisfies type checker
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -250,7 +275,7 @@ async def search_news(query: str, max_results: int = 5, region: str = "", timeli
     except Exception as exc:
         if _is_network_error(exc):
             raise
-        logger.error("News search error: %s", exc)
+        logger.warning("News search error (will retry if caller allows): %s", exc)
         return []
 
 

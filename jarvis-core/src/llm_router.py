@@ -31,13 +31,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 import httpx
-
 from config import (
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
-    ROUTER_API_URL,
     ROUTER_API_KEY,
+    ROUTER_API_URL,
     ROUTER_DATA_DIR,
     ROUTER_MODEL,
     ROUTER_TIMEOUT,
@@ -51,23 +50,23 @@ logger = get_logger("jarvis-llm-router")
 # ── Result dataclass ──────────────────────────────────────────────────────
 @dataclass
 class RouterResult:
-    use_memory:       bool
-    use_rag:          bool
-    use_web:          bool
-    use_weather:      bool
-    use_gmail:        bool
-    use_calendar:     bool
-    use_briefing:     bool
-    use_self:         bool
-    use_portfolio:    bool
-    use_reasoning:    bool
-    gmail_query:      str
-    calendar_days:    int
+    use_memory: bool
+    use_rag: bool
+    use_web: bool
+    use_weather: bool
+    use_gmail: bool
+    use_calendar: bool
+    use_briefing: bool
+    use_self: bool
+    use_portfolio: bool
+    use_reasoning: bool
+    gmail_query: str
+    calendar_days: int
     weather_location: str = field(default="")
 
 
-
 # ── Training data collector ───────────────────────────────────────────────
+
 
 def _log_routing_sample(
     message: str,
@@ -86,32 +85,32 @@ def _log_routing_sample(
     """
     os.makedirs(ROUTER_DATA_DIR, exist_ok=True)
     sample = {
-        "id":      str(uuid.uuid4()),
-        "ts":      datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+        "id": str(uuid.uuid4()),
+        "ts": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
         "message": message,
         "routing": {
             "intents": [
                 intent
                 for intent, flag in [
-                    ("memory",    result.use_memory),
-                    ("rag",       result.use_rag),
-                    ("web",       result.use_web),
-                    ("weather",   result.use_weather),
-                    ("gmail",     result.use_gmail),
-                    ("calendar",  result.use_calendar),
-                    ("briefing",  result.use_briefing),
-                    ("self",      result.use_self),
+                    ("memory", result.use_memory),
+                    ("rag", result.use_rag),
+                    ("web", result.use_web),
+                    ("weather", result.use_weather),
+                    ("gmail", result.use_gmail),
+                    ("calendar", result.use_calendar),
+                    ("briefing", result.use_briefing),
+                    ("self", result.use_self),
                     ("portfolio", result.use_portfolio),
                 ]
                 if flag
             ],
-            "gmail_query":      result.gmail_query,
-            "calendar_days":    result.calendar_days,
+            "gmail_query": result.gmail_query,
+            "calendar_days": result.calendar_days,
             "weather_location": result.weather_location,
-            "use_reasoning":    result.use_reasoning,
+            "use_reasoning": result.use_reasoning,
         },
         "model": model,
-        "ok":    None,  # null = not yet reviewed by human
+        "ok": None,  # null = not yet reviewed by human
     }
     path = os.path.join(ROUTER_DATA_DIR, "routing_samples.jsonl")
     try:
@@ -122,6 +121,7 @@ def _log_routing_sample(
 
 
 # ── Core call ─────────────────────────────────────────────────────────────
+
 
 async def llm_route(message: str, google_available: bool = True) -> RouterResult | None:
     """
@@ -136,7 +136,7 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
     """
     api_url = ROUTER_API_URL if ROUTER_MODEL else PRIMARY_API_URL
     api_key = ROUTER_API_KEY if ROUTER_MODEL else PRIMARY_API_KEY
-    model   = ROUTER_MODEL   if ROUTER_MODEL else PRIMARY_MODEL
+    model = ROUTER_MODEL if ROUTER_MODEL else PRIMARY_MODEL
 
     prompt = get_prompt("ROUTER_USER").format(message=message)
 
@@ -146,13 +146,13 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
         raw = await call_llm_async(
             [
                 {"role": "system", "content": get_prompt("ROUTER_SYSTEM")},
-                {"role": "user",   "content": prompt},
+                {"role": "user", "content": prompt},
             ],
             model=model,
             api_url=api_url,
             api_key=api_key,
             temperature=0,
-            max_tokens=250,
+            max_tokens=400,
             json_response=True,
             no_think=True,
             timeout=ROUTER_TIMEOUT,
@@ -161,7 +161,8 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
 
     except httpx.TimeoutException:
         logger.warning(
-            "LLM router timeout (%.1fs) — falling back to embedding router", ROUTER_TIMEOUT
+            "LLM router timeout (%.1fs) — falling back to embedding router",
+            ROUTER_TIMEOUT,
         )
         return None
     except (json.JSONDecodeError, KeyError) as exc:
@@ -172,7 +173,8 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
         return None
     except Exception as exc:
         logger.warning(
-            "LLM router error (%s) — falling back to embedding router", type(exc).__name__
+            "LLM router error (%s) — falling back to embedding router",
+            type(exc).__name__,
         )
         return None
 
@@ -183,32 +185,53 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
     if not intents:
         intents = ["memory"]
 
-    gmail_query:      str  = parsed.get("gmail_query") or ""
-    calendar_days:    int  = int(parsed.get("calendar_days") or 7)
-    weather_location: str  = parsed.get("weather_location") or ""
-    use_reasoning:    bool = bool(parsed.get("use_reasoning", False))
+    gmail_query: str = parsed.get("gmail_query") or ""
+    calendar_days: int = int(parsed.get("calendar_days") or 7)
+    weather_location: str = parsed.get("weather_location") or ""
+    use_reasoning: bool = bool(parsed.get("use_reasoning", False))
+
+    # ── Guardrail: prevent over-triggering reasoning on simple queries ──
+    _simple_query = (
+        len(message) < 80
+        and "?" not in message
+        and not any(
+            k in message.lower() for k in ["analyse", "explique", "compare", "pourquoi"]
+        )
+    )
+
+    if _simple_query:
+        use_reasoning = False
 
     calendar_days = max(1, min(calendar_days, 90))
 
     result = RouterResult(
-        use_memory        = "memory"    in intents,
-        use_rag           = "rag"       in intents,
-        use_web           = "web"       in intents,
-        use_weather       = "weather"   in intents,
-        use_gmail         = "gmail"     in intents and google_available,
-        use_calendar      = "calendar"  in intents and google_available,
-        use_briefing      = "briefing"  in intents,
-        use_self          = "self"      in intents,
-        use_portfolio     = "portfolio" in intents,
-        use_reasoning     = use_reasoning,
-        gmail_query       = gmail_query,
-        calendar_days     = calendar_days,
-        weather_location  = weather_location,
+        use_memory="memory" in intents,
+        use_rag="rag" in intents,
+        use_web="web" in intents,
+        use_weather="weather" in intents,
+        use_gmail="gmail" in intents and google_available,
+        use_calendar="calendar" in intents and google_available,
+        use_briefing="briefing" in intents,
+        use_self="self" in intents,
+        use_portfolio="portfolio" in intents,
+        use_reasoning=use_reasoning,
+        gmail_query=gmail_query,
+        calendar_days=calendar_days,
+        weather_location=weather_location,
     )
 
+    # ── Guardrail 2: reasoning only allowed with complex intents ──
+    if result.use_reasoning and not (
+        result.use_rag or result.use_web or result.use_portfolio
+    ):
+        result.use_reasoning = False
+
     logger.info(
-        "LLM router [%s]: intents=%s weather_location=%r gmail_query=%r calendar_days=%d use_reasoning=%s",
-        model, intents, weather_location, gmail_query, calendar_days, use_reasoning,
+        "LLM router [%s]: intents=%s | reasoning=%s → final=%s",
+        model,
+        intents,
+        parsed.get("use_reasoning"),
+        result.use_reasoning,
     )
     _log_routing_sample(message, result, model)
     return result

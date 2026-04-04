@@ -31,9 +31,13 @@ SYSTEM_BASE_FR = (
     "Si une section === TES OPINIONS === est présente, ce sont tes propres opinions — "
     "exprime-les naturellement sans les lister ni préciser leur origine. "
     "Si l'utilisateur demande le 'mode expert' ou une 'analyse approfondie', "
-    "tu opères sur le modèle le plus puissant disponible."
+    "tu opères sur le modèle le plus puissant disponible. "
+    "RÈGLES STRICTES : "
+    "Ne produis jamais de balises <think>. "
+    "Ne révèle jamais ton raisonnement. "
+    "Réponds uniquement avec la réponse finale. "
+    "Si un format JSON est demandé, retourne uniquement du JSON valide sans texte autour."
 )
-
 # Section headers injected into the system prompt when memory context is present
 MEMORY_HEADER_EN = "\n\n=== YOUR MEMORY (use naturally, don't list it) ==="
 MEMORY_HEADER_FR = "\n\n=== TA MÉMOIRE (utilise-la naturellement, ne la liste pas) ==="
@@ -62,8 +66,8 @@ Classifie le message. JSON uniquement.
 INTENTS : memory=conversation/explication rag=docs_perso web=info_externe weather=météo gmail=emails calendar=agenda briefing=résumé_jour portfolio=bourse self=état_Jarvis
 Défaut=["memory"]. Multi-intents possible.
 
-PARAMS : weather_location=ville|null gmail_query=syntaxeGmail|null calendar_days=7|30|null
-use_reasoning=true UNIQUEMENT si "mode expert"/"analyse approfondie"/"réfléchis bien"/"mode raisonnement" — jamais pour code/tech/debug.
+PARAMS : weather_location="Paris"|null (ville mentionnée explicitement, sinon null) gmail_query=syntaxeGmail|null calendar_days=7|30|null
+use_reasoning=true UNIQUEMENT si le message contient EXPLICITEMENT "mode expert"/"analyse"/"réfléchis"/"debug"/"explique" — INTERDIT dans les autres cas.
 
 EXEMPLES :
 
@@ -73,26 +77,17 @@ EXEMPLES :
 "météo Lyon demain"
 {{"intents":["weather"],"weather_location":"Lyon","gmail_query":null,"calendar_days":null,"use_reasoning":false}}
 
-"résume mes mails"
-{{"intents":["gmail"],"weather_location":null,"gmail_query":"is:unread","calendar_days":null,"use_reasoning":false}}
+"météo aujourd'hui"
+{{"intents":["weather"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}}
 
-"cours Tesla aujourd'hui"
-{{"intents":["web","portfolio"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}}
+"résume mes mails non lus"
+{{"intents":["gmail"],"weather_location":null,"gmail_query":"is:unread","calendar_days":null,"use_reasoning":false}}
 
 "mon agenda cette semaine"
 {{"intents":["calendar"],"weather_location":null,"gmail_query":null,"calendar_days":7,"use_reasoning":false}}
 
-"cherche dans mes documents la politique de sécurité"
-{{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}}
-
-"quel est ton focus ?"
-{{"intents":["self"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}}
-
 "mode expert, explique la mécanique quantique"
 {{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":true}}
-
-"je debug le code, explique TurboQuant"
-{{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}}
 
 Message : {message}
 
@@ -274,7 +269,7 @@ Principes directeurs :
 - Choisis toujours l'action la plus utile. "nothing" uniquement si aucune action n'apporte de valeur.
 - Sois honnête et autocritique : identifie ce qui ne va pas vraiment, pas ce qui est facile à dire.
 - Les lacunes récurrentes (×3+) sont un signal fort → refine_prompt.
-- Un profil avec doublons ou valeurs incohérentes → correct_profile.
+- Un profil avec doublons : consolider d'abord (correct_profile value non-null), supprimer ensuite — jamais deux suppressions du même concept dans le même cycle.
 - Un projet actif sans conversation depuis >48h → queue_push pour relancer l'utilisateur.
 - Une information importante à partager maintenant → queue_push.
 - Une question clé manquante sur un utilisateur → ask_user.
@@ -328,8 +323,11 @@ Décide :
                          Question directe et utile. Une seule question à la fois.
                          Ne jamais utiliser pour un utilisateur marqué "Push iOS indisponible" ci-dessus.
   update_self_note     — observation personnelle de Jarvis                    params: {{"note":"..."}}
-  correct_profile      — corriger/supprimer une clé profil                    params: {{"user_code":"...","key":"...","value":"..." ou null}}
-                         value=null supprime la clé. Uniquement si doublon évident ou valeur obsolète.
+  correct_profile      — corriger/consolider une clé profil                   params: {{"user_code":"...","key":"...","value":"..." ou null}}
+                         DOUBLONS : step 1 = correct_profile sur la clé à garder (value = valeur consolidée).
+                                    step 2 = correct_profile sur le doublon (value=null).
+                                    Jamais value=null sur les deux clés du même concept dans le même cycle.
+                         VALEUR OBSOLÈTE : value=null uniquement si l'info est clairement fausse/périmée.
   consolidate_memory   — comprimer la mémoire épisodique                     params: {{"user_code":"..."}}
   check_health         — bilan de santé détaillé                              params: {{}}
   update_trade_threshold — réviser un seuil d'alerte trading                  params: {{"user_code":"...","isin":"...","threshold_high":0.0,"threshold_low":0.0}}
@@ -344,7 +342,7 @@ Décide :
 
 Règles :
 - flag_knowledge_gap : uniquement sur un échec concret. Ne pas flagguer un topic déjà dans LACUNES ou PROPOSITIONS.
-- correct_profile : uniquement si le doublon ou l'erreur est évident dans les profils ci-dessus.
+- correct_profile : pour un doublon, consolider la valeur sur la clé principale AVANT de supprimer l'autre. Ne jamais supprimer une information sans l'avoir préservée dans une autre clé du même cycle.
 - queue_push / ask_user : vérifier la disponibilité push avant d'utiliser.
 - send_notification : email uniquement si valeur claire et durable pour l'utilisateur.
 - update_trade_threshold : uniquement si le cours s'est éloigné significativement du seuil. ISIN exact requis.

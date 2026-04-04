@@ -15,7 +15,6 @@ import json
 from typing import AsyncGenerator
 
 import httpx
-
 from config import (
     LLM_LOCAL,
     OPENAI_API_KEY,
@@ -24,10 +23,6 @@ from config import (
     PRIMARY_API_URL,
     PRIMARY_MODEL,
     PRIMARY_TIMEOUT,
-    REASONING_API_KEY,
-    REASONING_API_URL,
-    REASONING_MODEL,
-    REASONING_TIMEOUT,
     ROUTER_MODEL,
     VISION_API_KEY,
     VISION_API_URL,
@@ -58,18 +53,16 @@ def select_model(
     use_reasoning: bool = False,
 ) -> tuple[str, str, str, float]:
     """
-    Single decision point for LLM tier selection.
-    Returns (model_name, api_url, api_key, timeout_seconds).
-
-    Priority:
-    1. Explicit model override in the request  →  PRIMARY credentials
-    2. Router flagged use_reasoning=True        →  REASONING_MODEL (cloud, complex only)
-    3. Everything else                          →  PRIMARY_MODEL
+    Clean model selection:
+    - No model switching based on reasoning -> Mode Think on PRIMARY is activated if reasonning.
+    - Reasoning handled via no_think flag only
     """
+
+    # Override utilisateur → toujours PRIMARY infra
     if req_model:
         return req_model, PRIMARY_API_URL, PRIMARY_API_KEY, PRIMARY_TIMEOUT
-    if use_reasoning:
-        return REASONING_MODEL, REASONING_API_URL, REASONING_API_KEY, REASONING_TIMEOUT
+
+    # Toujours PRIMARY
     return PRIMARY_MODEL, PRIMARY_API_URL, PRIMARY_API_KEY, PRIMARY_TIMEOUT
 
 
@@ -95,8 +88,106 @@ async def stream_openai(
     no_think: bool = False,
     session_id: str = "",
 ) -> AsyncGenerator[str, None]:
+
+    # ── Local path (MLX) ───────────────────────────────────────────
     if LLM_LOCAL and model in _LOCAL_MODELS:
-        async for chunk in stream_local(messages, model, no_think=no_think, session_id=session_id):
+        async for chunk in stream_local(
+            messages,
+            model,
+            no_think=no_think,
+            session_id=session_id,
+        ):
+            yield chunk
+        return
+
+    # ── Remote path (OpenAI-compatible APIs) ───────────────────────
+    try:
+        client = get_stream_client(timeout)
+
+        # ── Build payload ──────────────────────────────────────────
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+        }
+
+        # ── Token param (mlx / compat providers) ──────────────────
+        try:
+            payload[tokens_param(model)] = 1024
+        except Exception:
+            pass
+
+        logger.debug(
+            "LLM call model=%s no_think=%s keys=%s",
+            model,
+            no_think,
+            list(payload.keys()),
+        )
+
+        # ── HTTP streaming ────────────────────────────────────────
+        async with client.stream(
+            "POST",
+            f"{api_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        ) as response:
+            if response.status_code != 200:
+                logger.error(
+                    "OpenAI streaming error: %s",
+                    response.status_code,
+                )
+                return
+
+            # ── Stream parsing ────────────────────────────────────
+            async for line in response.aiter_lines():
+                if not line or not line.startswith("data: "):
+                    continue
+
+                payload_str = line[6:]
+
+                if payload_str == "[DONE]":
+                    break
+
+                try:
+                    data = json.loads(payload_str)
+
+                    choice = data.get("choices", [{}])[0]
+
+                    delta = choice.get("delta") or {}
+                    message = choice.get("message") or {}
+
+                    content = delta.get("content") or message.get("content")
+
+                    if content:
+                        yield content
+
+                except json.JSONDecodeError:
+                    logger.debug(
+                        "Invalid JSON chunk: %s",
+                        payload_str[:100],
+                    )
+                    continue
+
+    except httpx.RequestError as e:
+        logger.error("OpenAI request error: %s", e)
+
+
+async def stream_openaiOLD(
+    messages: list,
+    model: str,
+    api_url: str = OPENAI_API_URL,
+    api_key: str = OPENAI_API_KEY,
+    timeout: float = 30.0,
+    no_think: bool = False,
+    session_id: str = "",
+) -> AsyncGenerator[str, None]:
+    if LLM_LOCAL and model in _LOCAL_MODELS:
+        async for chunk in stream_local(
+            messages, model, no_think=no_think, session_id=session_id
+        ):
             yield chunk
         return
 
@@ -127,7 +218,9 @@ async def stream_openai(
                     break
                 try:
                     data = json.loads(payload)
-                    content = data.get("choices", [{}])[0].get("delta", {}).get("content")
+                    content = (
+                        data.get("choices", [{}])[0].get("delta", {}).get("content")
+                    )
                     if content:
                         yield content
                 except json.JSONDecodeError:
@@ -153,10 +246,14 @@ async def _resolve_image_part(part: dict, client: httpx.AsyncClient) -> dict:
         r.raise_for_status()
         mime = (r.headers.get("content-type") or "image/jpeg").split(";")[0]
         b64 = base64.b64encode(r.content).decode()
-        logger.debug("Vision: re-encoded internal image (%s, %d bytes)", mime, len(r.content))
+        logger.debug(
+            "Vision: re-encoded internal image (%s, %d bytes)", mime, len(r.content)
+        )
         return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
     except Exception as exc:
-        logger.warning("Vision: could not fetch internal image URL (%s): %s", url[:80], exc)
+        logger.warning(
+            "Vision: could not fetch internal image URL (%s): %s", url[:80], exc
+        )
         return part
 
 

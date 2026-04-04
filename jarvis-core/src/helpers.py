@@ -62,9 +62,16 @@ from threading import Lock
 import httpx
 import pytz
 import redis
+from config import (
+    LLM_LOCAL,
+    PRIMARY_MODEL,
+    QDRANT_URL,
+    REDIS_URL,
+    ROUTER_MODEL,
+    USERS,
+    tokens_param,
+)
 from qdrant_client import QdrantClient
-
-from config import LLM_LOCAL, PRIMARY_MODEL, ROUTER_MODEL, QDRANT_URL, REDIS_URL, USERS, no_think_suffix, tokens_param
 
 if LLM_LOCAL:
     from llm_local import call_llm_local, call_llm_local_async
@@ -106,22 +113,37 @@ def setup_logging(log_file: str = "/opt/jarvis/logs/jarvis-api.log") -> None:
     os.makedirs(log_dir, exist_ok=True)
 
     # INFO+ rotating file: 5 MB × 3 backups
-    fh = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    fh = RotatingFileHandler(
+        log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
     fh.setLevel(logging.INFO)
     fh.setFormatter(fmt)
     root.addHandler(fh)
 
     # DEBUG+ rotating file: 10 MB × 2 backups
     debug_file = os.path.join(log_dir, "jarvis-debug.log")
-    dfh = RotatingFileHandler(debug_file, maxBytes=10 * 1024 * 1024, backupCount=2, encoding="utf-8")
+    dfh = RotatingFileHandler(
+        debug_file, maxBytes=10 * 1024 * 1024, backupCount=2, encoding="utf-8"
+    )
     dfh.setLevel(logging.DEBUG)
     dfh.setFormatter(fmt)
     root.addHandler(dfh)
 
     # Quiet noisy third-party loggers
-    for noisy in ("httpx", "httpcore", "primp", "sentence_transformers",
-                  "apscheduler", "urllib3", "asyncio",
-                  "rustls", "hyper_util", "h2", "reqwest", "hyper"):
+    for noisy in (
+        "httpx",
+        "httpcore",
+        "primp",
+        "sentence_transformers",
+        "apscheduler",
+        "urllib3",
+        "asyncio",
+        "rustls",
+        "hyper_util",
+        "h2",
+        "reqwest",
+        "hyper",
+    ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
@@ -139,13 +161,16 @@ _UTC = pytz.UTC
 #  TIMEZONE HELPERS
 # ══════════════════════════════════════════════════
 
+
 def get_user_tz(user_code: str) -> pytz.BaseTzInfo:
     """Return the pytz timezone for a user. Defaults to UTC on unknown code or bad name."""
     tz_name = USERS.get(user_code, {}).get("timezone", "UTC")
     try:
         return pytz.timezone(tz_name)
     except pytz.UnknownTimeZoneError:
-        logger.warning("Unknown timezone %r for user %s — falling back to UTC", tz_name, user_code)
+        logger.warning(
+            "Unknown timezone %r for user %s — falling back to UTC", tz_name, user_code
+        )
         return _UTC
 
 
@@ -167,8 +192,11 @@ def build_iso_dt(date_str: str, time_str: str, tz_name: str) -> str:
     """
     tz = pytz.timezone(tz_name)
     naive = datetime(
-        int(date_str[:4]), int(date_str[5:7]), int(date_str[8:10]),
-        int(time_str[:2]), int(time_str[3:5]),
+        int(date_str[:4]),
+        int(date_str[5:7]),
+        int(date_str[8:10]),
+        int(time_str[:2]),
+        int(time_str[3:5]),
     )
     return tz.localize(naive).isoformat()
 
@@ -195,15 +223,36 @@ def fmt_event_time(iso: str, user_code: str, fmt: str = "%d/%m %H:%M") -> str:
 
 
 _JOURS_FR = ("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
-_MOIS_FR  = ("", "janvier", "février", "mars", "avril", "mai", "juin",
-             "juillet", "août", "septembre", "octobre", "novembre", "décembre")
+_MOIS_FR = (
+    "",
+    "janvier",
+    "février",
+    "mars",
+    "avril",
+    "mai",
+    "juin",
+    "juillet",
+    "août",
+    "septembre",
+    "octobre",
+    "novembre",
+    "décembre",
+)
 
 
 _SEASONS_FR = {
-    12: "hiver", 1: "hiver", 2: "hiver",
-    3: "printemps", 4: "printemps", 5: "printemps",
-    6: "été", 7: "été", 8: "été",
-    9: "automne", 10: "automne", 11: "automne",
+    12: "hiver",
+    1: "hiver",
+    2: "hiver",
+    3: "printemps",
+    4: "printemps",
+    5: "printemps",
+    6: "été",
+    7: "été",
+    8: "été",
+    9: "automne",
+    10: "automne",
+    11: "automne",
 }
 
 
@@ -224,6 +273,7 @@ def rel_time_fr(ts: float) -> str:
     Examples: 'il y a 3 jours', 'il y a 2 semaines', 'il y a 1 mois'
     """
     import time as _time
+
     delta = _time.time() - ts
     if delta < 3600:
         m = max(1, int(delta / 60))
@@ -306,8 +356,83 @@ def redis_set_json(key: str, data, ttl: int | None = None) -> None:
 # ══════════════════════════════════════════════════
 #  LLM JSON EXTRACTION
 # ══════════════════════════════════════════════════
+def extract_llm_json(text: str) -> dict:
+    """
+    Extraction robuste de JSON depuis une réponse LLM.
+    Gère :
+    - reasoning avant/après
+    - texte parasite
+    - multiples blocs JSON
+    """
 
-def extract_llm_json(raw: str) -> dict:
+    if not text:
+        raise ValueError("Empty LLM response")
+
+    # ── 1. Nettoyage agressif ─────────────────────────────
+
+    # remove <think> blocks (Qwen3)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+    # remove known reasoning markers
+    if "Final Answer:" in text:
+        text = text.split("Final Answer:")[-1]
+
+    if "Thinking Process:" in text:
+        text = text.split("Thinking Process:")[-1]
+
+    text = text.strip()
+
+    # ── 2. Extraction JSON par parsing équilibré ──────────
+
+    start = text.find("{")
+    if start == -1:
+        raise ValueError(f"No JSON found in LLM response: {text[:200]}")
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i in range(start, len(text)):
+        char = text[i]
+
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+
+            if depth == 0:
+                candidate = text[start : i + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    break  # fallback
+
+    # ── 3. Fallback (sale mais utile) ─────────────────────
+
+    matches = re.findall(r"\{.*\}", text, re.DOTALL)
+    for candidate in reversed(matches):  # try biggest first
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+
+    raise ValueError(f"Invalid JSON in LLM response: {text[:200]}")
+
+
+def extract_llm_jsonOLD(raw: str) -> dict:
     """
     Parse JSON from a model response robustly.
 
@@ -393,23 +518,15 @@ def _llm_body(
     temperature: float,
     max_tokens: int,
     json_response: bool,
-    no_think: bool = False,
 ) -> dict:
     """
     Build the JSON body for a /chat/completions request.
 
-    - no_think=True appends /no_think to the last message (Qwen only, no-op elsewhere).
-      Use for fast JSON-output tasks (router, analyzer, query builders) where
-      chain-of-thought would break parsing or waste tokens.
-      Leave False (default) for reasoning-heavy tasks (self-reflection, user questions).
     - Uses tokens_param() to pick max_tokens vs max_completion_tokens.
     - Sets response_format when json_response=True.
+    - Thinking control (no_think) is handled at the MLX prompt level for local
+      models (_build_prompt via enable_thinking), not at the HTTP body level.
     """
-    if no_think:
-        suffix = no_think_suffix(model)
-        if suffix:
-            last = messages[-1]
-            messages = [*messages[:-1], {**last, "content": last["content"] + suffix}]
 
     body: dict = {
         "model": model,
@@ -442,13 +559,18 @@ def call_llm(
     """
     if LLM_LOCAL and model in _LOCAL_MODELS:
         return call_llm_local(
-            messages, model=model, temperature=temperature,
-            max_tokens=max_tokens, no_think=no_think,
+            messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            no_think=no_think,
         )
     resp = _get_llm_sync_client().post(
         f"{api_url}/chat/completions",
         headers=_llm_headers(api_key),
-        json=_llm_body(messages, model, temperature, max_tokens, json_response, no_think),
+        json=_llm_body(
+            messages, model, temperature, max_tokens, json_response
+        ),
         timeout=timeout,
     )
     resp.raise_for_status()
@@ -475,13 +597,18 @@ async def call_llm_async(
     """
     if LLM_LOCAL and model in _LOCAL_MODELS:
         return await call_llm_local_async(
-            messages, model=model, temperature=temperature,
-            max_tokens=max_tokens, no_think=no_think,
+            messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            no_think=no_think,
         )
     resp = await _get_llm_async_client().post(
         f"{api_url}/chat/completions",
         headers=_llm_headers(api_key),
-        json=_llm_body(messages, model, temperature, max_tokens, json_response, no_think),
+        json=_llm_body(
+            messages, model, temperature, max_tokens, json_response
+        ),
         timeout=timeout,
     )
     resp.raise_for_status()

@@ -4,6 +4,8 @@ venv/
 .config
 .bash_history
 jarvis-core/__pycache__
+.pytest_cache
+
 
 #FILES#
 logs/

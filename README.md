@@ -138,6 +138,12 @@ Everything else (chat, questions, summaries, portfolio, translations, writing, c
 **Local MLX mode (`LLM_LOCAL=yes`):**
 When `LLM_LOCAL=yes`, Jarvis uses `mlx_lm` directly (no HTTP server) — models are loaded into unified memory at startup. Set `HF_HOME` to control where models are stored. Download models with `python scripts/download_models.py`.
 
+**KV cache quantization (`QUANT_KV=yes`):**
+- Uses mlx_lm's built-in `QuantizedKVCache` (Metal-accelerated, no monkey-patching).
+- Applied only to the primary model via `_get_session_cache` — the router keeps a standard cache.
+- `QUANT_KV_BITS=4` (default) — 4× memory bandwidth reduction during decode (~420 MB → ~105 MB/step at 3200-token context, 64 layers). Use `8` for near-lossless quality if regressions are observed.
+- Compatible with the per-session prefix cache (`_session_kv` LRU). The quantized tensors are exact enough for multi-turn coherence.
+
 **Thinking control:**
 - `THINKING_BUDGET_TOKENS` (default 1024) — limits `<think>` block length via `thinking_budget` kwarg in the chat template. Applied per-call without modifying message content (KV-cache safe).
 - Router/analyzer calls always disable thinking (`thinking_budget=0`) — prevents `<think>` blocks from breaking JSON parsing.

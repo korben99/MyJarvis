@@ -30,18 +30,24 @@ class JarvisAPI: ObservableObject {
     // prevents these from hanging for the URLSession.shared default of 60 s.
     private let apiSession: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest  = 10
-        config.timeoutIntervalForResource = 30
+        config.timeoutIntervalForRequest  = 20
+        config.timeoutIntervalForResource = 60
         return URLSession(configuration: config)
     }()
 
     // URLSession for SSE streaming. URLSession.shared has a 7-day resource timeout —
     // a server that hangs mid-stream would hold the connection open indefinitely.
-    // 120 s resource timeout kills a stalled stream well within any reasonable LLM latency.
+    //
+    // timeoutIntervalForRequest  = time without receiving ANY byte (= TTFT budget).
+    //   Worst case: 512-token think budget (~8 s) + large-context prefill (~12 s)
+    //   + _infer_lock wait (~5 s) = ~25 s. 60 s gives a 35 s safety margin.
+    // timeoutIntervalForResource = total stream duration cap.
+    //   Longest plausible response: 2000-token briefing @ 60 tok/s (~33 s) + 25 s TTFT
+    //   = ~58 s. 180 s kills truly stalled streams without cutting off legitimate ones.
     private let sseSession: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest  = 30
-        config.timeoutIntervalForResource = 120
+        config.timeoutIntervalForRequest  = 60
+        config.timeoutIntervalForResource = 180
         return URLSession(configuration: config)
     }()
 

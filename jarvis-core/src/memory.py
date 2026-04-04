@@ -279,8 +279,8 @@ def _normalize_profile_key(user_code: str, new_key: str, existing_keys: list[str
             model=ROUTER_MODEL,
             api_url=ROUTER_API_URL,
             api_key=ROUTER_API_KEY,
-            temperature=0.0,
-            max_tokens=40,
+            temperature=0.1,
+            max_tokens=80,
             no_think=True,
             timeout=ROUTER_TIMEOUT,
         )
@@ -302,13 +302,19 @@ def update_user_profile(user_code: str, key: str, value: str | None):
     Preventive duplicate guard: before writing a new key, the router LLM checks
     whether it is semantically equivalent to an existing key.  If a match is found,
     the old key is deleted before the new one is written, preventing profile bloat.
+
+    Every write/delete is mirrored to the shadow timestamp hash
+    user:{user_code}:profile:ts so that curative cleanup can reason about recency.
     """
     r = get_redis()
     profile_redis_key = f"user:{user_code}:profile"
+    profile_ts_key    = f"user:{user_code}:profile:ts"
 
     if value is None:
+        old_val = r.hget(profile_redis_key, key)
         r.hdel(profile_redis_key, key)
-        logger.info("User %s profile deleted: %s", user_code, key)
+        r.hdel(profile_ts_key, key)
+        logger.info("User %s profile deleted: %s (was: %s)", user_code, key, old_val or "(empty)")
     else:
         existing_keys = r.hkeys(profile_redis_key)
 
@@ -317,9 +323,14 @@ def update_user_profile(user_code: str, key: str, value: str | None):
         # key and write under the new name — no value merging, each key is atomic.
         duplicate = _normalize_profile_key(user_code, key, existing_keys)
         if duplicate:
+            old_dup_val = r.hget(profile_redis_key, duplicate)
+            logger.info("User %s profile key normalized: '%s' (was: %s) → replaced by '%s'",
+                        user_code, duplicate, old_dup_val or "(empty)", key)
             r.hdel(profile_redis_key, duplicate)
+            r.hdel(profile_ts_key, duplicate)
 
         r.hset(profile_redis_key, key, value)
+        r.hset(profile_ts_key, key, int(time.time()))
         logger.info("User %s profile updated: %s = %s", user_code, key, value)
 
 
@@ -889,7 +900,7 @@ def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str 
                         points=[m["_id"]],
                     )
         except Exception as _e:
-            logger.debug("Memory reinforcement failed (non-blocking): %s", _e)
+            logger.warning("Memory reinforcement failed (non-blocking): %s", _e)
 
         # Strip internal fields before returning
         for m in top:
@@ -1100,8 +1111,8 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
         scalars: list[tuple[str, str]] = []
         for k, v in profile.items():
             if ":" in k:
-                category, _ = k.split(":", 1)
-                grouped.setdefault(category, []).append(v)
+                category, subkey = k.split(":", 1)
+                grouped.setdefault(category, []).append(f"{subkey}={v}")
             else:
                 scalars.append((k, v))
         for k, v in scalars:
@@ -1245,6 +1256,13 @@ Si aucun fait durable : {{"facts": []}}"""
             facts = parsed.get("facts", []) if isinstance(parsed, dict) else []
             facts = [f.strip().strip('"\'')[:300] for f in facts if isinstance(f, str) and f.strip()]
 
+            if not facts:
+                logger.warning(
+                    "[%s] Consolidation: LLM returned 0 facts for %d episodic points — skipping deletion",
+                    user_code, len(point_ids),
+                )
+                break
+
             for fact in facts:
                 store_autobiographical_event(user_code, fact, MEMORY_CONSOLIDATION_IMPORTANCE)
 
@@ -1282,22 +1300,42 @@ def _curative_profile_cleanup(user_code: str):
     Skip condition: profile has fewer than 5 keys (not worth the LLM call).
     """
     r = get_redis()
-    profile = r.hgetall(f"user:{user_code}:profile")
+    profile_redis_key = f"user:{user_code}:profile"
+    profile_ts_key    = f"user:{user_code}:profile:ts"
+    profile = r.hgetall(profile_redis_key)
     if len(profile) < 5:
         return
 
     try:
-        profile_str = "\n".join(f'- "{k}": {v}' for k, v in profile.items())
+        timestamps = r.hgetall(profile_ts_key)  # key → unix timestamp string (may be empty for old keys)
+
+        def _fmt_ts(k: str) -> str:
+            raw = timestamps.get(k)
+            if not raw:
+                return "inconnu"
+            try:
+                from datetime import datetime, timezone
+                return datetime.fromtimestamp(int(raw), tz=timezone.utc).strftime("%Y-%m-%d")
+            except Exception:
+                return "inconnu"
+
+        profile_str = "\n".join(
+            f'- "{k}" (mis à jour : {_fmt_ts(k)}): {v}' for k, v in profile.items()
+        )
         prompt = (
             f"Voici le profil Redis d'un utilisateur ({len(profile)} clés) :\n"
             f"{profile_str}\n\n"
-            f"Identifie les clés à supprimer parmi :\n"
-            f"1. Doublons sémantiques — même information sous deux noms différents "
-            f"(garde la clé la plus descriptive/récente, supprime l'autre)\n"
-            f"2. Entrées obsolètes ou contredites par une autre clé plus récente\n\n"
-            f"Réponds uniquement en JSON, rien d'autre : "
-            f'{{\"keys_to_delete\": [\"clé1\", \"clé2\"]}} '
-            f"ou {{\"keys_to_delete\": []}} si le profil est propre."
+            f"Identifie les doublons sémantiques (même information sous deux noms différents) "
+            f"et les entrées obsolètes (contredites par une clé plus récente).\n\n"
+            f"RÈGLE OBLIGATOIRE pour les doublons :\n"
+            f"  step 1 — consolide la valeur sur la clé à conserver dans 'updates'\n"
+            f"  step 2 — liste la clé à supprimer dans 'keys_to_delete'\n"
+            f"  En cas de doute sur laquelle garder, préfère la plus récente (date dans le profil).\n"
+            f"  Ne jamais mettre les DEUX clés du même concept dans 'keys_to_delete'.\n\n"
+            f"Format JSON strict :\n"
+            f'{{"updates": {{"cle_a_garder": "valeur_consolidee"}}, '
+            f'"keys_to_delete": ["cle_doublon"]}}\n'
+            f"ou {{'updates': {{}}, 'keys_to_delete': []}} si le profil est propre."
         )
 
         parsed = extract_llm_json(call_llm(
@@ -1305,18 +1343,38 @@ def _curative_profile_cleanup(user_code: str):
             model=PRIMARY_MODEL,
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
-            temperature=0.0,
-            max_tokens=120,
+            temperature=0.1,
+            max_tokens=200,
             no_think=True,
             timeout=30.0,
         ))
+
+        # Apply consolidation updates BEFORE any deletion (merge-before-delete)
+        updates = parsed.get("updates", {}) if isinstance(parsed, dict) else {}
+        now_ts = int(time.time())
+        for key, value in updates.items():
+            if key in profile and isinstance(value, str) and value.strip():
+                r.hset(profile_redis_key, key, value.strip())
+                r.hset(profile_ts_key, key, now_ts)
+                logger.info("[%s] Curative profile update: '%s' → '%s'", user_code, key, value.strip())
+
         # Only delete keys that actually exist in the profile (safety guard)
         keys_to_delete = [k for k in parsed.get("keys_to_delete", []) if k in profile]
 
+        # Safety: never delete a key that was just updated (merge target)
+        keys_to_delete = [k for k in keys_to_delete if k not in updates]
+
         if keys_to_delete:
-            r.hdel(f"user:{user_code}:profile", *keys_to_delete)
+            for key in keys_to_delete:
+                old_val = r.hget(profile_redis_key, key)
+                logger.warning(
+                    "[%s] Curative profile cleanup: DELETE '%s' (was: %s, ts: %s)",
+                    user_code, key, old_val or "(empty)", _fmt_ts(key),
+                )
+            r.hdel(profile_redis_key, *keys_to_delete)
+            r.hdel(profile_ts_key, *keys_to_delete)
             logger.info("[%s] Curative profile cleanup: deleted %s", user_code, keys_to_delete)
-        else:
+        elif not updates:
             logger.info("[%s] Curative profile cleanup: profile is clean", user_code)
 
     except Exception as exc:

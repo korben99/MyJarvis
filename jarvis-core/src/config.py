@@ -31,7 +31,7 @@ ROUTER_TIMEOUT = float(os.getenv("ROUTER_TIMEOUT") or "6")
 PRIMARY_MODEL = os.getenv("PRIMARY_MODEL", "gpt-4o-mini")
 PRIMARY_API_URL = os.getenv("PRIMARY_API_URL") or OPENAI_API_URL
 PRIMARY_API_KEY = os.getenv("PRIMARY_API_KEY") or OPENAI_API_KEY
-PRIMARY_TIMEOUT = float(os.getenv("PRIMARY_TIMEOUT") or "60")
+PRIMARY_TIMEOUT = float(os.getenv("PRIMARY_TIMEOUT") or "120")
 
 # ── Tier 3 — Reasoning model (complex queries only, cloud-gated) ─────────
 # Now:    GPT-5.1 (cloud)   → set REASONING_MODEL + optionally REASONING_API_*
@@ -39,7 +39,7 @@ PRIMARY_TIMEOUT = float(os.getenv("PRIMARY_TIMEOUT") or "60")
 REASONING_MODEL = os.getenv("REASONING_MODEL") or PRIMARY_MODEL
 REASONING_API_URL = os.getenv("REASONING_API_URL") or OPENAI_API_URL
 REASONING_API_KEY = os.getenv("REASONING_API_KEY") or OPENAI_API_KEY
-REASONING_TIMEOUT = float(os.getenv("REASONING_TIMEOUT") or "90")
+REASONING_TIMEOUT = float(os.getenv("REASONING_TIMEOUT") or "180")
 
 # ── Vision model (image description — first stage of two-stage pipeline) ──
 # Set to a vision-capable model (Qwen2.5-VL, gpt-4o, gpt-5.1, …).
@@ -47,7 +47,7 @@ REASONING_TIMEOUT = float(os.getenv("REASONING_TIMEOUT") or "90")
 VISION_MODEL = os.getenv("VISION_MODEL") or PRIMARY_MODEL
 VISION_API_URL = os.getenv("VISION_API_URL") or OPENAI_API_URL
 VISION_API_KEY = os.getenv("VISION_API_KEY") or OPENAI_API_KEY
-VISION_TIMEOUT = float(os.getenv("VISION_TIMEOUT") or "30")
+VISION_TIMEOUT = float(os.getenv("VISION_TIMEOUT") or "60")
 
 # ── Local LLM mode — Apple Silicon / mlx-lm (M4 Pro) ─────────────────────
 # Activé par LLM_LOCAL=yes dans .env.
@@ -73,12 +73,12 @@ if LLM_LOCAL:
     PRIMARY_MODEL = os.getenv(
         "PRIMARY_MODEL_LOCAL", "inferencerlabs/Qwen3.5-35B-A3B-MLX-5.5bit"
     )
-    VISION_MODEL = os.getenv(
-        "VISION_MODEL_LOCAL", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"
-    )
+    # Vision reste sur API cloud même en mode local (appels rares, libère ~5 GB RAM).
+    # VISION_MODEL / VISION_API_URL / VISION_API_KEY sont lus plus haut depuis .env,
+    # donc déjà configurés pour OpenAI — ne pas écraser ici.
 
     logger.info(
-        "Mode LLM local activé (import direct MLX) — router: %s  primary: %s  vision: %s",
+        "Mode LLM local activé (import direct MLX) — router: %s  primary: %s  vision: %s (cloud)",
         ROUTER_MODEL,
         PRIMARY_MODEL,
         VISION_MODEL,
@@ -119,15 +119,6 @@ def tokens_param(model: str) -> str:
     )
 
 
-def no_think_suffix(model: str) -> str:
-    """
-    Return '/no_think' suffix for Qwen3 models to disable chain-of-thought.
-    Required for JSON-output tasks (router, analyzer) — prevents <think> blocks
-    from breaking JSON parsing. Empty string for all other models.
-    """
-    return "\n/no_think" if is_qwen(model) else ""
-
-
 # ── Infrastructure ────────────────────────────────────────────────────────
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
@@ -152,7 +143,9 @@ BRIEFING_TIMEZONE = os.getenv("BRIEFING_TIMEZONE", "Europe/Paris")
 
 # ── Proto-self reflection loop ─────────────────────────────────────────────
 REFLECTION_INTERVAL_HOURS = int(os.getenv("REFLECTION_INTERVAL_HOURS", "6"))
-MAX_REFLECTION_TOKENS = 6000  # think block (~2000-4000) + JSON output (~500)
+MAX_REFLECTION_TOKENS = (
+    2000  # no_think=True → JSON output only (~500-1000 tok, no reasoning chain)
+)
 MAX_CHAIN_ITERATIONS = int(
     os.getenv("MAX_CHAIN_ITERATIONS", "3")
 )  # max actions per reflection cycle

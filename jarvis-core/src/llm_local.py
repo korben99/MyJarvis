@@ -7,13 +7,13 @@ Les modèles sont chargés une seule fois au démarrage (preload_models) ou
 au premier appel (lazy). Router et Primary partagent le même objet si leur
 chemin est identique (optimisation un-seul-modèle).
 
-TurboQuant KV cache (TURBO_QUANT=yes) :
-  Applique apply_turboquant_cache après le chargement pour étendre la
-  fenêtre de contexte sans surcoût mémoire proportionnel.
+KV cache quantifié (QUANT_KV=yes) :
+  Utilise QuantizedKVCache de mlx_lm pour réduire la bande passante mémoire
+  pendant le décodage (4-bit = 4× moins de données lues par token généré).
+  S'applique uniquement au modèle primaire (le routeur garde KVCache standard).
   Variables d'environnement :
-    TURBO_QUANT=yes          activer (défaut : non)
-    TURBO_QUANT_BITS=3       bits de quantification KV (défaut : 3)
-    TURBO_QUANT_SINK=128     fp16_sink_size en tokens (défaut : 128)
+    QUANT_KV=yes       activer (défaut : non)
+    QUANT_KV_BITS=4    bits de quantification (4 ou 8, défaut : 4)
 
 Exports publics :
   preload_models()            → charge les modèles au démarrage (main.py lifespan)
@@ -27,22 +27,24 @@ import logging
 import os
 import threading
 from collections import OrderedDict
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from config import (
     LLM_LOCAL,
     PRIMARY_MODEL,
     ROUTER_MODEL,
     THINKING_BUDGET_TOKENS,
-    no_think_suffix,
+    is_qwen3,
 )
 from mlx_lm import generate, load, stream_generate
 from mlx_lm.sample_utils import make_sampler
 
 try:
-    from mlx_lm.models.cache import make_prompt_cache as _make_prompt_cache
+    import mlx_lm.models.cache as _cache_mod
+
     _KV_CACHE_AVAILABLE = True
 except ImportError:
+    _cache_mod = None
     _KV_CACHE_AVAILABLE = False
 
 HF_HOME = os.getenv("HF_HOME", "/opt/jarvis/models")
@@ -53,11 +55,10 @@ os.environ["TRANSFORMERS_CACHE"] = os.environ["HF_HUB_CACHE"]
 logger = logging.getLogger("jarvis-llm-local")
 
 
-# ── TurboQuant ────────────────────────────────────────────────────────────
+# ── KV cache quantifié ────────────────────────────────────────────────────
 
-TURBO_QUANT = os.getenv("TURBO_QUANT", "").lower() in ("yes", "true", "1")
-TURBO_QUANT_BITS = int(os.getenv("TURBO_QUANT_BITS", "3"))
-TURBO_QUANT_SINK = int(os.getenv("TURBO_QUANT_SINK", "128"))
+QUANT_KV = os.getenv("QUANT_KV", "").lower() in ("yes", "true", "1")
+QUANT_KV_BITS = int(os.getenv("QUANT_KV_BITS", "4"))
 
 
 # ── Registre de modèles ───────────────────────────────────────────────────
@@ -69,39 +70,85 @@ _infer_lock = (
 )  # sérialise toutes les inférences MLX (contrainte Metal GPU)
 
 # ── Session KV cache (prefix caching) ─────────────────────────────────────
-# Stores one mlx_lm prompt_cache object per session_id.
-# The cache accumulates KV pairs turn-by-turn; only new tokens are processed
-# each turn once the common prefix (system + history) is cached.
-# LRU eviction keeps memory bounded.
+# Key: "{session_id}:{'nt'|'think'}" — thinking mode included to prevent
+# prefix-token mismatch (enable_thinking changes the generation prompt suffix).
+# Both modes cache independently; LRU eviction keeps memory bounded.
 
-_session_kv: OrderedDict = OrderedDict()   # session_id → prompt_cache object
-_MAX_SESSIONS = 5                          # max concurrent session caches
+_session_kv: OrderedDict = OrderedDict()        # cache_key → prompt_cache object
+_session_kv_first_hash: dict[str, int] = {}     # cache_key → hash(messages[1].content)
+_MAX_SESSIONS = 5  # max concurrent session caches
 
 
-def _get_session_cache(session_id: str, model):
+def _strip_thinking(text: str) -> str:
+    if not text:
+        return text
+
+    # Cas Qwen / instruct
+    if "Final Answer:" in text:
+        return text.split("Final Answer:")[-1].strip()
+
+    # Cas classique reasoning leak
+    if "Thinking Process:" in text:
+        return text.split("Thinking Process:")[-1].strip()
+
+    return text
+
+
+def _get_session_cache(session_id: str, model, no_think: bool = False):
     """
-    Return the existing KV cache for this session (LRU refresh) or create a new one.
-    Thread-safe: called from _worker thread while _infer_lock is held.
+    Return the existing KV cache for this session/mode (LRU refresh) or create a new one.
+    Thread-safe: called from inference thread while _infer_lock is held.
+
+    Cache key = session_id + thinking mode.
+    Rationale: enable_thinking=False appends '<think>\\n\\n</think>\\n\\n' to the prompt,
+    enable_thinking=True appends '<think>\\n'. These are different generation-prompt suffixes,
+    so KV state built under one mode is invalid for the other. Separating the keys allows
+    both modes to benefit from prefix caching independently.
     """
     if not _KV_CACHE_AVAILABLE or not session_id:
         return None
-    if session_id in _session_kv:
-        _session_kv.move_to_end(session_id)
-        return _session_kv[session_id]
+    # Include thinking mode in key to prevent prefix-token mismatch
+    cache_key = f"{session_id}:{'nt' if no_think else 'think'}"
+    if cache_key in _session_kv:
+        _session_kv.move_to_end(cache_key)
+        cache = _session_kv[cache_key]
+        offset = _kv_offset(cache)
+        logger.debug(
+            "KV cache: HIT  key=%s offset=%s slots=%d/%d",
+            cache_key,
+            offset,
+            len(_session_kv),
+            _MAX_SESSIONS,
+        )
+        return cache
     # Evict oldest if at capacity
     if len(_session_kv) >= _MAX_SESSIONS:
         evicted, _ = _session_kv.popitem(last=False)
-        logger.debug("KV cache: evicted session %s", evicted)
-    cache = _make_prompt_cache(model)
-    _session_kv[session_id] = cache
-    logger.debug("KV cache: new session %s (total=%d)", session_id, len(_session_kv))
+        _session_kv_first_hash.pop(evicted, None)
+        logger.debug(
+            "KV cache: EVICT key=%s slots=%d/%d",
+            evicted,
+            len(_session_kv),
+            _MAX_SESSIONS,
+        )
+
+    cache = _cache_mod.make_prompt_cache(model)
+    logger.debug(
+        "KV cache: MISS  key=%s slots=%d/%d", cache_key, len(_session_kv), _MAX_SESSIONS
+    )
+    _session_kv[cache_key] = cache
     return cache
+
+
+def _kv_offset(cache) -> str:
+    """Extract KV cache offset for logging (list-of-layers or single object)."""
+    obj = cache[0] if isinstance(cache, list) and cache else cache
+    return str(getattr(obj, "offset", "?"))
 
 
 def _load_model(model_path: str) -> tuple:
     """
-    Charge un modèle mlx-lm et applique TurboQuant si activé.
-    Thread-safe via double-checked locking.
+    Charge un modèle mlx-lm. Thread-safe via double-checked locking.
     """
     if model_path in _model_cache:
         return _model_cache[model_path]
@@ -111,60 +158,7 @@ def _load_model(model_path: str) -> tuple:
             return _model_cache[model_path]
 
         logger.info("Chargement modèle MLX : %s", model_path)
-
-        logger.info("Loading model from: %s", model_path)
-        logger.info("Exists: %s", os.path.exists(model_path))
-
         model, tokenizer = load(model_path)
-
-        if TURBO_QUANT:
-            try:
-                import mlx_lm.models.cache as _cache_mod
-                from mlx_core.cache import TurboQuantKVCache, apply_turboquant_cache
-
-                apply_turboquant_cache(
-                    model,
-                    bits=TURBO_QUANT_BITS,
-                    fp16_sink_size=TURBO_QUANT_SINK,
-                )
-                # Re-patch make_prompt_cache pour les architectures Qwen3 MoE
-                # où head_dim est sur l.self_attn et non directement sur la couche.
-                _bits, _sink = TURBO_QUANT_BITS, TURBO_QUANT_SINK
-
-                class _PatchedCache(TurboQuantKVCache):
-                    def __init__(self, head_dim, n_kv_heads, **kwargs):
-                        super().__init__(
-                            head_dim=head_dim,
-                            n_kv_heads=n_kv_heads,
-                            pq_bits=_bits,
-                            fp16_sink_size=_sink,
-                        )
-
-                def _make_prompt_cache(m, max_kv_size=None):
-                    caches = []
-                    for layer in m.layers:
-                        attn = getattr(layer, "self_attn", layer)
-                        hd = getattr(attn, "head_dim", None) or getattr(
-                            layer, "head_dim", 64
-                        )
-                        nkv = getattr(attn, "n_kv_heads", None) or getattr(
-                            layer, "n_kv_heads", 8
-                        )
-                        caches.append(_PatchedCache(head_dim=hd, n_kv_heads=nkv))
-                    return caches
-
-                _cache_mod.make_prompt_cache = _make_prompt_cache
-                logger.info(
-                    "TurboQuant activé : bits=%d sink=%d",
-                    TURBO_QUANT_BITS,
-                    TURBO_QUANT_SINK,
-                )
-            except ImportError:
-                logger.warning(
-                    "TURBO_QUANT=yes mais mlx_core.cache introuvable — "
-                    "installer mlx-core ou désactiver TURBO_QUANT"
-                )
-
         _model_cache[model_path] = (model, tokenizer)
         logger.info("Modèle prêt : %s", model_path)
         return model, tokenizer
@@ -185,11 +179,18 @@ def preload_models() -> None:
 
     # Warmup JIT : déclenche la compilation MLX au démarrage, pas au 1er appel utilisateur.
     # Sans ça, le 1er generate() peut prendre 3-5s supplémentaires (JIT + graph build).
-    warmup_msgs = [{"role": "user", "content": "ok"}]
+    warmup_msgs = [
+        {"role": "system", "content": "Tu es un assistant."},
+        {"role": "user", "content": "Salut"},
+    ]
     for path in model_paths:
         try:
             _generate_sync(
-                path, warmup_msgs, temperature=0.0, max_tokens=1, no_think=False
+                path,
+                warmup_msgs,
+                temperature=0.0,
+                max_tokens=32,  # assez pour le JIT sans déclencher le warning de troncature
+                no_think=True,
             )
             logger.info("MLX warmup OK : %s", path)
         except Exception as exc:
@@ -206,41 +207,35 @@ def _build_prompt(
     no_think: bool,
 ) -> str:
     """
-    Convertit les messages OpenAI en prompt via le chat template du tokenizer.
+    Construit le prompt final via apply_chat_template.
 
-    KV-cache compatibility: message content is NEVER modified here.
-    Instead of appending /no_think to the last message (which would change
-    the cached token sequence), we use thinking_budget=0 which the template
-    inserts near the generation prompt — after the cacheable prefix.
+    Qwen3.x uniquement : passe enable_thinking pour contrôler le bloc <think>.
+      enable_thinking=False → <think>\\n\\n</think>\\n\\n inséré (no-think)
+      enable_thinking=True  → <think>\\n inséré (thinking libre)
 
-    no_think=True  → thinking_budget=0   (disables <think> block entirely)
-    no_think=False → thinking_budget=THINKING_BUDGET_TOKENS (limits think length)
+    Fallback : si enable_thinking n'est pas accepté (TypeError), réessaie sans.
     """
-    budget = 0 if no_think else THINKING_BUDGET_TOKENS
-    try:
-        return tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            thinking_budget=budget,
-        )
-    except TypeError:
-        # Tokenizer does not support thinking_budget — fall back to suffix for no_think
-        if no_think:
-            suffix = no_think_suffix(model_path)
-            if suffix:
-                last = messages[-1]
-                messages = [*messages[:-1], {**last, "content": last["content"] + suffix}]
-        return tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+    qwen3 = is_qwen3(model_path)
+    base_kwargs: dict[str, Any] = {"tokenize": False, "add_generation_prompt": True}
+
+    if qwen3:
+        try:
+            think_kwargs: dict[str, Any] = {"enable_thinking": not no_think}
+            # Cap the think block when thinking is enabled — prevents unbounded
+            # token generation in <think> (e.g. 8000+ tokens → 137s inference).
+            # THINKING_BUDGET_TOKENS=0 means no cap (unlimited).
+            if not no_think and THINKING_BUDGET_TOKENS > 0:
+                think_kwargs["thinking_budget"] = THINKING_BUDGET_TOKENS
+            return tokenizer.apply_chat_template(messages, **base_kwargs, **think_kwargs)
+        except TypeError:
+            # Tokenizer version does not support enable_thinking — fall through
+            logger.debug("enable_thinking not supported for %s — retrying without", model_path.split("/")[-1])
+
+    return tokenizer.apply_chat_template(messages, **base_kwargs)
+
 
 
 # ── Inférence synchrone (cœur) ────────────────────────────────────────────
-
-
 def _generate_sync(
     model_path: str,
     messages: list[dict],
@@ -252,16 +247,59 @@ def _generate_sync(
     """Génération complète (non-streaming). Bloquant — wrapper pour asyncio.to_thread."""
     model, tokenizer = _load_model(model_path)
     prompt = _build_prompt(messages, tokenizer, model_path, no_think)
-    kv_cache = _get_session_cache(session_id, model)
-    return generate(
+
+    # ── Stats prompt ───────────────────────────────────────────────
+    prompt_tokens = len(tokenizer.encode(prompt))
+
+    kv_cache = _get_session_cache(session_id, model, no_think)
+    quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if QUANT_KV else {}
+    result = generate(
         model,
         tokenizer,
         prompt=prompt,
         max_tokens=max_tokens,
-        sampler=make_sampler(temp=temperature),
+        sampler=make_sampler(
+            temp=temperature,
+            top_p=0.9,
+            min_p=0.05,
+        ),
         verbose=False,
         **({"prompt_cache": kv_cache} if kv_cache is not None else {}),
+        **quant_kwargs,
     )
+
+    # ── Stats réponse ──────────────────────────────────────────────
+    resp_tokens = len(tokenizer.encode(result))
+    thinking_active = "</think>" in result
+    model_short = model_path.split("/")[-1]
+    logger.debug(
+        "[LLM-STATS] %s | no_think=%s thinking=%s | prompt=%d tok | resp=%d/%d tok",
+        model_short,
+        no_think,
+        thinking_active,
+        prompt_tokens,
+        resp_tokens,
+        max_tokens,
+    )
+    if resp_tokens >= int(max_tokens * 0.9):
+        logger.warning(
+            "[LLM-STATS] POSSIBLE TRUNCATION — resp=%d tok near limit=%d (model=%s no_think=%s)",
+            resp_tokens,
+            max_tokens,
+            model_short,
+            no_think,
+        )
+
+    # ── Strip thinking block, keep actual answer ──────────────────
+    # split("</think>", 1)[-1] → keeps everything AFTER </think>
+    # Truncated case: model hit token budget mid-reasoning → no </think>.
+    # Discard from <think> onwards to avoid leaking raw reasoning.
+    if "</think>" in result:
+        result = result.split("</think>", 1)[-1].strip()
+    elif "<think>" in result:
+        result = result.split("<think>", 1)[0].strip()
+
+    return _strip_thinking(result)
 
 
 # ── API publique ──────────────────────────────────────────────────────────
@@ -282,7 +320,9 @@ def call_llm_local(
     Depuis du code async, toujours appeler via asyncio.to_thread pour ne pas
     bloquer la boucle événementielle.
     """
-    return _generate_sync(model, messages, temperature, max_tokens, no_think, session_id)
+    return _generate_sync(
+        model, messages, temperature, max_tokens, no_think, session_id
+    )
 
 
 async def call_llm_local_async(
@@ -317,7 +357,13 @@ async def call_llm_local_async(
         )
         # ====DEBUG====
         result = await asyncio.to_thread(
-            _generate_sync, model, messages, temperature, max_tokens, no_think, session_id
+            _generate_sync,
+            model,
+            messages,
+            temperature,
+            max_tokens,
+            no_think,
+            session_id,
         )
         # ====DEBUG====
         logger.debug(
@@ -369,35 +415,97 @@ async def stream_local(
         # ====DEBUG====
         mlx_model, tokenizer = _load_model(model)
         prompt = _build_prompt(messages, tokenizer, model, no_think)
-        kv_cache = _get_session_cache(session_id, mlx_model)
-        if kv_cache is not None:
-            logger.debug(
-                "[KV] session=%s cache_offset=%d",
-                session_id, getattr(kv_cache[0] if isinstance(kv_cache, list) else kv_cache, "offset", "?"),
-            )
+
+        # ── Encode prompt une seule fois (réutilisé pour cache validation ET stats) ─
+        prompt_tokens = len(tokenizer.encode(prompt))
+        model_short = model.split("/")[-1]
+
+        kv_cache = _get_session_cache(session_id, mlx_model, no_think)
+
+        # ── Validation préfixe KV cache par hash du premier message d'historique ──
+        # mlx_lm suppose que les cache.offset premiers tokens du nouveau prompt sont
+        # IDENTIQUES à ceux du dernier appel. La fenêtre glissante hist[-8:] peut
+        # supprimer le message le plus ancien → préfixe différent → output corrompu.
+        #
+        # Détection fiable : on compare le hash du contenu du premier message
+        # d'historique (messages[1]). Si ce message change entre deux tours,
+        # la fenêtre a glissé → on recrée le cache proprement.
+        # La comparaison par token count seul (ancienne approche) ratait les
+        # glissements qui font croître le prompt net (drop 400 tok, ajout 600 tok).
+        if kv_cache is not None and session_id:
+            _cache_key = f"{session_id}:{'nt' if no_think else 'think'}"
+            # messages = [system, ...hist..., current_user] — first hist msg is [1]
+            _cur_hash = hash(messages[1]["content"]) if len(messages) > 2 else 0
+            _stored_hash = _session_kv_first_hash.get(_cache_key)
+            if _stored_hash is not None and _stored_hash != _cur_hash:
+                # First history message changed → window shifted → stale KV
+                _session_kv.pop(_cache_key, None)
+                _session_kv_first_hash.pop(_cache_key, None)
+                kv_cache = _get_session_cache(session_id, mlx_model, no_think)
+                logger.debug(
+                    "KV cache: REBUILT (first hist msg changed — window shifted) key=%s",
+                    _cache_key,
+                )
+            # Record current first-hist-message hash for next-turn validation
+            if kv_cache is not None:
+                _session_kv_first_hash[_cache_key] = _cur_hash
+
         first = True
+        raw_chunks: list[str] = []  # accumule la réponse brute pour stats
+        # ── Token budget: more room in think mode (thinking + answer) ─
+        # Nouvelle variable locale pour éviter l'UnboundLocalError (closure Python)
+        budget = min(max_tokens, 2048) if no_think else min(max_tokens, 4096)
+        quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if QUANT_KV else {}
         try:
             for chunk in stream_generate(
                 mlx_model,
                 tokenizer,
                 prompt=prompt,
-                max_tokens=max_tokens,
+                max_tokens=budget,
                 sampler=make_sampler(temp=temperature),
                 **({"prompt_cache": kv_cache} if kv_cache is not None else {}),
+                **quant_kwargs,
             ):
                 if chunk.text:
-                    # ====DEBUG====
+                    text = chunk.text
+                    raw_chunks.append(text)
+
                     if first:
                         logger.debug(
                             "[TTFT] stream_local: first token generated — %.3fs since inference start",
                             _time.time() - _t_infer,
                         )
                         first = False
-                    # ====DEBUG====
-                    loop.call_soon_threadsafe(queue.put_nowait, chunk.text)
+
+                    # Forward all tokens to sse() which handles <think>/<think>
+                    # filtering. Do NOT break at </think> — the actual answer
+                    # is generated AFTER </think> and must be streamed.
+                    loop.call_soon_threadsafe(queue.put_nowait, text)
+
         except Exception as exc:
             logger.error("stream_local erreur : %s", exc)
         finally:
+            # ── Stats réponse ──────────────────────────────────────
+            raw_resp = "".join(raw_chunks)
+            resp_tokens = len(tokenizer.encode(raw_resp))
+            thinking_active = "</think>" in raw_resp
+            logger.debug(
+                "[LLM-STATS] %s | no_think=%s thinking=%s | prompt=%d tok | resp=%d/%d tok",
+                model_short,
+                no_think,
+                thinking_active,
+                prompt_tokens,
+                resp_tokens,
+                budget,
+            )
+            if resp_tokens >= int(budget * 0.9):
+                logger.warning(
+                    "[LLM-STATS] POSSIBLE TRUNCATION — resp=%d tok near limit=%d (model=%s no_think=%s)",
+                    resp_tokens,
+                    budget,
+                    model_short,
+                    no_think,
+                )
             loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinelle fin de flux
 
     async with _infer_lock:
