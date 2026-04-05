@@ -8,9 +8,11 @@ Public functions:
   build_dynamic_prefix(session_id,
                        user_code,
                        user_name,
-                       voice_mode)           -> str  (per-turn, prepended to user msg)
+                       voice_mode)           -> tuple[str, dict]
+                                                (prefix, self_mem — shared with build_context)
   build_context(rag_chunks, memory_chunks, web_results, gmail_results,
-                calendar_results, use_portfolio, use_self, user_code) -> str
+                calendar_results, use_portfolio, use_self, user_code,
+                self_mem)                    -> str
   post_analysis(session_id, user_code, user_msg, assistant_msg)
 
 KV-cache strategy
@@ -59,12 +61,27 @@ from web_search import INTERNET_ERROR
 
 logger = get_logger("jarvis-pipeline")
 
-
-# ── System prompt ──────────────────────────────────────────────────────────────
-
 # Marker used to separate the injected context block from the user's raw message
 # when both are stored together in Redis history.
 _CTX_SEP = "\x00"  # null byte — never present in natural text
+
+# Static lookup tables for self context — defined once at module level.
+_STYLE_DIRECTIVES: dict[str, str] = {
+    "direct":  "Réponds sans détours, va droit au but, sans formules de politesse superflues.",
+    "gentle":  "Adopte une communication douce et bienveillante, prends le temps d'être rassurant.",
+    "formal":  "Maintiens un registre formel et respectueux en toutes circonstances.",
+    "playful": "Tu peux être léger et décontracté, l'humour est bienvenu.",
+}
+_MOOD_DIRECTIVES: dict[str, str] = {
+    "warm":         "Adopte un ton chaleureux et bienveillant.",
+    "enthusiastic": "Sois enthousiaste et investi dans tes réponses.",
+    "measured":     "Reste posé et mesuré, ne surjoue pas.",
+    "playful":      "Tu peux être joueur et humoristique.",
+    "professional": "Garde un registre professionnel et précis.",
+}
+
+
+# ── System prompt ──────────────────────────────────────────────────────────────
 
 
 def build_system_prompt() -> str:
@@ -81,11 +98,14 @@ def build_dynamic_prefix(
     user_code: str,
     user_name: str = "",
     voice_mode: bool = False,
-) -> str:
+) -> tuple[str, dict]:
     """
     Build the per-turn context block prepended to the current user message.
     Contains: date/time, user name, profile/memory context, opinions, voice hint.
     Runs in a thread (I/O: Redis reads via build_memory_context / get_self_memory).
+
+    Returns (prefix_string, self_mem) so the caller can pass self_mem to
+    build_context() without triggering a second get_self_memory() Redis call.
     """
     tz = USER_TIMEZONES.get(user_code, "Europe/Paris")
     parts: list[str] = [f"Date et heure : {fmt_now_fr(tz)}."]
@@ -107,7 +127,7 @@ def build_dynamic_prefix(
     if voice_mode:
         parts.append(get_prompt("VOICE_SUFFIX_FR").strip())
 
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), self_mem
 
 
 def augment_user_message(dynamic_prefix: str, raw_message: str) -> str:
@@ -133,6 +153,7 @@ def strip_ctx_prefix(content: str) -> str:
 
 # ── Context assembly ───────────────────────────────────────────────────────────
 
+
 def build_context(
     rag_chunks: list,
     memory_chunks: list,
@@ -142,10 +163,14 @@ def build_context(
     use_portfolio: bool,
     use_self: bool,
     user_code: str,
+    self_mem: dict | None = None,
 ) -> str:
     """
     Assemble all fetched context into a single string for system prompt injection.
     Returns "" when there is nothing to inject.
+
+    self_mem — pass the dict returned by build_dynamic_prefix() to avoid a
+               second get_self_memory() call when use_self is True.
 
     Injection priority (background → urgent):
     1. Web results       (reference material, lowest urgency)
@@ -189,12 +214,14 @@ def build_context(
         logger.info("rag recall %d/%d (budget=%d)", len(rag_selected_texts), len(rag_chunks), RAG_CHAR_BUDGET)
 
     # 3. MEMORY
+    # Build timestamped copies — do NOT mutate the caller's list.
     if memory_chunks:
-        # Prepend relative timestamp before trimming so the LLM knows when each memory occurred
-        for m in memory_chunks:
-            if m.get("timestamp"):
-                m["text"] = f"({rel_time_fr(m['timestamp'])}) {m['text']}"
-        selected_memories = trim_chunks(memory_chunks, MEMORY_CHAR_BUDGET)
+        stamped = [
+            {**m, "text": f"({rel_time_fr(m['timestamp'])}) {m['text']}"}
+            if m.get("timestamp") else m
+            for m in memory_chunks
+        ]
+        selected_memories = trim_chunks(stamped, MEMORY_CHAR_BUDGET)
         if selected_memories:
             context_parts.append("=== SOUVENIRS PERTINENTS ===")
             context_parts.extend(selected_memories)
@@ -250,29 +277,15 @@ def build_context(
     except Exception as exc:
         logger.warning("Could not fetch pending trade alerts: %s", exc)
 
-    # 7. SELF
+    # 7. SELF — reuse self_mem from build_dynamic_prefix if available
     if use_self:
-        self_data   = get_self_memory()
-        focus       = self_data.get("current_focus", "")
-        last_ref    = get_reflection_log(1)
-        last_action = last_ref[0].get("action", "none") if last_ref else "none"
-        last_reason = last_ref[0].get("reason", "") if last_ref else ""
-        goals_text  = " | ".join(f"G{i+1}: {g['label']}" for i, g in enumerate(self_data.get("goals", [])))
+        self_data    = self_mem if self_mem is not None else get_self_memory()
+        focus        = self_data.get("current_focus", "")
+        last_ref     = get_reflection_log(1)
+        last_action  = last_ref[0].get("action", "none") if last_ref else "none"
+        last_reason  = last_ref[0].get("reason", "") if last_ref else ""
+        goals_text   = " | ".join(f"G{i+1}: {g['label']}" for i, g in enumerate(self_data.get("goals", [])))
         pending_proposals = list_pending_proposals()
-
-        _STYLE_DIRECTIVES = {
-            "direct":  "Réponds sans détours, va droit au but, sans formules de politesse superflues.",
-            "gentle":  "Adopte une communication douce et bienveillante, prends le temps d'être rassurant.",
-            "formal":  "Maintiens un registre formel et respectueux en toutes circonstances.",
-            "playful": "Tu peux être léger et décontracté, l'humour est bienvenu.",
-        }
-        _MOOD_DIRECTIVES = {
-            "warm":         "Adopte un ton chaleureux et bienveillant.",
-            "enthusiastic": "Sois enthousiaste et investi dans tes réponses.",
-            "measured":     "Reste posé et mesuré, ne surjoue pas.",
-            "playful":      "Tu peux être joueur et humoristique.",
-            "professional": "Garde un registre professionnel et précis.",
-        }
 
         rel           = get_user_relation(user_code)
         affinity      = rel["affinity"]
@@ -321,6 +334,7 @@ def build_context(
 
 # ── Post-response analysis ─────────────────────────────────────────────────────
 
+
 async def post_analysis(
     session_id: str, user_code: str, user_msg: str, assistant_msg: str
 ):
@@ -333,12 +347,12 @@ async def post_analysis(
 
         mood = analysis.get("mood", "neutral")
         mood_to_state = {
-            "happy":     {"mood": "happy",     "energy": 0.8},
-            "stressed":  {"mood": "attentive",  "concern": 0.6},
-            "frustrated":{"mood": "supportive", "concern": 0.7},
-            "curious":   {"mood": "engaged",    "curiosity": 0.8},
-            "tired":     {"mood": "gentle",     "energy": 0.4},
-            "focused":   {"mood": "focused",    "energy": 0.7},
+            "happy":      {"mood": "happy",     "energy": 0.8},
+            "stressed":   {"mood": "attentive",  "concern": 0.6},
+            "frustrated": {"mood": "supportive", "concern": 0.7},
+            "curious":    {"mood": "engaged",    "curiosity": 0.8},
+            "tired":      {"mood": "gentle",     "energy": 0.4},
+            "focused":    {"mood": "focused",    "energy": 0.7},
         }
         if mood in mood_to_state:
             update_emotional_state(mood_to_state[mood])
@@ -378,7 +392,6 @@ async def post_analysis(
         )
 
         logger.info("[PROJECTS] events=%s", projects)
-        logger.info("[PROJECTS] state=%s", get_user_projects(user_code))
         logger.info(
             "Analysis: mood=%s, topics=%s, facts=%d",
             mood, analysis.get("topics"), len(analysis.get("user_facts", []))

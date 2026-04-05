@@ -138,7 +138,10 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
     api_key = ROUTER_API_KEY if ROUTER_MODEL else PRIMARY_API_KEY
     model = ROUTER_MODEL if ROUTER_MODEL else PRIMARY_MODEL
 
-    prompt = get_prompt("ROUTER_USER").format(message=message)
+    # Truncate to 400 chars — Qwen2.5-3B starts answering instead of routing on long inputs.
+    # The first 400 chars are enough to classify intent; the rest is noise for the router.
+    routing_message = message[:400]
+    prompt = get_prompt("ROUTER_USER").format(message=routing_message)
 
     try:
         # response_format is supported by OpenAI and mlx-lm ≥ 0.21.
@@ -151,8 +154,8 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
             model=model,
             api_url=api_url,
             api_key=api_key,
-            temperature=0,
-            max_tokens=400,
+            temperature=0.1,  # avoid greedy (temp=0) repetition loops on small model
+            max_tokens=300,  # routing JSON is ~60 tok — cap to avoid runaway output
             json_response=True,
             no_think=True,
             timeout=ROUTER_TIMEOUT,
@@ -161,20 +164,20 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
 
     except httpx.TimeoutException:
         logger.warning(
-            "LLM router timeout (%.1fs) — falling back to embedding router",
+            "LLM router timeout (%.1fs) — no routing info (all intents off)",
             ROUTER_TIMEOUT,
         )
         return None
     except (json.JSONDecodeError, KeyError) as exc:
         logger.warning(
-            "LLM router response parse error (%s) — falling back to embedding router",
-            type(exc).__name__,
+            "LLM router parse error (%s) — no routing info (all intents off): %s",
+            type(exc).__name__, exc,
         )
         return None
     except Exception as exc:
         logger.warning(
-            "LLM router error (%s) — falling back to embedding router",
-            type(exc).__name__,
+            "LLM router error (%s) — no routing info (all intents off): %s",
+            type(exc).__name__, exc,
         )
         return None
 

@@ -3,7 +3,6 @@ llm_client.py — LLM HTTP client (streaming + vision)
 ======================================================
 Provides:
   openai_headers()          : build auth headers for OpenAI-compatible APIs
-  select_model()            : tier selection (primary / reasoning)
   trim_chunks()             : cap RAG/web results by char budget
   stream_openai()           : async SSE streaming generator
   describe_images()         : two-stage vision pipeline (resolve URLs → call VISION_MODEL)
@@ -46,24 +45,6 @@ def openai_headers() -> dict:
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
-
-
-def select_model(
-    req_model: "str | None",
-    use_reasoning: bool = False,
-) -> tuple[str, str, str, float]:
-    """
-    Clean model selection:
-    - No model switching based on reasoning -> Mode Think on PRIMARY is activated if reasonning.
-    - Reasoning handled via no_think flag only
-    """
-
-    # Override utilisateur → toujours PRIMARY infra
-    if req_model:
-        return req_model, PRIMARY_API_URL, PRIMARY_API_KEY, PRIMARY_TIMEOUT
-
-    # Toujours PRIMARY
-    return PRIMARY_MODEL, PRIMARY_API_URL, PRIMARY_API_KEY, PRIMARY_TIMEOUT
 
 
 def trim_chunks(chunks, char_budget, text_key="text", max_item_chars=800):

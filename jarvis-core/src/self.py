@@ -11,12 +11,16 @@ Architecture:
   - Notification guard: Redis key         jarvis:self:notif:{user_code}:{date}
   - Push system       : Redis list        jarvis:push:pending:{user_code}  (polled by iOS)
 
-Reflection cycle:
-  1. gather_context()   — system health, user activity, topics, knowledge gaps
-  2. LLM call           — returns {focus, action, reason, params}
-  3. execute_action()   — dispatches to catalog function
-  4. log_reflection()   — persists result to Redis + updates jarvis-self.json
-  5. generate_proactive_push() — per-user LLM call to queue contextual push if relevant
+Reflection cycle (two-phase):
+  Phase 1 — global (Jarvis self-state):
+    1. gather_global_context()      — health, activity, gaps, self-notes
+    2. _call_global_reflection_llm() — returns {focus, action, reason, params}
+    3. execute_action()             — dispatches to global action catalog
+  Phase 2 — per-user (one chain per user):
+    1. gather_user_context(code)    — single user's profile, activity, push status
+    2. _call_user_reflection_llm()  — returns {focus, action, reason, params}
+    3. execute_action()             — dispatches to user action catalog
+  Final: log_reflection() + generate_proactive_push() per user
 
 Action catalog (v1 — grows in future versions):
   nothing                  — explicit no-op, with reason
@@ -45,7 +49,6 @@ from config import (
     BRIEFING_TIMEZONE,
     GROWTH_LOG_MAX_ENTRIES,
     MAX_CHAIN_ITERATIONS,
-    MAX_REFLECTION_TOKENS,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
@@ -335,8 +338,10 @@ def _get_knowledge_gaps(n: int = 5) -> list[str]:
         except Exception:
             topic = item
         slug = re.sub(r"\s+", "_", topic.lower())[:40]
-        count = int(counts.get(slug, 1))
-        label = f"{topic} (×{count})" if count > 1 else topic
+        # Use actual Redis count (default 0 like _action_refine_prompt, not 1)
+        # so the LLM sees the real progress toward REFINE_PROMPT_THRESHOLD.
+        count = int(counts.get(slug, 0))
+        label = f"{topic} (×{count}/{REFINE_PROMPT_THRESHOLD})"
         results.append(label)
     return results
 
@@ -350,8 +355,8 @@ def _fmt_pending_proposals() -> str:
     )
 
 
-def gather_context() -> dict:
-    """Assemble full context for the reflection prompt."""
+def gather_global_context() -> dict:
+    """Assemble global context for Phase 1 (Jarvis self-state, no user profiles)."""
     self_data = get_self_memory()
     health = _check_service_health()
     activity = _get_user_activity(24)
@@ -370,12 +375,37 @@ def gather_context() -> dict:
         "last_reflection": last_ref,
         "reflection_count": self_data.get("reflection_count", 0),
         "user_relations": self_data.get("user_relations", {}),
-        "user_profiles": _fmt_user_profiles(),
-        "push_availability": _fmt_push_availability(),
         "behavioral_patterns": _extract_behavioral_patterns(20),
         "emotional_state": get_emotional_state(),
         "self_notes": self_data.get("self_notes", [])[-5:],
         "opinions": self_data.get("opinions", [])[-5:],
+    }
+
+
+def gather_user_context(user_code: str) -> dict:
+    """Assemble per-user context for Phase 2 (single user's profile and activity)."""
+    from memory import get_user_profile
+
+    user_name = USER_CODES.get(user_code, user_code)
+    full_activity = _get_user_activity(24)
+    user_activity = full_activity.get(user_code, {})
+    self_data = get_self_memory()
+    user_relation = self_data.get("user_relations", {}).get(user_code, {})
+    profile = {k: v for k, v in get_user_profile(user_code).items() if v}
+
+    r = get_redis()
+    tz_name = USER_TIMEZONES.get(user_code, "Europe/Paris")
+    local_time = fmt_now_fr(tz_name)
+    has_push = bool(r.exists(f"{_DEVICE_TOKEN_PREFIX}:{user_code}"))
+
+    return {
+        "user_code": user_code,
+        "user_name": user_name,
+        "profile": profile,
+        "has_push": has_push,
+        "local_time": local_time,
+        "user_activity": user_activity,
+        "user_relation": user_relation,
     }
 
 
@@ -427,20 +457,25 @@ def _fmt_opinions(opinions: list[dict]) -> str:
 
 
 def _fmt_user_profiles() -> str:
-    """Compact profile dump for all users — passed to the reflection LLM."""
+    """Compact profile dump for all users — passed to the reflection LLM.
+
+    Each user block is clearly delimited so the LLM cannot confuse which
+    key belongs to which user_code.  Empty-valued keys are filtered out —
+    they are invalid state and should not appear in the reasoning context.
+    """
     from memory import get_user_profile
 
-    lines = []
+    blocks = []
     for code, name in USER_CODES.items():
-        profile = get_user_profile(code)
+        # Filter out empty/None values — stale keys that were never properly cleaned.
+        profile = {k: v for k, v in get_user_profile(code).items() if v}
         if not profile:
             continue
-        lines.append(f"  {name} ({code}):")
-        for k, v in list(profile.items())[
-            :20
-        ]:  # cap at 20 keys to stay within token budget
-            lines.append(f"    {k} = {str(v)[:80]}")
-    return "\n".join(lines) or "  No profiles."
+        lines = [f"=== PROFIL user_code={code} ({name}) ==="]
+        for k, v in list(profile.items())[:20]:  # cap at 20 keys for token budget
+            lines.append(f"  {k} = {str(v)[:80]}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) or "  No profiles."
 
 
 def _fmt_push_availability() -> str:
@@ -470,28 +505,34 @@ def _fmt_push_availability() -> str:
 
 # ─────────────────────────────────────────────────────────────────────────
 
+# Actions allowed per phase — LLM cannot hallucinate cross-phase actions
+_GLOBAL_ACTIONS = frozenset({
+    "nothing", "flag_knowledge_gap", "update_self_note",
+    "check_health", "prune_self_memory", "refine_prompt",
+})
+_USER_ACTIONS = frozenset({
+    "nothing", "store_insight", "send_notification", "queue_push",
+    "correct_profile", "ask_user", "consolidate_memory", "update_trade_threshold",
+})
 
-async def _call_reflection_llm(
+
+def _fmt_previous_steps(steps: list[dict] | None) -> str:
+    if not steps:
+        return "  aucune (première itération)"
+    return "\n".join(
+        f"  [{s['iteration']}] {s['action']} → {s['outcome']}"
+        for s in steps
+    )
+
+
+async def _call_global_reflection_llm(
     context: dict, previous_steps: list[dict] | None = None
 ) -> dict | None:
-    """Call the LLM to produce a reflection result.
-
-    previous_steps: steps already executed this cycle, each with keys
-                    {iteration, action, reason, outcome}.
-    """
+    """Phase 1 — global self-reflection (Jarvis state, no user profiles)."""
     bp = context.get("behavioral_patterns", [])
     behavioral_patterns = (
         "\n".join(f"  • {p}" for p in bp) if bp else "  aucun pattern identifié"
     )
-
-    if previous_steps:
-        prev_lines = [
-            f"  [{s['iteration']}] {s['action']} → {s['outcome']}"
-            for s in previous_steps
-        ]
-        prev_fmt = "\n".join(prev_lines)
-    else:
-        prev_fmt = "  aucune (première itération)"
 
     prompt = get_prompt("REFLECTION_PROMPT").format(
         timestamp=context["timestamp"],
@@ -511,9 +552,7 @@ async def _call_reflection_llm(
         self_notes=_fmt_self_notes(context.get("self_notes", [])),
         opinions=_fmt_opinions(context.get("opinions", [])),
         user_relations=json.dumps(context["user_relations"], ensure_ascii=False),
-        user_profiles=context["user_profiles"],
-        push_availability=context["push_availability"],
-        previous_steps=prev_fmt,
+        previous_steps=_fmt_previous_steps(previous_steps),
     )
 
     try:
@@ -525,18 +564,95 @@ async def _call_reflection_llm(
             model=PRIMARY_MODEL,
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
-            temperature=0.7,
-            max_tokens=MAX_REFLECTION_TOKENS,
+            temperature=0.1,
+            max_tokens=500,  # action JSON ~150 tok; early-stop kicks in before ceiling
             json_response=True,
-            no_think=True,  # structured JSON output — thinking wastes tokens
+            no_think=True,  # structured JSON action selection — thinking adds latency/failure risk
             timeout=120.0,
         )
         return extract_llm_json(content)
-    except Exception as exc:
+    except ValueError as exc:
         logger.error(
-            "Reflection LLM call failed: %s", type(exc).__name__, exc_info=True
+            "Global reflection LLM failed: %s — truncated or malformed JSON",
+            type(exc).__name__, exc_info=True,
         )
         return None
+    except Exception as exc:
+        logger.error("Global reflection LLM failed: %s", type(exc).__name__, exc_info=True)
+        return None
+
+
+def _fmt_single_user_profile(profile: dict) -> str:
+    """Format a single user's profile dict for the per-user reflection prompt."""
+    if not profile:
+        return "  (aucun profil)"
+    lines = []
+    for k, v in list(profile.items())[:20]:
+        lines.append(f"  {k} = {str(v)[:80]}")
+    return "\n".join(lines)
+
+
+async def _call_user_reflection_llm(
+    global_ctx: dict,
+    user_ctx: dict,
+    previous_steps: list[dict] | None = None,
+) -> dict | None:
+    """Phase 2 — per-user reflection (single user's profile, activity, relation)."""
+    user_code = user_ctx["user_code"]
+    user_activity_entry = user_ctx["user_activity"]
+    # Format as a single-user activity line using existing helper
+    activity_str = _fmt_activity(
+        {user_code: user_activity_entry} if user_activity_entry else {}
+    ) or "  Aucune activité récente."
+
+    push_status = "disponible ✓" if user_ctx["has_push"] else "indisponible"
+
+    prompt = get_prompt("REFLECTION_USER_PROMPT").format(
+        timestamp=global_ctx["timestamp"],
+        user_name=user_ctx["user_name"],
+        user_code=user_code,
+        local_time=user_ctx["local_time"],
+        push_status=push_status,
+        user_activity=activity_str,
+        user_relation=json.dumps(user_ctx["user_relation"], ensure_ascii=False),
+        user_profile=_fmt_single_user_profile(user_ctx["profile"]),
+        previous_steps=_fmt_previous_steps(previous_steps),
+    )
+
+    messages = [
+        {"role": "system", "content": get_prompt("REFLECTION_USER_SYSTEM")},
+        {"role": "user", "content": prompt},
+    ]
+    for attempt in range(2):
+        try:
+            content = await call_llm_async(
+                messages,
+                model=PRIMARY_MODEL,
+                api_url=PRIMARY_API_URL,
+                api_key=PRIMARY_API_KEY,
+                temperature=0.1,
+                max_tokens=500,  # action JSON ~150 tok; early-stop kicks in before ceiling
+                json_response=True,
+                no_think=True,  # structured JSON action selection — thinking adds latency/failure risk
+                timeout=60.0,
+            )
+            return extract_llm_json(content)
+        except ValueError as exc:
+            if attempt == 0:
+                logger.warning(
+                    "User reflection LLM malformed JSON (%s), retrying — %s", user_code, exc
+                )
+                continue
+            logger.error(
+                "User reflection LLM failed (%s) after retry: %s", user_code, exc
+            )
+            return None
+        except Exception as exc:
+            logger.error(
+                "User reflection LLM failed (%s): %s", user_code, type(exc).__name__, exc_info=True,
+            )
+            return None
+    return None
 
 
 # ══════════════════════════════════════════════════
@@ -616,10 +732,12 @@ def _action_flag_knowledge_gap(params: dict) -> str:
             "date": datetime.now(timezone.utc).isoformat(),
         }
     )
-    r.zadd(_KNOWLEDGE_GAPS_KEY, {entry: time.time()})
-    r.zremrangebyrank(_KNOWLEDGE_GAPS_KEY, 0, -51)  # keep last 50
-
-    count = int(r.hincrby(_GAP_COUNTS_KEY, slug, 1) or 0)
+    pipe = r.pipeline()
+    pipe.zadd(_KNOWLEDGE_GAPS_KEY, {entry: time.time()})
+    pipe.zremrangebyrank(_KNOWLEDGE_GAPS_KEY, 0, -51)  # keep last 50
+    pipe.hincrby(_GAP_COUNTS_KEY, slug, 1)
+    results = pipe.execute()
+    count = int(results[2] or 0)
 
     logger.info("Self action: knowledge gap flagged — %s (count=%d)", topic, count)
     return f"flagged knowledge gap: {topic} (count={count})"
@@ -722,21 +840,60 @@ def _action_correct_profile(params: dict) -> str:
     """
     user_code = params.get("user_code", "")
     key = params.get("key", "").strip()
-    value = params.get("value")  # None means delete
+    value = params.get("value")  # None or "" means delete
+    if value == "":
+        value = None
 
     if not user_code or user_code not in USER_CODES:
         return "correct_profile: invalid user_code"
     if not key:
         return "correct_profile: missing key"
+    # Deletions (value=null) are reserved for nightly review and prune_self_memory.
+    # The reflection phase must never silently erase profile facts it cannot verify.
+    if value is None:
+        logger.warning(
+            "Self correct_profile: BLOCKED deletion of '%s' for %s — "
+            "deletions are not allowed in the reflection phase (use nightly review)",
+            key, user_code,
+        )
+        return (
+            f"correct_profile: deletion of '{key}' blocked — "
+            "deletions are reserved for the nightly review phase"
+        )
 
     from helpers import get_redis
     from memory import update_user_profile
 
+    # Guard: reflection can only modify or delete existing keys.
+    # New keys are created exclusively by the conversation analyzer (which reads
+    # actual user statements). This prevents the reflection from hallucinating
+    # profile facts from its own context.
+    if value is not None:
+        exists = get_redis().hexists(f"user:{user_code}:profile", key)
+        if not exists:
+            logger.warning(
+                "Self correct_profile: REJECTED creation of new key '%s' for %s — "
+                "new keys can only be created by the conversation analyzer",
+                key, user_code,
+            )
+            return f"correct_profile: key '{key}' does not exist — use the analyzer to create new profile facts from conversation"
+
     if value is None:
         old_val = get_redis().hget(f"user:{user_code}:profile", key)
+        if old_val is None:
+            # Key does not exist for this user — likely a user-confusion error in the LLM.
+            logger.warning(
+                "Self correct_profile: key '%s' does not exist for %s — "
+                "possible user confusion in reflection LLM (check _fmt_user_profiles context)",
+                key, user_code,
+            )
+            return (
+                f"correct_profile: key '{key}' does not exist for {user_code}. "
+                f"Verify you have the correct user_code — this key may belong to another user."
+            )
         logger.warning(
             "Self correct_profile: DELETE '%s' for %s (current value: %s)",
-            key, user_code, old_val or "(empty)"
+            key, user_code, old_val if old_val else "(empty)"
         )
 
     update_user_profile(user_code, key, value if value is not None else None)
@@ -813,7 +970,7 @@ async def _nightly_review_user(
     )
     conv_text = ""
     for c in sorted_convs:
-        conv_text += f"User: {c.get('user', '')[:200]}\nJarvis: {c.get('assistant', '')[:200]}\nMood: {c.get('mood', '?')}\n\n"
+        conv_text += f"User: {c.get('user', '')[:400]}\nJarvis: {c.get('assistant', '')[:400]}\nMood: {c.get('mood', '?')}\n\n"
 
     data = get_self_memory()
     recent_self_reflections = [l["text"] for l in data.get("learnings", [])[-12:]]
@@ -845,8 +1002,9 @@ async def _nightly_review_user(
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.3,
-            max_tokens=3000,
+            max_tokens=4000,  # 1024 thinking + ~3000 JSON output (facts, profile updates)
             json_response=True,
+            no_think=False,  # reasoning task — thinking improves nightly analysis quality
             timeout=90.0,
         )
         return extract_llm_json(content)
@@ -1152,22 +1310,29 @@ def approve_proposal(proposal_id: str) -> str:
     # 3. cooldown key   — prevent re-flagging for 30 days after approval
     topic_slug = re.sub(r"\s+", "_", found.get("topic", "").lower())[:40]
     if topic_slug:
+        r = get_redis()
+        # hdel is unconditional — never swallowed by a broad except.
+        # A failed hdel would leave count intact and allow immediate re-crossing of threshold.
+        r.hdel(_GAP_COUNTS_KEY, topic_slug)
+        r.setex(f"jarvis:self:gap_cooldown:{topic_slug}", 30 * 86400, "1")
+        # Remove sorted-set entries one by one; skip malformed JSON silently so
+        # a single corrupt entry doesn't abort the whole cleanup.
         try:
-            r = get_redis()
-            r.hdel(_GAP_COUNTS_KEY, topic_slug)
-            # Remove all sorted-set entries whose JSON topic slug matches
             all_entries = r.zrange(_KNOWLEDGE_GAPS_KEY, 0, -1)
-            to_remove = [
-                e
-                for e in all_entries
-                if re.sub(r"\s+", "_", json.loads(e).get("topic", "").lower())[:40]
-                == topic_slug
-            ]
-            if to_remove:
-                r.zrem(_KNOWLEDGE_GAPS_KEY, *to_remove)
-            r.setex(f"jarvis:self:gap_cooldown:{topic_slug}", 30 * 86400, "1")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("gap cleanup: could not read knowledge_gaps set: %s", exc)
+            all_entries = []
+        for e in all_entries:
+            try:
+                e_slug = re.sub(r"\s+", "_", json.loads(e).get("topic", "").lower())[:40]
+                if e_slug == topic_slug:
+                    r.zrem(_KNOWLEDGE_GAPS_KEY, e)
+            except Exception:
+                # Malformed entry — zrem by raw value as fallback
+                try:
+                    r.zrem(_KNOWLEDGE_GAPS_KEY, e)
+                except Exception:
+                    pass
 
     # Invalidate prompts in-memory cache so the new text is returned immediately
     # (clears both the mtime sentinel and the cached dict — belt & suspenders)
@@ -1273,8 +1438,13 @@ def _action_refine_prompt(params: dict) -> str:
 
     # Hard threshold check — LLM instructions are advisory; enforce here too
     slug = re.sub(r"\s+", "_", topic.lower())[:40]
-    count = int(get_redis().hget(_GAP_COUNTS_KEY, slug) or 0)
+    r = get_redis()
+    count = int(r.hget(_GAP_COUNTS_KEY, slug) or 0)
     if count < REFINE_PROMPT_THRESHOLD:
+        # Cooldown: suppress this topic for 6 h so the LLM doesn't re-propose
+        # it every cycle until the gap count actually reaches the threshold.
+        cooldown_key = f"jarvis:self:refine_cooldown:{slug}"
+        r.set(cooldown_key, "1", ex=6 * 3600)
         return (
             f"refine_prompt: topic '{topic}' flagged {count}× "
             f"(threshold={REFINE_PROMPT_THRESHOLD}) — too early"
@@ -1339,7 +1509,7 @@ def _action_refine_prompt(params: dict) -> str:
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.4,
-            max_tokens=4000,
+            max_tokens=5000,  # 1024 thinking + ~4000 proposed prompt text + rationale
             json_response=True,
             no_think=False,
             timeout=PRIMARY_TIMEOUT,
@@ -1384,7 +1554,7 @@ def _action_refine_prompt(params: dict) -> str:
                 api_url=PRIMARY_API_URL,
                 api_key=PRIMARY_API_KEY,
                 temperature=0.3,
-                max_tokens=4000,
+                max_tokens=5000,  # retry — same budget as initial call
                 json_response=True,
                 no_think=False,
                 timeout=PRIMARY_TIMEOUT,
@@ -1567,7 +1737,7 @@ def _action_prune_self_memory(params: dict) -> str:
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.2,
-            max_tokens=400,
+            max_tokens=800,
             json_response=True,
             no_think=True,
             timeout=30.0,
@@ -1777,7 +1947,7 @@ async def generate_proactive_push(user_code: str) -> str:
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.7,
-            max_tokens=2000,
+            max_tokens=600,
             json_response=True,
             no_think=True,
             timeout=30.0,
@@ -1805,47 +1975,80 @@ async def generate_proactive_push(user_code: str) -> str:
 # ══════════════════════════════════════════════════
 
 
+def _run_chain_step(
+    result: dict,
+    steps: list[dict],
+    allowed_actions: frozenset,
+    phase_label: str,
+) -> tuple[str, str, str, dict, bool]:
+    """
+    Extract and validate one chain step from an LLM result.
+
+    Returns (focus, action, reason, params, should_stop).
+    should_stop=True means the caller must break the chain loop.
+    """
+    focus = result.get("focus", "").strip()
+    action = result.get("action", "nothing").strip()
+    reason = result.get("reason", "").strip()
+    params = result.get("params", {})
+
+    # Guard 1: action must be in the allowed catalog for this phase
+    if action not in allowed_actions:
+        logger.warning(
+            "%s: invalid action %r (not in allowed set) — defaulting to nothing",
+            phase_label, action,
+        )
+        action = "nothing"
+        params = {"reason": f"invalid action for this phase: {result.get('action')}"}
+
+    # Guard 2: detect exact duplicate to prevent infinite loops
+    _sig = json.dumps({"action": action, "params": params}, sort_keys=True)
+    if any(
+        json.dumps({"action": s["action"], "params": s["params"]}, sort_keys=True) == _sig
+        for s in steps
+    ):
+        logger.info("%s: duplicate action=%s — stopping chain", phase_label, action)
+        return focus, action, reason, params, True
+
+    return focus, action, reason, params, False
+
+
 async def run_self_reflection() -> dict:
     """
-    Jarvis system self-reflection cycle. Called by APScheduler every REFLECTION_INTERVAL_HOURS.
-    Runs an agentic chain of up to MAX_CHAIN_ITERATIONS actions; the LLM exits with "nothing"
-    when it has nothing more to do. Each step result is fed back into the next LLM call.
-    Returns a log entry with the full chain under the "steps" key.
+    Two-phase self-reflection cycle. Called by APScheduler every REFLECTION_INTERVAL_HOURS.
+
+    Phase 1 (global): Jarvis self-state — health, knowledge gaps, self-notes, prompts.
+                      Up to MAX_CHAIN_ITERATIONS steps.
+    Phase 2 (per-user): One LLM chain per user — profile, push, insights.
+                        Up to MAX_CHAIN_ITERATIONS steps per user.
+
+    Returns a log entry with all steps under the "steps" key.
     """
     logger.info(
-        "=== Jarvis self-reflection starting (max %d steps) ===", MAX_CHAIN_ITERATIONS
+        "=== Jarvis self-reflection starting (max %d steps/phase) ===",
+        MAX_CHAIN_ITERATIONS,
     )
 
-    context = gather_context()
-    steps: list[dict] = []
+    global_ctx = gather_global_context()
+    global_steps: list[dict] = []
     focus = ""
 
+    # ── Phase 1: global self-state ─────────────────────────────────────────
+    logger.info("--- Phase 1: global self-state ---")
     for i in range(MAX_CHAIN_ITERATIONS):
-        result = await _call_reflection_llm(context, previous_steps=steps)
+        result = await _call_global_reflection_llm(global_ctx, previous_steps=global_steps)
 
         if result is None:
-            logger.warning(
-                "Reflection LLM call failed at step %d — stopping chain", i + 1
-            )
+            logger.warning("Global reflection LLM failed at step %d — stopping", i + 1)
             break
 
-        focus = result.get("focus", "").strip()
-        action = result.get("action", "nothing").strip()
-        reason = result.get("reason", "").strip()
-        params = result.get("params", {})
-
-        if action not in _ACTION_CATALOG:
-            logger.warning(
-                "Self: unknown action %r at step %d — defaulting to nothing",
-                action,
-                i + 1,
-            )
-            action = "nothing"
-            params = {"reason": f"unknown action requested: {result.get('action')}"}
-
+        focus, action, reason, params, stop = _run_chain_step(
+            result, global_steps, _GLOBAL_ACTIONS, f"P1-step{i+1}"
+        )
         outcome = await asyncio.to_thread(_execute_action, action, params)
 
         step = {
+            "phase": "global",
             "iteration": i + 1,
             "focus": focus,
             "action": action,
@@ -1853,19 +2056,90 @@ async def run_self_reflection() -> dict:
             "params": params,
             "outcome": outcome,
         }
-        steps.append(step)
-        logger.info(
-            "Chain step %d/%d: action=%s outcome=%s",
-            i + 1,
-            MAX_CHAIN_ITERATIONS,
-            action,
-            outcome,
-        )
+        global_steps.append(step)
+        logger.info("P1 step %d/%d: action=%s outcome=%s", i + 1, MAX_CHAIN_ITERATIONS, action, outcome)
 
-        if action == "nothing":
+        if stop or action == "nothing":
             break
 
-    # Persist focus + reflection metadata
+    # ── Phase 2: per-user chains ───────────────────────────────────────────
+    logger.info("--- Phase 2: per-user reflection (%d users) ---", len(USER_CODES))
+    all_user_steps: list[dict] = []
+
+    for user_code in USER_CODES:
+        user_ctx = gather_user_context(user_code)
+        user_steps: list[dict] = []
+        _failed_actions: set[str] = set()  # actions that hit a system constraint this cycle
+        logger.info("--- User: %s (%s) ---", user_code, user_ctx["user_name"])
+
+        for i in range(MAX_CHAIN_ITERATIONS):
+            result = await _call_user_reflection_llm(global_ctx, user_ctx, previous_steps=user_steps)
+
+            if result is None:
+                logger.warning(
+                    "User reflection LLM failed at step %d for %s — stopping",
+                    i + 1, user_code,
+                )
+                break
+
+            ufocus, action, reason, params, stop = _run_chain_step(
+                result, user_steps, _USER_ACTIONS, f"P2-{user_code}-step{i+1}"
+            )
+            if not focus:
+                focus = ufocus
+
+            # Inject user_code into params for all user-scoped actions so the
+            # LLM doesn't need to carry it reliably across iterations.
+            _user_scoped = {
+                "correct_profile", "store_insight", "queue_push",
+                "send_notification", "ask_user", "consolidate_memory",
+                "update_trade_threshold",
+            }
+            if action in _user_scoped and not params.get("user_code"):
+                params["user_code"] = user_code
+
+            # Don't retry an action that already hit a system-level constraint
+            # (cooldown, invalid key, push unavailable, …).
+            if action in _failed_actions:
+                logger.info(
+                    "P2 %s step %d/%d: action=%s previously failed — skipping to nothing",
+                    user_code, i + 1, MAX_CHAIN_ITERATIONS, action,
+                )
+                action = "nothing"
+                params = {"reason": f"previous {action} hit a system constraint — not retrying"}
+
+            outcome = await asyncio.to_thread(_execute_action, action, params)
+
+            # Detect system-constraint failures: outcome format is "action: error"
+            # (no "[user_code]" bracket), distinct from success "action [user_code]: ..."
+            _looks_like_error = (
+                outcome.startswith(f"{action}:")
+                and not outcome.startswith(f"{action} [")
+            )
+            if _looks_like_error and action != "nothing":
+                _failed_actions.add(action)
+
+            step = {
+                "phase": f"user:{user_code}",
+                "iteration": i + 1,
+                "focus": ufocus,
+                "action": action,
+                "reason": reason,
+                "params": params,
+                "outcome": outcome,
+            }
+            user_steps.append(step)
+            all_user_steps.append(step)
+            logger.info(
+                "P2 %s step %d/%d: action=%s outcome=%s",
+                user_code, i + 1, MAX_CHAIN_ITERATIONS, action, outcome,
+            )
+
+            if stop or action == "nothing":
+                break
+
+    # ── Persist focus + reflection metadata ────────────────────────────────
+    all_steps = global_steps + all_user_steps
     now_iso = datetime.now(timezone.utc).isoformat()
     with self_memory_lock:
         data = get_self_memory()
@@ -1874,10 +2148,9 @@ async def run_self_reflection() -> dict:
         data["reflection_count"] = data.get("reflection_count", 0) + 1
         save_self_memory(data)
 
-    # Backward-compat top-level fields reflect the last step
     last = (
-        steps[-1]
-        if steps
+        all_steps[-1]
+        if all_steps
         else {"action": "nothing", "reason": "no steps executed", "outcome": ""}
     )
     log_entry = {
@@ -1886,14 +2159,15 @@ async def run_self_reflection() -> dict:
         "action": last["action"],  # for _extract_behavioral_patterns
         "reason": last["reason"],
         "outcome": last["outcome"],
-        "steps": steps,  # full chain
-        "health": context["health"],
+        "steps": all_steps,
+        "health": global_ctx["health"],
     }
     log_reflection(log_entry)
 
     logger.info(
-        "=== Reflection complete: %d step(s), final=%s ===",
-        len(steps),
+        "=== Reflection complete: %d global + %d user step(s), final=%s ===",
+        len(global_steps),
+        len(all_user_steps),
         last["action"],
     )
 

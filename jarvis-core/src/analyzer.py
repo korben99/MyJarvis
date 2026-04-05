@@ -106,7 +106,7 @@ async def analyze_exchange(
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.1,
-            max_tokens=500,
+            max_tokens=2000,  # multi-fact extraction JSON; early-stop active
             json_response=True,
             no_think=True,
             timeout=30.0,
@@ -142,11 +142,12 @@ async def analyze_exchange(
         importance += min(len(result.get("projects", [])), 2) * 0.15
 
         # Emotional intensity (mild boost — avoid over-storing rants)
+        # Both positive and negative emotions weighted equally: high intensity = more memorable,
+        # regardless of valence. Previous asymmetry (0.15 negative vs 0.10 positive) created
+        # a bias toward storing frustration over joy in long-term memory.
         mood = result.get("mood", "neutral")
-        if mood in ["happy", "curious", "focused"]:
+        if mood in ["happy", "curious", "focused", "stressed", "frustrated"]:
             importance += 0.10
-        elif mood in ["stressed", "frustrated"]:
-            importance += 0.15
 
         # Message depth (minor signal — long messages often carry more info)
         if len(user_msg) > 200:

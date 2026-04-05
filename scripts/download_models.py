@@ -8,9 +8,10 @@ load_dotenv()
 
 # ---- CONFIG ----
 MODELS = [
-    "inferencerlabs/Qwen3.5-35B-A3B-MLX-5.5bit",
+    # "inferencerlabs/Qwen3.5-30B-A3B-MLX-5.5bit",
     "mlx-community/Qwen2.5-3B-Instruct-8bit",
-    "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+    "Qwen/Qwen3-30B-A3B-MLX-6bit",
+    # "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
 ]
 
 # Récup variables
@@ -41,8 +42,12 @@ def model_exists(model_name):
     if os.path.exists(snapshots_dir):
         for rev in os.listdir(snapshots_dir):
             rev_path = os.path.join(snapshots_dir, rev)
-            if any(f.endswith(".safetensors") or f.endswith(".npz") or f == "model.safetensors.index.json"
-                   for f in os.listdir(rev_path)):
+            if any(
+                f.endswith(".safetensors")
+                or f.endswith(".npz")
+                or f == "model.safetensors.index.json"
+                for f in os.listdir(rev_path)
+            ):
                 # model.safetensors.index.json without the actual shards = incomplete
                 files = set(os.listdir(rev_path))
                 if "model.safetensors.index.json" in files and not any(

@@ -58,7 +58,15 @@ def _is_network_error(exc: Exception) -> bool:
 _HTTP = httpx.AsyncClient(
     timeout=10.0,
     follow_redirects=True,
-    headers={"User-Agent": "Mozilla/5.0 (compatible; Jarvis/1.0)"},
+    headers={
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+    },
 )
 
 # ── Deep search tuning ─────────────────────────────────────────────────────
@@ -339,13 +347,72 @@ async def _fetch_page_text(url: str) -> str:
     try:
         resp = await _HTTP.get(url, timeout=_PAGE_FETCH_TIMEOUT)
         if resp.status_code != 200:
+            logger.debug("fetch_page_text: HTTP %d for %s", resp.status_code, url)
             return ""
         ct = resp.headers.get("content-type", "").lower()
         if not any(x in ct for x in ("html", "text/plain")):
+            logger.debug("fetch_page_text: unsupported content-type %r for %s", ct, url)
             return ""
         return _extract_text_from_html(resp.text)
-    except Exception:
+    except Exception as exc:
+        logger.debug("fetch_page_text: error fetching %s — %s: %s", url, type(exc).__name__, exc)
         return ""
+
+
+async def fetch_user_urls(urls: list[str], max_urls: int = 3) -> list[dict]:
+    """Fetch user-provided URLs and return them as web-result dicts.
+
+    Called when the user pastes a direct URL in their message.
+    Fetches up to *max_urls* in parallel and returns non-empty results only.
+    Result format matches the web_results dicts used throughout the pipeline.
+
+    On failure (403, timeout, unsupported content-type…) an error sentinel dict
+    is returned so the LLM can explain the situation to the user rather than
+    silently ignoring the URL.
+    """
+    urls = [u for u in urls if u.startswith("http")][:max_urls]
+    if not urls:
+        return []
+
+    async def _fetch_with_status(url: str) -> tuple[str, str]:
+        """Return (text, error_reason). One of them is always empty."""
+        if not url.startswith("http"):
+            return "", "URL invalide"
+        try:
+            resp = await _HTTP.get(url, timeout=_PAGE_FETCH_TIMEOUT)
+            if resp.status_code == 403:
+                return "", f"accès refusé (HTTP 403) — le site bloque les requêtes automatiques"
+            if resp.status_code != 200:
+                return "", f"HTTP {resp.status_code}"
+            ct = resp.headers.get("content-type", "").lower()
+            if not any(x in ct for x in ("html", "text/plain")):
+                return "", f"type de contenu non supporté ({ct})"
+            text = _extract_text_from_html(resp.text)
+            if not text:
+                return "", "page vide ou contenu non extractible (JavaScript requis ?)"
+            return text, ""
+        except Exception as exc:
+            return "", f"{type(exc).__name__}: {exc}"
+
+    fetches = await asyncio.gather(*[_fetch_with_status(u) for u in urls])
+    results = []
+    for url, (text, error) in zip(urls, fetches):
+        if text:
+            first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), url)
+            results.append({"title": first_line[:120], "body": text, "url": url})
+            logger.info("Fetched user-provided URL: %s (%d chars)", url, len(text))
+        else:
+            logger.warning("Could not fetch user-provided URL: %s — %s", url, error)
+            # Inject an error sentinel so the LLM informs the user instead of ignoring the URL
+            results.append({
+                "title": f"[Erreur fetch] {url}",
+                "body": (
+                    f"Impossible de lire la page : {error}. "
+                    f"Tu peux copier-coller le contenu directement dans le chat."
+                ),
+                "url": url,
+            })
+    return results
 
 
 # ── Router-model LLM calls (fast, no_think) ────────────────────────────────

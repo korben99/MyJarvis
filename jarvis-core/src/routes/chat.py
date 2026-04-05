@@ -17,6 +17,7 @@ from config import (
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
+    PRIMARY_TIMEOUT,
     ROUTER_API_KEY,
     ROUTER_API_URL,
     ROUTER_MODEL,
@@ -26,6 +27,7 @@ from config import (
     VISION_MODEL,
 )
 from deps import REDIS_CLIENT
+from embed_router import embed_route
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from google_services import (
@@ -37,7 +39,7 @@ from google_services import (
     is_google_available,
 )
 from helpers import build_iso_dt, call_llm_async, get_logger
-from llm_client import describe_images, select_model, stream_openai
+from llm_client import describe_images, stream_openai
 from llm_router import llm_route
 from memory import (
     append_conversation_message,
@@ -56,12 +58,21 @@ from pipeline import (
 from pydantic import BaseModel
 from rag import search_documents
 from self import handle_proposal_command
-from web_search import INTERNET_ERROR, optimize_web_query, search_weather, search_web
+from web_search import (
+    INTERNET_ERROR,
+    fetch_user_urls,
+    optimize_web_query,
+    search_weather,
+    search_web,
+)
 
 logger = get_logger("jarvis-chat")
 
 router = APIRouter()
+_HIST_WINDOW = 8  # HISTORIQUE DES MESSAGES DANS LE PROMPT INJECTE
 
+# Compiled once at module level — used in STEP 5 URL detection.
+_URL_RE = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]{5,}')
 
 # ── Request model ──────────────────────────────────────────────────────────────
 
@@ -79,6 +90,236 @@ class ChatRequest(BaseModel):
     image_base64: Optional[str] = None  # base64 JPEG/PNG sent directly by the iOS app
 
 
+# ── Module-level coroutine helpers (no closure dependency) ────────────────────
+
+
+async def _empty() -> list:
+    return []
+
+
+async def _timed_thread(fn, *args, timeout: float = 15.0) -> list:
+    """Run a sync function in a thread with a timeout; returns [] on timeout."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(fn, *args), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning("Google API call timed out: %s", fn.__name__)
+        return []
+
+
+# ── Pipeline helpers ───────────────────────────────────────────────────────────
+
+_OPENWEBUI_KEYWORDS = (
+    "### task:",
+    "generate a title",
+    "suggest 3",
+    "suggest 4",
+    "suggest 5",
+    "relevant follow",
+    "follow-up question",
+    "followup question",
+    "questions de suivi",
+)
+
+
+def _openwebui_passthrough(req: ChatRequest) -> "StreamingResponse | dict | None":
+    """
+    Détecte les requêtes système d'Open WebUI (suggestions, titres, follow-ups)
+    et les renvoie directement au modèle léger, sans passer par le pipeline Jarvis.
+    Retourne None si le message n'est pas une requête Open WebUI.
+    """
+    if not any(kw in req.message.lower() for kw in _OPENWEBUI_KEYWORDS):
+        return None
+
+    logger.debug("Open WebUI system message detected — bypassing Jarvis pipeline")
+    _owui_model = ROUTER_MODEL or PRIMARY_MODEL
+    _owui_api_url = ROUTER_API_URL if ROUTER_MODEL else PRIMARY_API_URL
+    _owui_api_key = ROUTER_API_KEY if ROUTER_MODEL else PRIMARY_API_KEY
+
+    async def _passthrough():
+        async for chunk in stream_openai(
+            [{"role": "user", "content": req.message}],
+            _owui_model,
+            _owui_api_url,
+            _owui_api_key,
+            no_think=True,
+        ):
+            yield f"data: {json.dumps({'content': chunk})}\n\n"
+        yield f"data: {json.dumps({'done': True})}\n\n"
+
+    if req.stream:
+        return StreamingResponse(_passthrough(), media_type="text/event-stream")
+    return {"response": req.message, "session_id": req.session_id}
+
+
+def _instant_reply(
+    req: ChatRequest,
+    user_code: str,
+    text: str,
+    model: str = PRIMARY_MODEL,
+) -> "StreamingResponse | dict":
+    """
+    Enregistre l'échange dans l'historique et retourne une réponse immédiate
+    sans appel LLM. Utilisé pour le keyword-dispatch, le briefing, les proposals.
+    """
+    append_conversation_message(user_code, req.session_id, "user", req.message)
+    append_conversation_message(user_code, req.session_id, "assistant", text)
+
+    if req.stream:
+        _text = text  # capture pour la closure
+
+        async def _stream():
+            yield f"data: {json.dumps({'content': _text})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'model': model, 'duration_ms': 0})}\n\n"
+
+        return StreamingResponse(_stream(), media_type="text/event-stream")
+
+    return {
+        "response": text,
+        "model": model,
+        "session_id": req.session_id,
+        "duration_ms": 0,
+    }
+
+
+async def _handle_calendar_pending(
+    req: ChatRequest,
+    user_code: str,
+    pending_raw: bytes,
+) -> "StreamingResponse | dict | None":
+    """
+    Gère la confirmation ou l'annulation d'un événement calendrier en attente
+    (clé Redis jarvis:{user_code}:pending_calendar_action).
+    Retourne None si le message n'est ni "confirme" ni "annule" → pipeline normal.
+    """
+    words = set(req.message.lower().split())
+
+    if words & {"confirme"}:
+        pending = json.loads(pending_raw)
+        REDIS_CLIENT.delete(f"jarvis:{user_code}:pending_calendar_action")
+        try:
+            event_id = await asyncio.wait_for(
+                asyncio.to_thread(
+                    create_calendar_event,
+                    pending["title"],
+                    pending["start_dt"],
+                    pending["end_dt"],
+                    pending.get("description", ""),
+                    pending.get("location", ""),
+                    None,
+                    user_code,
+                ),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("create_calendar_event timed out for %s", user_code)
+            event_id = None
+        reply = (
+            f"C'est fait ! J'ai ajouté « {pending['title']} » à ton agenda."
+            if event_id
+            else "Désolé, je n'ai pas pu créer l'événement. Vérifie les droits d'accès au calendrier."
+        )
+        return _instant_reply(req, user_code, reply)
+
+    if words & {"non", "annule", "annuler"}:
+        REDIS_CLIENT.delete(f"jarvis:{user_code}:pending_calendar_action")
+        return _instant_reply(
+            req, user_code, "D'accord, j'annule. L'événement n'a pas été créé."
+        )
+
+    return None  # mot non reconnu → fall-through vers le pipeline
+
+
+async def _handle_calendar_write(
+    req: ChatRequest,
+    user_code: str,
+    google_available: bool,
+) -> "StreamingResponse | dict | None":
+    """
+    Détecte les requêtes d'ajout au calendrier, extrait l'événement via LLM
+    et stocke une action en attente de confirmation.
+    Retourne None si la détection échoue ou si Google n'est pas disponible.
+    """
+    if not is_calendar_write(req.message) or not google_available:
+        return None
+
+    event = await extract_calendar_event_llm(req.message)
+    if not event:
+        # Date ou heure manquante — demander sans passer par le LLM principal
+        return _instant_reply(
+            req,
+            user_code,
+            "Je n'ai pas trouvé la date ou l'heure du rendez-vous. Peux-tu préciser ?",
+        )
+
+    try:
+        tz = USER_TIMEZONES.get(user_code, BRIEFING_TIMEZONE)
+        start_dt = build_iso_dt(event["start_date"], event["start_time"], tz)
+        end_dt = build_iso_dt(event["end_date"], event["end_time"], tz)
+        pending_data = json.dumps(
+            {
+                "title": event["title"],
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "description": event.get("description", ""),
+                "location": event.get("location", ""),
+            }
+        )
+        REDIS_CLIENT.setex(
+            f"jarvis:{user_code}:pending_calendar_action", 600, pending_data
+        )
+        loc_line = f"\n📍 {event['location']}" if event.get("location") else ""
+        multi = event["start_date"] != event["end_date"]
+        date_line = (
+            f"📅 {event['start_date']} {event['start_time']} → {event['end_date']} {event['end_time']}"
+            if multi
+            else f"📅 {event['start_date']} · {event['start_time']} → {event['end_time']}"
+        )
+        confirm_msg = (
+            f"Je vais créer : **{event['title']}**\n"
+            f"{date_line}"
+            f'{loc_line}\n\nConfirmes ? (réponds "confirme" ou "annule")'
+        )
+        return _instant_reply(req, user_code, confirm_msg)
+    except Exception as exc:
+        logger.warning("Calendar write prep failed: %s", type(exc).__name__)
+        return None  # fall-through vers le pipeline
+
+
+def _handle_proposal(
+    req: ChatRequest,
+    user_code: str,
+    use_model: str,
+) -> "StreamingResponse | dict | None":
+    """
+    Exécute une commande de proposition (optimisation de prompt, etc.).
+    Retourne None si aucune commande ne correspond au message.
+    """
+    proposal_resp = handle_proposal_command(req.message, user_code)
+    if proposal_resp is None:
+        return None
+    return _instant_reply(req, user_code, proposal_resp, model=use_model)
+
+
+async def _handle_briefing(
+    req: ChatRequest,
+    user_code: str,
+    use_model: str,
+) -> "StreamingResponse | dict":
+    """
+    Sert le briefing matinal depuis Redis ou le génère à la demande.
+    Toujours appelé avec use_briefing=True — ne retourne jamais None.
+    """
+    stored = get_stored_briefing(user_code)
+    if stored:
+        logger.info("Briefing served from Redis for %s", user_code)
+        return _instant_reply(req, user_code, stored.text, model=use_model)
+
+    logger.info("Briefing not cached, generating on-demand for %s", user_code)
+    result = await gather_briefing(user_code)
+    store_briefing(user_code, result)
+    return _instant_reply(req, user_code, result.text, model=use_model)
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 
@@ -91,248 +332,105 @@ async def chat(req: ChatRequest):
     if not user_code or user_code not in USER_CODES:
         raise HTTPException(403, "Invalid user code")
 
-    # ── Early-exit: Open WebUI internal system requests ───────────────────
-    # Open WebUI sends its own LLM calls for follow-up suggestions, title
-    # generation, etc. These must not run through the full Jarvis pipeline.
-    _msg_lower = req.message.lower()
-    _OPENWEBUI_KEYWORDS = (
-        "### task:",
-        "generate a title",
-        "suggest 3",
-        "suggest 4",
-        "suggest 5",
-        "relevant follow",
-        "follow-up question",
-        "followup question",
-        "questions de suivi",
-    )
-    if any(kw in _msg_lower for kw in _OPENWEBUI_KEYWORDS):
-        logger.debug("Open WebUI system message detected — bypassing Jarvis pipeline")
-        _owui_model = ROUTER_MODEL or PRIMARY_MODEL
-        _owui_api_url = ROUTER_API_URL if ROUTER_MODEL else PRIMARY_API_URL
-        _owui_api_key = ROUTER_API_KEY if ROUTER_MODEL else PRIMARY_API_KEY
-
-        async def _passthrough():
-            async for chunk in stream_openai(
-                [{"role": "user", "content": req.message}],
-                _owui_model,
-                _owui_api_url,
-                _owui_api_key,
-                no_think=True,
-            ):
-                yield f"data: {json.dumps({'content': chunk})}\n\n"
-            yield f"data: {json.dumps({'done': True})}\n\n"
-
-        if req.stream:
-            return StreamingResponse(_passthrough(), media_type="text/event-stream")
-        return {"response": req.message, "session_id": req.session_id}
-
-    # ════════════════════════════════════════════════════════════════════════
-    # KEYWORD DISPATCH — fast paths, no LLM router cost
-    # Order: pure-keyword checks first, then router for everything else.
-    # ════════════════════════════════════════════════════════════════════════
-
-    # ── 1. Pending calendar action: confirm or cancel ─────────────────────
-    _pending_key = f"jarvis:{user_code}:pending_calendar_action"
-    _pending_raw = REDIS_CLIENT.get(_pending_key)
-    if _pending_raw:
-        _words = set(req.message.lower().split())
-        if _words & {"confirme"}:
-            _pending = json.loads(_pending_raw)
-            REDIS_CLIENT.delete(_pending_key)
-            try:
-                _event_id = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        create_calendar_event,
-                        _pending["title"],
-                        _pending["start_dt"],
-                        _pending["end_dt"],
-                        _pending.get("description", ""),
-                        _pending.get("location", ""),
-                        None,
-                        user_code,
-                    ),
-                    timeout=15.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("create_calendar_event timed out for %s", user_code)
-                _event_id = None
-            _cal_reply = (
-                f"C'est fait ! J'ai ajouté « {_pending['title']} » à ton agenda."
-                if _event_id
-                else "Désolé, je n'ai pas pu créer l'événement. Vérifie les droits d'accès au calendrier."
-            )
-            append_conversation_message(user_code, req.session_id, "user", req.message)
-            append_conversation_message(
-                user_code, req.session_id, "assistant", _cal_reply
-            )
-            if req.stream:
-
-                async def _cal_confirm_stream():
-                    yield f"data: {json.dumps({'content': _cal_reply})}\n\n"
-                    yield f"data: {json.dumps({'done': True, 'model': PRIMARY_MODEL, 'duration_ms': 0})}\n\n"
-
-                return StreamingResponse(
-                    _cal_confirm_stream(), media_type="text/event-stream"
-                )
-            return {
-                "response": _cal_reply,
-                "model": PRIMARY_MODEL,
-                "session_id": req.session_id,
-                "duration_ms": 0,
-            }
-
-        elif _words & {"non", "annule", "annuler"}:
-            REDIS_CLIENT.delete(_pending_key)
-            _cancel_reply = "D'accord, j'annule. L'événement n'a pas été créé."
-            append_conversation_message(user_code, req.session_id, "user", req.message)
-            append_conversation_message(
-                user_code, req.session_id, "assistant", _cancel_reply
-            )
-            if req.stream:
-
-                async def _cal_cancel_stream():
-                    yield f"data: {json.dumps({'content': _cancel_reply})}\n\n"
-                    yield f"data: {json.dumps({'done': True, 'model': PRIMARY_MODEL, 'duration_ms': 0})}\n\n"
-
-                return StreamingResponse(
-                    _cal_cancel_stream(), media_type="text/event-stream"
-                )
-            return {
-                "response": _cancel_reply,
-                "model": PRIMARY_MODEL,
-                "session_id": req.session_id,
-                "duration_ms": 0,
-            }
-        # neither confirm nor cancel → fall through to router
-
-    # ── 2. Calendar write (keyword → LLM extraction, no router needed) ────
-    if is_calendar_write(req.message) and is_google_available(user_code):
-        _event = await extract_calendar_event_llm(req.message)
-        if _event:
-            try:
-                _tz = USER_TIMEZONES.get(user_code, BRIEFING_TIMEZONE)
-                _start_dt = build_iso_dt(
-                    _event["start_date"], _event["start_time"], _tz
-                )
-                _end_dt = build_iso_dt(_event["end_date"], _event["end_time"], _tz)
-                _pending_data = json.dumps(
-                    {
-                        "title": _event["title"],
-                        "start_dt": _start_dt,
-                        "end_dt": _end_dt,
-                        "description": _event.get("description", ""),
-                        "location": _event.get("location", ""),
-                    }
-                )
-                REDIS_CLIENT.setex(
-                    f"jarvis:{user_code}:pending_calendar_action", 600, _pending_data
-                )
-                _loc_line = (
-                    f"\n📍 {_event['location']}" if _event.get("location") else ""
-                )
-                _multi = _event["start_date"] != _event["end_date"]
-                _date_line = (
-                    f"📅 {_event['start_date']} {_event['start_time']} → {_event['end_date']} {_event['end_time']}"
-                    if _multi
-                    else f"📅 {_event['start_date']} · {_event['start_time']} → {_event['end_time']}"
-                )
-                _confirm_msg = (
-                    f"Je vais créer : **{_event['title']}**\n"
-                    f"{_date_line}"
-                    f'{_loc_line}\n\nConfirmes ? (réponds "confirme" ou "annule")'
-                )
-                append_conversation_message(
-                    user_code, req.session_id, "user", req.message
-                )
-                append_conversation_message(
-                    user_code, req.session_id, "assistant", _confirm_msg
-                )
-                if req.stream:
-
-                    async def _cal_write_stream():
-                        yield f"data: {json.dumps({'content': _confirm_msg})}\n\n"
-                        yield f"data: {json.dumps({'done': True, 'model': PRIMARY_MODEL, 'duration_ms': 0})}\n\n"
-
-                    return StreamingResponse(
-                        _cal_write_stream(), media_type="text/event-stream"
-                    )
-                return {
-                    "response": _confirm_msg,
-                    "model": PRIMARY_MODEL,
-                    "session_id": req.session_id,
-                    "duration_ms": 0,
-                }
-            except Exception as exc:
-                logger.warning("Calendar write prep failed: %s", type(exc).__name__)
-        else:
-            # Missing date/time — ask without going to LLM or router
-            _missing_msg = "Je n'ai pas trouvé la date ou l'heure du rendez-vous. Peux-tu préciser ?"
-            append_conversation_message(user_code, req.session_id, "user", req.message)
-            append_conversation_message(
-                user_code, req.session_id, "assistant", _missing_msg
-            )
-            if req.stream:
-
-                async def _cal_missing_stream():
-                    yield f"data: {json.dumps({'content': _missing_msg})}\n\n"
-                    yield f"data: {json.dumps({'done': True, 'model': PRIMARY_MODEL, 'duration_ms': 0})}\n\n"
-
-                return StreamingResponse(
-                    _cal_missing_stream(), media_type="text/event-stream"
-                )
-            return {
-                "response": _missing_msg,
-                "model": PRIMARY_MODEL,
-                "session_id": req.session_id,
-                "duration_ms": 0,
-            }
-
-    # ════════════════════════════════════════════════════════════════════════
-    # LLM ROUTER — parallel with system prompt build
-    # ════════════════════════════════════════════════════════════════════════
-
-    user_name = USER_CODES.get(user_code)
-
-    # ====DEBUG==== TTFT instrumentation — remove once latency is understood
+    # Timer starts here — before any processing — so all TTFT logs are accurate.
     _t0 = time.time()
-    logger.debug(
-        "[TTFT] request received — user=%s msg=%r", user_code, req.message[:60]
-    )
-    # ====DEBUG====
+    logger.debug("[TTFT] request received — user=%s msg=%r", user_code, req.message[:60])
 
-    # Historique de conversation — uniquement nécessaire pour la phase LLM,
-    # chargé ici après tous les fast-paths (calendrier, proposal) qui n'en ont pas besoin.
-    hist = get_conversation(user_code, req.session_id)
+    # Compute once — reused in embed router, LLM router, calendar write, context gather.
+    _google_available = is_google_available(user_code)
 
-    # System prompt is now STATIC — no thread needed.
-    # Dynamic context (date, profile, opinions) goes into the user message prefix.
+    # ── Early-exit: Open WebUI internal system requests ─────────────────────
+    # Open WebUI envoie ses propres appels LLM (suggestions, titres…).
+    # Ces messages doivent être renvoyés directement au modèle léger.
+    if (result := _openwebui_passthrough(req)) is not None:
+        return result
+
+    # ════════════════════════════════════════════════════════════════════════
+    # STEP 1 — KEYWORD DISPATCH — fast paths, no LLM router cost
+    # Checks keyword-triggered actions before any embedding or LLM call.
+    # ════════════════════════════════════════════════════════════════════════
+
+    # ── 1a. Pending calendar action: confirm or cancel ──────────────────────
+    # If a pending action exists and the user confirms/cancels → act and return.
+    # If the word is unrecognised → skip calendar write check (avoids overwriting
+    # the existing pending event with a brand new one).
+    _pending_raw = REDIS_CLIENT.get(f"jarvis:{user_code}:pending_calendar_action")
+    if _pending_raw:
+        if (result := await _handle_calendar_pending(req, user_code, _pending_raw)) is not None:
+            return result
+        # Unrecognised word while pending → fall through to router, skip 1b.
+    else:
+        # ── 1b. Calendar write (keyword → LLM extraction, no router needed) ─
+        # Only checked when there is no pending action to avoid overwriting it.
+        if (result := await _handle_calendar_write(req, user_code, _google_available)) is not None:
+            return result
+
+    # ════════════════════════════════════════════════════════════════════════
+    # STEP 2 — EMBEDDING ROUTER — fast cosine-similarity intent classifier
+    # ~2-5 ms. Skips the LLM router (~1.3 s) when confident.
+    # Returns None when score is low or ambiguous → LLM router takes over.
+    # ════════════════════════════════════════════════════════════════════════
+    _embed_result = embed_route(req.message, google_available=_google_available)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # STEP 3 — LLM ROUTER + dynamic prefix + conversation history (parallel)
+    # get_conversation is gathered here so it overlaps with the LLM router call
+    # instead of running sequentially after it.
+    # ════════════════════════════════════════════════════════════════════════
+    user_name = USER_CODES.get(user_code)
     system_prompt = build_system_prompt()
 
-    _gather1 = await asyncio.gather(
-        asyncio.to_thread(
-            build_dynamic_prefix,
-            req.session_id,
-            user_code,
-            user_name or "",
-            req.voice_mode,
-        ),
-        llm_route(req.message, google_available=is_google_available(user_code)),
-        return_exceptions=True,
-    )
+    if _embed_result is not None:
+        # Fast-path: no LLM router — load prefix and history in parallel.
+        _gather_ep = await asyncio.gather(
+            asyncio.to_thread(
+                build_dynamic_prefix,
+                req.session_id, user_code, user_name or "", req.voice_mode,
+            ),
+            asyncio.to_thread(get_conversation, user_code, req.session_id),
+            return_exceptions=True,
+        )
+        _pfx = _gather_ep[0]
+        if isinstance(_pfx, BaseException):
+            logger.error("build_dynamic_prefix failed: %s", _pfx)
+            dynamic_prefix, _self_mem = "", {}
+        else:
+            dynamic_prefix, _self_mem = _pfx
+        hist = _gather_ep[1] if not isinstance(_gather_ep[1], BaseException) else []
+        if isinstance(_gather_ep[1], BaseException):
+            logger.error("get_conversation failed: %s", _gather_ep[1])
+        llm_result = _embed_result
+        logger.debug(
+            "[TTFT] embed router hit — LLM router skipped — %.3fs", time.time() - _t0
+        )
+    else:
+        # Fallback: LLM router 3B + dynamic prefix + history in parallel.
+        _gather1 = await asyncio.gather(
+            asyncio.to_thread(
+                build_dynamic_prefix,
+                req.session_id, user_code, user_name or "", req.voice_mode,
+            ),
+            llm_route(req.message, google_available=_google_available),
+            asyncio.to_thread(get_conversation, user_code, req.session_id),
+            return_exceptions=True,
+        )
+        _pfx = _gather1[0]
+        if isinstance(_pfx, BaseException):
+            logger.error("build_dynamic_prefix failed: %s", _pfx)
+            dynamic_prefix, _self_mem = "", {}
+        else:
+            dynamic_prefix, _self_mem = _pfx
+        llm_result = _gather1[1] if not isinstance(_gather1[1], BaseException) else None
+        hist = _gather1[2] if not isinstance(_gather1[2], BaseException) else []
+        if isinstance(_gather1[1], BaseException):
+            logger.error("llm_route failed: %s", _gather1[1])
+        if isinstance(_gather1[2], BaseException):
+            logger.error("get_conversation failed: %s", _gather1[2])
+        logger.debug(
+            "[TTFT] gather1 done (LLM router+dynamic_prefix+hist) — %.3fs", time.time() - _t0
+        )
 
-    # ====DEBUG====
-    logger.debug(
-        "[TTFT] gather1 done (router+dynamic_prefix) — %.3fs", time.time() - _t0
-    )
-    # ====DEBUG====
-    dynamic_prefix = _gather1[0] if not isinstance(_gather1[0], BaseException) else ""
-    llm_result = _gather1[1] if not isinstance(_gather1[1], BaseException) else None
-    if isinstance(_gather1[0], BaseException):
-        logger.error("build_dynamic_prefix failed: %s", _gather1[0])
-    if isinstance(_gather1[1], BaseException):
-        logger.error("llm_route failed: %s", _gather1[1])
-
+    # ── Router result extraction ────────────────────────────────────────────
     if llm_result:
         use_memory = llm_result.use_memory
         use_rag = llm_result.use_rag
@@ -353,22 +451,22 @@ async def chat(req: ChatRequest):
         _llm_cal_days = None
         _llm_weather_location = ""
 
-    # ── Model / tier selection ──
-    use_model, _use_api_url, _use_api_key, _use_timeout = select_model(
-        req.model, use_reasoning=bool(llm_result and llm_result.use_reasoning)
+    # ── Model selection ─────────────────────────────────────────────────────
+    # Always PRIMARY infrastructure — reasoning is handled via no_think flag only.
+    use_model = req.model or PRIMARY_MODEL
+    _use_api_url = PRIMARY_API_URL
+    _use_api_key = PRIMARY_API_KEY
+    _use_timeout = PRIMARY_TIMEOUT
+
+    # ── no_think for simple intents (memory/conversation) ──────────────────
+    # Complex intents (web, RAG, reasoning) keep chain-of-thought.
+    # Typical saving: ~4 s of TTFT on conversational exchanges.
+    _complex_intents = use_rag or use_web_auto
+    chat_no_think = (
+        False if (llm_result and llm_result.use_reasoning) else not _complex_intents
     )
 
-    # ── no_think pour les questions simples (mémoire/conversation pure) ────
-    # Les requêtes complexes (web, RAG, reasoning) conservent la réflexion.
-    # Économie typique : ~4s de TTFT sur les échanges conversationnels.
-    _complex_intents = use_rag or use_web_auto
-
-    if llm_result and llm_result.use_reasoning:
-        chat_no_think = False
-    else:
-        chat_no_think = not _complex_intents
-
-    # ── Vision: convert iOS base64 image into standard image_part ────────
+    # ── Vision: convert iOS base64 image into standard image_part ──────────
     if req.image_base64:
         req.image_parts = [
             {
@@ -377,116 +475,52 @@ async def chat(req: ChatRequest):
             }
         ] + req.image_parts
 
-    # ── Vision: describe images (two-stage pipeline) ──────────────────────
+    # ── Vision: describe images (two-stage pipeline) ────────────────────────
     image_description = ""
     if req.image_parts:
         if VISION_MODEL:
             image_description = await describe_images(req.image_parts, req.message)
             if image_description:
-                logger.info(
-                    "Vision: image described (%d chars)", len(image_description)
-                )
+                logger.info("Vision: image described (%d chars)", len(image_description))
         else:
             logger.warning(
                 "Vision: image received but VISION_MODEL not configured — ignored"
             )
 
-    # ── Self takes priority over briefing when both fire ──
+    # ════════════════════════════════════════════════════════════════════════
+    # STEP 4 — INTENT SHORT-CIRCUITS — self / briefing
+    # These intents return immediately, without going through context gather.
+    # ════════════════════════════════════════════════════════════════════════
+
+    # ── 4a. Self: état interne Jarvis (proposals take priority over briefing) ─
     if use_self:
         use_briefing = False
-        proposal_resp = handle_proposal_command(req.message, user_code)
-        if proposal_resp is not None:
-            append_conversation_message(user_code, req.session_id, "user", req.message)
-            append_conversation_message(
-                user_code, req.session_id, "assistant", proposal_resp
-            )
-            if req.stream:
+        if (result := _handle_proposal(req, user_code, use_model)) is not None:
+            return result
+        # No proposal match → self context injected below via build_context
 
-                async def _proposal_stream():
-                    yield f"data: {json.dumps({'content': proposal_resp})}\n\n"
-                    yield f"data: {json.dumps({'done': True})}\n\n"
-
-                return StreamingResponse(
-                    _proposal_stream(), media_type="text/event-stream"
-                )
-            return {
-                "response": proposal_resp,
-                "model": use_model,
-                "session_id": req.session_id,
-                "duration_ms": 0,
-            }
-
-    # ── Briefing short-circuit — return stored or generate on-demand ──
+    # ── 4b. Briefing: sert depuis Redis ou génère à la demande ─────────────
     if use_briefing:
-        stored = get_stored_briefing(user_code)
-        if stored:
-            logger.info("Briefing served from Redis for %s", user_code)
-            if req.stream:
+        return await _handle_briefing(req, user_code, use_model)
 
-                async def _briefing_stream():
-                    yield f"data: {json.dumps({'content': stored.text})}\n\n"
-                    yield f"data: {json.dumps({'done': True})}\n\n"
-
-                return StreamingResponse(
-                    _briefing_stream(), media_type="text/event-stream"
-                )
-            return {
-                "response": stored.text,
-                "model": use_model,
-                "session_id": req.session_id,
-                "duration_ms": 0,
-            }
-        logger.info("Briefing not cached, generating on-demand for %s", user_code)
-        result = await gather_briefing(user_code)
-        store_briefing(user_code, result)
-        if req.stream:
-
-            async def _briefing_stream_fresh():
-                yield f"data: {json.dumps({'content': result.text})}\n\n"
-                yield f"data: {json.dumps({'done': True})}\n\n"
-
-            return StreamingResponse(
-                _briefing_stream_fresh(), media_type="text/event-stream"
-            )
-        return {
-            "response": result.text,
-            "model": use_model,
-            "session_id": req.session_id,
-            "duration_ms": 0,
-        }
-
-    # self intent: state is injected as context below — no short-circuit
-
-    # ── Parallel context fetch ─────────────────────────────────────────────
-    # memory_scope/conversation_type removed — router intents handle routing decisions.
-
-    async def _empty() -> list:
-        return []
-
+    # ════════════════════════════════════════════════════════════════════════
+    # STEP 5 — CONTEXT GATHER — all external sources fetched in parallel
+    # ════════════════════════════════════════════════════════════════════════
     gmail_query = _llm_gmail_query or ""
     cal_days = _llm_cal_days or 7
     _weather_query = _llm_weather_location or USER_CITIES.get(user_code, "Paris")
+    _inline_urls = _URL_RE.findall(req.message)
 
-    _google_available = is_google_available(user_code)
-
-    async def _timed_thread(fn, *args, timeout=15.0):
-        try:
-            return await asyncio.wait_for(asyncio.to_thread(fn, *args), timeout=timeout)
-        except asyncio.TimeoutError:
-            logger.warning("Google API call timed out: %s", fn.__name__)
-            return []
-
-    # ====DEBUG====
     logger.debug(
-        "[TTFT] gather2 start (rag=%s memory=%s web=%s gmail=%s cal=%s) — %.3fs",
+        "[TTFT] gather2 start (rag=%s memory=%s web=%s gmail=%s cal=%s urls=%d) — %.3fs",
         use_rag,
         use_memory,
         use_web_auto or req.use_web,
         use_gmail,
         use_calendar,
+        len(_inline_urls),
         time.time() - _t0,
     )
-    # ====DEBUG====
 
     _gather2 = await asyncio.gather(
         search_documents(req.message) if (req.use_rag or use_rag) else _empty(),
@@ -504,24 +538,42 @@ async def chat(req: ChatRequest):
         _timed_thread(fetch_calendar_events, cal_days, None, None, user_code)
         if use_calendar and _google_available
         else _empty(),
+        fetch_user_urls(_inline_urls) if _inline_urls else _empty(),
         return_exceptions=True,
     )
-    _ctx_names = ("rag", "memory", "web", "gmail", "calendar")
-    rag_chunks, memory_chunks, web_results, gmail_results, calendar_results = [
+    _ctx_names = ("rag", "memory", "web", "gmail", "calendar", "inline_urls")
+    (
+        rag_chunks,
+        memory_chunks,
+        web_results,
+        gmail_results,
+        calendar_results,
+        inline_url_results,
+    ) = [
         (logger.error("Context source '%s' failed: %s", _ctx_names[i], v) or [])
         if isinstance(v, BaseException)
         else v
         for i, v in enumerate(_gather2)
     ]
-    # ====DEBUG====
-    logger.debug("[TTFT] gather2 done (all context sources resolved) — %.3fs", time.time() - _t0)
-    # ====DEBUG====
 
-    # Only write once — avoids HKEYS + LLM normalisation on every request
+    # Inline URL results take priority — prepend so the LLM sees them first.
+    if inline_url_results:
+        web_results = inline_url_results + [
+            r for r in web_results if r not in inline_url_results
+        ]
+
+    logger.debug(
+        "[TTFT] gather2 done (all context sources resolved) — %.3fs", time.time() - _t0
+    )
+
+    # ════════════════════════════════════════════════════════════════════════
+    # STEP 6 — MESSAGE ASSEMBLY — context + prefix + history → final prompt
+    # ════════════════════════════════════════════════════════════════════════
+
+    # Write user name once — avoids HKEYS + LLM normalisation on every request
     if user_name and not REDIS_CLIENT.hget(f"user:{user_code}:profile", "name"):
         update_user_profile(user_code, "name", user_name)
 
-    # ── Context assembly ──────────────────────────────────────────────────
     assembled = build_context(
         rag_chunks,
         memory_chunks,
@@ -531,6 +583,7 @@ async def chat(req: ChatRequest):
         use_portfolio,
         use_self,
         user_code,
+        self_mem=_self_mem,  # reuse from build_dynamic_prefix — avoids second Redis call
     )
     if assembled:
         logger.info(
@@ -540,7 +593,8 @@ async def chat(req: ChatRequest):
             len(web_results),
         )
 
-    # ── Chain-of-thought hint ─────────────────────────────────────────────
+    # Chain-of-thought hint injected into user message (not system prompt)
+    # to keep the static system prefix token-identical → KV cache valid.
     reasoning_hint = ""
     if llm_result and llm_result.use_reasoning:
         reasoning_hint = (
@@ -548,11 +602,6 @@ async def chat(req: ChatRequest):
             "Analyse-la étape par étape avant de répondre."
         )
 
-    # ── Build user content with dynamic prefix ────────────────────────────
-    # dynamic_prefix (date, profile, opinions) + assembled context + reasoning
-    # hint are prepended to the user message — NOT to the static system prompt.
-    # This keeps the system prompt token-identical across all turns so the
-    # MLX KV cache is always valid for that prefix.
     extra_ctx_parts = []
     if dynamic_prefix:
         extra_ctx_parts.append(dynamic_prefix)
@@ -577,28 +626,29 @@ async def chat(req: ChatRequest):
     # can recover the original message when serving history to the iOS app.
     user_content = augment_user_message(full_prefix, raw_user_content)
 
-    # ── Build message list ────────────────────────────────────────────────
-    # Fenêtre : 8 derniers messages (4 échanges). Au-delà, le KV cache est
-    # invalidé car le préfixe glisse — voir llm_local.py _get_session_cache.
-    _HIST_WINDOW = 8
+    # Window: last 8 messages (4 exchanges). Beyond that, the KV cache is
+    # invalidated because the prefix shifts — see llm_local.py _get_session_cache.
     hist_slice = hist[-_HIST_WINDOW:]
     messages = [{"role": "system", "content": system_prompt}]
     for m in hist_slice:
         messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": user_content})
 
-    # ====DEBUG====
     logger.debug(
         "[TTFT] messages built (%d msgs, sysprompt=%d chars) — handing off to LLM — %.3fs",
         len(messages),
         len(system_prompt),
         time.time() - _t0,
     )
-    # ====DEBUG====
 
     start = time.time()
 
-    # ── Streaming response ────────────────────────────────────────────────
+    # Pre-compute safe web sources (used in both streaming and JSON paths).
+    _safe_web = [] if web_results == INTERNET_ERROR else web_results
+
+    # ════════════════════════════════════════════════════════════════════════
+    # STEP 7 — LLM CALL — streaming SSE or blocking JSON
+    # ════════════════════════════════════════════════════════════════════════
     if req.stream:
 
         async def sse():
@@ -618,15 +668,15 @@ async def chat(req: ChatRequest):
                 ):
                     full += chunk
 
-                    # ── Think filtering ────────────────────────────────────
-                    # Cas particulier : <think> et </think> dans le même chunk
-                    # (ex: mode no-think Qwen3.5 → "<think>\n\n</think>\n\n").
-                    # Si on fait `continue` dès <think>, on rate le </think>
-                    # → in_think reste True → toute la réponse est avalée.
+                    # ── Think filtering ─────────────────────────────────────
+                    # Special case: <think> and </think> in the same chunk
+                    # (e.g. Qwen3.5 no-think mode → "<think>\n\n</think>\n\n").
+                    # Doing `continue` on <think> alone would miss the </think>
+                    # → in_think stays True → the entire response is swallowed.
                     if "<think>" in chunk:
                         in_think = True
                         if "</think>" in chunk:
-                            in_think = False  # bloc vide entier dans ce chunk
+                            in_think = False  # empty block entirely in this chunk
                         continue
 
                     if "</think>" in chunk:
@@ -652,7 +702,9 @@ async def chat(req: ChatRequest):
                 # Strip complete think blocks, then any truncated open <think>
                 # (e.g. model hit token budget mid-reasoning — no closing </think>).
                 full_clean = re.sub(r"<think>.*?</think>", "", full, flags=re.DOTALL)
-                full_clean = re.sub(r"<think>.*$", "", full_clean, flags=re.DOTALL).strip()
+                full_clean = re.sub(
+                    r"<think>.*$", "", full_clean, flags=re.DOTALL
+                ).strip()
                 # Store the AUGMENTED user message so the KV cache matches on
                 # the next turn (the common prefix must be token-identical).
                 append_conversation_message(
@@ -662,7 +714,6 @@ async def chat(req: ChatRequest):
                     user_code, req.session_id, "assistant", full_clean
                 )
                 ms = int((time.time() - start) * 1000)
-                _safe_web = [] if web_results == INTERNET_ERROR else web_results
                 yield f"data: {json.dumps({'done': True, 'model': use_model, 'duration_ms': ms, 'rag_sources': [{'source': c['source'], 'score': c['score']} for c in rag_chunks], 'web_sources': [{'title': w['title'], 'url': w['url']} for w in _safe_web]})}\n\n"
                 asyncio.create_task(
                     post_analysis(req.session_id, user_code, req.message, full_clean)
@@ -674,7 +725,7 @@ async def chat(req: ChatRequest):
             sse(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
         )
 
-    # ── JSON response ─────────────────────────────────────────────────────
+    # ── JSON response (non-streaming) ───────────────────────────────────────
     resp = await call_llm_async(
         messages,
         model=use_model,
@@ -699,9 +750,7 @@ async def chat(req: ChatRequest):
             {"source": c["source"], "score": c["score"]} for c in rag_chunks
         ],
         "web_sources": [
-            {"title": w["title"], "url": w["url"]}
-            for w in web_results
-            if w != INTERNET_ERROR[0]
+            {"title": w["title"], "url": w["url"]} for w in _safe_web
         ],
     }
 

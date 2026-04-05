@@ -119,7 +119,7 @@ async def portfolio_analysis(user_code: str, authorization: str = Header(default
                 {"role": "user",   "content": f"Analyse ce portefeuille et donne tes observations :\n\n{summary}"},
             ],
             model=PRIMARY_MODEL, api_url=PRIMARY_API_URL, api_key=PRIMARY_API_KEY,
-            temperature=0.4, max_tokens=600, json_response=False, no_think=True, timeout=40.0,
+            temperature=0.4, max_tokens=2000, json_response=False, no_think=True, timeout=40.0,
         )
         return {"user": USER_CODES[user_code], "analysis": analysis, "portfolio_snapshot": summary}
     except Exception as exc:

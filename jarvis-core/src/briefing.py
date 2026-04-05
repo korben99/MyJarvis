@@ -356,7 +356,7 @@ async def _assemble_with_llm(
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.6,
-            max_tokens=1200,
+            max_tokens=3000,  # briefing JSON can include multiple sections; early-stop active
             json_response=True,
             no_think=True,
             timeout=30.0,

@@ -432,48 +432,6 @@ def extract_llm_json(text: str) -> dict:
     raise ValueError(f"Invalid JSON in LLM response: {text[:200]}")
 
 
-def extract_llm_jsonOLD(raw: str) -> dict:
-    """
-    Parse JSON from a model response robustly.
-
-    Strategy:
-    1. Direct parse (works when response_format is supported).
-    2. Strip markdown code fences if present.
-    3. Extract the first {...} block (mlx-lm fallback for older versions
-       that ignore response_format, or models that prefix with prose).
-
-    Raises json.JSONDecodeError if all strategies fail.
-    """
-    raw = raw.strip()
-
-    # 0. Strip <think>...</think> blocks (Qwen3 chain-of-thought)
-    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-
-    # 1. Direct parse
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-
-    # 2. Strip markdown code fences
-    if "```" in raw:
-        inner = raw.split("```")[1]
-        first_newline = inner.find("\n")
-        if first_newline != -1 and not inner[:first_newline].strip().startswith("{"):
-            inner = inner[first_newline:].strip()
-        try:
-            return json.loads(inner.strip())
-        except json.JSONDecodeError:
-            pass
-
-    # 3. Extract first {...} block (handles prose-prefixed responses)
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if match:
-        return json.loads(match.group())
-
-    raise json.JSONDecodeError("No JSON found in LLM response", raw, 0)
-
-
 # ══════════════════════════════════════════════════
 #  LLM HTTP CLIENTS  (shared, connection-pooled)
 # ══════════════════════════════════════════════════
@@ -512,11 +470,14 @@ def _llm_headers(api_key: str) -> dict:
     }
 
 
+_LOCAL_DEFAULT_MAX_TOKENS = 10000  # global ceiling — thinking + output are counted together in mlx-lm
+
+
 def _llm_body(
     messages: list[dict],
     model: str,
     temperature: float,
-    max_tokens: int,
+    max_tokens: int | None,
     json_response: bool,
 ) -> dict:
     """
@@ -524,6 +485,7 @@ def _llm_body(
 
     - Uses tokens_param() to pick max_tokens vs max_completion_tokens.
     - Sets response_format when json_response=True.
+    - max_tokens=None → field omitted → API uses model default (no truncation risk).
     - Thinking control (no_think) is handled at the MLX prompt level for local
       models (_build_prompt via enable_thinking), not at the HTTP body level.
     """
@@ -532,8 +494,9 @@ def _llm_body(
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        tokens_param(model): max_tokens,
     }
+    if max_tokens is not None:
+        body[tokens_param(model)] = max_tokens
     if json_response:
         body["response_format"] = {"type": "json_object"}
     return body
@@ -546,7 +509,7 @@ def call_llm(
     api_url: str,
     api_key: str,
     temperature: float = 0.1,
-    max_tokens: int = 500,
+    max_tokens: int | None = None,
     json_response: bool = True,
     no_think: bool = False,
     timeout: float = 30.0,
@@ -556,14 +519,16 @@ def call_llm(
 
     Returns the model's raw text content.
     API key is never logged.
+    max_tokens=None → no explicit limit (model stops at EOS / closing JSON brace).
     """
     if LLM_LOCAL and model in _LOCAL_MODELS:
         return call_llm_local(
             messages,
             model=model,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=max_tokens or _LOCAL_DEFAULT_MAX_TOKENS,
             no_think=no_think,
+            json_response=json_response,
         )
     resp = _get_llm_sync_client().post(
         f"{api_url}/chat/completions",
@@ -584,7 +549,7 @@ async def call_llm_async(
     api_url: str,
     api_key: str,
     temperature: float = 0.1,
-    max_tokens: int = 500,
+    max_tokens: int | None = None,
     json_response: bool = True,
     no_think: bool = False,
     timeout: float = 30.0,
@@ -594,14 +559,16 @@ async def call_llm_async(
 
     Returns the model's raw text content.
     API key is never logged.
+    max_tokens=None → no explicit limit (model stops at EOS / closing JSON brace).
     """
     if LLM_LOCAL and model in _LOCAL_MODELS:
         return await call_llm_local_async(
             messages,
             model=model,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=max_tokens or _LOCAL_DEFAULT_MAX_TOKENS,
             no_think=no_think,
+            json_response=json_response,
         )
     resp = await _get_llm_async_client().post(
         f"{api_url}/chat/completions",

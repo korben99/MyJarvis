@@ -193,28 +193,68 @@ class JarvisAPI: ObservableObject {
                 messages[pos].isStreaming = false
             }
         } catch {
+            // Classify the error before touching connection state.
+            // A URLError lets us distinguish a slow LLM (timedOut) from a real
+            // network failure (host unreachable, no internet, …).
+            let urlErr = error as? URLError
+            let isNetworkDown = [
+                URLError.Code.notConnectedToInternet,
+                .cannotConnectToHost,
+                .cannotFindHost,
+                .networkConnectionLost,
+            ].contains(urlErr?.code)
+
             if let pos = messages.firstIndex(where: { $0.id == assistantID }) {
-                messages[pos].content = "Error: \(error.localizedDescription)"
+                switch urlErr?.code {
+                case .timedOut:
+                    // Server is reachable but inference took too long.
+                    // We'll try to reload — if the server finished we get the real answer.
+                    messages[pos].content = "⏱ Pas de réponse dans les délais — rechargement…"
+                case .networkConnectionLost, .notConnectedToInternet,
+                     .cannotConnectToHost, .cannotFindHost:
+                    messages[pos].content = "Réseau inaccessible."
+                default:
+                    messages[pos].content = "Erreur : \(error.localizedDescription)"
+                }
                 messages[pos].isStreaming = false
             }
-            // Invalidate the cached URL so the next send triggers a fresh probe
-            // rather than hammering a server we already know is unreachable.
-            resolvedURL = ""
-            connectionState = .error("Connection lost")
+
+            if isNetworkDown {
+                // Server is genuinely unreachable — clear cached URL so next send
+                // triggers a fresh probe, and surface the disconnected state.
+                resolvedURL = ""
+                connectionState = .error("Serveur inaccessible")
+            } else {
+                // Timeout or transient error — server is probably still up.
+                // Reload conversation: if the server finished processing the request
+                // after the client-side timeout, we'll recover the actual response.
+                await loadConversation()
+            }
         }
     }
 
     // MARK: - Private helpers
 
-    /// Probes local and VPN in parallel — if local is unreachable the VPN probe
-    /// is already in-flight, so the result comes back immediately after the 2 s
-    /// local timeout instead of after an additional 2 s.  Prefers local on a tie.
+    /// Probes local and VPN in parallel and returns whichever responds first.
+    /// Prefers local when both answer within the same probe window.
+    /// Uses a TaskGroup so neither probe blocks the other — if local times out
+    /// after 2 s the VPN result (already in-flight) is returned immediately.
     private func resolveActiveURL() async -> (url: String, route: NetworkRoute, data: Data)? {
-        async let localResult = probe(base: localServerURL, route: .local)
-        async let vpnResult   = probe(base: vpnServerURL,   route: .vpn)
-        if let r = await localResult { return r }
-        if let r = await vpnResult   { return r }
-        return nil
+        await withTaskGroup(of: (url: String, route: NetworkRoute, data: Data)?.self) { group in
+            group.addTask { await self.probe(base: self.localServerURL, route: .local) }
+            group.addTask { await self.probe(base: self.vpnServerURL,   route: .vpn) }
+
+            var vpnFallback: (url: String, route: NetworkRoute, data: Data)? = nil
+            for await result in group {
+                guard let r = result else { continue }
+                if r.route == .local {
+                    group.cancelAll()
+                    return r          // local always wins if it responds
+                }
+                vpnFallback = r       // keep VPN in case local times out
+            }
+            return vpnFallback
+        }
     }
 
     private func probe(base: String, route: NetworkRoute) async -> (url: String, route: NetworkRoute, data: Data)? {

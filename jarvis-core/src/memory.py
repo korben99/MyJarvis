@@ -275,12 +275,16 @@ def _normalize_profile_key(user_code: str, new_key: str, existing_keys: list[str
             f'JSON uniquement : {{"match": "clé_existante"}} ou {{"match": null}}'
         )
         raw = call_llm(
-            [{"role": "user", "content": prompt}],
+            [
+                {"role": "system", "content": "JSON uniquement. Aucun autre texte."},
+                {"role": "user", "content": prompt},
+            ],
             model=ROUTER_MODEL,
             api_url=ROUTER_API_URL,
             api_key=ROUTER_API_KEY,
             temperature=0.1,
             max_tokens=80,
+            json_response=True,
             no_think=True,
             timeout=ROUTER_TIMEOUT,
         )
@@ -297,7 +301,7 @@ def _normalize_profile_key(user_code: str, new_key: str, existing_keys: list[str
 
 
 def update_user_profile(user_code: str, key: str, value: str | None):
-    """Add, update, or delete (value=None) a user profile fact.
+    """Add, update, or delete (value=None or "") a user profile fact.
 
     Preventive duplicate guard: before writing a new key, the router LLM checks
     whether it is semantically equivalent to an existing key.  If a match is found,
@@ -310,7 +314,7 @@ def update_user_profile(user_code: str, key: str, value: str | None):
     profile_redis_key = f"user:{user_code}:profile"
     profile_ts_key    = f"user:{user_code}:profile:ts"
 
-    if value is None:
+    if not value:  # None or empty string → delete
         old_val = r.hget(profile_redis_key, key)
         r.hdel(profile_redis_key, key)
         r.hdel(profile_ts_key, key)
@@ -503,15 +507,18 @@ def get_conversation_summary(user_code: str, days: int = 7) -> str:
     return summary
 
 
-def _fuzzy_project_name(name: str, project_map: dict) -> str | None:
+def _fuzzy_project_name(name: str, project_map: dict, threshold: float = 0.6) -> str | None:
     """
-    Find the best matching project name by word overlap (≥60% threshold).
+    Find the best matching project name by word overlap (≥threshold).
 
     Two scores are computed and the max is taken:
     - General overlap : overlap / max(|A|, |B|)  — classic Jaccard-like
     - Subset score    : overlap / min(|A|, |B|)  — catches versioned names
       e.g. "Jarvis" (1 word) vs "Jarvis v9" (2 words):
            general = 1/2 = 0.5 (would miss), subset = 1/1 = 1.0 (matches ✓)
+
+    threshold=0.6 is the default for standard matching.
+    Pass threshold=0.4 for a softer second-pass to catch near-typos on create.
     """
     words_new = set(name.lower().split())
     best_match: str | None = None
@@ -524,7 +531,7 @@ def _fuzzy_project_name(name: str, project_map: dict) -> str | None:
         general = overlap / max(len(words_new), len(words_ex))
         subset  = overlap / min(len(words_new), len(words_ex))
         score   = max(general, subset)
-        if score > best_score and score >= 0.6:
+        if score > best_score and score >= threshold:
             best_score = score
             best_match = existing_name
     return best_match
@@ -551,12 +558,23 @@ def apply_project_updates(user_code: str, project_events: list[str]):
 
         if action == "create":
             if resolved not in project_map:
-                project_map[resolved] = {
-                    "name": resolved,
-                    "status": "in_progress",
-                    "first_mentioned": now,
-                    "last_update": now,
-                }
+                # Second-pass fuzzy at lower threshold (0.4) before creating —
+                # catches near-typos that the 0.6 pass missed, preventing phantom projects.
+                soft_match = _fuzzy_project_name(name, project_map, threshold=0.4)
+                if soft_match:
+                    resolved = soft_match
+                    project_map[resolved]["last_update"] = now
+                    logger.debug(
+                        "Project create: '%s' soft-matched to existing '%s' — skipping create",
+                        name, soft_match,
+                    )
+                else:
+                    project_map[resolved] = {
+                        "name": resolved,
+                        "status": "in_progress",
+                        "first_mentioned": now,
+                        "last_update": now,
+                    }
             else:
                 project_map[resolved]["last_update"] = now  # already exists → update
 
@@ -634,7 +652,8 @@ def compute_memory_novelty(user_code: str, text: str, vector: list | None = None
         if not results:
             return 1.0
 
-        max_similarity = max(r.score for r in results)
+        # Clamp to [0, 1]: collection uses Distance.DOT, scores can exceed 1.0
+        max_similarity = max(min(r.score, 1.0) for r in results)
         return max(0, min(1, 1 - max_similarity))
 
     except Exception as e:
@@ -714,7 +733,11 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
                 ]
             },
         ).points
-        if existing and existing[0].score >= AUTOBIO_DEDUP_THRESHOLD:
+        # The collection uses Distance.DOT — raw dot product score can exceed 1.0 when
+        # stored vectors were uploaded without normalization. Clamp to [0, 1] before
+        # comparing against the threshold to avoid spurious dedup skips or false hits.
+        dedup_score = min(existing[0].score, 1.0) if existing else 0.0
+        if existing and dedup_score >= AUTOBIO_DEDUP_THRESHOLD:
             # Reinforce the existing memory if the new submission carries higher importance
             existing_importance = float(existing[0].payload.get("importance", 0))
             if importance > existing_importance:
@@ -729,7 +752,7 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
                 )
             else:
                 logger.debug(
-                    "Autobio dedup: skipping '%s' (similar=%.2f)", summary[:60], existing[0].score
+                    "Autobio dedup: skipping '%s' (similar=%.2f)", summary[:60], dedup_score
                 )
             return
 
@@ -775,7 +798,7 @@ def retract_autobiographical_event(user_code: str, query: str, threshold: float 
                 ]
             },
         ).points
-        to_delete = [r.id for r in results if r.score >= threshold]
+        to_delete = [r.id for r in results if min(r.score, 1.0) >= threshold]
         if to_delete:
             qdrant.delete(
                 collection_name=QDRANT_MEMORY_COLLECTION,
@@ -838,7 +861,10 @@ def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str 
         now = time.time()
 
         for r in results:
-            if r.score < RECALL_MEMORY_SIMILARITY_THRESHOLD:
+            # Clamp to [0, 1]: the collection uses Distance.DOT so scores can exceed 1.0
+            # for old vectors that were stored before normalize_embeddings was enforced.
+            sim = min(r.score, 1.0)
+            if sim < RECALL_MEMORY_SIMILARITY_THRESHOLD:
                 continue
             payload = r.payload
 
@@ -856,7 +882,7 @@ def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str 
             # Weighted blend: semantic similarity (primary) + importance + recency
             # All weights sum to 1.0 so the score stays in ~[0, 1]
             final_score = (
-                r.score * 0.65
+                sim * 0.65
                 + payload.get("importance", 0) * 0.25
                 + recency_bonus * 0.1
             )
@@ -867,7 +893,7 @@ def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str 
                     "timestamp": timestamp,
                     "score": final_score,
                     "_id":       r.id,
-                    "_sim":      r.score,       # raw semantic similarity — used for reconsolidation gate
+                    "_sim":      sim,           # clamped similarity — used for reconsolidation gate
                     "_mem_type": mem_type,
                     "_importance": payload.get("importance", 0),
                 }
@@ -1312,12 +1338,11 @@ def _curative_profile_cleanup(user_code: str):
         def _fmt_ts(k: str) -> str:
             raw = timestamps.get(k)
             if not raw:
-                return "inconnu"
+                return "date inconnue"
             try:
-                from datetime import datetime, timezone
-                return datetime.fromtimestamp(int(raw), tz=timezone.utc).strftime("%Y-%m-%d")
+                return rel_time_fr(int(raw))
             except Exception:
-                return "inconnu"
+                return "date inconnue"
 
         profile_str = "\n".join(
             f'- "{k}" (mis à jour : {_fmt_ts(k)}): {v}' for k, v in profile.items()
@@ -1345,6 +1370,7 @@ def _curative_profile_cleanup(user_code: str):
             api_key=PRIMARY_API_KEY,
             temperature=0.1,
             max_tokens=200,
+            json_response=True,
             no_think=True,
             timeout=30.0,
         ))
@@ -1432,7 +1458,7 @@ def _decay_autobiographical_memories(user_code: str) -> int:
 
             if decayed < MEMORY_DECAY_THRESHOLD:
                 to_delete.append(point.id)
-            elif decayed < importance - 0.01:
+            else:
                 qdrant.set_payload(
                     collection_name=QDRANT_MEMORY_COLLECTION,
                     payload={"importance": round(decayed, 4)},

@@ -37,7 +37,7 @@ from config import (
     is_qwen3,
 )
 from mlx_lm import generate, load, stream_generate
-from mlx_lm.sample_utils import make_sampler
+from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
 try:
     import mlx_lm.models.cache as _cache_mod
@@ -77,6 +77,46 @@ _infer_lock = (
 _session_kv: OrderedDict = OrderedDict()        # cache_key → prompt_cache object
 _session_kv_first_hash: dict[str, int] = {}     # cache_key → hash(messages[1].content)
 _MAX_SESSIONS = 5  # max concurrent session caches
+
+
+def _first_complete_json(text: str) -> str | None:
+    """
+    Return the first complete top-level JSON object or array found in *text*, or None.
+
+    Scans character-by-character tracking brace/bracket depth and string escapes.
+    Used by _generate_sync to stop streaming as soon as JSON output is complete.
+    """
+    start = -1
+    open_char = close_char = ""
+    depth = 0
+    in_string = False
+    escape_next = False
+
+    for i, c in enumerate(text):
+        if escape_next:
+            escape_next = False
+            continue
+        if c == "\\" and in_string:
+            escape_next = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if start == -1:
+            if c == "{":
+                start, open_char, close_char, depth = i, "{", "}", 1
+            elif c == "[":
+                start, open_char, close_char, depth = i, "[", "]", 1
+        else:
+            if c == open_char:
+                depth += 1
+            elif c == close_char:
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+    return None
 
 
 def _strip_thinking(text: str) -> str:
@@ -219,17 +259,34 @@ def _build_prompt(
     base_kwargs: dict[str, Any] = {"tokenize": False, "add_generation_prompt": True}
 
     if qwen3:
-        try:
-            think_kwargs: dict[str, Any] = {"enable_thinking": not no_think}
-            # Cap the think block when thinking is enabled — prevents unbounded
-            # token generation in <think> (e.g. 8000+ tokens → 137s inference).
-            # THINKING_BUDGET_TOKENS=0 means no cap (unlimited).
-            if not no_think and THINKING_BUDGET_TOKENS > 0:
+        # Build thinking kwargs:
+        # - no_think=True  → enable_thinking=False + thinking_budget=0 (belt+suspenders:
+        #   mlx-lm issue #1625 — enable_thinking=False alone may not suppress thinking in
+        #   some library versions; thinking_budget=0 enforces the budget at template level)
+        # - no_think=False → enable_thinking=True + THINKING_BUDGET_TOKENS cap
+        #   (thinking + output share the same max_tokens budget in mlx-lm; Qwen3 open-source
+        #   correctly honours thinking_budget in apply_chat_template)
+        if no_think:
+            think_kwargs: dict[str, Any] = {"enable_thinking": False, "thinking_budget": 0}
+        else:
+            think_kwargs = {"enable_thinking": True}
+            if THINKING_BUDGET_TOKENS > 0:
                 think_kwargs["thinking_budget"] = THINKING_BUDGET_TOKENS
+
+        # Try full kwargs; fall back if tokenizer version is too old
+        try:
             return tokenizer.apply_chat_template(messages, **base_kwargs, **think_kwargs)
         except TypeError:
-            # Tokenizer version does not support enable_thinking — fall through
-            logger.debug("enable_thinking not supported for %s — retrying without", model_path.split("/")[-1])
+            # thinking_budget not supported → retry with only enable_thinking
+            try:
+                return tokenizer.apply_chat_template(
+                    messages, **base_kwargs, enable_thinking=not no_think
+                )
+            except TypeError:
+                logger.debug(
+                    "enable_thinking not supported for %s — falling back to default template",
+                    model_path.split("/")[-1],
+                )
 
     return tokenizer.apply_chat_template(messages, **base_kwargs)
 
@@ -243,51 +300,88 @@ def _generate_sync(
     max_tokens: int,
     no_think: bool,
     session_id: str = "",
+    json_response: bool = False,
 ) -> str:
-    """Génération complète (non-streaming). Bloquant — wrapper pour asyncio.to_thread."""
+    """Génération complète (non-streaming). Bloquant — wrapper pour asyncio.to_thread.
+
+    json_response=True + no_think=True : utilise stream_generate avec early-stop
+    dès que le premier objet JSON complet est détecté. Évite de générer des centaines
+    de tokens superflus après la } finale (explications, markdown, …).
+    """
     model, tokenizer = _load_model(model_path)
     prompt = _build_prompt(messages, tokenizer, model_path, no_think)
 
-    # ── Stats prompt ───────────────────────────────────────────────
     prompt_tokens = len(tokenizer.encode(prompt))
-
     kv_cache = _get_session_cache(session_id, model, no_think)
     quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if QUANT_KV else {}
-    result = generate(
-        model,
-        tokenizer,
-        prompt=prompt,
-        max_tokens=max_tokens,
-        sampler=make_sampler(
-            temp=temperature,
-            top_p=0.9,
-            min_p=0.05,
-        ),
-        verbose=False,
-        **({"prompt_cache": kv_cache} if kv_cache is not None else {}),
-        **quant_kwargs,
+    # Global 10k ceiling. Thinking + output tokens are counted together in mlx-lm,
+    # so thinking_budget (set in _build_prompt) reserves the thinking portion.
+    effective_max = min(max_tokens, 10000)
+    model_short = model_path.split("/")[-1]
+
+    # Qwen3 recommended: top_k=20 always; top_p=0.95 (thinking) / 0.8 (no-think); min_p=0.0
+    sampler = make_sampler(
+        temp=temperature,
+        top_p=0.95 if not no_think else 0.8,
+        top_k=20,
+        min_p=0.0,
     )
+    # Repetition penalty — prevents the model from looping on the same tokens,
+    # especially critical at low temperatures (near-greedy) where the model can
+    # get stuck in "eneeneeneene..." style degenerate output.
+    logits_procs = make_logits_processors(repetition_penalty=1.1, repetition_context_size=20)
+    cache_kwargs: dict = {"prompt_cache": kv_cache} if kv_cache is not None else {}
+
+    early_stopped = False
+
+    if json_response and no_think:
+        # Stream token-by-token; break as soon as a complete JSON object/array
+        # is found. GPU stops exactly there — no wasted tokens after the closing }.
+        raw_chunks: list[str] = []
+        for chunk in stream_generate(
+            model, tokenizer,
+            prompt=prompt,
+            max_tokens=effective_max,
+            sampler=sampler,
+            logits_processors=logits_procs,
+            **cache_kwargs,
+            **quant_kwargs,
+        ):
+            if chunk.text:
+                raw_chunks.append(chunk.text)
+                if _first_complete_json("".join(raw_chunks)) is not None:
+                    early_stopped = True
+                    break
+        raw = "".join(raw_chunks)
+        result = _first_complete_json(raw) or raw
+    else:
+        result = generate(
+            model, tokenizer,
+            prompt=prompt,
+            max_tokens=effective_max,
+            sampler=sampler,
+            logits_processors=logits_procs,
+            verbose=False,
+            **cache_kwargs,
+            **quant_kwargs,
+        )
 
     # ── Stats réponse ──────────────────────────────────────────────
     resp_tokens = len(tokenizer.encode(result))
     thinking_active = "</think>" in result
-    model_short = model_path.split("/")[-1]
-    logger.debug(
-        "[LLM-STATS] %s | no_think=%s thinking=%s | prompt=%d tok | resp=%d/%d tok",
-        model_short,
-        no_think,
-        thinking_active,
-        prompt_tokens,
-        resp_tokens,
-        max_tokens,
+    call_type = "json" if json_response else "text"
+    stop_label = "early-stop" if early_stopped else "eos/limit"
+    pct = resp_tokens * 100 // effective_max if effective_max else 0
+
+    logger.info(
+        "[LLM-STATS] %s | %s no_think=%s | %s | prompt=%d tok | resp=%d/%d tok (%d%%)",
+        model_short, call_type, no_think, stop_label,
+        prompt_tokens, resp_tokens, effective_max, pct,
     )
-    if resp_tokens >= int(max_tokens * 0.9):
+    if not early_stopped and resp_tokens >= int(effective_max * 0.9):
         logger.warning(
-            "[LLM-STATS] POSSIBLE TRUNCATION — resp=%d tok near limit=%d (model=%s no_think=%s)",
-            resp_tokens,
-            max_tokens,
-            model_short,
-            no_think,
+            "[LLM-STATS] POSSIBLE TRUNCATION — resp=%d tok near limit=%d (model=%s)",
+            resp_tokens, effective_max, model_short,
         )
 
     # ── Strip thinking block, keep actual answer ──────────────────
@@ -298,6 +392,17 @@ def _generate_sync(
         result = result.split("</think>", 1)[-1].strip()
     elif "<think>" in result:
         result = result.split("<think>", 1)[0].strip()
+    elif not no_think:
+        # enable_thinking=True → the chat template appends <think>\n to the prompt.
+        # The model's raw output starts INSIDE the think block, so there is no
+        # <think> tag in `result`. If </think> was never generated (truncated
+        # mid-reasoning), there is no actual answer — return empty so callers
+        # can detect the failure cleanly instead of receiving raw markdown.
+        logger.warning(
+            "_generate_sync: thinking truncated before </think> (model=%s) — returning empty",
+            model_short,
+        )
+        result = ""
 
     return _strip_thinking(result)
 
@@ -313,7 +418,8 @@ def call_llm_local(
     max_tokens: int = 500,
     no_think: bool = False,
     session_id: str = "",
-    **_kwargs,  # absorbe api_url, api_key, json_response, timeout (non utilisés)
+    json_response: bool = False,
+    **_kwargs,  # absorbe api_url, api_key, timeout (non utilisés)
 ) -> str:
     """
     Inférence synchrone directe.
@@ -321,7 +427,7 @@ def call_llm_local(
     bloquer la boucle événementielle.
     """
     return _generate_sync(
-        model, messages, temperature, max_tokens, no_think, session_id
+        model, messages, temperature, max_tokens, no_think, session_id, json_response
     )
 
 
@@ -333,6 +439,7 @@ async def call_llm_local_async(
     max_tokens: int = 500,
     no_think: bool = False,
     session_id: str = "",
+    json_response: bool = False,
     **_kwargs,
 ) -> str:
     """
@@ -364,6 +471,7 @@ async def call_llm_local_async(
             max_tokens,
             no_think,
             session_id,
+            json_response,
         )
         # ====DEBUG====
         logger.debug(
@@ -379,7 +487,7 @@ async def stream_local(
     messages: list[dict],
     model: str,
     temperature: float = 0.7,
-    max_tokens: int = 8192,
+    max_tokens: int = 10000,
     no_think: bool = False,
     session_id: str = "",
     **_kwargs,
@@ -452,9 +560,9 @@ async def stream_local(
 
         first = True
         raw_chunks: list[str] = []  # accumule la réponse brute pour stats
-        # ── Token budget: more room in think mode (thinking + answer) ─
-        # Nouvelle variable locale pour éviter l'UnboundLocalError (closure Python)
-        budget = min(max_tokens, 2048) if no_think else min(max_tokens, 4096)
+        # Global 10k ceiling — thinking + output are counted together in mlx-lm.
+        # thinking_budget in the chat template reserves the thinking portion.
+        budget = min(max_tokens, 10000)
         quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if QUANT_KV else {}
         try:
             for chunk in stream_generate(
@@ -462,7 +570,16 @@ async def stream_local(
                 tokenizer,
                 prompt=prompt,
                 max_tokens=budget,
-                sampler=make_sampler(temp=temperature),
+                # Qwen3 recommended: top_k=20; top_p=0.95 (thinking) / 0.8 (no-think); min_p=0.0
+                sampler=make_sampler(
+                    temp=temperature,
+                    top_p=0.95 if not no_think else 0.8,
+                    top_k=20,
+                    min_p=0.0,
+                ),
+                logits_processors=make_logits_processors(
+                    repetition_penalty=1.1, repetition_context_size=20
+                ),
                 **({"prompt_cache": kv_cache} if kv_cache is not None else {}),
                 **quant_kwargs,
             ):
@@ -489,22 +606,17 @@ async def stream_local(
             raw_resp = "".join(raw_chunks)
             resp_tokens = len(tokenizer.encode(raw_resp))
             thinking_active = "</think>" in raw_resp
-            logger.debug(
-                "[LLM-STATS] %s | no_think=%s thinking=%s | prompt=%d tok | resp=%d/%d tok",
-                model_short,
-                no_think,
-                thinking_active,
-                prompt_tokens,
-                resp_tokens,
-                budget,
+            pct = resp_tokens * 100 // budget if budget else 0
+            logger.info(
+                "[LLM-STATS] %s | stream no_think=%s thinking=%s | eos/limit"
+                " | prompt=%d tok | resp=%d/%d tok (%d%%)",
+                model_short, no_think, thinking_active,
+                prompt_tokens, resp_tokens, budget, pct,
             )
             if resp_tokens >= int(budget * 0.9):
                 logger.warning(
-                    "[LLM-STATS] POSSIBLE TRUNCATION — resp=%d tok near limit=%d (model=%s no_think=%s)",
-                    resp_tokens,
-                    budget,
-                    model_short,
-                    no_think,
+                    "[LLM-STATS] POSSIBLE TRUNCATION — resp=%d tok near limit=%d (model=%s)",
+                    resp_tokens, budget, model_short,
                 )
             loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinelle fin de flux
 

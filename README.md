@@ -184,7 +184,7 @@ After each exchange, `analyzer.py` computes an importance score in `[0, 1]` that
 | LLM flags `memory_summary` (non-null) | +0.40 | Primary signal — alone clears the storage threshold |
 | User fact revealed (max 3) | +0.20 each | Profile facts, preferences, life events |
 | Project / goal mentioned (max 2) | +0.15 each | Active work context |
-| Strong emotional mood | +0.10–0.15 | Stressed/frustrated weighted slightly higher |
+| Strong emotional mood | +0.10 | Symmetric — positive and negative emotions weighted equally |
 | Long message (> 200 chars) | +0.05 | Minor depth signal |
 
 Storage thresholds (set in `config.py`):
@@ -216,6 +216,16 @@ Profile facts are stored as Redis hash fields with namespaced keys (`hobby:kart`
 
 Stage 1 prevents ~90 % of duplicates at the source. Stages 2–3 are safety nets.
 
+#### Profile Write Governance
+
+Profile key **creation** is restricted exclusively to the conversation analyzer (`analyze_exchange` → `update_user_profile`). The analyzer reads actual user messages and only extracts facts explicitly stated by the user.
+
+The autonomous reflection loop (`self.py`) can **modify or delete existing keys** via the `correct_profile` action, but is blocked from creating new keys — enforced both in code (`_action_correct_profile` checks `hexists` before any write) and in the reflection prompt. This prevents the reflection model from hallucinating profile facts from its own context or perpetuating garbage keys across cycles.
+
+The nightly review (`run_nightly_interaction_review`) does not write to the profile hash at all — its `user_insights` go to Qdrant autobiographical memory instead.
+
+An empty string value (`value=""`) is treated identically to `null` (deletion) throughout the write path — a guard against LLM JSON responses that send `""` instead of `null`.
+
 #### Project Tracking
 
 Projects are stored as JSON objects with `name`, `status` (`in_progress` / `done`), `first_mentioned`, and `last_update`. The `apply_project_updates()` function resolves project names using word-overlap fuzzy matching (≥ 60 % threshold) before exact-string lookup, preventing name-drift duplicates (`"Jarvis"` → `"Jarvis v7"`).
@@ -234,7 +244,9 @@ The recency window is **type-aware**: episodic memories use a 30-day window, aut
 
 #### Autobiographical Memory Deduplication and Reinforcement
 
-Before any call to `store_autobiographical_event()`, Jarvis queries Qdrant for the most similar existing autobiographical point. If the cosine similarity exceeds `AUTOBIO_DEDUP_THRESHOLD` (default: 0.85), the new entry is not duplicated. However, if the new submission carries a **higher importance** than the existing point, the existing point is reinforced (importance updated upward). This models the human phenomenon of a recurring important fact becoming more firmly anchored over time.
+Before any call to `store_autobiographical_event()`, Jarvis queries Qdrant for the most similar existing autobiographical point. If the similarity exceeds `AUTOBIO_DEDUP_THRESHOLD` (default: 0.85), the new entry is not duplicated. However, if the new submission carries a **higher importance** than the existing point, the existing point is reinforced (importance updated upward). This models the human phenomenon of a recurring important fact becoming more firmly anchored over time.
+
+**Score clamping note:** The Qdrant memory collection uses `Distance.DOT`. Raw dot product scores can exceed `1.0` when stored vectors predate the `normalize_embeddings=True` enforcement. All score comparisons in `memory.py` (`store_autobiographical_event`, `retract_autobiographical_event`, `compute_memory_novelty`, `search_memory`) clamp the score to `min(score, 1.0)` before any threshold comparison or weighted blend. Without this, a stored vector with magnitude > 1 would produce `novelty = 1 − 1.28 = −0.28`, clamped to `0`, blocking all new memory writes.
 
 The threshold is tunable: raise toward 0.95 to allow more variations, lower toward 0.75 to be stricter.
 
@@ -368,8 +380,9 @@ User message
     →   streaming via shared per-timeout httpx.AsyncClient (connection pool reused)
     → Conversation analyzer / PRIMARY_MODEL (extract facts, mood, topics, importance, memory_summary)
     →   current date (ISO 8601) injected into ANALYSIS_PROMPT — prevents date hallucination
+    →   user_facts → update_user_profile() — ONLY path authorised to create new profile keys
     → Memory storage: importance > 0.35 → Qdrant episodic | importance > 0.60 → autobiographical
-    →   store_autobiographical_event: dedup check (cosine ≥ 0.85 → skip or reinforce)
+    →   store_autobiographical_event: dedup check (DOT score clamped to [0,1] ≥ 0.85 → skip or reinforce)
     →   search_memory recalls: +0.05 reconsolidation boost on returned points
     →   retractions from ANALYSIS_PROMPT → retract_autobiographical_event (semantic delete, threshold 0.88)
     →   satisfaction signal written to convlog entry (positive/negative/unknown — proxy on previous response)

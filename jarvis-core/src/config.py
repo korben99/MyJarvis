@@ -93,13 +93,16 @@ def is_qwen(model: str) -> bool:
 
 
 def is_qwen3(model: str) -> bool:
-    """True specifically for Qwen3 models (support thinking_budget in chat template)."""
+    """True for Qwen3.x models — supports enable_thinking + thinking_budget in apply_chat_template.
+    llm_local._build_prompt catches TypeError if a kwarg isn't available (e.g. old tokenizer version
+    or Qwen3.5 open-source where thinking_budget is Alibaba Cloud API only)."""
     return "qwen3" in (model or "").lower()
 
 
-# Max tokens allowed for the <think> block in Qwen3 chat responses.
+# Max tokens for the <think> block — Qwen3 open-source supports this in apply_chat_template.
+# Thinking + output tokens share the same max_tokens budget in mlx-lm.
 # Set via env THINKING_BUDGET_TOKENS. 0 = no budget (unlimited).
-# Default 1024 = ~1-2s of thinking on 30B, enough for most questions.
+# Default 1024 = ~1-2s of thinking on Qwen3-30B-A3B, enough for structured tasks.
 THINKING_BUDGET_TOKENS = int(os.getenv("THINKING_BUDGET_TOKENS", "1024"))
 
 
@@ -143,9 +146,6 @@ BRIEFING_TIMEZONE = os.getenv("BRIEFING_TIMEZONE", "Europe/Paris")
 
 # ── Proto-self reflection loop ─────────────────────────────────────────────
 REFLECTION_INTERVAL_HOURS = int(os.getenv("REFLECTION_INTERVAL_HOURS", "6"))
-MAX_REFLECTION_TOKENS = (
-    2000  # no_think=True → JSON output only (~500-1000 tok, no reasoning chain)
-)
 MAX_CHAIN_ITERATIONS = int(
     os.getenv("MAX_CHAIN_ITERATIONS", "3")
 )  # max actions per reflection cycle

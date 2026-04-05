@@ -704,7 +704,7 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.2,
-            max_tokens=3000,
+            max_tokens=3000,  # 1024 thinking + ~2000 threshold JSON per position
             json_response=True,
             no_think=False,
             timeout=90.0,
