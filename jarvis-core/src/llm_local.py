@@ -25,8 +25,10 @@ Exports publics :
 import asyncio
 import logging
 import os
+import time
 import threading
-from collections import OrderedDict
+import copy
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 from config import (
@@ -34,6 +36,7 @@ from config import (
     PRIMARY_MODEL,
     ROUTER_MODEL,
     THINKING_BUDGET_TOKENS,
+    is_hermes,
     is_qwen3,
 )
 from mlx_lm import generate, load, stream_generate
@@ -61,22 +64,91 @@ QUANT_KV = os.getenv("QUANT_KV", "").lower() in ("yes", "true", "1")
 QUANT_KV_BITS = int(os.getenv("QUANT_KV_BITS", "4"))
 
 
+# ── Profils d'inférence par modèle ────────────────────────────────────────
+
+@dataclass(frozen=True)
+class _ModelProfile:
+    """Sampling + generation parameters for a given model family.
+
+    Centralises all per-model tuning so call sites are free of if/else.
+    Resolved once per call via _model_profile().
+    """
+    top_p_think: float           # top_p when enable_thinking=True
+    top_p_nothink: float         # top_p when enable_thinking=False / no-think
+    top_k: int                   # 0 = disabled
+    min_p: float
+    repetition_penalty: float    # > 1.0 penalises repeated tokens
+    repetition_context_size: int # how many past tokens to look at
+    frequency_penalty: float     # additive penalty proportional to frequency
+    use_quant_kv: bool           # whether to enable KV cache quantisation
+
+
+def _model_profile(model_path: str) -> _ModelProfile:
+    """Return the inference profile for *model_path*.
+
+    Two profiles:
+    - Qwen3 (primary): thinking-aware sampler + KV quantisation allowed.
+    - Generic (router / non-Qwen3): relaxed sampler, no KV quantisation.
+      Applying top_k=20 or 4-bit KV to small instruct models (e.g. Qwen2.5-3B-8bit)
+      causes degenerate looping — these must stay at their default settings.
+    """
+    if is_qwen3(model_path):
+        return _ModelProfile(
+            top_p_think=0.95,
+            top_p_nothink=0.80,
+            top_k=20,
+            min_p=0.0,
+            repetition_penalty=1.1,
+            repetition_context_size=64,
+            frequency_penalty=0.05,
+            use_quant_kv=QUANT_KV,
+        )
+    if is_hermes(model_path):
+        # Hermes-3 (Llama 3.2 base) — purpose-built for structured/JSON output.
+        # Temperature=0 is safe (no greedy loops), no penalties needed (trained format).
+        return _ModelProfile(
+            top_p_think=1.0,
+            top_p_nothink=1.0,
+            top_k=0,
+            min_p=0.0,
+            repetition_penalty=1.0,   # already-quantised Q4; penalties degrade JSON quality
+            repetition_context_size=64,
+            frequency_penalty=0.0,
+            use_quant_kv=False,       # already Q4 affine quantised
+        )
+    # Generic profile — fallback for any other small model
+    return _ModelProfile(
+        top_p_think=0.90,
+        top_p_nothink=0.90,
+        top_k=0,
+        min_p=0.0,
+        repetition_penalty=1.3,
+        repetition_context_size=64,
+        frequency_penalty=0.10,
+        use_quant_kv=False,
+    )
+
+
 # ── Registre de modèles ───────────────────────────────────────────────────
 
 _model_cache: dict[str, tuple] = {}  # model_path → (model, tokenizer)
 _load_lock = threading.Lock()  # protège le chargement concurrent
-_infer_lock = (
-    asyncio.Lock()
-)  # sérialise toutes les inférences MLX (contrainte Metal GPU)
+_infer_lock = threading.Lock()  # sérialise toutes les inférences MLX (contrainte Metal GPU)
+# threading.Lock (pas asyncio.Lock) : garantit la mutual exclusion entre les appelants
+# sync (call_llm_local via asyncio.to_thread) ET les appelants async (call_llm_local_async,
+# stream_local). asyncio.Lock est invisible depuis les threads → race GPU sans threading.Lock.
 
-# ── Session KV cache (prefix caching) ─────────────────────────────────────
-# Key: "{session_id}:{'nt'|'think'}" — thinking mode included to prevent
-# prefix-token mismatch (enable_thinking changes the generation prompt suffix).
-# Both modes cache independently; LRU eviction keeps memory bounded.
+# ── System prompt KV cache ────────────────────────────────────────────────
+# Caches the prefilled KV states for the system prompt (which is token-identical
+# across every turn). Each streaming inference gets a deepcopy of this cache so
+# only the conversation history + current user message need prefill processing.
+#
+# Multi-turn session caching was removed: Qwen3's enable_thinking template adds
+# <think>…</think> tokens to the generation prompt that are absent from
+# historical message reconstruction, causing permanent token-sequence mismatch.
 
-_session_kv: OrderedDict = OrderedDict()        # cache_key → prompt_cache object
-_session_kv_first_hash: dict[str, int] = {}     # cache_key → hash(messages[1].content)
-_MAX_SESSIONS = 5  # max concurrent session caches
+_sys_kv: dict[str, tuple[int, Any]] = {}  # model_path → (sys_hash, base_cache)
+_sys_kv_lock = threading.Lock()  # protects lazy build of the base cache
 
 
 def _first_complete_json(text: str) -> str | None:
@@ -134,56 +206,76 @@ def _strip_thinking(text: str) -> str:
     return text
 
 
-def _get_session_cache(session_id: str, model, no_think: bool = False):
+def _make_system_kv(model_path: str, model, tokenizer, system_content: str) -> Any:
     """
-    Return the existing KV cache for this session/mode (LRU refresh) or create a new one.
-    Thread-safe: called from inference thread while _infer_lock is held.
+    Pre-fill the system prompt into a fresh KV cache.
+    Called once per unique (model_path, system_content) pair — never call directly.
 
-    Cache key = session_id + thinking mode.
-    Rationale: enable_thinking=False appends '<think>\\n\\n</think>\\n\\n' to the prompt,
-    enable_thinking=True appends '<think>\\n'. These are different generation-prompt suffixes,
-    so KV state built under one mode is invalid for the other. Separating the keys allows
-    both modes to benefit from prefix caching independently.
+    Strategy: run stream_generate for 1 token to drive the prefill, then trim
+    the cache offset back to the exact system token count so the 1 garbage
+    decode token is overwritten by real tokens on the first actual inference.
     """
-    if not _KV_CACHE_AVAILABLE or not session_id:
-        return None
-    # Include thinking mode in key to prevent prefix-token mismatch
-    cache_key = f"{session_id}:{'nt' if no_think else 'think'}"
-    if cache_key in _session_kv:
-        _session_kv.move_to_end(cache_key)
-        cache = _session_kv[cache_key]
-        offset = _kv_offset(cache)
-        logger.debug(
-            "KV cache: HIT  key=%s offset=%s slots=%d/%d",
-            cache_key,
-            offset,
-            len(_session_kv),
-            _MAX_SESSIONS,
-        )
-        return cache
-    # Evict oldest if at capacity
-    if len(_session_kv) >= _MAX_SESSIONS:
-        evicted, _ = _session_kv.popitem(last=False)
-        _session_kv_first_hash.pop(evicted, None)
-        logger.debug(
-            "KV cache: EVICT key=%s slots=%d/%d",
-            evicted,
-            len(_session_kv),
-            _MAX_SESSIONS,
-        )
-
-    cache = _cache_mod.make_prompt_cache(model)
-    logger.debug(
-        "KV cache: MISS  key=%s slots=%d/%d", cache_key, len(_session_kv), _MAX_SESSIONS
+    sys_messages = [{"role": "system", "content": system_content}]
+    sys_prompt_text = tokenizer.apply_chat_template(
+        sys_messages, tokenize=False, add_generation_prompt=False
     )
-    _session_kv[cache_key] = cache
+    sys_token_count = len(tokenizer.encode(sys_prompt_text))
+
+    profile = _model_profile(model_path)
+    quant_kwargs = (
+        {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if profile.use_quant_kv else {}
+    )
+    cache = _cache_mod.make_prompt_cache(model)
+    sampler = make_sampler(temp=0.0, top_p=1.0, top_k=0, min_p=0.0)
+
+    try:
+        for _ in stream_generate(
+            model, tokenizer,
+            prompt=sys_prompt_text,
+            max_tokens=1,
+            sampler=sampler,
+            prompt_cache=cache,
+            **quant_kwargs,
+        ):
+            break  # stop after prefill + 1 decode step
+
+        # Trim offset to system token count — the 1 garbage token will be
+        # overwritten by the first real token on the next call.
+        for layer_cache in cache:
+            if hasattr(layer_cache, "offset"):
+                layer_cache.offset = sys_token_count
+
+    except Exception as exc:
+        logger.warning("System KV cache build failed: %s", exc)
+        return None
+
+    logger.info(
+        "KV cache: system prompt prefilled (%d tok, model=%s)",
+        sys_token_count, model_path.split("/")[-1],
+    )
     return cache
 
 
-def _kv_offset(cache) -> str:
-    """Extract KV cache offset for logging (list-of-layers or single object)."""
-    obj = cache[0] if isinstance(cache, list) and cache else cache
-    return str(getattr(obj, "offset", "?"))
+def _get_system_cache(model_path: str, model, tokenizer, system_content: str) -> Any:
+    """
+    Return a fresh deepcopy of the system prompt KV cache (lazy init, thread-safe).
+    Returns None on any failure → caller proceeds without cache.
+    Must be called from inside _infer_lock.
+    """
+    if not _KV_CACHE_AVAILABLE or not system_content:
+        return None
+    h = hash(system_content)
+    with _sys_kv_lock:
+        if model_path not in _sys_kv or _sys_kv[model_path][0] != h:
+            base = _make_system_kv(model_path, model, tokenizer, system_content)
+            if base is None:
+                return None
+            _sys_kv[model_path] = (h, base)
+        try:
+            return copy.deepcopy(_sys_kv[model_path][1])
+        except Exception as exc:
+            logger.warning("KV cache: deepcopy failed (%s) — running without cache", exc)
+            return None
 
 
 def _load_model(model_path: str) -> tuple:
@@ -312,48 +404,83 @@ def _generate_sync(
     prompt = _build_prompt(messages, tokenizer, model_path, no_think)
 
     prompt_tokens = len(tokenizer.encode(prompt))
-    kv_cache = _get_session_cache(session_id, model, no_think)
-    quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if QUANT_KV else {}
-    # Global 10k ceiling. Thinking + output tokens are counted together in mlx-lm,
-    # so thinking_budget (set in _build_prompt) reserves the thinking portion.
+    profile = _model_profile(model_path)
+    quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if profile.use_quant_kv else {}
     effective_max = min(max_tokens, 10000)
     model_short = model_path.split("/")[-1]
 
-    # Qwen3 recommended: top_k=20 always; top_p=0.95 (thinking) / 0.8 (no-think); min_p=0.0
     sampler = make_sampler(
         temp=temperature,
-        top_p=0.95 if not no_think else 0.8,
-        top_k=20,
-        min_p=0.0,
+        top_p=profile.top_p_nothink if no_think else profile.top_p_think,
+        top_k=profile.top_k,
+        min_p=profile.min_p,
     )
-    # Repetition penalty — prevents the model from looping on the same tokens,
-    # especially critical at low temperatures (near-greedy) where the model can
-    # get stuck in "eneeneeneene..." style degenerate output.
-    logits_procs = make_logits_processors(repetition_penalty=1.1, repetition_context_size=20)
-    cache_kwargs: dict = {"prompt_cache": kv_cache} if kv_cache is not None else {}
+    logits_procs = make_logits_processors(
+        repetition_penalty=profile.repetition_penalty,
+        repetition_context_size=profile.repetition_context_size,
+        frequency_penalty=profile.frequency_penalty,
+    )
 
     early_stopped = False
+    _think_already_stripped = False
 
-    if json_response and no_think:
-        # Stream token-by-token; break as soon as a complete JSON object/array
-        # is found. GPU stops exactly there — no wasted tokens after the closing }.
-        raw_chunks: list[str] = []
+    if json_response:
+        # Stream token-by-token and stop as soon as a complete JSON object is found.
+        #
+        # no_think=True  → model outputs JSON directly; scan from the start.
+        # no_think=False → model outputs <think>…</think> THEN JSON; wait for
+        #                  </think> before scanning so we don't stop inside the
+        #                  think block on any JSON-like structure.
+        #
+        # This prevents wasted GPU cycles after the closing } AND avoids
+        # returning a truncated JSON when the model stops mid-object.
+        #
+        # O(n) optimisation: accumulate via += instead of "".join(list) per token,
+        # and only call _first_complete_json when the current chunk contains "}".
+        raw_so_far = ""
+        seen_end_think = no_think  # True immediately if no thinking expected
+
         for chunk in stream_generate(
             model, tokenizer,
             prompt=prompt,
             max_tokens=effective_max,
             sampler=sampler,
             logits_processors=logits_procs,
-            **cache_kwargs,
             **quant_kwargs,
         ):
             if chunk.text:
-                raw_chunks.append(chunk.text)
-                if _first_complete_json("".join(raw_chunks)) is not None:
-                    early_stopped = True
-                    break
-        raw = "".join(raw_chunks)
-        result = _first_complete_json(raw) or raw
+                raw_so_far += chunk.text
+
+                if not seen_end_think and "</think>" in raw_so_far:
+                    seen_end_think = True
+
+                if seen_end_think and "}" in chunk.text:
+                    # Only scan when a closing brace arrived — avoids O(n²) scan per token.
+                    after_think = (
+                        raw_so_far.split("</think>", 1)[-1]
+                        if "</think>" in raw_so_far
+                        else raw_so_far
+                    )
+                    if _first_complete_json(after_think) is not None:
+                        early_stopped = True
+                        break
+
+        raw = raw_so_far
+        # For thinking mode: extract the JSON portion after </think>
+        if "</think>" in raw:
+            json_portion = raw.split("</think>", 1)[-1]
+        else:
+            json_portion = raw
+        extracted = _first_complete_json(json_portion)
+        if extracted is not None:
+            # Complete JSON found — result is already clean, skip the stripping section.
+            result = extracted
+            early_stopped = True  # marks that we stopped at a clean boundary
+            _think_already_stripped = True
+        else:
+            # Incomplete JSON — fall through to the stripping section with the raw text.
+            result = raw
+            _think_already_stripped = False
     else:
         result = generate(
             model, tokenizer,
@@ -362,7 +489,6 @@ def _generate_sync(
             sampler=sampler,
             logits_processors=logits_procs,
             verbose=False,
-            **cache_kwargs,
             **quant_kwargs,
         )
 
@@ -388,7 +514,12 @@ def _generate_sync(
     # split("</think>", 1)[-1] → keeps everything AFTER </think>
     # Truncated case: model hit token budget mid-reasoning → no </think>.
     # Discard from <think> onwards to avoid leaking raw reasoning.
-    if "</think>" in result:
+    #
+    # Skip when json_response=True already extracted a clean JSON object
+    # (result contains no <think> tags and stripping would erroneously empty it).
+    if _think_already_stripped:
+        pass  # think block was handled inline; result is already clean
+    elif "</think>" in result:
         result = result.split("</think>", 1)[-1].strip()
     elif "<think>" in result:
         result = result.split("<think>", 1)[0].strip()
@@ -425,10 +556,12 @@ def call_llm_local(
     Inférence synchrone directe.
     Depuis du code async, toujours appeler via asyncio.to_thread pour ne pas
     bloquer la boucle événementielle.
+    Acquiert _infer_lock (threading.Lock) pour sérialiser avec les appelants async.
     """
-    return _generate_sync(
-        model, messages, temperature, max_tokens, no_think, session_id, json_response
-    )
+    with _infer_lock:
+        return _generate_sync(
+            model, messages, temperature, max_tokens, no_think, session_id, json_response
+        )
 
 
 async def call_llm_local_async(
@@ -455,14 +588,16 @@ async def call_llm_local_async(
         model.split("/")[-1],
     )
     # ====DEBUG====
-    async with _infer_lock:
-        # ====DEBUG====
-        _t_infer_start = _time.time()
-        logger.debug(
-            "[TTFT] call_llm_local_async: lock acquired — waited %.3fs",
-            _t_infer_start - _t_lock_wait,
-        )
-        # ====DEBUG====
+    # Acquiert threading.Lock depuis un thread pool pour ne pas bloquer l'event loop.
+    await asyncio.to_thread(_infer_lock.acquire)
+    # ====DEBUG====
+    _t_infer_start = _time.time()
+    logger.debug(
+        "[TTFT] call_llm_local_async: lock acquired — waited %.3fs",
+        _t_infer_start - _t_lock_wait,
+    )
+    # ====DEBUG====
+    try:
         result = await asyncio.to_thread(
             _generate_sync,
             model,
@@ -481,6 +616,8 @@ async def call_llm_local_async(
         )
         # ====DEBUG====
         return result
+    finally:
+        _infer_lock.release()
 
 
 async def stream_local(
@@ -528,57 +665,34 @@ async def stream_local(
         prompt_tokens = len(tokenizer.encode(prompt))
         model_short = model.split("/")[-1]
 
-        kv_cache = _get_session_cache(session_id, mlx_model, no_think)
-
-        # ── Validation préfixe KV cache par hash du premier message d'historique ──
-        # mlx_lm suppose que les cache.offset premiers tokens du nouveau prompt sont
-        # IDENTIQUES à ceux du dernier appel. La fenêtre glissante hist[-8:] peut
-        # supprimer le message le plus ancien → préfixe différent → output corrompu.
-        #
-        # Détection fiable : on compare le hash du contenu du premier message
-        # d'historique (messages[1]). Si ce message change entre deux tours,
-        # la fenêtre a glissé → on recrée le cache proprement.
-        # La comparaison par token count seul (ancienne approche) ratait les
-        # glissements qui font croître le prompt net (drop 400 tok, ajout 600 tok).
-        if kv_cache is not None and session_id:
-            _cache_key = f"{session_id}:{'nt' if no_think else 'think'}"
-            # messages = [system, ...hist..., current_user] — first hist msg is [1]
-            _cur_hash = hash(messages[1]["content"]) if len(messages) > 2 else 0
-            _stored_hash = _session_kv_first_hash.get(_cache_key)
-            if _stored_hash is not None and _stored_hash != _cur_hash:
-                # First history message changed → window shifted → stale KV
-                _session_kv.pop(_cache_key, None)
-                _session_kv_first_hash.pop(_cache_key, None)
-                kv_cache = _get_session_cache(session_id, mlx_model, no_think)
-                logger.debug(
-                    "KV cache: REBUILT (first hist msg changed — window shifted) key=%s",
-                    _cache_key,
-                )
-            # Record current first-hist-message hash for next-turn validation
-            if kv_cache is not None:
-                _session_kv_first_hash[_cache_key] = _cur_hash
+        # System prompt KV cache — pre-filled once, deepcopied per call.
+        # Only the tokens after the system prompt need prefill on each turn.
+        _sys_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
+        kv_cache = _get_system_cache(model, mlx_model, tokenizer, _sys_content)
 
         first = True
         raw_chunks: list[str] = []  # accumule la réponse brute pour stats
         # Global 10k ceiling — thinking + output are counted together in mlx-lm.
         # thinking_budget in the chat template reserves the thinking portion.
         budget = min(max_tokens, 10000)
-        quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if QUANT_KV else {}
+        profile = _model_profile(model)
+        quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if profile.use_quant_kv else {}
         try:
             for chunk in stream_generate(
                 mlx_model,
                 tokenizer,
                 prompt=prompt,
                 max_tokens=budget,
-                # Qwen3 recommended: top_k=20; top_p=0.95 (thinking) / 0.8 (no-think); min_p=0.0
                 sampler=make_sampler(
                     temp=temperature,
-                    top_p=0.95 if not no_think else 0.8,
-                    top_k=20,
-                    min_p=0.0,
+                    top_p=profile.top_p_nothink if no_think else profile.top_p_think,
+                    top_k=profile.top_k,
+                    min_p=profile.min_p,
                 ),
                 logits_processors=make_logits_processors(
-                    repetition_penalty=1.1, repetition_context_size=20
+                    repetition_penalty=profile.repetition_penalty,
+                    repetition_context_size=profile.repetition_context_size,
+                    frequency_penalty=profile.frequency_penalty,
                 ),
                 **({"prompt_cache": kv_cache} if kv_cache is not None else {}),
                 **quant_kwargs,
@@ -620,13 +734,15 @@ async def stream_local(
                 )
             loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinelle fin de flux
 
-    async with _infer_lock:
-        # ====DEBUG====
-        logger.debug(
-            "[TTFT] stream_local: lock acquired — waited %.3fs",
-            _time.time() - _t_lock_wait,
-        )
-        # ====DEBUG====
+    # Acquiert threading.Lock depuis un thread pool pour ne pas bloquer l'event loop.
+    await asyncio.to_thread(_infer_lock.acquire)
+    # ====DEBUG====
+    logger.debug(
+        "[TTFT] stream_local: lock acquired — waited %.3fs",
+        _time.time() - _t_lock_wait,
+    )
+    # ====DEBUG====
+    try:
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()
 
@@ -635,3 +751,5 @@ async def stream_local(
             if chunk is None:
                 break
             yield chunk
+    finally:
+        _infer_lock.release()

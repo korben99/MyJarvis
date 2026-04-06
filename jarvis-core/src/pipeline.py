@@ -324,7 +324,8 @@ def build_context(
 
     assembled = "\n\n".join(context_parts)
     if len(assembled) > TOTAL_CONTEXT_BUDGET:
-        assembled = assembled[:TOTAL_CONTEXT_BUDGET]
+        cut = assembled.rfind("\n", 0, TOTAL_CONTEXT_BUDGET)
+        assembled = assembled[: cut if cut != -1 else TOTAL_CONTEXT_BUDGET]
         logger.warning(
             "Context truncated to global budget (%d chars) — consider raising TOTAL_CONTEXT_BUDGET",
             TOTAL_CONTEXT_BUDGET,

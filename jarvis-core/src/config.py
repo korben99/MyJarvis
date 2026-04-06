@@ -99,6 +99,12 @@ def is_qwen3(model: str) -> bool:
     return "qwen3" in (model or "").lower()
 
 
+def is_hermes(model: str) -> bool:
+    """True for NousResearch Hermes models (Llama base, purpose-built structured output).
+    No thinking mode; optimal at temperature=0 with no repetition/frequency penalty."""
+    return "hermes" in (model or "").lower()
+
+
 # Max tokens for the <think> block — Qwen3 open-source supports this in apply_chat_template.
 # Thinking + output tokens share the same max_tokens budget in mlx-lm.
 # Set via env THINKING_BUDGET_TOKENS. 0 = no budget (unlimited).

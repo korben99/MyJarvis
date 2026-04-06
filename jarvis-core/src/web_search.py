@@ -87,14 +87,19 @@ def _strip_accents(s: str) -> str:
 
 
 def optimize_web_query(message: str) -> str:
-    """Strip conversational filler and truncate to a search-engine query."""
-    msg = message.lower()
+    """Strip conversational filler and truncate to a search-engine query.
+
+    Case is preserved — lowercasing destroys proper nouns and acronyms
+    (e.g. "IA" → "ia" causes DDG to return unrelated results).
+    Filler words are matched case-insensitively via re.sub.
+    """
+    msg = message
     for filler in (
         "est ce que", "peux tu", "dis moi", "explique", "pourquoi",
         "comment", "tell me", "what is", "why", "how",
     ):
-        msg = msg.replace(filler, "")
-    msg = msg.replace("?", "").replace("!", "").strip()
+        msg = re.sub(re.escape(filler), "", msg, flags=re.IGNORECASE)
+    msg = msg.replace("?", "").replace("!", "").replace(".", "").strip()
     return " ".join(msg.split()[:10])
 
 
@@ -442,7 +447,7 @@ async def _llm_judge_relevance(question: str, results: list[dict]) -> bool:
             )}],
             **_router_llm_params(),
             temperature=0,
-            max_tokens=80,
+            max_tokens=150,
             json_response=True,
             no_think=True,
             timeout=8.0,
@@ -481,6 +486,10 @@ async def _refine_web_query(question: str, current_query: str, results: list[dic
         return ""
 
 
+_DDG_EXECUTOR_TIMEOUT = 12.0   # max time for a single DDG executor call
+_PIPELINE_TIMEOUT     = 20.0   # hard cap for the entire deep pipeline
+
+
 async def _ddg_text_deep(
     query: str,
     original_message: str,
@@ -498,13 +507,24 @@ async def _ddg_text_deep(
       Stage 3 — LLM refines the query → fresh DDG search → return
 
     Weather and news bypass this function entirely.
+
+    Hard cap: _PIPELINE_TIMEOUT seconds total.  On timeout the best results
+    collected so far are returned immediately instead of an empty list.
     """
     question  = original_message or query
     seen_urls: set[str] = set()
+    best_so_far: list[dict] = []
 
     async def _run_ddg(q: str) -> list[dict]:
         loop = asyncio.get_running_loop()
-        raw  = await loop.run_in_executor(None, _ddg_text_sync, q, max_results)
+        try:
+            raw = await asyncio.wait_for(
+                loop.run_in_executor(None, _ddg_text_sync, q, max_results),
+                timeout=_DDG_EXECUTOR_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("DDG executor timed out after %.0fs for query: %s", _DDG_EXECUTOR_TIMEOUT, q[:60])
+            return []
         unique = []
         for r in raw:
             if r["url"] and r["url"] not in seen_urls:
@@ -512,53 +532,69 @@ async def _ddg_text_deep(
                 unique.append(r)
         return unique
 
-    # ── Stage 1: DDG snippets ─────────────────────────────────────────────
-    results = await _run_ddg(query)
-    if not results:
-        return []
+    async def _pipeline() -> list[dict]:
+        nonlocal best_so_far
 
-    if await _llm_judge_relevance(question, results):
-        logger.info("Web deep[1]: %d results — sufficient", len(results))
-        return results
+        # ── Stage 1: DDG snippets ─────────────────────────────────────────
+        results = await _run_ddg(query)
+        if not results:
+            return []
+        best_so_far = results
 
-    logger.info("Web deep[1]: insufficient — fetching pages")
+        if await _llm_judge_relevance(question, results):
+            logger.info("Web deep[1]: %d results — sufficient", len(results))
+            return results
 
-    # ── Stage 2: Fetch page content (parallel) ────────────────────────────
-    to_fetch   = [r for r in results if r["url"]][:_MAX_FETCH_PAGES]
-    page_texts = await asyncio.gather(*[_fetch_page_text(r["url"]) for r in to_fetch])
+        logger.info("Web deep[1]: insufficient — fetching pages")
 
-    enriched = [
-        {**r, "body": page_texts[i] if i < len(page_texts) and len(page_texts[i]) > len(r["body"]) else r["body"]}
-        for i, r in enumerate(results)
-    ]
+        # ── Stage 2: Fetch page content (parallel) ────────────────────────
+        to_fetch   = [r for r in results if r["url"]][:_MAX_FETCH_PAGES]
+        page_texts = await asyncio.gather(*[_fetch_page_text(r["url"]) for r in to_fetch])
 
-    if await _llm_judge_relevance(question, enriched):
-        logger.info("Web deep[2]: enriched pages — sufficient")
+        enriched = [
+            {**r, "body": page_texts[i] if i < len(page_texts) and len(page_texts[i]) > len(r["body"]) else r["body"]}
+            for i, r in enumerate(results)
+        ]
+        best_so_far = enriched
+
+        if await _llm_judge_relevance(question, enriched):
+            logger.info("Web deep[2]: enriched pages — sufficient")
+            return enriched
+
+        logger.info("Web deep[2]: still insufficient — refining query")
+
+        # ── Stage 3: Query refinement ─────────────────────────────────────
+        refined_query = await _refine_web_query(question, query, enriched)
+        if not refined_query:
+            logger.info("Web deep[3]: no refined query generated — returning best effort")
+            return enriched
+
+        refined_results = await _run_ddg(refined_query)
+        if refined_results:
+            logger.info("Web deep[3]: '%s' → %d new results", refined_query[:50], len(refined_results))
+            refined_urls = {r["url"] for r in refined_results}
+            merged = refined_results + [r for r in enriched if r["url"] not in refined_urls]
+            return merged[:max_results]
+
+        logger.info("Web deep[3]: refined search empty — returning enriched")
         return enriched
 
-    logger.info("Web deep[2]: still insufficient — refining query")
-
-    # ── Stage 3: Query refinement ─────────────────────────────────────────
-    refined_query = await _refine_web_query(question, query, enriched)
-    if not refined_query:
-        logger.info("Web deep[3]: no refined query generated — returning best effort")
-        return enriched
-
-    refined_results = await _run_ddg(refined_query)
-    if refined_results:
-        logger.info("Web deep[3]: '%s' → %d new results", refined_query[:50], len(refined_results))
-        # Refined results first; pad with non-duplicate enriched ones
-        refined_urls = {r["url"] for r in refined_results}
-        merged = refined_results + [r for r in enriched if r["url"] not in refined_urls]
-        return merged[:max_results]
-
-    logger.info("Web deep[3]: refined search empty — returning enriched")
-    return enriched
+    try:
+        return await asyncio.wait_for(_pipeline(), timeout=_PIPELINE_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Web pipeline timeout (%.0fs) — returning %d partial results",
+            _PIPELINE_TIMEOUT, len(best_so_far),
+        )
+        return best_so_far
 
 
 # ══════════════════════════════════════════════════════════════════════════
 #  PUBLIC ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════
+
+_SEARCH_WEB_TIMEOUT = 25.0   # hard cap for the entire search_web call
+
 
 async def search_web(
     query: str,
@@ -575,27 +611,42 @@ async def search_web(
 
     original_message is the raw user question, used by the LLM judge and
     query refiner to understand intent beyond the optimised query string.
-    """
-    if _is_weather_query(query):
-        results = await search_weather(query)
-        if results:
-            return results
 
-    if _is_news_query(query):
-        results = await search_news(query, max_results=max_results)
-        if results:
+    Hard cap: _SEARCH_WEB_TIMEOUT seconds — returns INTERNET_ERROR on timeout.
+    """
+    async def _inner() -> list[dict]:
+        if _is_weather_query(query):
+            results = await search_weather(query)
+            if results:
+                return results
+
+        if _is_news_query(query):
+            results = await search_news(query, max_results=max_results)
+            if results:
+                return results
+
+        try:
+            results = await _ddg_text_deep(
+                query, original_message, max_results=max(max_results, 5),
+            )
+            if not results:
+                wiki = await search_wikipedia(query)
+                if wiki:
+                    return wiki
+                # All backends exhausted — signal the LLM rather than returning []
+                # (empty list → LLM ignores web, answers with date only)
+                logger.warning("All web backends returned empty — returning INTERNET_ERROR")
+                return INTERNET_ERROR
             return results
+        except Exception as exc:
+            if _is_network_error(exc):
+                logger.warning("Internet unavailable: %s", type(exc).__name__)
+                return INTERNET_ERROR
+            logger.error("Web search error: %s", exc)
+            return INTERNET_ERROR
 
     try:
-        results = await _ddg_text_deep(
-            query, original_message, max_results=max(max_results, 5),
-        )
-        if not results:
-            return await search_wikipedia(query)
-        return results
-    except Exception as exc:
-        if _is_network_error(exc):
-            logger.warning("Internet unavailable: %s", type(exc).__name__)
-            return INTERNET_ERROR
-        logger.error("Web search error: %s", exc)
-        return []
+        return await asyncio.wait_for(_inner(), timeout=_SEARCH_WEB_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning("search_web hard timeout (%.0fs) for query: %s", _SEARCH_WEB_TIMEOUT, query[:60])
+        return INTERNET_ERROR

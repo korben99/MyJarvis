@@ -28,7 +28,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 from config import (
@@ -86,7 +86,7 @@ def _log_routing_sample(
     os.makedirs(ROUTER_DATA_DIR, exist_ok=True)
     sample = {
         "id": str(uuid.uuid4()),
-        "ts": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+        "ts": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
         "message": message,
         "routing": {
             "intents": [
@@ -154,7 +154,7 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
             model=model,
             api_url=api_url,
             api_key=api_key,
-            temperature=0.1,  # avoid greedy (temp=0) repetition loops on small model
+            temperature=0.0,  # Hermes is designed for deterministic structured output
             max_tokens=300,  # routing JSON is ~60 tok — cap to avoid runaway output
             json_response=True,
             no_think=True,
@@ -168,30 +168,45 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
             ROUTER_TIMEOUT,
         )
         return None
-    except (json.JSONDecodeError, KeyError) as exc:
-        logger.warning(
-            "LLM router parse error (%s) — no routing info (all intents off): %s",
-            type(exc).__name__, exc,
-        )
-        return None
     except Exception as exc:
         logger.warning(
             "LLM router error (%s) — no routing info (all intents off): %s",
-            type(exc).__name__, exc,
+            type(exc).__name__,
+            exc,
         )
         return None
 
-    # ── Extract and validate fields ──
-    intents: list[str] = parsed.get("intents", [])
-    if not isinstance(intents, list):
-        intents = []
-    if not intents:
-        intents = ["memory"]
+    # ── Guard: parsed must be a non-empty dict ──────────────────────────────
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "LLM router returned non-dict (%s): %r — falling back",
+            type(parsed).__name__,
+            str(parsed)[:200],
+        )
+        return None
 
-    gmail_query: str = parsed.get("gmail_query") or ""
-    calendar_days: int = int(parsed.get("calendar_days") or 7)
-    weather_location: str = parsed.get("weather_location") or ""
-    use_reasoning: bool = bool(parsed.get("use_reasoning", False))
+    logger.debug("LLM router raw output: %r", raw[:300])
+
+    # ── Extract and validate fields ──
+    try:
+        intents: list[str] = parsed.get("intents", [])
+        if not isinstance(intents, list):
+            intents = []
+        if not intents:
+            intents = ["memory"]
+
+        gmail_query: str = parsed.get("gmail_query") or ""
+        calendar_days: int = int(parsed.get("calendar_days") or 7)
+        weather_location: str = parsed.get("weather_location") or ""
+        use_reasoning: bool = bool(parsed.get("use_reasoning", False))
+    except Exception as exc:
+        logger.warning(
+            "LLM router field extraction failed (%s): %s — parsed=%r",
+            type(exc).__name__,
+            exc,
+            str(parsed)[:300],
+        )
+        return None
 
     # ── Guardrail: prevent over-triggering reasoning on simple queries ──
     _simple_query = (

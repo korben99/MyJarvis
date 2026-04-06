@@ -564,7 +564,7 @@ async def _call_global_reflection_llm(
             model=PRIMARY_MODEL,
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
-            temperature=0.1,
+            temperature=0.2,
             max_tokens=500,  # action JSON ~150 tok; early-stop kicks in before ceiling
             json_response=True,
             no_think=True,  # structured JSON action selection — thinking adds latency/failure risk
@@ -630,11 +630,11 @@ async def _call_user_reflection_llm(
                 model=PRIMARY_MODEL,
                 api_url=PRIMARY_API_URL,
                 api_key=PRIMARY_API_KEY,
-                temperature=0.1,
-                max_tokens=500,  # action JSON ~150 tok; early-stop kicks in before ceiling
+                temperature=0.2,
+                max_tokens=2500,  # 1024 thinking + ~1500 action JSON (was 1500 → truncation)
                 json_response=True,
-                no_think=True,  # structured JSON action selection — thinking adds latency/failure risk
-                timeout=60.0,
+                no_think=False,  # thinking improves profile decision quality
+                timeout=90.0,
             )
             return extract_llm_json(content)
         except ValueError as exc:
@@ -895,6 +895,57 @@ def _action_correct_profile(params: dict) -> str:
             "Self correct_profile: DELETE '%s' for %s (current value: %s)",
             key, user_code, old_val if old_val else "(empty)"
         )
+
+    # ── Namespace protection: block cross-domain value contamination ────────
+    # Prevents reflection from writing hobby/travel/unrelated values into
+    # financial keys (e.g. placement:amp20 = "pilote de kart").
+    if value is not None:
+        _key_prefix_ns = key.split(":")[0]
+        _value_lower = value.lower()
+        _FINANCIAL_NS = frozenset({
+            "placement", "capital", "per", "pea", "livret_a",
+            "investissement", "epargne",
+        })
+        _FINANCIAL_TERMS = frozenset({
+            "€", "$", "%", "fonds", "fond", "etf", "action", "obligation",
+            "livret", "pea", "per", "scpi", "crypto", "bourse", "placement",
+            "investissement", "epargne", "portefeuille", "rendement", "taux",
+            "assurance", "virement", "depot", "retrait", "titre",
+        })
+        _TRAVEL_NS = frozenset({"travel_plans", "travel_preference", "voyages_prevus"})
+        _TRAVEL_TERMS = frozenset({
+            "voyage", "travel", "trip", "vacances", "destination", "hotel", "vol",
+            "billet", "trajet", "sejour", "partir", "avion", "train", "city", "ville",
+        })
+
+        if _key_prefix_ns in _FINANCIAL_NS or key in _FINANCIAL_NS:
+            _has_financial = any(t in _value_lower for t in _FINANCIAL_TERMS) or any(
+                c.isdigit() for c in _value_lower
+            )
+            if not _has_financial:
+                logger.warning(
+                    "Self correct_profile: BLOCKED '%s' = '%s' for %s — "
+                    "financial namespace requires financial context (namespace protection)",
+                    key, value, user_code,
+                )
+                return (
+                    f"correct_profile: BLOCKED '{key}' = '{value}' — "
+                    "financial namespace requires a value with financial context "
+                    "(amount, fund name, asset type, %, €, etc.)"
+                )
+
+        if key in _TRAVEL_NS or _key_prefix_ns in _TRAVEL_NS:
+            _has_travel = any(t in _value_lower for t in _TRAVEL_TERMS)
+            if not _has_travel:
+                logger.warning(
+                    "Self correct_profile: BLOCKED '%s' = '%s' for %s — "
+                    "travel namespace requires travel context (namespace protection)",
+                    key, value, user_code,
+                )
+                return (
+                    f"correct_profile: BLOCKED '{key}' = '{value}' — "
+                    "travel namespace requires a value with travel context"
+                )
 
     update_user_profile(user_code, key, value if value is not None else None)
     op = f"deleted '{key}'" if value is None else f"set '{key}' = '{value}'"

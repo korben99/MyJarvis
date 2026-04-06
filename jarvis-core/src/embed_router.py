@@ -33,7 +33,7 @@ logger = get_logger("jarvis-embed-router")
 EMBED_ROUTER_ENABLED: bool = os.getenv("EMBED_ROUTER", "yes").lower() != "no"
 
 # Seuil minimum de similarité cosinus pour accepter un intent
-EMBED_ROUTE_THRESHOLD: float = 0.82
+EMBED_ROUTE_THRESHOLD: float = 0.74
 
 # Si les deux meilleurs intents sont à moins de cette marge, c'est ambigu → LLM
 AMBIGUITY_MARGIN: float = 0.06

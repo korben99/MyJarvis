@@ -173,11 +173,12 @@ def append_conversation_message(
     pipe.execute()
 
 
-def get_conversation(user_code: str, session_id: str):
+def get_conversation(user_code: str, session_id: str, limit: int | None = None):
     r = get_redis()
     key = f"chat:{user_code}:{session_id}"
 
-    entries = r.lrange(key, 0, -1)
+    start = -limit if limit else 0
+    entries = r.lrange(key, start, -1)
 
     return [json.loads(e) for e in entries]
 
@@ -780,7 +781,7 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
         logger.error("Autobiographical memory failed: %s", e)
 
 
-def retract_autobiographical_event(user_code: str, query: str, threshold: float = 0.88) -> int:
+def retract_autobiographical_event(user_code: str, query: str, threshold: float = 0.78) -> int:
     """Delete autobiographical memories semantically matching the query.
     Returns the number of deleted points. Used when the user corrects a past fact."""
     try:
@@ -1124,13 +1125,33 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
 
     Pass an already-loaded *self_mem* dict to avoid a redundant JSON read when
     the caller (build_system_prompt) has already called get_self_memory().
+
+    All Redis reads are batched into a single pipeline round-trip.
     """
     if self_mem is None:
         self_mem = get_self_memory()
     parts = []
 
+    # ── Single Redis pipeline round-trip for all scalar/hash reads ──────────
+    r = get_redis()
+    cutoff_24h = time.time() - 86400
+    pipe = r.pipeline(transaction=False)
+    pipe.hgetall(f"user:{user_code}:profile")            # 0
+    pipe.hgetall(f"user:{user_code}:preferences")        # 1
+    pipe.get(f"user:{user_code}:projects")               # 2
+    pipe.get("jarvis:emotional_state")                   # 3
+    pipe.get(f"jarvis:{user_code}:tomorrow_suggestions") # 4
+    pipe.zrangebyscore(f"convlog:{user_code}", cutoff_24h, "+inf", start=0, num=10)  # 5
+    _pipe_results = pipe.execute()
+
+    profile      = _pipe_results[0] or {}
+    prefs        = _pipe_results[1] or {}
+    _proj_raw    = _pipe_results[2]
+    _emotion_raw = _pipe_results[3]
+    _sugg_raw    = _pipe_results[4]
+    _conv_raw    = _pipe_results[5] or []
+
     # User profile — namespaced keys (hobby:kart) are grouped by category for readability
-    profile = get_user_profile(user_code)
     if profile:
         parts.append("=== PROFIL UTILISATEUR ===")
         grouped: dict[str, list[str]] = {}
@@ -1147,14 +1168,16 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
             parts.append(f"- {category}: {', '.join(values)}")
 
     # User preferences
-    prefs = get_user_preferences(user_code)
     if prefs:
         parts.append("\n=== PRÉFÉRENCES ===")
         for k, v in prefs.items():
             parts.append(f"- {k}: {v}")
 
     # Active projects only — done projects are not useful context for chat
-    projects = get_user_projects(user_code)
+    try:
+        projects = json.loads(_proj_raw) if _proj_raw else []
+    except Exception:
+        projects = []
     active_projects = [p for p in projects if isinstance(p, dict) and p.get("status") != "done"]
     if active_projects:
         parts.append("\n=== PROJETS ACTIFS ===")
@@ -1162,7 +1185,12 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
             parts.append(f"- {p.get('name', 'sans nom')}")
 
     # Recent conversation topics (last 24h)
-    recent = get_recent_conversations(user_code, hours=24, limit=10)
+    recent = []
+    for e in _conv_raw:
+        try:
+            recent.append(json.loads(e))
+        except (json.JSONDecodeError, ValueError):
+            pass
     if recent:
         topics = set()
         for conv in recent:
@@ -1172,7 +1200,12 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
             parts.append(f"Sujets abordés : {', '.join(topics)}")
 
     # Emotional state
-    emotion = get_emotional_state()
+    try:
+        emotion = json.loads(_emotion_raw) if _emotion_raw else {}
+    except Exception:
+        emotion = {}
+    if not emotion:
+        emotion = {"mood": "neutral", "energy": 0.7, "confidence": 0.8, "curiosity": 0.6, "concern": 0.0}
     if emotion.get("mood") != "neutral":
         parts.append("\n=== ÉTAT ÉMOTIONNEL ===")
         parts.append(f"Humeur actuelle : {emotion['mood']}")
@@ -1197,8 +1230,7 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
 
     # Tomorrow suggestions — written by nightly review, consumed today
     try:
-        raw = get_redis().get(f"jarvis:{user_code}:tomorrow_suggestions")
-        suggestions = json.loads(raw) if raw else []
+        suggestions = json.loads(_sugg_raw) if _sugg_raw else []
     except Exception:
         suggestions = []
     if suggestions:
@@ -1369,7 +1401,7 @@ def _curative_profile_cleanup(user_code: str):
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.1,
-            max_tokens=200,
+            max_tokens=600,   # profil ~20 clés → output JSON potentiellement >200 tok
             json_response=True,
             no_think=True,
             timeout=30.0,

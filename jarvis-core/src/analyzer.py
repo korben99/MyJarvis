@@ -106,10 +106,10 @@ async def analyze_exchange(
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.1,
-            max_tokens=2000,  # multi-fact extraction JSON; early-stop active
+            max_tokens=3500,  # 1024 thinking + ~2500 multi-fact JSON
             json_response=True,
-            no_think=True,
-            timeout=30.0,
+            no_think=False,  # thinking improves fact extraction accuracy
+            timeout=60.0,
         )
         logger.debug(f"[ANALYZER RAW] {content[:300]}")
         try:

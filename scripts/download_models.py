@@ -11,6 +11,7 @@ MODELS = [
     # "inferencerlabs/Qwen3.5-30B-A3B-MLX-5.5bit",
     "mlx-community/Qwen2.5-3B-Instruct-8bit",
     "Qwen/Qwen3-30B-A3B-MLX-6bit",
+    "NousResearch/Hermes-3-Llama-3.2-3B",
     # "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
 ]
 

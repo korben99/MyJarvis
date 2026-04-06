@@ -57,18 +57,34 @@ VOICE_SUFFIX_FR = (
 # (inférés en aval par le Primary).
 
 ROUTER_SYSTEM = """\
-Tu es un moteur de routage. Ta seule tâche : classifier le message et produire du JSON.
-Tu ne réponds JAMAIS à la question. Tu produis UNIQUEMENT du JSON valide."""
+Tu es un moteur de routage. Ta seule tâche : classifier le message et produire du JSON strict.
+Répond toujours exactement avec du JSON valide, sans aucun texte supplémentaire.
+Le JSON doit contenir les champs : "intents", "weather_location", "gmail_query", "calendar_days", "use_reasoning".
+"""
 
 ROUTER_USER = """\
 Classifie le message. JSON uniquement.
 
-INTENTS : memory=conversation/explication rag=docs_perso web=info_externe weather=météo gmail=emails calendar=agenda briefing=résumé_jour portfolio=bourse self=état_Jarvis
-Défaut=["memory"]. Multi-intents possible.
+INTENTS :
+memory=conversation/explication
+rag=docs_perso
+web=info_externe
+weather=météo
+gmail=emails
+calendar=agenda
+briefing=résumé_jour
+portfolio=bourse
+self=état_Jarvis
 
-PARAMS : weather_location="Paris"|null (ville mentionnée explicitement, sinon null) gmail_query=syntaxeGmail|null calendar_days=7|30|null
-use_reasoning=true UNIQUEMENT si le message contient EXPLICITEMENT "mode expert"/"analyse"/"réfléchis"/"debug"/"explique" — INTERDIT dans les autres cas.
-RÈGLE URL : si le message contient une URL http(s), NE PAS utiliser l'intent web — la page est déjà fetchée automatiquement. Utiliser ["memory"].
+Défaut : ["memory"]. Multi-intents possible, inclure tous les intents pertinents.
+
+PARAMS :
+- weather_location : ville mentionnée explicitement ou null
+- gmail_query : syntaxe Gmail ou null
+- calendar_days : 7, 30 ou null
+- use_reasoning : true seulement si le message contient explicitement "mode expert", "analyse", "réfléchis", "debug", ou "explique"
+
+RÈGLE URL : si le message contient une URL http(s), ne pas utiliser l'intent "web". Inclure "memory" à la place.
 
 EXEMPLES :
 
@@ -96,9 +112,20 @@ EXEMPLES :
 "donne ton avis sur https://news.ycombinator.com"
 {{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}}
 
+--- Exemples multi-intents ---
+"météo Paris demain et résume mes mails non lus"
+{{"intents":["weather","gmail"],"weather_location":"Paris","gmail_query":"is:unread","calendar_days":null,"use_reasoning":false}}
+
+"agenda + briefing sur les événements de la semaine"
+{{"intents":["calendar","briefing"],"weather_location":null,"gmail_query":null,"calendar_days":7,"use_reasoning":false}}
+
+"analyse mes mails non lus et lis cette page https://example.com"
+{{"intents":["gmail","memory"],"weather_location":null,"gmail_query":"is:unread","calendar_days":null,"use_reasoning":false}}
+
 Message : {message}
 
-JSON uniquement."""
+JSON uniquement.
+"""
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -346,6 +373,10 @@ Principes :
   Doublon évident (même fait, même clé en double) → consolider en une seule valeur non-null.
   Des domaines différents (famille, finances, santé, loisirs) ne sont JAMAIS des doublons.
   En cas de doute sur la pertinence d'une clé → "nothing", ne pas modifier.
+  NAMESPACES PROTÉGÉS — ne modifier QUE si la conversation contient un contexte explicite du même domaine :
+    placement:*, capital, per, pea, livret_a → contexte financier requis (montant, fonds, placement, bourse)
+    travel_plans, travel_preference → contexte voyage explicite requis
+    dislike:* → uniquement si l'utilisateur exprime explicitement une aversion
 - queue_push / ask_user : uniquement si PUSH disponible. Message court, naturel, en français.
 - "nothing" si aucune action n'apporte de valeur réelle pour cet utilisateur.
 

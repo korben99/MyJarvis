@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.moi.uploadrag</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/opt/jarvis/venv/bin/python</string>
+      <string>/opt/jarvis/scripts/uploadrag.py</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+      <key>Hour</key>
+      <integer>23</integer>   <!-- heure d’exécution -->
+      <key>Minute</key>
+      <integer>10</integer>   <!-- minute -->
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/uploadrag.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/uploadrag.err</string>
+  </dict>
+</plist>

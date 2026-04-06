@@ -53,7 +53,6 @@ from pipeline import (
     build_dynamic_prefix,
     build_system_prompt,
     post_analysis,
-    strip_ctx_prefix,
 )
 from pydantic import BaseModel
 from rag import search_documents
@@ -380,14 +379,24 @@ async def chat(req: ChatRequest):
     user_name = USER_CODES.get(user_code)
     system_prompt = build_system_prompt()
 
+    # Speculative memory search — started immediately, in parallel with routing.
+    # Memory is the most common intent (~80 % of requests); the embedding call
+    # (~2–3 s on CPU) was previously sequential with routing, adding 2–3 s to TTFT.
+    # If routing decides use_memory=False the result is discarded (cost: one
+    # embedding call, ~2–3 s CPU, no GPU impact).
+    _spec_mem_task: asyncio.Task = asyncio.ensure_future(
+        asyncio.to_thread(search_memory, user_code, req.message, 5)
+    )
+
     if _embed_result is not None:
-        # Fast-path: no LLM router — load prefix and history in parallel.
+        # Fast-path: no LLM router — load prefix, history, memory in parallel.
         _gather_ep = await asyncio.gather(
             asyncio.to_thread(
                 build_dynamic_prefix,
                 req.session_id, user_code, user_name or "", req.voice_mode,
             ),
-            asyncio.to_thread(get_conversation, user_code, req.session_id),
+            asyncio.to_thread(get_conversation, user_code, req.session_id, _HIST_WINDOW),
+            _spec_mem_task,
             return_exceptions=True,
         )
         _pfx = _gather_ep[0]
@@ -399,19 +408,23 @@ async def chat(req: ChatRequest):
         hist = _gather_ep[1] if not isinstance(_gather_ep[1], BaseException) else []
         if isinstance(_gather_ep[1], BaseException):
             logger.error("get_conversation failed: %s", _gather_ep[1])
+        _prefetched_memory = _gather_ep[2] if not isinstance(_gather_ep[2], BaseException) else None
+        if isinstance(_gather_ep[2], BaseException):
+            logger.warning("speculative memory search failed: %s", _gather_ep[2])
         llm_result = _embed_result
         logger.debug(
             "[TTFT] embed router hit — LLM router skipped — %.3fs", time.time() - _t0
         )
     else:
-        # Fallback: LLM router 3B + dynamic prefix + history in parallel.
+        # Fallback: LLM router 3B + dynamic prefix + history + memory in parallel.
         _gather1 = await asyncio.gather(
             asyncio.to_thread(
                 build_dynamic_prefix,
                 req.session_id, user_code, user_name or "", req.voice_mode,
             ),
             llm_route(req.message, google_available=_google_available),
-            asyncio.to_thread(get_conversation, user_code, req.session_id),
+            asyncio.to_thread(get_conversation, user_code, req.session_id, _HIST_WINDOW),
+            _spec_mem_task,
             return_exceptions=True,
         )
         _pfx = _gather1[0]
@@ -422,12 +435,15 @@ async def chat(req: ChatRequest):
             dynamic_prefix, _self_mem = _pfx
         llm_result = _gather1[1] if not isinstance(_gather1[1], BaseException) else None
         hist = _gather1[2] if not isinstance(_gather1[2], BaseException) else []
+        _prefetched_memory = _gather1[3] if not isinstance(_gather1[3], BaseException) else None
         if isinstance(_gather1[1], BaseException):
             logger.error("llm_route failed: %s", _gather1[1])
         if isinstance(_gather1[2], BaseException):
             logger.error("get_conversation failed: %s", _gather1[2])
+        if isinstance(_gather1[3], BaseException):
+            logger.warning("speculative memory search failed: %s", _gather1[3])
         logger.debug(
-            "[TTFT] gather1 done (LLM router+dynamic_prefix+hist) — %.3fs", time.time() - _t0
+            "[TTFT] gather1 done (LLM router+dynamic_prefix+hist+mem) — %.3fs", time.time() - _t0
         )
 
     # ── Router result extraction ────────────────────────────────────────────
@@ -522,11 +538,13 @@ async def chat(req: ChatRequest):
         time.time() - _t0,
     )
 
+    async def _resolved_memory():
+        """Retourne la recherche mémoire préchargée (gather1) ou [] si non requise."""
+        return _prefetched_memory if (_prefetched_memory is not None) else []
+
     _gather2 = await asyncio.gather(
         search_documents(req.message) if (req.use_rag or use_rag) else _empty(),
-        asyncio.to_thread(search_memory, user_code, req.message, 5)
-        if use_memory
-        else _empty(),
+        _resolved_memory() if use_memory else _empty(),
         search_weather(_weather_query)
         if use_weather_auto
         else search_web(optimize_web_query(req.message), original_message=req.message)
@@ -558,8 +576,9 @@ async def chat(req: ChatRequest):
 
     # Inline URL results take priority — prepend so the LLM sees them first.
     if inline_url_results:
+        _seen_urls = {r.get("url") for r in inline_url_results}
         web_results = inline_url_results + [
-            r for r in web_results if r not in inline_url_results
+            r for r in web_results if r.get("url") not in _seen_urls
         ]
 
     logger.debug(
@@ -622,12 +641,10 @@ async def chat(req: ChatRequest):
         )
 
     full_prefix = "\n\n".join(extra_ctx_parts)
-    # augment_user_message embeds a null-byte separator so strip_ctx_prefix()
-    # can recover the original message when serving history to the iOS app.
     user_content = augment_user_message(full_prefix, raw_user_content)
 
-    # Window: last 8 messages (4 exchanges). Beyond that, the KV cache is
-    # invalidated because the prefix shifts — see llm_local.py _get_session_cache.
+    # Window: last 8 messages (4 exchanges).
+    # Raw messages (no dynamic prefix) are stored in Redis → history stays compact.
     hist_slice = hist[-_HIST_WINDOW:]
     messages = [{"role": "system", "content": system_prompt}]
     for m in hist_slice:
@@ -705,10 +722,8 @@ async def chat(req: ChatRequest):
                 full_clean = re.sub(
                     r"<think>.*$", "", full_clean, flags=re.DOTALL
                 ).strip()
-                # Store the AUGMENTED user message so the KV cache matches on
-                # the next turn (the common prefix must be token-identical).
                 append_conversation_message(
-                    user_code, req.session_id, "user", user_content
+                    user_code, req.session_id, "user", raw_user_content
                 )
                 append_conversation_message(
                     user_code, req.session_id, "assistant", full_clean
@@ -735,7 +750,7 @@ async def chat(req: ChatRequest):
         no_think=chat_no_think,
     )
 
-    append_conversation_message(user_code, req.session_id, "user", user_content)
+    append_conversation_message(user_code, req.session_id, "user", raw_user_content)
     append_conversation_message(user_code, req.session_id, "assistant", resp)
     ms = int((time.time() - start) * 1000)
 
@@ -768,10 +783,6 @@ async def get_history(session_id: str, user_code: str, limit: int = IOS_MAX_MESS
     for e in entries:
         try:
             msg = json.loads(e)
-            # Strip the KV-cache context prefix from user messages before
-            # returning to the iOS app so only the original text is shown.
-            if msg.get("role") == "user":
-                msg = {**msg, "content": strip_ctx_prefix(msg["content"])}
             result.append(msg)
         except (json.JSONDecodeError, ValueError):
             logger.warning("Skipping corrupted history entry session=%s", session_id)

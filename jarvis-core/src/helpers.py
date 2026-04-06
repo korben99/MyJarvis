@@ -356,6 +356,17 @@ def redis_set_json(key: str, data, ttl: int | None = None) -> None:
 # ══════════════════════════════════════════════════
 #  LLM JSON EXTRACTION
 # ══════════════════════════════════════════════════
+
+def _repair_json(text: str) -> str:
+    """Best-effort repair of common LLM JSON generation mistakes.
+
+    Currently handles:
+    - Missing opening quote on object keys:  action": "x"  →  "action": "x"
+      Pattern: a bare word followed by `":` that is NOT already preceded by `"`.
+    """
+    return re.sub(r'(?<!")\b([a-zA-Z_]\w*)(":\s*)', r'"\1\2', text)
+
+
 def extract_llm_json(text: str) -> dict:
     """
     Extraction robuste de JSON depuis une réponse LLM.
