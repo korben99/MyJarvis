@@ -53,6 +53,7 @@ from helpers import get_logger, setup_logging
 from llm_client import openai_headers
 from memory import get_embed_model, get_emotional_state
 from rag import search_documents
+from analyzer import analyse_recent_conversations
 from self import run_nightly_interaction_review, run_self_reflection
 from trading import run_trade_check
 from web_search import search_web
@@ -106,6 +107,14 @@ async def lifespan(app: FastAPI):
             minute=0,
             id="nightly_interaction_review",
         )
+        scheduler.add_job(
+            analyse_recent_conversations,
+            trigger="interval",
+            minutes=30,
+            id="conversation_analysis",
+            next_run_time=datetime.now(tz) + timedelta(minutes=10),
+        )
+        logger.info("Conversation analysis scheduled every 30 min")
 
         if BRIEFING_ENABLED:
             scheduler.add_job(

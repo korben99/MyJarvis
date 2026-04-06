@@ -23,11 +23,11 @@ Exports publics :
 """
 
 import asyncio
+import copy
 import logging
 import os
-import time
 import threading
-import copy
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
@@ -66,6 +66,7 @@ QUANT_KV_BITS = int(os.getenv("QUANT_KV_BITS", "4"))
 
 # ── Profils d'inférence par modèle ────────────────────────────────────────
 
+
 @dataclass(frozen=True)
 class _ModelProfile:
     """Sampling + generation parameters for a given model family.
@@ -73,14 +74,15 @@ class _ModelProfile:
     Centralises all per-model tuning so call sites are free of if/else.
     Resolved once per call via _model_profile().
     """
-    top_p_think: float           # top_p when enable_thinking=True
-    top_p_nothink: float         # top_p when enable_thinking=False / no-think
-    top_k: int                   # 0 = disabled
+
+    top_p_think: float  # top_p when enable_thinking=True
+    top_p_nothink: float  # top_p when enable_thinking=False / no-think
+    top_k: int  # 0 = disabled
     min_p: float
-    repetition_penalty: float    # > 1.0 penalises repeated tokens
-    repetition_context_size: int # how many past tokens to look at
-    frequency_penalty: float     # additive penalty proportional to frequency
-    use_quant_kv: bool           # whether to enable KV cache quantisation
+    repetition_penalty: float  # > 1.0 penalises repeated tokens
+    repetition_context_size: int  # how many past tokens to look at
+    frequency_penalty: float  # additive penalty proportional to frequency
+    use_quant_kv: bool  # whether to enable KV cache quantisation
 
 
 def _model_profile(model_path: str) -> _ModelProfile:
@@ -111,10 +113,10 @@ def _model_profile(model_path: str) -> _ModelProfile:
             top_p_nothink=1.0,
             top_k=0,
             min_p=0.0,
-            repetition_penalty=1.0,   # already-quantised Q4; penalties degrade JSON quality
+            repetition_penalty=1.0,  # already-quantised Q4; penalties degrade JSON quality
             repetition_context_size=64,
             frequency_penalty=0.0,
-            use_quant_kv=False,       # already Q4 affine quantised
+            use_quant_kv=False,  # already Q4 affine quantised
         )
     # Generic profile — fallback for any other small model
     return _ModelProfile(
@@ -133,7 +135,9 @@ def _model_profile(model_path: str) -> _ModelProfile:
 
 _model_cache: dict[str, tuple] = {}  # model_path → (model, tokenizer)
 _load_lock = threading.Lock()  # protège le chargement concurrent
-_infer_lock = threading.Lock()  # sérialise toutes les inférences MLX (contrainte Metal GPU)
+_infer_lock = (
+    threading.Lock()
+)  # sérialise toutes les inférences MLX (contrainte Metal GPU)
 # threading.Lock (pas asyncio.Lock) : garantit la mutual exclusion entre les appelants
 # sync (call_llm_local via asyncio.to_thread) ET les appelants async (call_llm_local_async,
 # stream_local). asyncio.Lock est invisible depuis les threads → race GPU sans threading.Lock.
@@ -230,7 +234,8 @@ def _make_system_kv(model_path: str, model, tokenizer, system_content: str) -> A
 
     try:
         for _ in stream_generate(
-            model, tokenizer,
+            model,
+            tokenizer,
             prompt=sys_prompt_text,
             max_tokens=1,
             sampler=sampler,
@@ -251,7 +256,8 @@ def _make_system_kv(model_path: str, model, tokenizer, system_content: str) -> A
 
     logger.info(
         "KV cache: system prompt prefilled (%d tok, model=%s)",
-        sys_token_count, model_path.split("/")[-1],
+        sys_token_count,
+        model_path.split("/")[-1],
     )
     return cache
 
@@ -274,7 +280,9 @@ def _get_system_cache(model_path: str, model, tokenizer, system_content: str) ->
         try:
             return copy.deepcopy(_sys_kv[model_path][1])
         except Exception as exc:
-            logger.warning("KV cache: deepcopy failed (%s) — running without cache", exc)
+            logger.warning(
+                "KV cache: deepcopy failed (%s) — running without cache", exc
+            )
             return None
 
 
@@ -304,6 +312,18 @@ def preload_models() -> None:
     """
     if not LLM_LOCAL:
         return
+
+    # Limit Metal allocator cache to 4 GB so unused buffers between inferences
+    # are released promptly rather than retained indefinitely by the allocator.
+    # This keeps headroom available for KV caches during long conversations.
+    try:
+        import mlx.core as _mx
+
+        _mx.set_cache_limit(4 * 1024**3)
+        logger.info("MLX Metal cache limit set to 4 GB")
+    except Exception as exc:
+        logger.warning("MLX set_cache_limit failed (non-fatal): %s", exc)
+
     model_paths = {ROUTER_MODEL, PRIMARY_MODEL}  # set → déduplique
     for path in model_paths:
         _load_model(path)
@@ -321,7 +341,7 @@ def preload_models() -> None:
                 path,
                 warmup_msgs,
                 temperature=0.0,
-                max_tokens=32,  # assez pour le JIT sans déclencher le warning de troncature
+                max_tokens=50,  # assez pour le JIT sans déclencher le warning de troncature
                 no_think=True,
             )
             logger.info("MLX warmup OK : %s", path)
@@ -359,7 +379,10 @@ def _build_prompt(
         #   (thinking + output share the same max_tokens budget in mlx-lm; Qwen3 open-source
         #   correctly honours thinking_budget in apply_chat_template)
         if no_think:
-            think_kwargs: dict[str, Any] = {"enable_thinking": False, "thinking_budget": 0}
+            think_kwargs: dict[str, Any] = {
+                "enable_thinking": False,
+                "thinking_budget": 0,
+            }
         else:
             think_kwargs = {"enable_thinking": True}
             if THINKING_BUDGET_TOKENS > 0:
@@ -367,7 +390,9 @@ def _build_prompt(
 
         # Try full kwargs; fall back if tokenizer version is too old
         try:
-            return tokenizer.apply_chat_template(messages, **base_kwargs, **think_kwargs)
+            return tokenizer.apply_chat_template(
+                messages, **base_kwargs, **think_kwargs
+            )
         except TypeError:
             # thinking_budget not supported → retry with only enable_thinking
             try:
@@ -381,7 +406,6 @@ def _build_prompt(
                 )
 
     return tokenizer.apply_chat_template(messages, **base_kwargs)
-
 
 
 # ── Inférence synchrone (cœur) ────────────────────────────────────────────
@@ -405,9 +429,20 @@ def _generate_sync(
 
     prompt_tokens = len(tokenizer.encode(prompt))
     profile = _model_profile(model_path)
-    quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if profile.use_quant_kv else {}
+    quant_kwargs = (
+        {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if profile.use_quant_kv else {}
+    )
     effective_max = min(max_tokens, 10000)
     model_short = model_path.split("/")[-1]
+
+    # System prompt KV cache — pre-filled once, deepcopied per call.
+    _sys_content = (
+        messages[0]["content"]
+        if messages and messages[0].get("role") == "system"
+        else ""
+    )
+    kv_cache = _get_system_cache(model_path, model, tokenizer, _sys_content)
+    _cache_kwarg = {"prompt_cache": kv_cache} if kv_cache is not None else {}
 
     sampler = make_sampler(
         temp=temperature,
@@ -441,12 +476,14 @@ def _generate_sync(
         seen_end_think = no_think  # True immediately if no thinking expected
 
         for chunk in stream_generate(
-            model, tokenizer,
+            model,
+            tokenizer,
             prompt=prompt,
             max_tokens=effective_max,
             sampler=sampler,
             logits_processors=logits_procs,
             **quant_kwargs,
+            **_cache_kwarg,
         ):
             if chunk.text:
                 raw_so_far += chunk.text
@@ -483,13 +520,15 @@ def _generate_sync(
             _think_already_stripped = False
     else:
         result = generate(
-            model, tokenizer,
+            model,
+            tokenizer,
             prompt=prompt,
             max_tokens=effective_max,
             sampler=sampler,
             logits_processors=logits_procs,
             verbose=False,
             **quant_kwargs,
+            **_cache_kwarg,
         )
 
     # ── Stats réponse ──────────────────────────────────────────────
@@ -501,13 +540,21 @@ def _generate_sync(
 
     logger.info(
         "[LLM-STATS] %s | %s no_think=%s | %s | prompt=%d tok | resp=%d/%d tok (%d%%)",
-        model_short, call_type, no_think, stop_label,
-        prompt_tokens, resp_tokens, effective_max, pct,
+        model_short,
+        call_type,
+        no_think,
+        stop_label,
+        prompt_tokens,
+        resp_tokens,
+        effective_max,
+        pct,
     )
     if not early_stopped and resp_tokens >= int(effective_max * 0.9):
         logger.warning(
             "[LLM-STATS] POSSIBLE TRUNCATION — resp=%d tok near limit=%d (model=%s)",
-            resp_tokens, effective_max, model_short,
+            resp_tokens,
+            effective_max,
+            model_short,
         )
 
     # ── Strip thinking block, keep actual answer ──────────────────
@@ -560,7 +607,13 @@ def call_llm_local(
     """
     with _infer_lock:
         return _generate_sync(
-            model, messages, temperature, max_tokens, no_think, session_id, json_response
+            model,
+            messages,
+            temperature,
+            max_tokens,
+            no_think,
+            session_id,
+            json_response,
         )
 
 
@@ -667,7 +720,11 @@ async def stream_local(
 
         # System prompt KV cache — pre-filled once, deepcopied per call.
         # Only the tokens after the system prompt need prefill on each turn.
-        _sys_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
+        _sys_content = (
+            messages[0]["content"]
+            if messages and messages[0].get("role") == "system"
+            else ""
+        )
         kv_cache = _get_system_cache(model, mlx_model, tokenizer, _sys_content)
 
         first = True
@@ -676,7 +733,11 @@ async def stream_local(
         # thinking_budget in the chat template reserves the thinking portion.
         budget = min(max_tokens, 10000)
         profile = _model_profile(model)
-        quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if profile.use_quant_kv else {}
+        quant_kwargs = (
+            {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64}
+            if profile.use_quant_kv
+            else {}
+        )
         try:
             for chunk in stream_generate(
                 mlx_model,
@@ -724,13 +785,20 @@ async def stream_local(
             logger.info(
                 "[LLM-STATS] %s | stream no_think=%s thinking=%s | eos/limit"
                 " | prompt=%d tok | resp=%d/%d tok (%d%%)",
-                model_short, no_think, thinking_active,
-                prompt_tokens, resp_tokens, budget, pct,
+                model_short,
+                no_think,
+                thinking_active,
+                prompt_tokens,
+                resp_tokens,
+                budget,
+                pct,
             )
             if resp_tokens >= int(budget * 0.9):
                 logger.warning(
                     "[LLM-STATS] POSSIBLE TRUNCATION — resp=%d tok near limit=%d (model=%s)",
-                    resp_tokens, budget, model_short,
+                    resp_tokens,
+                    budget,
+                    model_short,
                 )
             loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinelle fin de flux
 

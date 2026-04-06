@@ -27,7 +27,6 @@ next, MLX's KV cache reuses their attention state and only the new tokens
 
 import asyncio
 
-from analyzer import analyze_exchange
 from config import USER_TIMEZONES
 from deps import (
     GOOGLE_CHAR_BUDGET,
@@ -39,15 +38,8 @@ from deps import (
 from helpers import fmt_event_time, fmt_now_fr, get_logger, rel_time_fr
 from llm_client import trim_chunks
 from memory import (
-    apply_project_updates,
     build_memory_context,
-    get_user_profile,
-    get_user_projects,
     log_conversation,
-    retract_autobiographical_event,
-    set_interest_weight,
-    update_emotional_state,
-    update_user_profile,
 )
 from prompts import get_prompt
 from self import (
@@ -111,7 +103,7 @@ def build_dynamic_prefix(
     parts: list[str] = [f"Date et heure : {fmt_now_fr(tz)}."]
 
     if user_name:
-        parts.append(f"Tu parles avec {user_name}.")
+        parts.append(f"Tu parles avec {user_name}. Tutoie-le toujours.")
 
     self_mem = get_self_memory()
 
@@ -338,65 +330,22 @@ def build_context(
 
 async def post_analysis(
     session_id: str, user_code: str, user_msg: str, assistant_msg: str
-):
-    """Run after each exchange: extract topics, mood, facts. Non-blocking."""
+) -> None:
+    """Log the exchange immediately after each response. Non-blocking, no LLM.
+
+    LLM analysis (fact extraction, importance scoring, Qdrant vectorisation)
+    is handled by the scheduled job analyse_recent_conversations() every 30 min.
+    This keeps post_analysis at ~5 ms and completely eliminates _infer_lock
+    contention on the next user request.
+    """
     try:
-        existing_projects = get_user_projects(user_code)
-        existing_profile_keys = list(get_user_profile(user_code).keys())
-        analysis = await analyze_exchange(user_msg, assistant_msg, existing_projects, existing_profile_keys)
-        importance = analysis.get("importance", 0)
-
-        mood = analysis.get("mood", "neutral")
-        mood_to_state = {
-            "happy":      {"mood": "happy",     "energy": 0.8},
-            "stressed":   {"mood": "attentive",  "concern": 0.6},
-            "frustrated": {"mood": "supportive", "concern": 0.7},
-            "curious":    {"mood": "engaged",    "curiosity": 0.8},
-            "tired":      {"mood": "gentle",     "energy": 0.4},
-            "focused":    {"mood": "focused",    "energy": 0.7},
-        }
-        if mood in mood_to_state:
-            update_emotional_state(mood_to_state[mood])
-
-        projects = analysis.get("projects", [])
-        if projects:
-            apply_project_updates(user_code, projects)
-
-        # Profile + interest writes: update_user_profile may call the router LLM
-        # (sync) for key normalisation — run in thread to avoid blocking the loop.
-        for fact in analysis.get("user_facts", []):
-            if "key" in fact and "value" in fact:
-                await asyncio.to_thread(
-                    update_user_profile, user_code, fact["key"], fact["value"] or None
-                )
-
-        for retraction in analysis.get("retractions") or []:
-            if isinstance(retraction, str) and retraction.strip():
-                await asyncio.to_thread(retract_autobiographical_event, user_code, retraction)
-
-        for iw in analysis.get("interest_weights") or []:
-            if "term" in iw and "weight" in iw:
-                set_interest_weight(user_code, iw["term"], float(iw["weight"]))
-
-        # log_conversation → store_memory_vector / store_autobiographical_event use
-        # sync Qdrant calls — run in thread to keep the event loop free.
         await asyncio.to_thread(
             log_conversation,
             user_code=user_code,
             session_id=session_id,
             user_msg=user_msg,
             assistant_msg=assistant_msg,
-            mood=analysis.get("mood", "neutral"),
-            topics=analysis.get("topics", []),
-            importance=importance,
-            memory_summary=analysis.get("memory_summary"),
+            # mood/topics/importance left at defaults — filled by scheduled analysis
         )
-
-        logger.info("[PROJECTS] events=%s", projects)
-        logger.info(
-            "Analysis: mood=%s, topics=%s, facts=%d",
-            mood, analysis.get("topics"), len(analysis.get("user_facts", []))
-        )
-
     except Exception as e:
-        logger.error("Post-analysis error: %s", e)
+        logger.error("post_analysis error: %s", e)

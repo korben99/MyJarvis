@@ -470,12 +470,13 @@ async def _refine_web_query(question: str, current_query: str, results: list[dic
                 f"User question: {question}\n"
                 f"Search query tried: {current_query}\n"
                 f"Insufficient results:\n{snippets}\n\n"
-                f"Write ONE better search query. Same language as the question. "
+                f"Write ONE better search query (5 to 8 words max). "
+                f"Same language as the question. "
                 f"Output only the query, nothing else."
             )}],
             **_router_llm_params(),
             temperature=0,
-            max_tokens=60,
+            max_tokens=120,
             json_response=False,
             no_think=True,
             timeout=8.0,

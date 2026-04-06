@@ -30,8 +30,17 @@ mkdir -p /opt/jarvis/logs
 source /opt/jarvis/venv/bin/activate
 cd /opt/jarvis/jarvis-core/src
 
+# ── Performance env vars ───────────────────────────────────────────────────
+# Prevent HuggingFace tokenizers from spawning CPU threads (MLX runs on GPU).
+export TOKENIZERS_PARALLELISM=false
+# Keep NumPy/BLAS single-threaded — all heavy compute goes through Metal.
+export OMP_NUM_THREADS=1
+# Avoid potential ObjC fork-safety crash when asyncio spawns threads.
+export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+
 uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1 \
-    --log-level info &
+    --loop uvloop --http httptools \
+    --log-level warning &
 
 PID=$!
 echo $PID > $PID_FILE

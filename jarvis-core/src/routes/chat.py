@@ -73,6 +73,36 @@ _HIST_WINDOW = 8  # HISTORIQUE DES MESSAGES DANS LE PROMPT INJECTE
 # Compiled once at module level — used in STEP 5 URL detection.
 _URL_RE = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]{5,}')
 
+# ── Web auto-trigger signals ────────────────────────────────────────────────────
+# Factual patterns that strongly suggest external info is needed even when the
+# router classified the message as "memory" (conversational phrasing).
+_AUTO_WEB_RE = re.compile(
+    r'\bprix\b|\btarif\b|\bcombien\b|\bcoûte?\b'
+    r'|\bversion\b|\bmodèle\b'
+    r'|\bsorti\b|\bdisponible\b|\blancé\b'
+    r'|\bactuel\b|\bactuelle\b|\bactuellem?ent\b'
+    r'|\bdernier\b|\bdernière\b|\bnouveau\b|\bnouvelle\b'
+    r'|\bspecs?\b|\bcaractéristique\b'
+    r'|\bqui est\b|\bc\'est qui\b'
+    r'|\bcompar[e-]\b|\bregarde\b',
+    re.IGNORECASE,
+)
+
+def _auto_web_needed(message: str, memory_chunks: list) -> bool:
+    """True if the message looks factual but the context is thin.
+
+    Conditions:
+    - At least one factual signal in the message (price, version, current, etc.)
+    - No memory hit with strong relevance (score > 0.70) — if memory already has
+      a relevant answer, web would be redundant noise.
+    - Message is long enough to be a real question (not a greeting).
+    """
+    if len(message) <= 20:
+        return False
+    if memory_chunks and any(m.get("score", 0) > 0.70 for m in memory_chunks):
+        return False
+    return bool(_AUTO_WEB_RE.search(message))
+
 # ── Request model ──────────────────────────────────────────────────────────────
 
 
@@ -584,6 +614,25 @@ async def chat(req: ChatRequest):
     logger.debug(
         "[TTFT] gather2 done (all context sources resolved) — %.3fs", time.time() - _t0
     )
+
+    # ── Web auto-trigger — fallback when context thin + factual question ────────
+    # Fires ONLY when: no web was planned, no RAG, no inline URL, and the question
+    # contains factual signals (price, version, current state, …).
+    # Memory score guard avoids firing when a relevant memory hit already exists.
+    if (
+        not web_results
+        and not rag_chunks
+        and not inline_url_results
+        and not (use_web_auto or req.use_web)
+        and _auto_web_needed(req.message, memory_chunks)
+    ):
+        logger.info("chat: auto-web fallback — factual query, thin context")
+        web_results = await search_web(
+            optimize_web_query(req.message),
+            original_message=req.message,
+            max_results=3,
+        )
+        chat_no_think = False  # research query → enable thinking
 
     # ════════════════════════════════════════════════════════════════════════
     # STEP 6 — MESSAGE ASSEMBLY — context + prefix + history → final prompt

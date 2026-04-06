@@ -56,14 +56,13 @@ VOICE_SUFFIX_FR = (
 # pas de jugement de complexité, pas de memory_scope/conversation_type
 # (inférés en aval par le Primary).
 
+# ROUTER_SYSTEM contient toutes les instructions et exemples (partie 100% fixe).
+# Elle est mise en cache KV dès le premier appel via _get_system_cache dans _generate_sync.
+# ROUTER_USER ne contient que la partie dynamique (le message) pour minimiser le prefill.
 ROUTER_SYSTEM = """\
-Tu es un moteur de routage. Ta seule tâche : classifier le message et produire du JSON strict.
+Tu es un moteur de routage. Ta seule tâche : classifier le message utilisateur et produire du JSON strict.
 Répond toujours exactement avec du JSON valide, sans aucun texte supplémentaire.
 Le JSON doit contenir les champs : "intents", "weather_location", "gmail_query", "calendar_days", "use_reasoning".
-"""
-
-ROUTER_USER = """\
-Classifie le message. JSON uniquement.
 
 INTENTS :
 memory=conversation/explication
@@ -82,50 +81,41 @@ PARAMS :
 - weather_location : ville mentionnée explicitement ou null
 - gmail_query : syntaxe Gmail ou null
 - calendar_days : 7, 30 ou null
-- use_reasoning : true seulement si le message contient explicitement "mode expert", "analyse", "réfléchis", "debug", ou "explique"
+- use_reasoning : true si le message demande une explication, un mécanisme, une analyse ou de l'aide pédagogique. Mots-clés : "explique", "comprendre", "comment fonctionne", "pourquoi", "mécanisme", "analyse", "réfléchis", "debug", "mode expert"
 
 RÈGLE URL : si le message contient une URL http(s), ne pas utiliser l'intent "web". Inclure "memory" à la place.
 
 EXEMPLES :
 
 "salut ça va ?"
-{{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}}
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}
 
 "météo Lyon demain"
-{{"intents":["weather"],"weather_location":"Lyon","gmail_query":null,"calendar_days":null,"use_reasoning":false}}
-
-"météo aujourd'hui"
-{{"intents":["weather"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}}
+{"intents":["weather"],"weather_location":"Lyon","gmail_query":null,"calendar_days":null,"use_reasoning":false}
 
 "résume mes mails non lus"
-{{"intents":["gmail"],"weather_location":null,"gmail_query":"is:unread","calendar_days":null,"use_reasoning":false}}
+{"intents":["gmail"],"weather_location":null,"gmail_query":"is:unread","calendar_days":null,"use_reasoning":false}
 
 "mon agenda cette semaine"
-{{"intents":["calendar"],"weather_location":null,"gmail_query":null,"calendar_days":7,"use_reasoning":false}}
+{"intents":["calendar"],"weather_location":null,"gmail_query":null,"calendar_days":7,"use_reasoning":false}
+
+"peux-tu m'aider à comprendre comment fonctionnent les muscles ?"
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":true}
 
 "mode expert, explique la mécanique quantique"
-{{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":true}}
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":true}
 
 "lis cette page https://example.com/article et résume"
-{{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}}
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}
 
-"donne ton avis sur https://news.ycombinator.com"
-{{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}}
-
---- Exemples multi-intents ---
 "météo Paris demain et résume mes mails non lus"
-{{"intents":["weather","gmail"],"weather_location":"Paris","gmail_query":"is:unread","calendar_days":null,"use_reasoning":false}}
+{"intents":["weather","gmail"],"weather_location":"Paris","gmail_query":"is:unread","calendar_days":null,"use_reasoning":false}
 
 "agenda + briefing sur les événements de la semaine"
-{{"intents":["calendar","briefing"],"weather_location":null,"gmail_query":null,"calendar_days":7,"use_reasoning":false}}
-
-"analyse mes mails non lus et lis cette page https://example.com"
-{{"intents":["gmail","memory"],"weather_location":null,"gmail_query":"is:unread","calendar_days":null,"use_reasoning":false}}
-
-Message : {message}
-
-JSON uniquement.
+{"intents":["calendar","briefing"],"weather_location":null,"gmail_query":null,"calendar_days":7,"use_reasoning":false}
 """
+
+ROUTER_USER = "Message : {message}"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -157,7 +147,12 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
   - Nommage (clés nouvelles seulement) :
     Fait scalaire → clé simple : "profession"
     Multi-valeur → "categorie:item" : "hobby:kart", "skill:python"
-    Catégories : hobby, skill, langue, sport, outil, technologie
+    Catégories AUTORISÉES : hobby, skill, langue, sport, outil, technologie, physique, preference
+    INTERDIT absolu : toute clé ou valeur contenant un nom de marque, modèle, référence produit.
+      Exemples interdits : "hobby:wristmaster", "hobby:longines", "model:X", "marque:X"
+      Exemple autorisé  : "hobby:horlogerie" avec valeur "collectionneur de montres"
+    L'item d'un hobby est une ACTIVITÉ GÉNÉRIQUE (horlogerie, kart, tennis), jamais un produit.
+    La valeur décrit le RAPPORT à l'activité, jamais une référence ou un nom de modèle.
     Minuscules sans accents pour catégorie et item.
   - Si incertain → ne rien ajouter
 
@@ -174,6 +169,7 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
 "interest_weights" : liste ou []
   Format : {{"term":"mot_clé_minuscule","weight":0.0-2.0}}
   0.0=supprimer · 1.0=normal · 2.0=passion — uniquement si intérêt explicite dans CET échange.
+  Exclure : mesures physiques, tailles, produits spécifiques (ce ne sont pas des centres d'intérêt).
 
 "importance"      : float 0.0-1.0 (importance du souvenir)
   0.0=banal · 0.4=utile · 0.7=important · 1.0=critique
@@ -205,12 +201,13 @@ Question : {question}
 Résultats :
 {snippets}
 
-Les résultats permettent-ils de répondre directement et précisément à la question ?
+Les résultats permettent-ils de formuler une réponse utile à la question ?
 
 Règles :
-- false si vague, incomplet ou hors sujet
-- false si info manquante pour répondre clairement
-- true seulement si la réponse peut être donnée sans supposition
+- false si hors sujet ou si aucune information pertinente n'est présente
+- false si la question porte sur un fait précis (prix, date, chiffre) et ce fait est absent
+- true si les résultats contiennent assez d'information pour une réponse utile, même partielle
+- true pour les recommandations/avis : les résultats n'ont pas besoin d'être exhaustifs
 - Ne réponds PAS toi-même à la question
 
 JSON uniquement :

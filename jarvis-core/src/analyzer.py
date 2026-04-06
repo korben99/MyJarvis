@@ -32,16 +32,21 @@ Message depth
 message long / détaillé
 """
 
+import asyncio
 import json
+import time
 from datetime import date
 
 from config import (
+    AUTOBIO_IMPORTANCE_THRESHOLD,
+    CHAT_LOG_TTL,
     IMPORTANCE_THRESHOLD,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
+    USER_CODES,
 )
-from helpers import call_llm_async, extract_llm_json, get_logger
+from helpers import call_llm_async, extract_llm_json, get_logger, get_redis
 from prompts import get_prompt
 
 logger = get_logger("jarvis-analyzer")
@@ -94,8 +99,8 @@ async def analyze_exchange(
         )
         prompt = get_prompt("ANALYSIS_PROMPT").format(
             current_date=date.today().isoformat(),
-            user_message=user_msg[:1000],
-            assistant_message=assistant_msg[:1000],
+            user_message=user_msg[:2500],
+            assistant_message=assistant_msg[:2500],
             existing_projects=projects_context,
             existing_profile_keys=profile_keys_str,
         )
@@ -178,3 +183,178 @@ async def analyze_exchange(
             "memory_summary": None,
             "should_remember": False,
         }
+
+
+# ── Scheduled batch analysis ──────────────────────────────────────────────
+
+
+async def analyse_recent_conversations(user_code: str | None = None) -> None:
+    """
+    Scheduled analysis of unanalyzed conversation exchanges (called every 30 min).
+
+    For each user, scans all active chat sessions, collects messages appended
+    since the last watermark, and runs a single analyze_exchange call on the
+    accumulated cross-session context (chronologically merged).
+
+    Watermark — Redis key `analysis_wm:{user_code}:{session_id}`:
+      Stores the LLEN of the chat list at the time of the last analysis.
+      lrange(key, wm, -1) returns only new, unanalyzed messages.
+      Snapshot is taken BEFORE the LLM call so messages that arrive during
+      analysis are included in the next batch (never dropped).
+
+    After analysis:
+      - user_facts  → Redis profile via update_user_profile
+      - projects    → apply_project_updates
+      - mood        → update_emotional_state
+      - retractions → retract_autobiographical_event
+      - importance > IMPORTANCE_THRESHOLD   → store_memory_vector (Qdrant épisodique)
+      - importance > AUTOBIO_IMPORTANCE_THRESHOLD → store_autobiographical_event
+    """
+    # Import here to avoid circular imports at module load time
+    from memory import (
+        apply_project_updates,
+        get_user_profile,
+        get_user_projects,
+        retract_autobiographical_event,
+        set_interest_weight,
+        store_autobiographical_event,
+        store_memory_vector,
+        update_emotional_state,
+        update_user_profile,
+    )
+
+    r = get_redis()
+    users = [user_code] if user_code else list(USER_CODES.keys())
+
+    _mood_to_state = {
+        "happy":      {"mood": "happy",     "energy": 0.8},
+        "stressed":   {"mood": "attentive",  "concern": 0.6},
+        "frustrated": {"mood": "supportive", "concern": 0.7},
+        "curious":    {"mood": "engaged",    "curiosity": 0.8},
+        "tired":      {"mood": "gentle",     "energy": 0.4},
+        "focused":    {"mood": "focused",    "energy": 0.7},
+    }
+
+    for uc in users:
+        try:
+            # ── Discover active sessions ──────────────────────────────────
+            session_keys: list[str] = []
+            cursor: int | str = "0"
+            while True:
+                cursor, keys = r.scan(cursor, match=f"chat:{uc}:*", count=100)
+                session_keys.extend(k.decode() if isinstance(k, bytes) else k for k in keys)
+                if str(cursor) == "0":
+                    break
+
+            if not session_keys:
+                continue
+
+            # ── Collect new messages (since watermark) from all sessions ──
+            all_new: list[dict] = []
+            wm_updates: dict[str, int] = {}  # wm_key → new watermark (snapshot)
+
+            for chat_key in session_keys:
+                session_id = chat_key.removeprefix(f"chat:{uc}:")
+                wm_key = f"analysis_wm:{uc}:{session_id}"
+
+                wm = int(r.get(wm_key) or 0)
+                current_len = r.llen(chat_key)
+
+                if current_len <= wm:
+                    continue  # nothing new in this session
+
+                # Snapshot BEFORE the LLM call
+                wm_updates[wm_key] = current_len
+
+                for raw in r.lrange(chat_key, wm, -1):
+                    try:
+                        msg = json.loads(raw)
+                        msg["_session_id"] = session_id
+                        all_new.append(msg)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+
+            if not all_new:
+                logger.debug("[SCHEDULER] analyse_recent_conversations: no new messages for %s", uc)
+                continue
+
+            # ── Merge chronologically across sessions ─────────────────────
+            all_new.sort(key=lambda m: m.get("ts", 0))
+
+            user_parts = [m["content"] for m in all_new if m.get("role") == "user"]
+            asst_parts  = [m["content"] for m in all_new if m.get("role") == "assistant"]
+
+            if not user_parts:
+                continue
+
+            acc_user = "\n---\n".join(user_parts)[:3000]
+            acc_asst  = "\n---\n".join(asst_parts)[:3000]
+
+            # ── LLM analysis ──────────────────────────────────────────────
+            existing_projects = get_user_projects(uc)
+            existing_profile_keys = list(get_user_profile(uc).keys())
+            analysis = await analyze_exchange(
+                acc_user, acc_asst, existing_projects, existing_profile_keys
+            )
+
+            # ── Update watermarks (analysis succeeded) ────────────────────
+            for wm_key, new_wm in wm_updates.items():
+                r.set(wm_key, new_wm, ex=CHAT_LOG_TTL)
+
+            # ── Apply results ─────────────────────────────────────────────
+            importance     = analysis.get("importance", 0)
+            mood           = analysis.get("mood", "neutral")
+            memory_summary = analysis.get("memory_summary")
+
+            if mood in _mood_to_state:
+                update_emotional_state(_mood_to_state[mood])
+
+            projects = analysis.get("projects", [])
+            if projects:
+                apply_project_updates(uc, projects)
+
+            for fact in analysis.get("user_facts", []):
+                if "key" in fact and "value" in fact:
+                    await asyncio.to_thread(
+                        update_user_profile, uc, fact["key"], fact["value"] or None
+                    )
+
+            for retraction in analysis.get("retractions") or []:
+                if isinstance(retraction, str) and retraction.strip():
+                    await asyncio.to_thread(retract_autobiographical_event, uc, retraction)
+
+            for iw in analysis.get("interest_weights") or []:
+                if "term" in iw and "weight" in iw:
+                    set_interest_weight(uc, iw["term"], float(iw["weight"]))
+
+            # ── Qdrant vectorisation (importance-gated) ───────────────────
+            if importance > IMPORTANCE_THRESHOLD and memory_summary:
+                entry = {
+                    "session_id": "batch",
+                    "timestamp": time.time(),
+                    "user": acc_user[:500],
+                    "assistant": acc_asst[:500],
+                    "mood": mood,
+                    "topics": analysis.get("topics", []),
+                    "importance": importance,
+                    "memory_summary": memory_summary,
+                }
+                await asyncio.to_thread(store_memory_vector, uc, entry)
+
+            if importance > AUTOBIO_IMPORTANCE_THRESHOLD and memory_summary:
+                await asyncio.to_thread(
+                    store_autobiographical_event, uc, memory_summary, importance
+                )
+
+            logger.info(
+                "[SCHEDULER] analyse_recent_conversations: user=%s sessions=%d "
+                "new_msgs=%d mood=%s facts=%d importance=%.2f memory=%s",
+                uc, len(wm_updates), len(all_new), mood,
+                len(analysis.get("user_facts", [])), importance,
+                "→Qdrant" if importance > IMPORTANCE_THRESHOLD else "skip",
+            )
+
+        except Exception as exc:
+            logger.error(
+                "[SCHEDULER] analyse_recent_conversations failed for %s: %s", uc, exc
+            )

@@ -126,9 +126,17 @@ def set_working_memory(session_id: str, key: str, value: str, ttl: int = 86400):
     r.expire(f"working:{session_id}", ttl)
 
 
+_CONCERN_DECAY_PER_HOUR = 0.05   # concern loses 0.05/h → fully decayed in 20h
+_ENERGY_DECAY_PER_HOUR  = 0.02   # energy drifts back to 0.7 baseline at 0.02/h
+
 def get_emotional_state() -> dict:
-    """Get Jarvis's current emotional state."""
-    return redis_get_json("jarvis:emotional_state") or {
+    """Get Jarvis's current emotional state, with time-based decay applied.
+
+    concern decays toward 0.0 at 0.05/h (fully cleared in ~20h without new stress).
+    energy drifts toward 0.7 baseline at 0.02/h.
+    Decay is applied lazily on read — no scheduler needed.
+    """
+    _default = {
         "mood": "neutral",
         "energy": 0.7,
         "confidence": 0.8,
@@ -136,6 +144,49 @@ def get_emotional_state() -> dict:
         "concern": 0.0,
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }
+    state = redis_get_json("jarvis:emotional_state")
+    if not state:
+        return _default
+
+    last_updated = state.get("last_updated")
+    if last_updated:
+        try:
+            elapsed_h = (
+                datetime.now(timezone.utc) - datetime.fromisoformat(last_updated)
+            ).total_seconds() / 3600
+
+            changed = False
+
+            # concern → decay toward 0.0
+            concern = state.get("concern", 0.0)
+            if concern > 0:
+                new_concern = max(0.0, concern - elapsed_h * _CONCERN_DECAY_PER_HOUR)
+                if abs(new_concern - concern) > 0.001:
+                    state["concern"] = round(new_concern, 3)
+                    changed = True
+
+            # energy → drift toward 0.7 baseline
+            energy = state.get("energy", 0.7)
+            if abs(energy - 0.7) > 0.001:
+                direction = 1 if energy < 0.7 else -1
+                new_energy = energy + direction * elapsed_h * _ENERGY_DECAY_PER_HOUR
+                # Don't overshoot baseline
+                if direction == 1:
+                    new_energy = min(0.7, new_energy)
+                else:
+                    new_energy = max(0.7, new_energy)
+                if abs(new_energy - energy) > 0.001:
+                    state["energy"] = round(new_energy, 3)
+                    changed = True
+
+            if changed:
+                state["last_updated"] = datetime.now(timezone.utc).isoformat()
+                redis_set_json("jarvis:emotional_state", state)
+
+        except (ValueError, TypeError):
+            pass
+
+    return state
 
 
 def update_emotional_state(updates: dict):

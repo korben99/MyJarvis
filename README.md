@@ -14,21 +14,21 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
                          │ OpenAI-compatible API
 ┌────────────────────────▼────────────────────────────────┐
 │                   Jarvis API (port 8000)                 │
-│                   FastAPI / Python 3.11                  │
+│                   FastAPI / Python 3.13                  │
 │                                                          │
 │  ┌──────────────┐  ┌───────────┐  ┌──────────────────┐  │
 │  │  LLM Router  │  │  Memory   │  │  Proto-Self /    │  │
 │  │  (Tier 1)    │  │  System   │  │  Reflection Loop │  │
-│  │ Qwen2.5-3B   │  │ 5 layers  │  │  Autonomous      │  │
+│  │ Hermes-3-3B  │  │ 5 layers  │  │  Autonomous      │  │
 │  └──────────────┘  └───────────┘  └──────────────────┘  │
 │  ┌──────────────┐  ┌───────────┐  ┌──────────────────┐  │
 │  │  RAG Engine  │  │ Briefing  │  │ Google Services  │  │
 │  │  (Qdrant)    │  │ Scheduler │  │ (Gmail/Calendar) │  │
 │  └──────────────┘  └───────────┘  └──────────────────┘  │
-│  ┌──────────────────────────────────────────────────┐    │
-│  │  Trading Surveillance (yfinance + Redis)         │    │
-│  │  CSV import · hourly prices · AI alerts          │    │
-│  └──────────────────────────────────────────────────┘    │
+│  ┌──────────────┐  ┌──────────────────────────────────┐  │
+│  │ Embed Router │  │  Trading Surveillance            │  │
+│  │ (fast-path)  │  │  yfinance + Redis · AI alerts    │  │
+│  └──────────────┘  └──────────────────────────────────┘  │
 └────────┬────────────────┬────────────────────────────────┘
          │                │
 ┌────────▼──────┐  ┌──────▼──────────┐
@@ -89,15 +89,17 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
 
 | Component | Technology | Role |
 |-----------|-----------|------|
-| **Jarvis API** | FastAPI, Python 3.13 | Main orchestration — bootstrap only (261 lines) |
+| **Jarvis API** | FastAPI, Python 3.13, uvloop | Main orchestration — bootstrap only (261 lines) |
 | **Open WebUI** | Docker, port 3000 | Chat interface, connects via `/v1/chat/completions` |
 | **Qdrant** | Docker, port 6333 | Vector DB for RAG document search and episodic memory |
 | **Redis** | Docker, port 6379 | Working memory, session context, conversation cache |
 | **`deps.py`** | Python module | Shared runtime singletons: Redis, Qdrant, embed model, HTTP clients, context budgets |
 | **`llm_client.py`** | Python module | LLM HTTP client: streaming SSE, model tier selection, vision pipeline |
 | **`rag.py`** | Python module | Qdrant document retrieval (embed query → search → score filter) |
-| **`pipeline.py`** | Python module | System prompt construction, 7-source context assembly, post-exchange analysis |
-| **`routes/chat.py`** | Python module | Main chat pipeline: routing → context gather → LLM → SSE stream |
+| **`pipeline.py`** | Python module | System prompt construction, 7-source context assembly, post-exchange logging |
+| **`analyzer.py`** | Python module | Scheduled batch analysis (every 30 min): fact extraction, ESS scoring, Qdrant vectorisation |
+| **`embed_router.py`** | Python module | Fast-path intent classifier via cosine similarity — bypasses LLM router for ~80 % of requests |
+| **`routes/chat.py`** | Python module | Main chat pipeline: routing → context gather → auto-web fallback → LLM → SSE stream |
 | **`routes/proxy.py`** | Python module | OpenAI-compatible proxy `/v1/*` for Open WebUI and iOS |
 | **`prompts.py`** | Python module | Single source of truth for all LLM prompts — supports live overrides via `get_prompt()` |
 | **`web_search.py`** | Python module | All external search backends: Open-Meteo weather, DDG news, 3-stage deep text pipeline |
@@ -108,16 +110,22 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
 Jarvis routes every request through a layered model stack. Each tier has its own API endpoint so you can run some tiers locally (Qwen via mlx-lm) and others on the cloud.
 
 ```
-Tier 1 — ROUTER      Fast intent classifier, JSON only
-         Target: Qwen2.5-3B-Instruct-8bit (local MLX, ~3.3 GB, 80-120 tok/s)
-         Cloud fallback: gpt-4.1-nano
+Tier 0 — EMBED ROUTER  Zero-LLM fast path — cosine similarity against pre-embedded examples
+                        ~2-5 ms, bypasses Tier 1 for ~80 % of unambiguous requests
+                        Falls through to Tier 1 if score < 0.74 or ambiguity margin < 0.06
 
-Tier 2 — PRIMARY     All standard responses: chat, questions, summaries
-         Target: Qwen3.5-35B-A3B-MLX-5.5bit (local MLX, ~24 GB, 30-45 tok/s, MoE)
-         Cloud fallback: gpt-4o-mini
+Tier 1 — ROUTER        Full LLM intent classifier, JSON only
+                        Target: Hermes-3-Llama-3.2-3B-Q4-affine (local MLX, ~2 GB)
+                        System prompt KV-cached (~666 tok prefilled once, deepcopied per call)
+                        Cloud fallback: gpt-4.1-nano
 
-Tier 3 — REASONING   Complex queries only — use_reasoning=True
-         Cloud: Claude Sonnet / GPT-5.x (stays cloud, rare ~10% of requests)
+Tier 2 — PRIMARY       All standard responses: chat, questions, summaries
+                        Target: Qwen3-30B-A3B-MLX-6bit (local MLX, ~18 GB, MoE)
+                        System prompt KV-cached (~262 tok prefilled once, deepcopied per call)
+                        Cloud fallback: gpt-4o-mini
+
+Tier 3 — REASONING     Complex queries only — use_reasoning=True
+                        Cloud: Claude Sonnet / GPT-4.x (stays cloud, rare ~10% of requests)
 ```
 
 **Routing logic:**
@@ -138,11 +146,21 @@ Everything else (chat, questions, summaries, portfolio, translations, writing, c
 **Local MLX mode (`LLM_LOCAL=yes`):**
 When `LLM_LOCAL=yes`, Jarvis uses `mlx_lm` directly (no HTTP server) — models are loaded into unified memory at startup. Set `HF_HOME` to control where models are stored. Download models with `python scripts/download_models.py`.
 
+**System prompt KV cache (prefix caching):**
+- `_get_system_cache()` in `llm_local.py` pre-fills the fixed system prompt into a KV cache once per model, then `deepcopy()`s it for every call.
+- Applied to **all inference paths**: `stream_local` (streaming chat), `_generate_sync` (router, analyzer, self-reflection, web judge).
+- Hermes router: ~666 tokens prefilled → only the 5-token `"Message: {message}"` part is computed per call.
+- Qwen3-30B primary: ~262 tokens prefilled → saves ~0.3–0.5 s prefill per turn.
+- The system message must remain **token-identical** every turn (no dynamic content) — enforced by the `build_dynamic_prefix` / `build_context` split.
+
 **KV cache quantization (`QUANT_KV=yes`):**
 - Uses mlx_lm's built-in `QuantizedKVCache` (Metal-accelerated, no monkey-patching).
-- Applied only to the primary model via `_get_session_cache` — the router keeps a standard cache.
-- `QUANT_KV_BITS=4` (default) — 4× memory bandwidth reduction during decode (~420 MB → ~105 MB/step at 3200-token context, 64 layers). Use `8` for near-lossless quality if regressions are observed.
-- Compatible with the per-session prefix cache (`_session_kv` LRU). The quantized tensors are exact enough for multi-turn coherence.
+- Applied only to the primary model — the router keeps a standard cache.
+- `QUANT_KV_BITS=4` (default) — 4× memory bandwidth reduction during decode (~420 MB → ~105 MB/step at 3200-token context). Use `8` for near-lossless quality if regressions are observed.
+
+**Metal allocator cache limit:**
+- `mx.set_cache_limit(4 GB)` set at startup in `preload_models()`.
+- Prevents the MLX allocator from retaining unused Metal buffers indefinitely between inferences, keeping headroom available for KV caches during long conversations.
 
 **Thinking control:**
 - `THINKING_BUDGET_TOKENS` (default 1024) — limits `<think>` block length via `thinking_budget` kwarg in the chat template. Applied per-call without modifying message content (KV-cache safe).
