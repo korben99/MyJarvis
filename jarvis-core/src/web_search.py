@@ -222,7 +222,15 @@ async def search_weather(query: str) -> list[dict]:
             ]
 
         except Exception as exc:
-            retriable = _is_network_error(exc) or isinstance(exc, httpx.TimeoutException)
+            is_server_error = (
+                isinstance(exc, httpx.HTTPStatusError)
+                and exc.response.status_code >= 500
+            )
+            retriable = (
+                _is_network_error(exc)
+                or isinstance(exc, httpx.TimeoutException)
+                or is_server_error
+            )
             if retriable:
                 if attempt < _MAX_ATTEMPTS:
                     logger.warning(
