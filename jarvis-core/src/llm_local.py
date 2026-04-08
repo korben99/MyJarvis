@@ -27,13 +27,13 @@ import copy
 import logging
 import os
 import threading
-import time
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 from config import (
     LLM_LOCAL,
     PRIMARY_MODEL,
+    REASONING_MODEL,
     ROUTER_MODEL,
     THINKING_BUDGET_TOKENS,
     is_hermes,
@@ -57,6 +57,35 @@ os.environ["TRANSFORMERS_CACHE"] = os.environ["HF_HUB_CACHE"]
 
 logger = logging.getLogger("jarvis-llm-local")
 
+# ── Debug prompt/response logging ─────────────────────────────────────────
+# Activé via LLM_DEBUG_PROMPTS=yes dans .env.
+# Écrit le prompt brut et la réponse brute (avant stripping) dans logs/prompts.log.
+
+LLM_DEBUG_PROMPTS = os.getenv("LLM_DEBUG_PROMPTS", "").lower() in ("yes", "true", "1")
+_PROMPTS_LOG_PATH = "/opt/jarvis/logs/prompts.log"
+_PROMPTS_LOG_SEP = "=" * 80
+
+
+def _debug_log(model_short: str, no_think: bool, prompt: str, raw_output: str) -> None:
+    """Écrit prompt + réponse brute dans prompts.log si LLM_DEBUG_PROMPTS=yes."""
+    if not LLM_DEBUG_PROMPTS:
+        return
+    import datetime
+
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = (
+        f"\n{_PROMPTS_LOG_SEP}\n"
+        f"[{ts}] model={model_short}  no_think={no_think}\n"
+        f"--- PROMPT ---\n{prompt}\n"
+        f"--- RESPONSE (raw) ---\n{raw_output}\n"
+        f"{_PROMPTS_LOG_SEP}\n"
+    )
+    try:
+        with open(_PROMPTS_LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(entry)
+    except Exception as exc:
+        logger.warning("_debug_log: impossible d'écrire prompts.log : %s", exc)
+
 
 # ── KV cache quantifié ────────────────────────────────────────────────────
 
@@ -75,6 +104,8 @@ class _ModelProfile:
     Resolved once per call via _model_profile().
     """
 
+    temp_think: float  # temperature when enable_thinking=True
+    temp_nothink: float  # temperature when enable_thinking=False / no-think
     top_p_think: float  # top_p when enable_thinking=True
     top_p_nothink: float  # top_p when enable_thinking=False / no-think
     top_k: int  # 0 = disabled
@@ -83,6 +114,7 @@ class _ModelProfile:
     repetition_context_size: int  # how many past tokens to look at
     frequency_penalty: float  # additive penalty proportional to frequency
     use_quant_kv: bool  # whether to enable KV cache quantisation
+    stop_tokens: tuple[str, ...]  # extra stop strings beyond the tokenizer's EOS
 
 
 def _model_profile(model_path: str) -> _ModelProfile:
@@ -95,7 +127,11 @@ def _model_profile(model_path: str) -> _ModelProfile:
       causes degenerate looping — these must stay at their default settings.
     """
     if is_qwen3(model_path):
+        # Official Qwen3 recommendations: temp 0.6 (think) / 0.7 (no-think),
+        # top_p 0.95 / 0.80, top_k 20, min_p 0.
         return _ModelProfile(
+            temp_think=0.6,
+            temp_nothink=0.7,
             top_p_think=0.95,
             top_p_nothink=0.80,
             top_k=20,
@@ -104,11 +140,16 @@ def _model_profile(model_path: str) -> _ModelProfile:
             repetition_context_size=64,
             frequency_penalty=0.05,
             use_quant_kv=QUANT_KV,
+            stop_tokens=(),
         )
     if is_hermes(model_path):
         # Hermes-3 (Llama 3.2 base) — purpose-built for structured/JSON output.
         # Temperature=0 is safe (no greedy loops), no penalties needed (trained format).
+        # stop_tokens: Hermes occasionally generates continuation text after <|im_end|>
+        # (tokenizer EOS not always sufficient); explicit stop string closes the leak.
         return _ModelProfile(
+            temp_think=0.0,
+            temp_nothink=0.0,
             top_p_think=1.0,
             top_p_nothink=1.0,
             top_k=0,
@@ -117,9 +158,12 @@ def _model_profile(model_path: str) -> _ModelProfile:
             repetition_context_size=64,
             frequency_penalty=0.0,
             use_quant_kv=False,  # already Q4 affine quantised
+            stop_tokens=("<|im_end|>",),
         )
     # Generic profile — fallback for any other small model
     return _ModelProfile(
+        temp_think=0.7,
+        temp_nothink=0.7,
         top_p_think=0.90,
         top_p_nothink=0.90,
         top_k=0,
@@ -128,6 +172,7 @@ def _model_profile(model_path: str) -> _ModelProfile:
         repetition_context_size=64,
         frequency_penalty=0.10,
         use_quant_kv=False,
+        stop_tokens=(),
     )
 
 
@@ -324,7 +369,7 @@ def preload_models() -> None:
     except Exception as exc:
         logger.warning("MLX set_cache_limit failed (non-fatal): %s", exc)
 
-    model_paths = {ROUTER_MODEL, PRIMARY_MODEL}  # set → déduplique
+    model_paths = {ROUTER_MODEL, PRIMARY_MODEL, REASONING_MODEL}  # set → déduplique
     for path in model_paths:
         _load_model(path)
     logger.info("MLX : %d modèle(s) préchargé(s)", len(model_paths))
@@ -491,6 +536,12 @@ def _generate_sync(
                 if not seen_end_think and "</think>" in raw_so_far:
                     seen_end_think = True
 
+                # Manual stop-token check (mlx_lm.generate/stream_generate do not
+                # accept a `stop` kwarg — handle it in the loop instead).
+                if profile.stop_tokens and any(t in raw_so_far for t in profile.stop_tokens):
+                    early_stopped = True
+                    break
+
                 if seen_end_think and "}" in chunk.text:
                     # Only scan when a closing brace arrived — avoids O(n²) scan per token.
                     after_think = (
@@ -502,7 +553,12 @@ def _generate_sync(
                         early_stopped = True
                         break
 
+        # Truncate at stop token if hit
         raw = raw_so_far
+        if profile.stop_tokens:
+            for st in profile.stop_tokens:
+                if st in raw:
+                    raw = raw.split(st, 1)[0]
         # For thinking mode: extract the JSON portion after </think>
         if "</think>" in raw:
             json_portion = raw.split("</think>", 1)[-1]
@@ -530,6 +586,14 @@ def _generate_sync(
             **quant_kwargs,
             **_cache_kwarg,
         )
+        # Truncate at stop token (mlx_lm.generate does not accept a `stop` kwarg)
+        if profile.stop_tokens:
+            for st in profile.stop_tokens:
+                if st in result:
+                    result = result.split(st, 1)[0]
+
+    # ── Debug log brut (avant stripping) ──────────────────────────
+    _debug_log(model_short, no_think, prompt, result)
 
     # ── Stats réponse ──────────────────────────────────────────────
     resp_tokens = len(tokenizer.encode(result))
@@ -676,7 +740,7 @@ async def call_llm_local_async(
 async def stream_local(
     messages: list[dict],
     model: str,
-    temperature: float = 0.7,
+    temperature: float | None = None,  # None → utilise temp_think/nothink du profil
     max_tokens: int = 10000,
     no_think: bool = False,
     session_id: str = "",
@@ -729,10 +793,17 @@ async def stream_local(
 
         first = True
         raw_chunks: list[str] = []  # accumule la réponse brute pour stats
-        # Global 10k ceiling — thinking + output are counted together in mlx-lm.
-        # thinking_budget in the chat template reserves the thinking portion.
+        # Budget vient du pipeline : 1500 (no_think) ou 4000 (reasoning).
+        # Hard cap à 10000 pour éviter les runaway en cas de mauvais passage.
         budget = min(max_tokens, 10000)
         profile = _model_profile(model)
+        # Température : utilise la valeur du profil par défaut (think vs no-think),
+        # ou la valeur explicite si le caller en a passé une.
+        effective_temp = (
+            temperature
+            if temperature is not None
+            else (profile.temp_nothink if no_think else profile.temp_think)
+        )
         quant_kwargs = (
             {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64}
             if profile.use_quant_kv
@@ -745,7 +816,7 @@ async def stream_local(
                 prompt=prompt,
                 max_tokens=budget,
                 sampler=make_sampler(
-                    temp=temperature,
+                    temp=effective_temp,
                     top_p=profile.top_p_nothink if no_think else profile.top_p_think,
                     top_k=profile.top_k,
                     min_p=profile.min_p,
@@ -760,25 +831,38 @@ async def stream_local(
             ):
                 if chunk.text:
                     text = chunk.text
+                    stop_hit = False
+
+                    # Manual stop-token check for models that need it (e.g. Hermes).
+                    if profile.stop_tokens:
+                        acc = "".join(raw_chunks) + text
+                        for st in profile.stop_tokens:
+                            if st in acc:
+                                text = acc.split(st, 1)[0][len("".join(raw_chunks)):]
+                                stop_hit = True
+                                break
+
                     raw_chunks.append(text)
 
-                    if first:
+                    if first and text:
                         logger.debug(
                             "[TTFT] stream_local: first token generated — %.3fs since inference start",
                             _time.time() - _t_infer,
                         )
                         first = False
 
-                    # Forward all tokens to sse() which handles <think>/<think>
-                    # filtering. Do NOT break at </think> — the actual answer
-                    # is generated AFTER </think> and must be streamed.
-                    loop.call_soon_threadsafe(queue.put_nowait, text)
+                    if text:
+                        loop.call_soon_threadsafe(queue.put_nowait, text)
+
+                    if stop_hit:
+                        break
 
         except Exception as exc:
             logger.error("stream_local erreur : %s", exc)
         finally:
             # ── Stats réponse ──────────────────────────────────────
             raw_resp = "".join(raw_chunks)
+            _debug_log(model_short, no_think, prompt, raw_resp)
             resp_tokens = len(tokenizer.encode(raw_resp))
             thinking_active = "</think>" in raw_resp
             pct = resp_tokens * 100 // budget if budget else 0

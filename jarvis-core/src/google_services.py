@@ -21,23 +21,15 @@ import email.mime.multipart
 import email.mime.text
 import hashlib
 import json
+import re
 import threading
 from datetime import date as date_type
 from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 
-from google.auth.exceptions import GoogleAuthError, RefreshError, TransportError
-import httplib2
 import google_auth_httplib2
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-
-_GOOGLE_API_TIMEOUT = 15   # seconds for all Google API calls
-
+import httplib2
 import pytz
-
 from config import (
     BRIEFING_TIMEZONE,
     GOOGLE_CALENDAR_ID,
@@ -51,9 +43,16 @@ from config import (
     ROUTER_API_URL,
     ROUTER_MODEL,
 )
+from google.auth.exceptions import GoogleAuthError, RefreshError, TransportError
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from helpers import call_llm_async, extract_llm_json, get_logger, get_redis
 
 logger = get_logger("jarvis-google")
+
+_GOOGLE_API_TIMEOUT = 15  # seconds for all Google API calls
 
 # ── OAuth scopes ──
 _SCOPES = [
@@ -63,25 +62,28 @@ _SCOPES = [
 ]
 
 # ── Cache TTLs (seconds) ──
-_GMAIL_CACHE_TTL = 300      # 5 min
-_CALENDAR_CACHE_TTL = 300   # 5 min
+_GMAIL_CACHE_TTL = 300  # 5 min
+_CALENDAR_CACHE_TTL = 300  # 5 min
 
 # ── Result limits ──
 _GMAIL_MAX_RESULTS = 10
 _CALENDAR_MAX_RESULTS = 50
-_EMAIL_BODY_MAX = 400   # chars per email
+_EMAIL_BODY_MAX = 400  # chars per email
 _SUBJECT_MAX = 120
 
 # ── Per-user credential / service caches ──
 _credentials_cache: dict[str, Credentials] = {}
 _gmail_service_cache: dict[str, object] = {}
 _calendar_service_cache: dict[str, object] = {}
-_creds_lock = threading.RLock()   # reentrant: _get_calendar_service → _get_credentials both hold this lock
+_creds_lock = (
+    threading.RLock()
+)  # reentrant: _get_calendar_service → _get_credentials both hold this lock
 
 
 # ══════════════════════════════════════════════════
 #  AVAILABILITY CHECK
 # ══════════════════════════════════════════════════
+
 
 def is_google_available(user_code: str | None = None) -> bool:
     """
@@ -99,6 +101,7 @@ def is_google_available(user_code: str | None = None) -> bool:
 # ══════════════════════════════════════════════════
 #  CREDENTIALS  (thread-safe per-user refresh)
 # ══════════════════════════════════════════════════
+
 
 def _get_credentials(user_code: str) -> Credentials:
     """
@@ -127,7 +130,11 @@ def _get_credentials(user_code: str) -> Credentials:
                 creds.refresh(Request())
                 logger.info("Google access token refreshed for %s", user_code)
             except (GoogleAuthError, TransportError) as exc:
-                logger.error("Google credential refresh failed for %s: %s", user_code, type(exc).__name__)
+                logger.error(
+                    "Google credential refresh failed for %s: %s",
+                    user_code,
+                    type(exc).__name__,
+                )
                 raise RuntimeError("Google authentication failed") from exc
 
         return creds
@@ -136,6 +143,7 @@ def _get_credentials(user_code: str) -> Credentials:
 # ══════════════════════════════════════════════════
 #  SERVICE CACHE (per user)
 # ══════════════════════════════════════════════════
+
 
 def _make_authorized_http(creds) -> google_auth_httplib2.AuthorizedHttp:
     """Build an AuthorizedHttp with a per-call timeout."""
@@ -150,7 +158,8 @@ def _get_gmail_service(user_code: str):
             if user_code not in _gmail_service_cache:
                 creds = _get_credentials(user_code)
                 _gmail_service_cache[user_code] = build(
-                    "gmail", "v1",
+                    "gmail",
+                    "v1",
                     http=_make_authorized_http(creds),
                     cache_discovery=False,
                 )
@@ -163,7 +172,8 @@ def _get_calendar_service(user_code: str):
             if user_code not in _calendar_service_cache:
                 creds = _get_credentials(user_code)
                 _calendar_service_cache[user_code] = build(
-                    "calendar", "v3",
+                    "calendar",
+                    "v3",
                     http=_make_authorized_http(creds),
                     cache_discovery=False,
                 )
@@ -173,6 +183,7 @@ def _get_calendar_service(user_code: str):
 # ══════════════════════════════════════════════════
 #  REDIS CACHE
 # ══════════════════════════════════════════════════
+
 
 def _cache_get(key: str):
     try:
@@ -200,6 +211,7 @@ def _cache_key(prefix: str, *parts: str) -> str:
 #  GMAIL
 # ══════════════════════════════════════════════════
 
+
 def _extract_header(headers: list, name: str) -> str:
     for h in headers:
         if h.get("name", "").lower() == name.lower():
@@ -217,9 +229,11 @@ def _decode_email_body(payload: dict) -> str:
 
     if mime_type == "text/plain" and body_data:
         try:
-            return base64.urlsafe_b64decode(body_data + "==").decode(
-                "utf-8", errors="replace"
-            ).strip()
+            return (
+                base64.urlsafe_b64decode(body_data + "==")
+                .decode("utf-8", errors="replace")
+                .strip()
+            )
         except Exception:
             return ""
 
@@ -232,16 +246,20 @@ def _decode_email_body(payload: dict) -> str:
 
         if part_mime == "text/plain" and part_data:
             try:
-                plain += base64.urlsafe_b64decode(part_data + "==").decode(
-                    "utf-8", errors="replace"
-                ).strip()
+                plain += (
+                    base64.urlsafe_b64decode(part_data + "==")
+                    .decode("utf-8", errors="replace")
+                    .strip()
+                )
             except Exception:
                 pass
         elif part_mime == "text/html" and part_data and not html_fallback:
             try:
-                html_fallback = base64.urlsafe_b64decode(part_data + "==").decode(
-                    "utf-8", errors="replace"
-                ).strip()
+                html_fallback = (
+                    base64.urlsafe_b64decode(part_data + "==")
+                    .decode("utf-8", errors="replace")
+                    .strip()
+                )
             except Exception:
                 pass
         elif part_mime.startswith("multipart/"):
@@ -250,7 +268,9 @@ def _decode_email_body(payload: dict) -> str:
     return plain or html_fallback
 
 
-def fetch_gmail_messages(query: str, max_results: int = _GMAIL_MAX_RESULTS, user_code: str = "") -> list[dict]:
+def fetch_gmail_messages(
+    query: str, max_results: int = _GMAIL_MAX_RESULTS, user_code: str = ""
+) -> list[dict]:
     """
     Search Gmail across ALL folders and labels (including Sent, Archive, Spam).
     Returns list of {subject, from, date, snippet}.
@@ -269,7 +289,12 @@ def fetch_gmail_messages(query: str, max_results: int = _GMAIL_MAX_RESULTS, user
     try:
         service = _get_gmail_service(user_code)
 
-        # includeSpamTrash=False + no label filter = ALL folders except Trash & spam
+        # Default to INBOX unless the query already targets a specific folder/label.
+        # Without this, Gmail returns messages from ALL folders including Sent.
+        _in_keywords = ("in:", "label:", "is:", "from:", "to:")
+        if not any(kw in query.lower() for kw in _in_keywords):
+            query = f"in:inbox {query}".strip()
+
         list_resp = (
             service.users()
             .messages()
@@ -305,12 +330,14 @@ def fetch_gmail_messages(query: str, max_results: int = _GMAIL_MAX_RESULTS, user
                 body = _decode_email_body(msg.get("payload", {}))
                 snippet = (body or msg.get("snippet", ""))[:_EMAIL_BODY_MAX]
 
-                results.append({
-                    "subject": subject or "(sans objet)",
-                    "from": sender_addr or sender_raw,
-                    "date": date,
-                    "snippet": snippet,
-                })
+                results.append(
+                    {
+                        "subject": subject or "(sans objet)",
+                        "from": sender_addr or sender_raw,
+                        "date": date,
+                        "snippet": snippet,
+                    }
+                )
             except HttpError as exc:
                 logger.warning("Gmail message fetch skipped (HTTP %s)", exc.status_code)
                 continue
@@ -326,7 +353,9 @@ def fetch_gmail_messages(query: str, max_results: int = _GMAIL_MAX_RESULTS, user
         # Auth failure already logged in _get_credentials
         return []
     except RefreshError as exc:
-        logger.error("Gmail list: OAuth token refresh failed for %s: %s", user_code, exc)
+        logger.error(
+            "Gmail list: OAuth token refresh failed for %s: %s", user_code, exc
+        )
         with _creds_lock:
             _credentials_cache.pop(user_code, None)
             _gmail_service_cache.pop(user_code, None)
@@ -340,7 +369,13 @@ def fetch_gmail_messages(query: str, max_results: int = _GMAIL_MAX_RESULTS, user
 #  CALENDAR
 # ══════════════════════════════════════════════════
 
-def fetch_calendar_events(days: int = 7, date: date_type | None = None, tz_name: str | None = None, user_code: str = "") -> list[dict]:
+
+def fetch_calendar_events(
+    days: int = 7,
+    date: date_type | None = None,
+    tz_name: str | None = None,
+    user_code: str = "",
+) -> list[dict]:
     """
     Fetch calendar events across all calendars.
 
@@ -355,7 +390,9 @@ def fetch_calendar_events(days: int = 7, date: date_type | None = None, tz_name:
     effective_tz = tz_name or BRIEFING_TIMEZONE
 
     if date is not None:
-        cache_key = _cache_key("calendar_today", user_code, date.strftime("%Y-%m-%d"), effective_tz)
+        cache_key = _cache_key(
+            "calendar_today", user_code, date.strftime("%Y-%m-%d"), effective_tz
+        )
     else:
         days = max(1, min(days, 90))
         cache_key = _cache_key("calendar", user_code, str(days))
@@ -382,7 +419,9 @@ def fetch_calendar_events(days: int = 7, date: date_type | None = None, tz_name:
 
         # Fetch all calendars the account has access to
         cal_list = service.calendarList().list().execute()
-        calendar_ids = [c["id"] for c in cal_list.get("items", [])] or [GOOGLE_CALENDAR_ID]
+        calendar_ids = [c["id"] for c in cal_list.get("items", [])] or [
+            GOOGLE_CALENDAR_ID
+        ]
 
         seen_ids: set = set()
         results = []
@@ -407,19 +446,26 @@ def fetch_calendar_events(days: int = 7, date: date_type | None = None, tz_name:
                     seen_ids.add(event_id)
                 start = event.get("start", {})
                 end = event.get("end", {})
-                results.append({
-                    "summary": event.get("summary", "(sans titre)"),
-                    "start": start.get("dateTime", start.get("date", "")),
-                    "end": end.get("dateTime", end.get("date", "")),
-                    "location": event.get("location", ""),
-                    "description": (event.get("description") or "")[:200],
-                    "all_day": "dateTime" not in start,
-                })
+                results.append(
+                    {
+                        "summary": event.get("summary", "(sans titre)"),
+                        "start": start.get("dateTime", start.get("date", "")),
+                        "end": end.get("dateTime", end.get("date", "")),
+                        "location": event.get("location", ""),
+                        "description": (event.get("description") or "")[:200],
+                        "all_day": "dateTime" not in start,
+                    }
+                )
 
         results.sort(key=lambda e: e["start"])
         _cache_set(cache_key, results, _CALENDAR_CACHE_TTL)
         label = date.isoformat() if date is not None else f"next {days}d"
-        logger.info("Calendar: %d events (%s, across %d calendars)", len(results), label, len(calendar_ids))
+        logger.info(
+            "Calendar: %d events (%s, across %d calendars)",
+            len(results),
+            label,
+            len(calendar_ids),
+        )
         return results
 
     except HttpError as exc:
@@ -442,7 +488,10 @@ def fetch_calendar_events(days: int = 7, date: date_type | None = None, tz_name:
 #  GMAIL SEND
 # ══════════════════════════════════════════════════
 
-def send_gmail_message(to: str, subject: str, html_body: str, text_body: str = "", user_code: str = "") -> bool:
+
+def send_gmail_message(
+    to: str, subject: str, html_body: str, text_body: str = "", user_code: str = ""
+) -> bool:
     """
     Send an email via the authenticated Gmail account of user_code.
     Returns True on success, False on any error.
@@ -475,7 +524,9 @@ def send_gmail_message(to: str, subject: str, html_body: str, text_body: str = "
         return False
     except RefreshError as exc:
         # Token revoked or expired — evict cache so next call rebuilds credentials
-        logger.error("Gmail send: OAuth token refresh failed for %s: %s", user_code, exc)
+        logger.error(
+            "Gmail send: OAuth token refresh failed for %s: %s", user_code, exc
+        )
         with _creds_lock:
             _credentials_cache.pop(user_code, None)
             _gmail_service_cache.pop(user_code, None)
@@ -491,33 +542,35 @@ def send_gmail_message(to: str, subject: str, html_body: str, text_body: str = "
 
 _CALENDAR_WRITE_KEYWORDS = (
     # crée
-    "crée un rendez-vous", 
+    "crée un rendez-vous",
     # ajoute
-    "ajoutes un rendez-vous", 
-    "ajoutes un rendez vous", 
-    "ajoutes un rdv", 
-    "ajoutes dans mon agenda", 
-    "ajoutes a mon agenda", 
-    "ajoutes à mon agenda", 
+    "ajoutes un rendez-vous",
+    "ajoutes un rendez vous",
+    "ajoutes un rdv",
+    "ajoutes dans mon agenda",
+    "ajoutes a mon agenda",
+    "ajoutes à mon agenda",
     "ajoutes une réunion",
-
-    "ajoute un rendez-vous", 
-    "ajoute un rendez vous", 
-    "ajoute un rdv", 
-    "ajoute dans mon agenda", 
-    "ajoute a mon agenda", 
-    "ajoute à mon agenda", 
+    "ajoute un rendez-vous",
+    "ajoute un rendez vous",
+    "ajoute un rdv",
+    "ajoute dans mon agenda",
+    "ajoute a mon agenda",
+    "ajoute à mon agenda",
     "ajoute une réunion",
     # planifie
     "planifie une réunion",
     # mets
-    "mets dans mon agenda", 
-    "mets un rdv", "mets un rendez-vous",
+    "mets dans mon agenda",
+    "mets un rdv",
+    "mets un rendez-vous",
     # prends rdv
     "prendre rendez-vous",
     "dans mon agenda",
     # nouveau
-    "nouveau rendez-vous", "nouvel événement", "nouvelle réunion",
+    "nouveau rendez-vous",
+    "nouvel événement",
+    "nouvelle réunion",
 )
 
 
@@ -526,35 +579,98 @@ def is_calendar_write(message: str) -> bool:
     return any(kw in msg for kw in _CALENDAR_WRITE_KEYWORDS)
 
 
+# Regex that matches leading command phrases so they can be stripped from the title.
+_CMD_PREFIX_RE = re.compile(
+    r"^(ajoute|crée|crée|planifie|mets|programme|rappelle(?:-moi)?)"
+    r"(\s+(un|une|le|la|les))?"
+    r"(\s+(rendez-vous|rdv|réunion|reunion|event|événement|evenement|rappel|rendez vous))?",
+    re.IGNORECASE,
+)
+# Words that are temporal context, not event subjects.
+_TEMPORAL_WORDS = {
+    "demain",
+    "aujourd'hui",
+    "lundi",
+    "mardi",
+    "mercredi",
+    "jeudi",
+    "vendredi",
+    "samedi",
+    "dimanche",
+    "prochain",
+    "prochaine",
+    "matin",
+    "soir",
+    "midi",
+    "après-midi",
+}
+
+
+def _sanitize_event_title(title: str) -> str:
+    """Strip LLM command-phrase artefacts from an extracted event title.
+
+    Returns '' if no meaningful subject remains after stripping.
+    """
+    t = _CMD_PREFIX_RE.sub("", title).strip(" ,-:;")
+    # If only temporal / generic words remain → no real subject
+    words = [w.lower() for w in t.split() if w]
+    if not words or all(w in _TEMPORAL_WORDS for w in words):
+        return ""
+    return t
+
+
 async def extract_calendar_event_llm(message: str) -> dict | None:
     """
     Extract event details from a user message using the router model.
-    Returns a dict {title, date, start_time, end_time, location, description} or None.
+    Returns a dict {title, start_date, end_date, start_time, end_time, location, description}.
+    title may be '' when date/time were found but no event subject — caller must ask user.
+    Returns None on hard failure (no date/time extractable or API error).
     """
     from datetime import date as _date
+
     from prompts import get_prompt
+
     today = _date.today().strftime("%Y-%m-%d")
-    _model   = ROUTER_MODEL   or PRIMARY_MODEL
-    _api_url = ROUTER_API_URL or PRIMARY_API_URL
-    _api_key = ROUTER_API_KEY or PRIMARY_API_KEY
+    _model = PRIMARY_MODEL
+    _api_url = PRIMARY_API_URL
+    _api_key = PRIMARY_API_KEY
     try:
         raw = await call_llm_async(
-            [{"role": "user", "content": get_prompt("CALENDAR_WRITE_EXTRACT").format(
-                message=message, today=today, timezone=BRIEFING_TIMEZONE,
-            )}],
-            model=_model, api_url=_api_url, api_key=_api_key,
-            temperature=0, max_tokens=150, json_response=True, no_think=True, timeout=8.0,
+            [
+                {
+                    "role": "user",
+                    "content": get_prompt("CALENDAR_WRITE_EXTRACT").format(
+                        message=message,
+                        today=today,
+                        timezone=BRIEFING_TIMEZONE,
+                    ),
+                }
+            ],
+            model=_model,
+            api_url=_api_url,
+            api_key=_api_key,
+            temperature=0,
+            max_tokens=150,
+            json_response=True,
+            no_think=True,
+            timeout=8.0,
         )
         parsed = extract_llm_json(raw)
         if not parsed.get("end_date"):
             parsed["end_date"] = parsed.get("start_date", "")
-        if "error" in parsed or not parsed.get("title") or not parsed.get("start_date") or not parsed.get("start_time"):
-            logger.warning("Calendar extraction incomplete: %s", parsed)
+        if (
+            "error" in parsed
+            or not parsed.get("start_date")
+            or not parsed.get("start_time")
+        ):
+            logger.warning("Calendar extraction incomplete (no date/time): %s", parsed)
             return None
         if not parsed.get("end_time"):
             parts = parsed["start_time"].replace("h", ":").split(":")
             h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
             parsed["end_time"] = f"{(h + 1) % 24:02d}:{m:02d}"
+        # Sanitize title — strip command artefacts added by the LLM.
+        parsed["title"] = _sanitize_event_title(parsed.get("title", ""))
         return parsed
     except Exception as exc:
         logger.warning("Calendar event extraction failed: %s", type(exc).__name__)
@@ -564,6 +680,7 @@ async def extract_calendar_event_llm(message: str) -> dict | None:
 # ══════════════════════════════════════════════════
 #  CALENDAR WRITE — API CALLS
 # ══════════════════════════════════════════════════
+
 
 def _invalidate_calendar_cache() -> None:
     """Delete all Google calendar Redis cache entries so next read is fresh."""
@@ -599,7 +716,9 @@ def create_calendar_event(
     Returns the event ID on success, None on failure.
     """
     if not is_google_available(user_code or None):
-        logger.warning("Calendar write skipped — Google not configured for %s", user_code)
+        logger.warning(
+            "Calendar write skipped — Google not configured for %s", user_code
+        )
         return None
 
     cal_id = calendar_id or GOOGLE_CALENDAR_ID
@@ -608,7 +727,7 @@ def create_calendar_event(
         body: dict = {
             "summary": title,
             "start": {"dateTime": start_dt},
-            "end":   {"dateTime": end_dt},
+            "end": {"dateTime": end_dt},
         }
         if description:
             body["description"] = description

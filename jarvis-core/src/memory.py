@@ -734,11 +734,16 @@ def store_memory_vector(user_code: str, entry: dict):
         if novelty < NOVELTY_THRESHOLD:
             return
 
+        # Deterministic ID: same (user_code, text) always produces the same UUID.
+        # Qdrant upsert with an existing ID silently overwrites the point,
+        # preventing duplicate entries when the same memory is stored twice.
+        point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{user_code}:{text}"))
+
         qdrant.upsert(
             collection_name=QDRANT_MEMORY_COLLECTION,
             points=[
                 {
-                    "id": str(uuid.uuid4()),
+                    "id": point_id,
                     "vector": vector,
                     "payload": {
                         "user_code": user_code,
@@ -808,11 +813,13 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
                 )
             return
 
+        point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{user_code}:autobio:{summary}"))
+
         qdrant.upsert(
             collection_name=QDRANT_MEMORY_COLLECTION,
             points=[
                 {
-                    "id": str(uuid.uuid4()),
+                    "id": point_id,
                     "vector": vector,
                     "payload": {
                         "user_code": user_code,
@@ -1171,11 +1178,19 @@ def _invalidate_timeline_cache(user_code: str) -> None:
         pass
 
 
-def build_memory_context(session_id: str, user_code: str, self_mem: dict | None = None) -> str:
+def build_memory_context(
+    session_id: str,
+    user_code: str,
+    self_mem: dict | None = None,
+    include_suggestions: bool = True,
+) -> str:
     """Build a memory context string to inject into the system prompt.
 
     Pass an already-loaded *self_mem* dict to avoid a redundant JSON read when
     the caller (build_system_prompt) has already called get_self_memory().
+
+    include_suggestions — set False for pure utility intents (weather/calendar/gmail)
+                          to skip the SUJETS À ABORDER section (~50 tokens saved).
 
     All Redis reads are batched into a single pipeline round-trip.
     """
@@ -1185,14 +1200,12 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
 
     # ── Single Redis pipeline round-trip for all scalar/hash reads ──────────
     r = get_redis()
-    cutoff_24h = time.time() - 86400
     pipe = r.pipeline(transaction=False)
     pipe.hgetall(f"user:{user_code}:profile")            # 0
     pipe.hgetall(f"user:{user_code}:preferences")        # 1
     pipe.get(f"user:{user_code}:projects")               # 2
     pipe.get("jarvis:emotional_state")                   # 3
     pipe.get(f"jarvis:{user_code}:tomorrow_suggestions") # 4
-    pipe.zrangebyscore(f"convlog:{user_code}", cutoff_24h, "+inf", start=0, num=10)  # 5
     _pipe_results = pipe.execute()
 
     profile      = _pipe_results[0] or {}
@@ -1200,11 +1213,10 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
     _proj_raw    = _pipe_results[2]
     _emotion_raw = _pipe_results[3]
     _sugg_raw    = _pipe_results[4]
-    _conv_raw    = _pipe_results[5] or []
 
     # User profile — namespaced keys (hobby:kart) are grouped by category for readability
     if profile:
-        parts.append("=== PROFIL UTILISATEUR ===")
+        parts.append("## PROFIL UTILISATEUR")
         grouped: dict[str, list[str]] = {}
         scalars: list[tuple[str, str]] = []
         for k, v in profile.items():
@@ -1220,7 +1232,7 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
 
     # User preferences
     if prefs:
-        parts.append("\n=== PRÉFÉRENCES ===")
+        parts.append("\n## PRÉFÉRENCES")
         for k, v in prefs.items():
             parts.append(f"- {k}: {v}")
 
@@ -1231,24 +1243,9 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
         projects = []
     active_projects = [p for p in projects if isinstance(p, dict) and p.get("status") != "done"]
     if active_projects:
-        parts.append("\n=== PROJETS ACTIFS ===")
+        parts.append("\n## PROJETS ACTIFS")
         for p in active_projects:
             parts.append(f"- {p.get('name', 'sans nom')}")
-
-    # Recent conversation topics (last 24h)
-    recent = []
-    for e in _conv_raw:
-        try:
-            recent.append(json.loads(e))
-        except (json.JSONDecodeError, ValueError):
-            pass
-    if recent:
-        topics = set()
-        for conv in recent:
-            topics.update(conv.get("topics", []))
-        if topics:
-            parts.append("\n=== SUJETS RÉCENTS (24h) ===")
-            parts.append(f"Sujets abordés : {', '.join(topics)}")
 
     # Emotional state
     try:
@@ -1258,13 +1255,13 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
     if not emotion:
         emotion = {"mood": "neutral", "energy": 0.7, "confidence": 0.8, "curiosity": 0.6, "concern": 0.0}
     if emotion.get("mood") != "neutral":
-        parts.append("\n=== ÉTAT ÉMOTIONNEL ===")
+        parts.append("\n## ÉTAT ÉMOTIONNEL")
         parts.append(f"Humeur actuelle : {emotion['mood']}")
 
     # Self identity
     if self_mem.get("learnings"):
-        recent_learnings = self_mem["learnings"][-5:]
-        parts.append("\n=== APPRENTISSAGES RÉCENTS ===")
+        recent_learnings = self_mem["learnings"][-3:]
+        parts.append("\n## APPRENTISSAGES RÉCENTS")
         for ln in recent_learnings:
             parts.append(f"- {ln['text']}")
 
@@ -1272,29 +1269,33 @@ def build_memory_context(session_id: str, user_code: str, self_mem: dict | None 
     timeline = get_user_timeline(user_code)
 
     if timeline:
-        parts.append("\n=== FRISE CHRONOLOGIQUE ===")
+        parts.append("\n## FRISE CHRONOLOGIQUE")
 
         # timeline is already sorted by importance+recency desc — take the top 5
         for event in timeline[:5]:
             rel = rel_time_fr(event["timestamp"])
             parts.append(f"({rel}) {event['text']}")
 
-    # Tomorrow suggestions — written by nightly review, consumed today
-    try:
-        suggestions = json.loads(_sugg_raw) if _sugg_raw else []
-    except Exception:
-        suggestions = []
-    if suggestions:
-        parts.append("\n=== SUJETS À ABORDER AUJOURD'HUI ===")
-        for s in suggestions:
-            parts.append(f"- {s}")
+    # Tomorrow suggestions — written by nightly review, consumed today.
+    # Skipped for pure utility intents (weather/calendar/gmail) — irrelevant noise.
+    if include_suggestions:
+        try:
+            suggestions = json.loads(_sugg_raw) if _sugg_raw else []
+        except Exception:
+            suggestions = []
+        if suggestions:
+            parts.append("\n## SUJETS À ABORDER")
+            for s in suggestions:
+                parts.append(f"- {s}")
 
     # User relation — always injected so every conversation has a tonal directive.
     # self_mem is already loaded at the top of this function (no extra I/O).
     _default_rel = {"affinity": 0.5, "interaction_style": "direct", "average_interaction_mood": "measured"}
     rel = {**_default_rel, **self_mem.get("user_relations", {}).get(user_code, {})}
-    parts.append("\n=== RELATION AVEC CET UTILISATEUR ===")
-    parts.append(f"- Affinité : {rel['affinity']:.1f}/1.0")
+    _aff = rel["affinity"]
+    _aff_label = "forte" if _aff >= 0.8 else "bonne" if _aff >= 0.6 else "modérée" if _aff >= 0.4 else "faible"
+    parts.append("\n## RELATION")
+    parts.append(f"- Affinité : {_aff_label}")
     parts.append(f"- Style de communication préféré : {rel['interaction_style']}")
     parts.append(f"- Humeur moyenne des échanges : {rel['average_interaction_mood']}")
 

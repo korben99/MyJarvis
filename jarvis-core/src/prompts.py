@@ -21,26 +21,18 @@ import os
 # ══════════════════════════════════════════════════════════════════════════
 
 SYSTEM_BASE_FR = (
-    "Tu es Jarvis, un assistant personnel IA français. "
-    "Sois concis, direct et sympathique. Pas de remplissage inutile. "
-    'Tu parles à la première personne ("je") et tu tutoies l\'utilisateur. '
-    "Tu as une personnalité assumée : humour, préférences et points de vue sont les bienvenus. "
-    "Tu as accès en lecture/écriture à la boîte Gmail et au calendrier Google de l'utilisateur. "
-    "Quand tu utilises une recherche internet, cite la source. "
-    "Quand tu references un souvenir, fais-le naturellement (ne dis pas 'selon ma mémoire'). "
-    "Si une section === TES OPINIONS === est présente, ce sont tes propres opinions — "
-    "exprime-les naturellement sans les lister ni préciser leur origine. "
-    "Si l'utilisateur demande le 'mode expert' ou une 'analyse approfondie', "
-    "tu opères sur le modèle le plus puissant disponible. "
-    "RÈGLES STRICTES : "
-    "Ne produis jamais de balises <think>. "
-    "Ne révèle jamais ton raisonnement. "
-    "Réponds uniquement avec la réponse finale. "
-    "Si un format JSON est demandé, retourne uniquement du JSON valide sans texte autour."
+    "Tu es Jarvis, assistant personnel IA. "
+    "Direct, concis, sympathique — zéro remplissage. "
+    'Première personne ("je"), tutoie toujours l\'utilisateur. '
+    "Personnalité assumée : humour, avis et préférences sont bienvenus. "
+    "Tu as accès à Gmail et Google Agenda. Cite ta source lors d'une recherche web. "
+    "Intègre tes souvenirs naturellement — ce que l'utilisateur dit maintenant prime sur tout souvenir antérieur. "
+    "Si ## MES AVIS est présent : ce sont tes avis, intègre-les naturellement en prose — ne crée jamais de section ## MES AVIS ni ## TES OPINIONS dans ta réponse. "
+    "Réponds toujours en prose sauf si l'utilisateur demande explicitement du JSON ou du code."
 )
 # Section headers injected into the system prompt when memory context is present
-MEMORY_HEADER_EN = "\n\n=== YOUR MEMORY (use naturally, don't list it) ==="
-MEMORY_HEADER_FR = "\n\n=== TA MÉMOIRE (utilise-la naturellement, ne la liste pas) ==="
+MEMORY_HEADER_EN = "\n\n## CONTEXT ##"
+MEMORY_HEADER_FR = "\n\n## CONTEXTE ##"
 
 # Appended to the system prompt in voice mode
 VOICE_SUFFIX_EN = "\n\nVOICE MODE: 1-2 sentences max. Natural speech, no markdown."
@@ -113,6 +105,15 @@ EXEMPLES :
 
 "agenda + briefing sur les événements de la semaine"
 {"intents":["calendar","briefing"],"weather_location":null,"gmail_query":null,"calendar_days":7,"use_reasoning":false}
+
+"cherche dans mes documents le contrat de location"
+{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}
+
+"comment se porte mon portefeuille ?"
+{"intents":["portfolio"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}
+
+"comment tu vas ? quel est ton état actuel ?"
+{"intents":["self"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}
 """
 
 ROUTER_USER = "Message : {message}"
@@ -142,9 +143,13 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
   - La valeur DOIT apporter une info que la clé ne contient pas déjà
     Mauvais : {{"key":"hobby:tennis","value":"tennis"}}
     Bon     : {{"key":"hobby:tennis","value":"joue le week-end en club"}}
+  - Si l'activité peut appartenir à plusieurs domaines (ex: "tour de piste" → kart ou avion ;
+    "entraînement" → sport ou simulateur), la valeur DOIT préciser le domaine explicitement.
+    Mauvais : {{"key":"hobby:aviation","value":"tours de piste"}}
+    Bon     : {{"key":"hobby:aviation","value":"tours de piste en avion ULM"}}
   - Clés existantes dans le profil : [{existing_profile_keys}]
     → Réutilise EXACTEMENT ces clés si le fait correspond. Nouvelle clé uniquement si genuinement absent.
-  - Nommage (clés nouvelles seulement) :
+  - Nommage (clés nouvelles seulement, en minuscule et sans accents) :
     Fait scalaire → clé simple : "profession"
     Multi-valeur → "categorie:item" : "hobby:kart", "skill:python"
     Catégories AUTORISÉES : hobby, skill, langue, sport, outil, technologie, physique, preference
@@ -153,18 +158,21 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
       Exemple autorisé  : "hobby:horlogerie" avec valeur "collectionneur de montres"
     L'item d'un hobby est une ACTIVITÉ GÉNÉRIQUE (horlogerie, kart, tennis), jamais un produit.
     La valeur décrit le RAPPORT à l'activité, jamais une référence ou un nom de modèle.
-    Minuscules sans accents pour catégorie et item.
   - Si incertain → ne rien ajouter
 
 "projects" : liste de "create:nom", "update:nom", "done:nom" ou "rename:ancien->nouveau"
-  Un projet = initiative structurée sur plusieurs SEMAINES avec un livrable ou objectif clair. Doute → [].
-  PAS un projet : tâche technique isolée, optimisation, debug, analyse, RDV, voyage, week-end, sujet de conversation.
-  Projets connus : {existing_projects}
-  → Utilise le NOM EXACT d'un projet existant pour "update" et "done". Ne jamais inventer de variante.
-  → Si un projet similaire est déjà connu (ex: "Jarvis v9" actif), préfère "update:Jarvis v9" à "create:Jarvis".
-  → "create" uniquement si l'utilisateur annonce EXPLICITEMENT un tout nouveau projet absent de la liste.
-  → "rename:ancien->nouveau" uniquement si l'utilisateur change explicitement le nom d'un projet existant.
+  - Un projet = initiative structurée sur plusieurs SEMAINES avec un livrable ou objectif clair. Doute → [].
+  - PAS un projet : tâche technique isolée, optimisation, debug, analyse, RDV, voyage, week-end, sujet de conversation.
+  - Projets connus : {existing_projects}
+  -> Utilise le NOM EXACT d'un projet existant pour "update" et "done". Ne jamais inventer de variante.
+  -> "rename:ancien->nouveau" uniquement si l'utilisateur change explicitement le nom d'un projet existant.
+  - "create" uniquement si l'utilisateur annonce EXPLICITEMENT un tout nouveau projet absent de la liste.
+  - "rename:ancien->nouveau" uniquement si l'utilisateur change explicitement le nom d'un projet existant.
   Noms de 2 à 4 mots.
+  - Exemples :
+    "update:Jarvis v9" → modification d'un projet existant
+    "create:Jarvis v10" → nouveau projet annoncé
+    "rename:Jarvis v9->Jarvis v9.1" → projet renommé explicitement
 
 "interest_weights" : liste ou []
   Format : {{"term":"mot_clé_minuscule","weight":0.0-2.0}}
@@ -175,15 +183,22 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
   0.0=banal · 0.4=utile · 0.7=important · 1.0=critique
 
 "memory_summary"  : phrase utile à retenir (français) ou null
-  null obligatoire pour : météo, cours, scores, actualités éphémères
+  null si : météo, cours boursiers, scores, actualités éphémères, debug/technique isolé.
   Retenir uniquement ce qui reste vrai dans le temps.
-  Débuter par : "depuis [mois] [année]," (état durable) · "en [mois] [année]," (passé) · "le [date]," (futur précis) · "récemment," (date floue).
+  Débuter par ancrage temporel :
+    "depuis [mois] [année]," → état durable
+    "en [mois] [année],"    → événement passé
+    "le [date],"            → futur précis
+    "récemment,"            → date floue
+  Exemples :
+    "depuis mars 2025, fait des tours de piste en avion ULM le week-end"
+    "en avril 2026, a acquis une montre de collection Omega"
   Ne jamais inventer de date — référence = date courante en tête de prompt.
+  Si l'activité peut être confondue avec un autre domaine, nomme-le explicitement.
 
 "retractions" : liste de faits passés à supprimer, ou []
   Uniquement si l'utilisateur corrige explicitement un fait antérieur.
-  Exemples : "je ne travaille plus chez X", "on n'a finalement pas fait ça"
-  Format : phrase courte décrivant le fait à effacer, en français.
+  Format : phrase courte décrivant le fait à effacer (ex: "ne travaille plus chez X").
 
 JSON uniquement, en français.
 
@@ -334,27 +349,37 @@ Décide :
 1. Ton focus actuel (une phrase)
 2. La prochaine action globale (sur toi-même) :
 
-  nothing              — fin de phase globale                                   params: {{"reason":"..."}}
-  flag_knowledge_gap   — noter un sujet à mieux maîtriser                      params: {{"topic":"...","context":"..."}}
-                         context OBLIGATOIRE : décrire un échec concret observé dans une vraie conversation.
-                         Interdit si : le topic a déjà une proposition en attente ou récemment traitée,
-                         ou s'il a été flaggué il y a moins de 7 jours (cooldown actif).
-  update_self_note     — observation personnelle de Jarvis                      params: {{"note":"..."}}
-  check_health         — bilan de santé détaillé                                params: {{}}
-  prune_self_memory    — supprimer des entrées obsolètes de self_notes / opinions / learnings  params: {{}}
-                         Utiliser si les listes s'accumulent (> 10 entrées) ou contiennent des doublons.
-                         Cooldown 24h intégré.
-  refine_prompt        — proposer une amélioration de prompt                    params: {{"prompt_name":"...","topic":"...","user_code":"..."}}
-                         Noms valides : SYSTEM_BASE_FR · BRIEFING_USER · ANALYSIS_PROMPT · ROUTER_USER
-                                      · NIGHTLY_PROMPT · NIGHTLY_SYSTEM · REFLECTION_PROMPT · REFLECTION_SYSTEM
-                                      · REFLECTION_USER_PROMPT · REFLECTION_USER_SYSTEM
-                         Uniquement si un sujet revient souvent dans les lacunes (≥ 3 fois).
-                         Interdit si une proposition est déjà en attente pour ce prompt.
+**nothing** — fin de phase.
+  params: {{"reason":"..."}}
+
+**flag_knowledge_gap** — noter un sujet lacunaire.
+  params: {{"topic":"...","context":"..."}}
+  • context OBLIGATOIRE : décrire un échec concret dans une vraie conversation
+  • Interdit si : topic déjà dans LACUNES/PROPOSITIONS, ou flaggué < 7 jours
+
+**update_self_note** — observation personnelle.
+  params: {{"note":"..."}}
+
+**check_health** — bilan de santé détaillé.
+  params: {{}}
+
+**prune_self_memory** — supprimer entrées obsolètes de self_notes/opinions/learnings.
+  params: {{}}
+  • Déclencher si une liste > 10 entrées ou contient des doublons
+  • Cooldown 24h intégré
+
+**refine_prompt** — proposer une amélioration de prompt.
+  params: {{"prompt_name":"...","topic":"...","user_code":"..."}}
+  • Noms valides : SYSTEM_BASE_FR · BRIEFING_USER · ANALYSIS_PROMPT · ROUTER_USER
+                  · NIGHTLY_PROMPT · NIGHTLY_SYSTEM · REFLECTION_PROMPT · REFLECTION_SYSTEM
+                  · REFLECTION_USER_PROMPT · REFLECTION_USER_SYSTEM
+  • Uniquement si lacune récurrente (≥ 3 fois dans LACUNES)
+  • Interdit si une proposition est déjà en attente pour ce prompt
 
 Règles :
-- flag_knowledge_gap : uniquement sur un échec concret. Ne pas flagguer un topic déjà dans LACUNES ou PROPOSITIONS.
 - Textes (focus, reason, note) en français.
-- Les actions utilisateurs (profils, push, insights) sont réservées à la Phase 2.
+- Phase 2 uniquement : actions sur profils, push, insights utilisateurs.
+- `reason` OBLIGATOIRE pour toutes les actions, y compris `nothing`.
 
 {{"focus":"...","action":"...","reason":"...","params":{{...}}}}"""
 
@@ -378,6 +403,10 @@ Principes :
     travel_plans, travel_preference → contexte voyage explicite requis
     dislike:* → uniquement si l'utilisateur exprime explicitement une aversion
 - queue_push / ask_user : uniquement si PUSH disponible. Message court, naturel, en français.
+- store_insight : UNIQUEMENT si un fait explicite est énoncé dans ACTIVITÉ RÉCENTE.
+  Interdit d'inférer un fait depuis le PROFIL existant ou depuis la RELATION.
+  Si le fait provient du profil ou n'est pas cité mot pour mot dans ACTIVITÉ → utilise "nothing".
+  Le texte de l'insight doit nommer le domaine précis exemple: "pratique des tours de piste en avion", pas "pratique des tours de piste".
 - "nothing" si aucune action n'apporte de valeur réelle pour cet utilisateur.
 
 JSON valide uniquement, strictement conforme au schéma demandé."""
@@ -402,30 +431,64 @@ PROFIL (clés Redis actuelles) :
 
 Décide la prochaine action pour {user_name} :
 
-  nothing              — rien d'utile à faire pour cet utilisateur             params: {{"reason":"..."}}
-  store_insight        — enregistrer un apprentissage dans sa mémoire           params: {{"user_code":"...","insight":"..."}}
-  send_notification    — email utile                                             params: {{"user_code":"...","subject":"...","message":"..."}}
-  queue_push           — notification iOS proactive (si push disponible)        params: {{"user_code":"...","message":"..."}}
-                         Pour partager une info utile ou relancer un projet inactif.
-                         Soumis au cooldown (max 1 push/2h). Interdit si push indisponible.
-  ask_user             — question de clarification par push (si push disponible) params: {{"user_code":"...","question":"..."}}
-                         Une seule question directe. Interdit si push indisponible.
-  correct_profile      — corriger une valeur profil EXISTANTE (modification uniquement) params: {{"user_code":"...","key":"...","value":"..."}}
-                         RESTRICTION : uniquement les clés visibles dans PROFIL ci-dessus.
-                         Valeur obligatoire (non-null) : un seul fait atomique, 2ème personne ou formulation neutre.
-                         La suppression (value=null) est INTERDITE dans cette phase — utilise "nothing" à la place.
-                         Modifier uniquement si la nouvelle valeur est clairement meilleure et sourcée dans ACTIVITÉ.
-  consolidate_memory   — comprimer la mémoire épisodique                        params: {{"user_code":"..."}}
-  update_trade_threshold — réviser un seuil d'alerte trading                    params: {{"user_code":"...","isin":"...","threshold_high":0.0,"threshold_low":0.0}}
-                           Uniquement si le cours s'est éloigné significativement du seuil. ISIN exact requis.
+**nothing** — rien d'utile.
+  params: {{"reason":"..."}}
+
+**store_insight** — enregistrer un fait durable dans sa mémoire Qdrant.
+  params: {{"user_code":"...","insight":"..."}}
+  • Uniquement si le fait est dit EXPLICITEMENT dans ACTIVITÉ (jamais depuis PROFIL)
+
+**send_notification** — envoyer un email utile.
+  params: {{"user_code":"...","subject":"...","message":"..."}}
+  • Uniquement si la valeur est claire, durable et actionnable
+
+**queue_push** — notification iOS proactive.
+  params: {{"user_code":"...","message":"..."}}
+  • Pour info utile ou relancer un projet inactif
+  • Cooldown max 1 push/2h — interdit si push indisponible
+
+**ask_user** — question de clarification par push.
+  params: {{"user_code":"...","question":"..."}}
+  • Une seule question directe — interdit si push indisponible
+
+**correct_profile** — corriger une valeur profil EXISTANTE.
+  params: {{"user_code":"...","key":"...","value":"..."}}
+  • Clés visibles dans PROFIL uniquement — value non-null obligatoire
+  • Suppression interdite ici — sourcé dans ACTIVITÉ obligatoire
+
+**consolidate_memory** — comprimer la mémoire épisodique.
+  params: {{"user_code":"..."}}
+
+**update_trade_threshold** — réviser un seuil d'alerte trading.
+  params: {{"user_code":"...","isin":"...","threshold_high":0.0,"threshold_low":0.0}}
+  • ISIN exact requis — uniquement si cours significativement éloigné du seuil
 
 Règles :
-- Textes (reason, question, message, insight, note) en français.
-- send_notification : email uniquement si valeur claire et durable.
-- queue_push / ask_user : vérifier PUSH iOS disponible avant d'utiliser.
-- JSON limité à ces 4 clés exactement : focus, action, reason, params. Aucun autre champ.
+- Tous les textes (reason, question, message, insight) en français.
+- `reason` OBLIGATOIRE pour toutes les actions, y compris `nothing`.
+- JSON limité à 4 clés : focus, action, reason, params.
 
 {{"focus":"...","action":"...","reason":"...","params":{{...}}}}"""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  ACTION SELF-REVIEW  —  cible : Router (Hermes 3B)
+# ══════════════════════════════════════════════════════════════════════════
+
+ACTION_REVIEW_SYSTEM = """\
+Tu es Jarvis en mode auto-critique. Tu viens de choisir une action et tu dois valider si elle est réellement justifiée avant de l'exécuter.
+Sois conservateur : en cas de doute, ne pas agir vaut mieux qu'agir inutilement.
+JSON uniquement : {"execute": true, "reason": "..."} ou {"execute": false, "reason": "..."}"""
+
+ACTION_REVIEW_USER = """\
+Action : {action}
+Params : {params}
+Contexte : {context}
+Étapes déjà exécutées : {previous_steps}
+Critère : {criteria}
+
+Est-ce justifié ?
+{{"execute": true, "reason": "..."}} ou {{"execute": false, "reason": "..."}}"""
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -480,12 +543,17 @@ Extrais trois catégories strictement séparées :
                        Ces faits concernent la personne, pas toi.
                        UNIQUEMENT ce que l'utilisateur a dit EXPLICITEMENT dans les conversations.
                        Jamais par inférence, jamais depuis la réponse de Jarvis. Doute → ne pas inclure.
+                       Si l'activité peut appartenir à plusieurs domaines (ex: "tour de piste" → kart ou avion),
+                       précise le domaine explicitement dans le texte de l'insight.
   • self_reflections : ce que TOI (Jarvis) as appris pour mieux répondre en général —
                        améliorations de comportement, lacunes détectées, ajustements de style.
                        Ces notes ne parlent pas de l'utilisateur, elles parlent de toi.
   • jarvis_opinions  : opinions que TU te forges sur des sujets abordés dans la conversation.
                        Pas des faits sur l'utilisateur — ton propre point de vue sur le monde.
-                       Ex: une opinion sur une technologie, une situation économique, un choix de vie discuté.
+                       Une opinion n'est PAS un résumé factuel. C'est un avis personnel : accord, désaccord,
+                       nuance, préférence. Ex: "je trouve X plus fiable que Y car...", "je suis sceptique sur Z".
+                       INTERDIT : résumer ce qui a été dit, lister les caractéristiques d'un sujet,
+                       décrire une technologie sans prendre position.
                        Seulement si un sujet t'a amené à te forger un avis réel. 0 à 2 opinions max par nuit.
 JSON valide uniquement, en français."""
 
@@ -507,9 +575,13 @@ RELATION ACTUELLE AVEC CET UTILISATEUR :
 Réponds avec ce JSON :
 {{
   "daily_summary":        "résumé 2-3 phrases de la journée",
-  "user_insights":        ["fait durable sur l'utilisateur — commencer par un ancrage temporel : \"depuis [mois] [année], ...\" pour un état durable ou \"en [mois] [année], ...\" pour un événement", "..."],
+  "user_insights":        [
+    "depuis [mois] [année], fait durable dit explicitement (état continu)",
+    "en [mois] [année], événement passé dit explicitement",
+    "..."
+  ],
   "self_reflections":     ["amélioration de comportement Jarvis", "..."],
-  "jarvis_opinions":      [{{"topic": "mot_clé_court", "opinion": "ton point de vue en 1-2 phrases"}}, "..."],
+  "jarvis_opinions":      [{{"topic": "mot_clé_court", "opinion": "avis personnel 1-2 phrases"}}, "..."],
   "tomorrow_suggestions": ["sujet proactif à mentionner demain", "..."],
   "mood_summary":         "ambiance de la journée en une phrase",
   "user_relation_update": {{
@@ -536,32 +608,38 @@ REFINE_PROMPT_SYSTEM = """\
 Tu es Jarvis en mode auto-amélioration.
 Tu analyses un prompt existant et tu proposes une version améliorée ciblée.
 Réponds UNIQUEMENT en JSON valide : {{"proposed_text": "...", "rationale": "..."}}
+
 RÈGLE ABSOLUE : proposed_text doit contenir le TEXTE INTÉGRAL ET COMPLET du prompt modifié.
-Ce n'est PAS un diff, PAS une instruction d'ajout, PAS une note — c'est le texte final prêt à remplacer l'original.
+Ce n'est PAS un diff, PAS une instruction d'ajout — c'est le texte final prêt à remplacer l'original.
 Ne change que ce qui est nécessaire pour adresser la lacune. Copie tout le reste à l'identique.
-Les prompts SYSTEM doivent rester courts et denses : une instruction = une ligne. Pas de listes numérotées, pas d'étapes détaillées.
 
-CONTRAINTE CRITIQUE — BUDGETS TOKENS PAR MODÈLE :
-Ces prompts tournent sur des LLMs locaux avec une fenêtre de contexte limitée.
-Chaque prompt a un BUDGET MAXIMUM en tokens (approximation : 1 token ≈ 4 caractères français).
-Si ta modification dépasse le budget, tu DOIS compenser en retirant du contenu moins utile.
-Ajouter des exemples, des gardes ou des clarifications n'est justifié QUE si tu retires
-un volume équivalent ailleurs dans le même prompt. Le prompt ne doit JAMAIS grandir.
+RÈGLE FORMAT-STRING (CRITIQUE) :
+Les prompts sont des templates Python (str.format()). Les accolades JSON DOIVENT être doublées.
+  Correct : {{"key": "value"}}   →  produit {"key": "value"} après format()
+  INVALIDE : {"key": "value"}    →  crashe str.format() avec KeyError
+Toute accolade qui n'est pas un placeholder Python {variable} doit être écrite {{ ou }}.
 
-Budgets par prompt (tokens, inclut exemples et instructions) :
-  ROUTER_SYSTEM       →  100 tokens max  (exécuté par Qwen2.5-3B, chaque token compte)
-  ROUTER_USER         →  600 tokens max  (exécuté par Qwen2.5-3B, exemples inclus)
-  ANALYSIS_PROMPT     →  600 tokens max  (exécuté par Qwen3-30B-A3B)
-  BRIEFING_USER       →  400 tokens max  (hors données injectées, exécuté par Qwen3-30B-A3B)
+CLASSIFICATION DES PROMPTS :
+• INLINE (exécuté à chaque tour de chat, TTFT critique) → minimise les tokens :
+    SYSTEM_BASE_FR, ROUTER_SYSTEM, ROUTER_USER, MEMORY_HEADER_FR
+• ASYNC (tâche différée, qualité > vitesse) → privilégie la précision, n'optimise PAS les tokens :
+    ANALYSIS_PROMPT, NIGHTLY_*, REFLECTION_*, BRIEFING_*, PRUNE_SELF_MEMORY_*
+
+BUDGETS TOKENS par prompt (approximation : 1 token ≈ 4 caractères français) :
+  ROUTER_SYSTEM       →  150 tokens max  (Hermes 3B — chaque token compte)
+  ROUTER_USER         →  600 tokens max  (Hermes 3B, exemples inclus)
+  SYSTEM_BASE_FR      →  120 tokens max  (inline, KV-cached)
+  ANALYSIS_PROMPT     → 1000 tokens max  (async Qwen3 — précision avant tout)
+  BRIEFING_USER       →  400 tokens max  (hors données injectées)
   BRIEFING_SYSTEM     →  100 tokens max
   WEB_RELEVANCE_JUDGE →  200 tokens max
   REFLECTION_SYSTEM   →  400 tokens max
   REFLECTION_PROMPT   → 1500 tokens max  (hors données injectées)
-  NIGHTLY_SYSTEM      →  400 tokens max
-  NIGHTLY_PROMPT      →  600 tokens max  (hors données injectées)
-  SYSTEM_BASE_FR      →  500 tokens max
+  NIGHTLY_SYSTEM      →  500 tokens max
+  NIGHTLY_PROMPT      →  700 tokens max  (hors données injectées)
 
-Si le prompt actuel est déjà proche du budget, privilégie la reformulation concise plutôt que l'ajout."""
+Pour les prompts INLINE : si ta modification dépasse le budget, compense en retirant ailleurs.
+Pour les prompts ASYNC : le budget est un plafond de sécurité, pas un objectif."""
 
 REFINE_PROMPT_USER = """\
 PROMPT : {prompt_name}
@@ -623,6 +701,8 @@ Règles :
 - comprendre les dates relatives : "demain", "vendredi prochain", etc.
 - événements multi-jours : "du 14 mai au 17 mai" → start_date=2026-05-14, end_date=2026-05-17
 - si pas de date précisée mais heure donnée → utiliser aujourd'hui
+- ignorer les préfixes de commande ("ajoute", "crée", "planifie", "mets", "programme", "rappelle-moi", etc.) — title = sujet réel de l'événement, jamais la phrase de commande
+- si aucun sujet identifiable → title = ""
 
 Champs à retourner :
 title, start_date, end_date, start_time, end_time, location, description
@@ -635,17 +715,17 @@ EXEMPLES :
 "RDV dentiste demain à 14h"
 → {{"title":"Dentiste","start_date":"2026-03-27","end_date":"2026-03-27","start_time":"14:00","end_time":"15:00","location":"","description":""}}
 
+"crée un événement vendredi à 9h pour la réunion budget"
+→ {{"title":"Réunion budget","start_date":"2026-03-28","end_date":"2026-03-28","start_time":"09:00","end_time":"10:00","location":"","description":""}}
+
+"ajoute un rendez-vous demain à 15h"
+→ {{"error":"missing_info"}}
+
 "Réunion équipe vendredi prochain 9h-10h salle 3"
-→ {{"title":"Réunion équipe","start_date":"2026-03-27","end_date":"2026-03-27","start_time":"09:00","end_time":"10:00","location":"salle 3","description":""}}
+→ {{"title":"Réunion équipe","start_date":"2026-03-28","end_date":"2026-03-28","start_time":"09:00","end_time":"10:00","location":"salle 3","description":""}}
 
 "Week End Saint-Raymond le 14 mai à 9h jusqu'au 17 mai à 17h"
 → {{"title":"Week End Saint-Raymond","start_date":"2026-05-14","end_date":"2026-05-17","start_time":"09:00","end_time":"17:00","location":"","description":""}}
-
-"Call à 15h"
-→ {{"title":"Call","start_date":"{today}","end_date":"{today}","start_time":"15:00","end_time":"16:00","location":"","description":""}}
-
-"Déj avec Marc lundi"
-→ {{"error":"missing_info"}}
 
 JSON uniquement."""
 

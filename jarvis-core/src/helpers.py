@@ -66,6 +66,7 @@ from config import (
     LLM_LOCAL,
     PRIMARY_MODEL,
     QDRANT_URL,
+    REASONING_MODEL,
     REDIS_URL,
     ROUTER_MODEL,
     USERS,
@@ -76,7 +77,7 @@ from qdrant_client import QdrantClient
 if LLM_LOCAL:
     from llm_local import call_llm_local, call_llm_local_async
 
-_LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL} if LLM_LOCAL else set()
+_LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL, REASONING_MODEL} if LLM_LOCAL else set()
 
 # ══════════════════════════════════════════════════
 #  LOGGING SETUP

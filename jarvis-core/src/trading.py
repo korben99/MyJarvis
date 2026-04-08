@@ -398,7 +398,7 @@ def get_portfolio_summary_text(user_code: str) -> str:
     if not positions:
         return ""
 
-    lines = ["=== PORTEFEUILLE BOURSIER ==="]
+    lines = ["## PORTEFEUILLE BOURSIER"]
     total_cost = total_value = 0.0
 
     for p in positions:
@@ -420,12 +420,11 @@ def get_portfolio_summary_text(user_code: str) -> str:
             if p.get("notes"):
                 extras += f" [{p['notes']}]"
 
-            updated = (p.get("price_updated_at") or "")[:16]
             lines.append(
-                f"• {p['name']} — qté:{p['quantity']:.0f} | achat:{p['buying_price']}€ | "
-                f"cours:{p['last_price']}€ ({intra:+.2f}% J) | PV:{pnl_pct:+.2f}%"
+                f"• {p['name']} : {p['quantity']:.0f} titres, "
+                f"achat {p['buying_price']}€, cours {p['last_price']}€ ({intra:+.2f}% J), "
+                f"PV {pnl_pct:+.2f}%"
                 f"{extras}"
-                + (f" [màj {updated}]" if updated else "")
             )
         except Exception:
             lines.append(f"• {p.get('name', p.get('isin', '?'))}")

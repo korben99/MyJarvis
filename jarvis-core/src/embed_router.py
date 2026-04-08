@@ -16,8 +16,9 @@ Modifier les seuils   : EMBED_ROUTE_THRESHOLD, AMBIGUITY_MARGIN.
 Ajouter un intent     : ajouter la clé dans INTENT_EXAMPLES + mettre à jour
                         _make_result() et RouterResult dans llm_router.py.
 
-Ne retourne jamais use_reasoning=True — les requêtes "mode expert" tombent
-toujours sur le routeur LLM qui a le contexte pour juger.
+Retourne use_reasoning=True pour les ordres explicites de l'utilisateur
+("mode expert", "analyse approfondie", etc.) — ces phrases sont non-ambiguës
+et n'ont pas besoin du routeur LLM pour être classifiées.
 """
 
 import os
@@ -51,8 +52,8 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
     "memory": [
         "salut, ça va ?",
         "comment vas-tu Jarvis ?",
-        "merci beaucoup",
-        "c'est quoi ton avis là-dessus ?",
+        "en forme ?merci beaucoup",
+        "mercic'est quoi ton avis là-dessus ?",
         "aide-moi à rédiger un email",
         "traduis ce texte en anglais",
         "explique-moi comment ça marche",
@@ -64,6 +65,24 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "résume ce texte",
         "donne-moi des idées pour",
         "c'est quoi la différence entre",
+        # conversation personnelle / anecdotique
+        "j'aime beaucoup le",
+        "tu savais que j'aime",
+        "j'ai passé une bonne journée",
+        "aujourd'hui j'ai fait",
+        "hier soir j'étais",
+        "je t'avais dit que je",
+        "souviens-toi",
+        "rappelle-toi",
+        "j'en ai fait",
+        "je ne peux plus",
+        "j'ai toujours aimé",
+        "j'adore",
+        "je déteste",
+        "tu te souviens de",
+        "je préfère le",
+        "on peut parler de",
+        "dis-moi ce que tu penses de",
     ],
     # ── Météo ────────────────────────────────────────────────────────────────
     "weather": [
@@ -132,6 +151,23 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "RAG",
         "rag",
     ],
+    # ── Raisonnement / mode expert ───────────────────────────────────────────
+    "reasoning": [
+        "mode expert",
+        "analyse approfondie",
+        "réfléchis en profondeur",
+        "réfléchis bien",
+        "raisonne sur",
+        "raisonne étape par étape",
+        "pense par étape",
+        "debug complet",
+        "analyse",
+        "analyse complète",
+        "réflexion approfondie",
+        "explique-moi",
+        "donne-moi ton analyse complète",
+        "prends le temps de réfléchir",
+    ],
     # ── Portefeuille boursier ────────────────────────────────────────────────
     "portfolio": [
         "mon portefeuille",
@@ -144,8 +180,8 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
     ],
     # ── État interne de Jarvis ───────────────────────────────────────────────
     "self": [
-        "comment tu vas Jarvis ?",
-        "Salut Jarvis, en forme ?quel est ton état actuel ?",
+        "comment vas-tu Jarvis ?",
+        "Salut Jarvis, en forme ?",
         "qu'est-ce que tu fais en ce moment ?",
         "ton état interne",
         "tes dernières réflexions",
@@ -154,12 +190,25 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "donne-moi ton introspection",
         "tu as réfléchi à quoi récemment ?",
         "tes auto-réflexions",
+        "montre les propositions de prompt",
+        "liste les propositions en attente",
+        "quelles propositions de prompt as-tu ?",
+        "accepte la proposition",
+        "rejette la proposition",
+        "montre la proposition",
+        "approuve la proposition de prompt",
     ],
 }
 
 # ── Cache des embeddings d'exemples (initialisé une seule fois) ───────────────
 _cache_lock = threading.Lock()
 _examples_vectors: dict[str, np.ndarray] | None = None  # intent → (N, D) matrix
+
+
+def preload_embed_router() -> None:
+    """Précharge les vecteurs d'exemples au démarrage (évite la latence sur la première requête)."""
+    if EMBED_ROUTER_ENABLED:
+        _load_example_vectors()
 
 
 def _load_example_vectors() -> dict[str, np.ndarray]:
@@ -267,7 +316,8 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
         logger.debug("Embed router: URL détectée → memory")
         return _build_result("memory", msg, google_available)
 
-    # Requête "mode expert" / "analyse approfondie" → LLM router (use_reasoning possible)
+    # Requête "mode expert" / "analyse approfondie" → reasoning direct (no_think=False)
+    # Retourne use_reasoning=True sans passer par le LLM router.
     reasoning_triggers = [
         "mode expert",
         "analyse approfondie",
@@ -277,8 +327,38 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
         "analyse complète",
     ]
     if any(t in msg_lower for t in reasoning_triggers):
-        logger.debug("Embed router: reasoning trigger → LLM router")
-        return None
+        logger.debug("Embed router: reasoning trigger → reasoning direct")
+        return _build_result("reasoning", msg, google_available)
+
+    # Commandes de gestion des propositions de prompt → self direct
+    import re as _re
+
+    _proposal_explicit = (
+        any(kw in msg_lower for kw in ("proposition", "proposals", "propositions"))
+        and any(
+            kw in msg_lower
+            for kw in (
+                "accepte",
+                "rejette",
+                "approuve",
+                "refuse",
+                "montre",
+                "liste",
+                "show",
+                "list",
+                "détail",
+            )
+        )
+    ) or bool(
+        _re.search(r"\b[a-f0-9]{6,8}\b", msg_lower)
+        and any(
+            kw in msg_lower
+            for kw in ("accepte", "rejette", "approuve", "refuse", "montre")
+        )
+    )
+    if _proposal_explicit:
+        logger.debug("Embed router: proposal trigger → self direct")
+        return _build_result("self", msg, google_available)
 
     # Messages très courts (≤ 12 chars) → memory (salutations, acquiescences)
     if len(msg) <= 12:
@@ -354,7 +434,8 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
 def _build_result(intent: str, message: str, google_available: bool) -> RouterResult:
     """Construit un RouterResult pour l'intent classifié."""
     return RouterResult(
-        use_memory=intent == "memory",
+        use_memory=intent
+        in ("memory", "reasoning"),  # reasoning inclut le contexte mémoire
         use_rag=intent == "rag",
         use_web=intent == "web",
         use_weather=intent == "weather",
@@ -363,7 +444,7 @@ def _build_result(intent: str, message: str, google_available: bool) -> RouterRe
         use_briefing=intent == "briefing",
         use_self=intent == "self",
         use_portfolio=intent == "portfolio",
-        use_reasoning=False,  # jamais — laissé au routeur LLM
+        use_reasoning=intent == "reasoning",
         gmail_query=_extract_gmail_query(message) if intent == "gmail" else "",
         calendar_days=_extract_calendar_days(message) if intent == "calendar" else 7,
         weather_location=_extract_weather_location(message)

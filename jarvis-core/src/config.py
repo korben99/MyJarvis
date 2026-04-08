@@ -44,7 +44,7 @@ REASONING_TIMEOUT = float(os.getenv("REASONING_TIMEOUT") or "180")
 # ── Vision model (image description — first stage of two-stage pipeline) ──
 # Set to a vision-capable model (Qwen2.5-VL, gpt-4o, gpt-5.1, …).
 # Leave empty to disable image support (images will be ignored with a warning).
-VISION_MODEL = os.getenv("VISION_MODEL") or PRIMARY_MODEL
+VISION_MODEL = os.getenv("VISION_MODEL", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
 VISION_API_URL = os.getenv("VISION_API_URL") or OPENAI_API_URL
 VISION_API_KEY = os.getenv("VISION_API_KEY") or OPENAI_API_KEY
 VISION_TIMEOUT = float(os.getenv("VISION_TIMEOUT") or "60")
@@ -52,15 +52,6 @@ VISION_TIMEOUT = float(os.getenv("VISION_TIMEOUT") or "60")
 # ── Local LLM mode — Apple Silicon / mlx-lm (M4 Pro) ─────────────────────
 # Activé par LLM_LOCAL=yes dans .env.
 # Écrase Router et Primary pour pointer vers les serveurs mlx-lm locaux.
-# Le Reasoning reste sur cloud (cas rares, latence acceptable).
-#
-# Sur le Mac (deux terminaux) :
-#   python -m mlx_lm.server --model $LOCAL_ROUTER_MODEL  --port $LOCAL_ROUTER_PORT
-#   python -m mlx_lm.server --model $LOCAL_PRIMARY_MODEL --port $LOCAL_PRIMARY_PORT
-#
-# Mémoire unifiée conseillée :
-#   24 GB → Qwen2.5-7B  (router) + Qwen2.5-14B  (primary)
-#   48 GB → Qwen2.5-7B  (router) + Qwen2.5-32B  (primary)
 LLM_LOCAL = os.getenv("LLM_LOCAL", "").lower() in ("yes", "true", "1")
 
 if LLM_LOCAL:
@@ -68,15 +59,15 @@ if LLM_LOCAL:
     # helpers.py route vers call_llm_local / call_llm_local_async directement.
     # Les API_URL / API_KEY ne sont pas utilisées pour l'inférence en mode local.
     ROUTER_MODEL = os.getenv(
-        "ROUTER_MODEL_LOCAL", "mlx-community/Qwen2.5-3B-Instruct-8bit"
+        "ROUTER_MODEL_LOCAL", "/opt/jarvis/models/hub/Hermes-3-Llama-3.2-3B-q4-affine"
     )
-    PRIMARY_MODEL = os.getenv(
-        "PRIMARY_MODEL_LOCAL", "inferencerlabs/Qwen3.5-35B-A3B-MLX-5.5bit"
-    )
-    # Vision reste sur API cloud même en mode local (appels rares, libère ~5 GB RAM).
-    # VISION_MODEL / VISION_API_URL / VISION_API_KEY sont lus plus haut depuis .env,
-    # donc déjà configurés pour OpenAI — ne pas écraser ici.
+    PRIMARY_MODEL = os.getenv("PRIMARY_MODEL_LOCAL", "Qwen/Qwen3-30B-A3B-MLX-6bit")
 
+    REASONING_MODEL = os.getenv("REASONING_MODEL_LOCAL") or PRIMARY_MODEL
+
+    # VISION_MODEL = os.getenv("VISION_MODEL_LOCAL", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
+
+    # donc déjà configurés pour OpenAI — ne pas écraser ici.
     logger.info(
         "Mode LLM local activé (import direct MLX) — router: %s  primary: %s  vision: %s (cloud)",
         ROUTER_MODEL,
@@ -84,9 +75,8 @@ if LLM_LOCAL:
         VISION_MODEL,
     )
 
+
 # ── Model compatibility helpers ───────────────────────────────────────────
-
-
 def is_qwen(model: str) -> bool:
     """True for Qwen models served locally via mlx-lm or Ollama."""
     return "qwen" in (model or "").lower()

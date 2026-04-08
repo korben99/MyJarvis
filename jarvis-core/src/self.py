@@ -58,7 +58,8 @@ from config import (
     REASONING_API_URL,
     REASONING_MODEL,
     REASONING_TIMEOUT,
-    REFINE_PROMPT_THRESHOLD,
+    THINKING_BUDGET_TOKENS,
+
     USER_ADMINS,
     USER_CODES,
     USER_EMAILS,
@@ -341,7 +342,7 @@ def _get_knowledge_gaps(n: int = 5) -> list[str]:
         # Use actual Redis count (default 0 like _action_refine_prompt, not 1)
         # so the LLM sees the real progress toward REFINE_PROMPT_THRESHOLD.
         count = int(counts.get(slug, 0))
-        label = f"{topic} (×{count}/{REFINE_PROMPT_THRESHOLD})"
+        label = f"{topic} (flaggé ×{count})"
         results.append(label)
     return results
 
@@ -398,11 +399,20 @@ def gather_user_context(user_code: str) -> dict:
     local_time = fmt_now_fr(tz_name)
     has_push = bool(r.exists(f"{_DEVICE_TOKEN_PREFIX}:{user_code}"))
 
+    cooldown_key = f"{_PUSH_COOLDOWN_PREFIX}:{user_code}"
+    cooldown_ttl = r.ttl(cooldown_key)  # -2 = key absent, -1 = no TTL, >0 = seconds remaining
+    if cooldown_ttl > 0:
+        h, m = divmod(cooldown_ttl // 60, 60)
+        push_cooldown_str = f"actif encore {h}h{m:02d}" if h else f"actif encore {m} min"
+    else:
+        push_cooldown_str = "expiré (push disponible)"
+
     return {
         "user_code": user_code,
         "user_name": user_name,
         "profile": profile,
         "has_push": has_push,
+        "push_cooldown_str": push_cooldown_str,
         "local_time": local_time,
         "user_activity": user_activity,
         "user_relation": user_relation,
@@ -471,7 +481,7 @@ def _fmt_user_profiles() -> str:
         profile = {k: v for k, v in get_user_profile(code).items() if v}
         if not profile:
             continue
-        lines = [f"=== PROFIL user_code={code} ({name}) ==="]
+        lines = [f"## PROFIL {name} ({code})"]
         for k, v in list(profile.items())[:20]:  # cap at 20 keys for token budget
             lines.append(f"  {k} = {str(v)[:80]}")
         blocks.append("\n".join(lines))
@@ -542,7 +552,10 @@ async def _call_global_reflection_llm(
         activity=_fmt_activity(context["user_activity"]),
         gaps=", ".join(context["knowledge_gaps"]) or "none flagged",
         pending_proposals=context["pending_proposals"],
-        last_reflection=json.dumps(context["last_reflection"], ensure_ascii=False)
+        last_reflection=json.dumps(
+            {k: v for k, v in context["last_reflection"].items() if k != "steps"},
+            ensure_ascii=False,
+        )
         if context["last_reflection"]
         else "none yet",
         behavioral_patterns=behavioral_patterns,
@@ -561,9 +574,9 @@ async def _call_global_reflection_llm(
                 {"role": "system", "content": get_prompt("REFLECTION_SYSTEM")},
                 {"role": "user", "content": prompt},
             ],
-            model=PRIMARY_MODEL,
-            api_url=PRIMARY_API_URL,
-            api_key=PRIMARY_API_KEY,
+            model=REASONING_MODEL,
+            api_url=REASONING_API_URL,
+            api_key=REASONING_API_KEY,
             temperature=0.2,
             max_tokens=500,  # action JSON ~150 tok; early-stop kicks in before ceiling
             json_response=True,
@@ -627,11 +640,11 @@ async def _call_user_reflection_llm(
         try:
             content = await call_llm_async(
                 messages,
-                model=PRIMARY_MODEL,
-                api_url=PRIMARY_API_URL,
-                api_key=PRIMARY_API_KEY,
+                model=REASONING_MODEL,
+                api_url=REASONING_API_URL,
+                api_key=REASONING_API_KEY,
                 temperature=0.2,
-                max_tokens=2500,  # 1024 thinking + ~1500 action JSON (was 1500 → truncation)
+                max_tokens=THINKING_BUDGET_TOKENS + 1500,  # think block + action JSON
                 json_response=True,
                 no_think=False,  # thinking improves profile decision quality
                 timeout=90.0,
@@ -806,10 +819,7 @@ def _action_queue_push(params: dict) -> str:
     if not r.exists(f"{_DEVICE_TOKEN_PREFIX}:{user_code}"):
         return f"queue_push: no device registered for {user_code}"
 
-    # Cooldown guard: max 1 proactive push per 2h per user
     cooldown_key = f"{_PUSH_COOLDOWN_PREFIX}:{user_code}"
-    if r.exists(cooldown_key):
-        return f"queue_push: cooldown active for {user_code}"
 
     pending_key = f"{_PUSH_PENDING_PREFIX}:{user_code}"
     r.rpush(
@@ -1049,11 +1059,11 @@ async def _nightly_review_user(
                 {"role": "system", "content": get_prompt("NIGHTLY_SYSTEM")},
                 {"role": "user", "content": prompt},
             ],
-            model=PRIMARY_MODEL,
-            api_url=PRIMARY_API_URL,
-            api_key=PRIMARY_API_KEY,
+            model=REASONING_MODEL,
+            api_url=REASONING_API_URL,
+            api_key=REASONING_API_KEY,
             temperature=0.3,
-            max_tokens=4000,  # 1024 thinking + ~3000 JSON output (facts, profile updates)
+            max_tokens=THINKING_BUDGET_TOKENS + 3000,  # think block + JSON output (facts, profile updates)
             json_response=True,
             no_think=False,  # reasoning task — thinking improves nightly analysis quality
             timeout=90.0,
@@ -1421,6 +1431,9 @@ def reject_proposal(proposal_id: str) -> str:
 
 def _notify_proposal(user_code: str, proposal: dict) -> None:
     """Send an email notification with the proposal diff."""
+    import difflib
+    import html as _html
+
     to = USER_EMAILS.get(user_code, "")
     if not to or not is_google_available():
         return
@@ -1428,28 +1441,63 @@ def _notify_proposal(user_code: str, proposal: dict) -> None:
     pid = proposal["id"]
     name = proposal["prompt_name"]
     rationale = proposal["rationale"]
-    current_short = proposal["current_text"][:400] + (
-        "…" if len(proposal["current_text"]) > 400 else ""
+    current_text = proposal["current_text"]
+    proposed_text = proposal["proposed_text"]
+
+    # ── Unified diff (plain text) ──────────────────────────────────────────
+    diff_lines = list(
+        difflib.unified_diff(
+            current_text.splitlines(),
+            proposed_text.splitlines(),
+            fromfile="actuel",
+            tofile="proposé",
+            lineterm="",
+            n=5,
+        )
     )
-    proposed_short = proposal["proposed_text"][:400] + (
-        "…" if len(proposal["proposed_text"]) > 400 else ""
+    diff_plain = "\n".join(diff_lines) if diff_lines else "(aucune différence détectée)"
+
+    # ── Unified diff (HTML colorisé) ───────────────────────────────────────
+    def _colorize_diff_html(lines: list[str]) -> str:
+        parts = []
+        for line in lines:
+            escaped = _html.escape(line)
+            if line.startswith("+++") or line.startswith("---"):
+                parts.append(f"<span style='color:#555;font-weight:bold'>{escaped}</span>")
+            elif line.startswith("+"):
+                parts.append(f"<span style='background:#d4edda;color:#155724'>{escaped}</span>")
+            elif line.startswith("-"):
+                parts.append(f"<span style='background:#f8d7da;color:#721c24'>{escaped}</span>")
+            elif line.startswith("@@"):
+                parts.append(f"<span style='color:#0d6efd;font-weight:bold'>{escaped}</span>")
+            else:
+                parts.append(escaped)
+        return "\n".join(parts)
+
+    diff_html = (
+        _colorize_diff_html(diff_lines)
+        if diff_lines
+        else "<em>(aucune différence détectée)</em>"
     )
 
     text = (
         f"Jarvis a identifié une opportunité d'amélioration du prompt « {name} ».\n\n"
         f"Raison : {rationale}\n\n"
-        f"TEXTE ACTUEL :\n{current_short}\n\n"
-        f"TEXTE PROPOSÉ :\n{proposed_short}\n\n"
+        f"── DIFFÉRENCES ──\n{diff_plain}\n\n"
+        f"── TEXTE ACTUEL (complet) ──\n{current_text}\n\n"
+        f"── TEXTE PROPOSÉ (complet) ──\n{proposed_text}\n\n"
         f"Pour approuver : dis à Jarvis « accepte la proposition {pid} »\n"
         f"Pour rejeter  : dis à Jarvis « rejette la proposition {pid} »"
     )
     html = (
         f"<p>Jarvis a identifié une opportunité d'amélioration du prompt <strong>{name}</strong>.</p>"
-        f"<p><strong>Raison :</strong> {rationale}</p>"
+        f"<p><strong>Raison :</strong> {_html.escape(rationale)}</p>"
+        f"<h3>Différences</h3>"
+        f"<pre style='background:#f8f9fa;padding:10px;font-size:12px;white-space:pre-wrap;border:1px solid #dee2e6;border-radius:4px'>{diff_html}</pre>"
         f"<h3>Texte actuel</h3>"
-        f"<pre style='background:#f5f5f5;padding:10px;font-size:12px;white-space:pre-wrap'>{current_short}</pre>"
+        f"<pre style='background:#f5f5f5;padding:10px;font-size:12px;white-space:pre-wrap'>{_html.escape(current_text)}</pre>"
         f"<h3>Texte proposé</h3>"
-        f"<pre style='background:#e8f5e9;padding:10px;font-size:12px;white-space:pre-wrap'>{proposed_short}</pre>"
+        f"<pre style='background:#e8f5e9;padding:10px;font-size:12px;white-space:pre-wrap'>{_html.escape(proposed_text)}</pre>"
         f"<p>Pour approuver : dis à Jarvis <strong>« accepte la proposition {pid} »</strong><br>"
         f"Pour rejeter : dis à Jarvis <strong>« rejette la proposition {pid} »</strong></p>"
         f"<p><em>— Jarvis</em></p>"
@@ -1487,56 +1535,10 @@ def _action_refine_prompt(params: dict) -> str:
     if not current_text:
         return f"refine_prompt: unknown prompt {prompt_name!r}"
 
-    # Hard threshold check — LLM instructions are advisory; enforce here too
-    slug = re.sub(r"\s+", "_", topic.lower())[:40]
-    r = get_redis()
-    count = int(r.hget(_GAP_COUNTS_KEY, slug) or 0)
-    if count < REFINE_PROMPT_THRESHOLD:
-        # Cooldown: suppress this topic for 6 h so the LLM doesn't re-propose
-        # it every cycle until the gap count actually reaches the threshold.
-        cooldown_key = f"jarvis:self:refine_cooldown:{slug}"
-        r.set(cooldown_key, "1", ex=6 * 3600)
-        return (
-            f"refine_prompt: topic '{topic}' flagged {count}× "
-            f"(threshold={REFINE_PROMPT_THRESHOLD}) — too early"
-        )
-
-    # Guard: no duplicate pending proposal for the same prompt
+    # Guard: no duplicate pending proposal for the same prompt (data integrity, not a cooldown)
     existing = [p for p in list_pending_proposals() if p["prompt_name"] == prompt_name]
     if existing:
         return f"refine_prompt: proposal already pending for {prompt_name} (id={existing[0]['id']})"
-
-    # Guard: cooldown after rejection — don't re-propose same prompt within 7 days
-    all_proposals = _load_proposals()
-    now_ts = datetime.now(timezone.utc).timestamp()
-    recent_cutoff_reject = now_ts - 7 * 86400
-    recently_rejected = [
-        p
-        for p in all_proposals
-        if p["prompt_name"] == prompt_name
-        and p.get("status") == "rejected"
-        and datetime.fromisoformat(
-            p.get("rejected_at", "2000-01-01T00:00:00+00:00")
-        ).timestamp()
-        > recent_cutoff_reject
-    ]
-    if recently_rejected:
-        return f"refine_prompt: {prompt_name} was rejected recently — cooldown active (7 days)"
-
-    # Guard: cooldown after approval — don't re-propose same prompt within 30 days
-    recent_cutoff_approve = now_ts - 30 * 86400
-    recently_approved = [
-        p
-        for p in all_proposals
-        if p["prompt_name"] == prompt_name
-        and p.get("status") == "approved"
-        and datetime.fromisoformat(
-            p.get("approved_at", "2000-01-01T00:00:00+00:00")
-        ).timestamp()
-        > recent_cutoff_approve
-    ]
-    if recently_approved:
-        return f"refine_prompt: {prompt_name} was approved recently — cooldown active (30 days)"
 
     max_budget = PROMPT_TOKEN_BUDGETS.get(prompt_name, 600)
     current_token_count = len(current_text) // 4  # approximation : 1 token ≈ 4 chars
@@ -1556,14 +1558,14 @@ def _action_refine_prompt(params: dict) -> str:
                 {"role": "system", "content": get_prompt("REFINE_PROMPT_SYSTEM")},
                 {"role": "user", "content": refine_prompt_text},
             ],
-            model=PRIMARY_MODEL,
-            api_url=PRIMARY_API_URL,
-            api_key=PRIMARY_API_KEY,
+            model=REASONING_MODEL,
+            api_url=REASONING_API_URL,
+            api_key=REASONING_API_KEY,
             temperature=0.4,
-            max_tokens=5000,  # 1024 thinking + ~4000 proposed prompt text + rationale
+            max_tokens=THINKING_BUDGET_TOKENS + 4000,  # think block + proposed prompt text + rationale
             json_response=True,
             no_think=False,
-            timeout=PRIMARY_TIMEOUT,
+            timeout=REASONING_TIMEOUT,
         )
         result = extract_llm_json(content)
     except Exception as exc:
@@ -1575,6 +1577,22 @@ def _action_refine_prompt(params: dict) -> str:
 
     if not proposed_text:
         return "refine_prompt: LLM returned empty proposed_text"
+
+    # Guard: format-string safety — detect unescaped JSON braces in proposed_text.
+    # JSON literals like {"key":"..."} must be escaped as {{"key":"..."}} in format templates.
+    # An unescaped {word} that isn't a known placeholder would crash str.format() with KeyError.
+    _original_placeholders = set(re.findall(r'\{(\w+)\}', current_text))
+    _proposed_new = set(re.findall(r'\{(\w+)\}', proposed_text)) - _original_placeholders
+    if _proposed_new:
+        logger.warning(
+            "refine_prompt: proposed text for %s contains unescaped braces: %s — rejecting",
+            prompt_name, _proposed_new,
+        )
+        return (
+            f"refine_prompt: proposed text contains unescaped brace placeholders {_proposed_new} "
+            f"that would break str.format(). JSON object literals must use {{{{ }}}} escaping. "
+            f"Proposal discarded."
+        )
 
     # Guard: reject if proposed text exceeds the token budget — retry once with explicit feedback
     proposed_token_count = len(proposed_text) // 4
@@ -1601,14 +1619,14 @@ def _action_refine_prompt(params: dict) -> str:
         try:
             content = call_llm(
                 retry_messages,
-                model=PRIMARY_MODEL,
-                api_url=PRIMARY_API_URL,
-                api_key=PRIMARY_API_KEY,
+                model=REASONING_MODEL,
+                api_url=REASONING_API_URL,
+                api_key=REASONING_API_KEY,
                 temperature=0.3,
-                max_tokens=5000,  # retry — same budget as initial call
+                max_tokens=THINKING_BUDGET_TOKENS + 4000,  # retry — same budget as initial call
                 json_response=True,
                 no_think=False,
-                timeout=PRIMARY_TIMEOUT,
+                timeout=REASONING_TIMEOUT,
             )
             result = extract_llm_json(content)
             proposed_text = result.get("proposed_text", "").strip()
@@ -1718,15 +1736,20 @@ def handle_proposal_command(message: str, user_code: str) -> str | None:
         found = next((p for p in proposals if p["id"] == pid), None)
         if not found:
             return f"Proposition `{pid}` introuvable."
-        cur = found["current_text"][:300] + (
-            "…" if len(found["current_text"]) > 300 else ""
+        import difflib as _difflib
+        cur = found["current_text"]
+        prop = found["proposed_text"]
+        diff_lines = list(
+            _difflib.unified_diff(
+                cur.splitlines(), prop.splitlines(),
+                fromfile="actuel", tofile="proposé", lineterm="", n=3,
+            )
         )
-        prop = found["proposed_text"][:300] + (
-            "…" if len(found["proposed_text"]) > 300 else ""
-        )
+        diff_block = "\n".join(diff_lines) if diff_lines else "(aucune différence)"
         return (
             f"**Proposition `{pid}` — {found['prompt_name']}** ({found['status']})\n\n"
             f"**Raison :** {found['rationale']}\n\n"
+            f"**Diff :**\n```diff\n{diff_block}\n```\n\n"
             f"**Texte actuel :**\n```\n{cur}\n```\n\n"
             f"**Texte proposé :**\n```\n{prop}\n```"
         )
@@ -1784,9 +1807,9 @@ def _action_prune_self_memory(params: dict) -> str:
                 {"role": "system", "content": get_prompt("PRUNE_SELF_MEMORY_SYSTEM")},
                 {"role": "user", "content": user_prompt},
             ],
-            model=PRIMARY_MODEL,
-            api_url=PRIMARY_API_URL,
-            api_key=PRIMARY_API_KEY,
+            model=REASONING_MODEL,
+            api_url=REASONING_API_URL,
+            api_key=REASONING_API_KEY,
             temperature=0.2,
             max_tokens=800,
             json_response=True,
@@ -1994,9 +2017,9 @@ async def generate_proactive_push(user_code: str) -> str:
     try:
         content = await call_llm_async(
             [{"role": "user", "content": prompt}],
-            model=PRIMARY_MODEL,
-            api_url=PRIMARY_API_URL,
-            api_key=PRIMARY_API_KEY,
+            model=REASONING_MODEL,
+            api_url=REASONING_API_URL,
+            api_key=REASONING_API_KEY,
             temperature=0.7,
             max_tokens=600,
             json_response=True,
@@ -2019,6 +2042,134 @@ async def generate_proactive_push(user_code: str) -> str:
     outcome = _action_queue_push({"user_code": user_code, "message": message})
     logger.info("generate_proactive_push for %s: %s", user_code, outcome)
     return outcome
+
+
+# ══════════════════════════════════════════════════
+#  ACTION SELF-REVIEW
+# ══════════════════════════════════════════════════
+
+# Actions that require a self-challenge LLM call before execution.
+_REVIEW_REQUIRED_ACTIONS: frozenset[str] = frozenset(
+    {"refine_prompt", "queue_push", "ask_user", "send_notification"}
+)
+
+
+def _build_review_context(
+    action: str,
+    global_ctx: dict,
+    user_ctx: dict | None,
+    params: dict | None = None,
+) -> tuple[str, str]:
+    """Return (context_str, criteria_str) tailored to the action being reviewed."""
+    params = params or {}
+
+    if action == "refine_prompt":
+        topic = params.get("topic", "")
+        prompt_name = params.get("prompt_name", "")
+
+        # Raw gap count for this specific topic
+        r = get_redis()
+        slug = re.sub(r"\s+", "_", topic.lower())[:40]
+        count = int(r.hget(_GAP_COUNTS_KEY, slug) or 0)
+
+        # Recent proposal history for this prompt (last 3)
+        all_proposals = _load_proposals()
+        recent = [
+            f"{p.get('status','?')} le {p.get('created_at','?')[:10]}"
+            for p in all_proposals
+            if p.get("prompt_name") == prompt_name
+        ][-3:]
+        proposals_history = "; ".join(recent) or "aucune"
+
+        gaps = ", ".join(global_ctx.get("knowledge_gaps", [])) or "aucune"
+        proposals_pending = global_ctx.get("pending_proposals", "aucune")
+
+        context = (
+            f"Topic proposé : '{topic}' — flaggé {count} fois dans les gaps\n"
+            f"Lacunes connues : {gaps}\n"
+            f"Historique des proposals pour '{prompt_name}' : {proposals_history}\n"
+            f"Proposals en attente : {proposals_pending}"
+        )
+        criteria = (
+            "refine_prompt est justifié si tu as des preuves concrètes que ce topic revient "
+            "régulièrement dans les conversations (gap count significatif) ET qu'aucune proposal "
+            "n'est déjà en attente ou n'a été soumise récemment pour ce prompt. "
+            "Si les données ci-dessus ne montrent pas de problème récurrent réel, dis false."
+        )
+
+    elif action in ("queue_push", "ask_user", "send_notification") and user_ctx:
+        has_push = user_ctx.get("has_push", False)
+        last_push = user_ctx.get("push_cooldown_str", "inconnu")
+        activity = str(user_ctx.get("user_activity", {}))[:300]
+        context = (
+            f"Push iOS disponible : {has_push}\n"
+            f"Dernier push envoyé : {last_push}\n"
+            f"Activité récente : {activity}"
+        )
+        criteria = (
+            "Un push est justifié si : push disponible ET délai raisonnable depuis le dernier "
+            "(au moins quelques heures) ET le message apporte une valeur concrète et urgente "
+            "qui n'a pas déjà été envoyée. Si le dernier push est récent, dis false. "
+            "Sois conservateur : mieux vaut ne pas envoyer que spammer."
+        )
+
+    else:
+        context = "Contexte général — évalue selon le bon sens."
+        criteria = "L'action doit apporter une valeur claire et concrète maintenant."
+
+    return context, criteria
+
+
+async def _llm_review_before_action(
+    action: str,
+    params: dict,
+    global_ctx: dict,
+    user_ctx: dict | None,
+    previous_steps: list[dict],
+) -> tuple[bool, str]:
+    """
+    Self-challenge LLM call before executing a consequential action.
+    Uses the router model (fast, binary decision).
+    Returns (should_execute, reason).
+    Fail-open: if the review call fails, the action is allowed.
+    """
+    context_str, criteria_str = _build_review_context(action, global_ctx, user_ctx, params)
+
+    steps_summary = (
+        "; ".join(f"{s['action']}→{s['outcome'][:60]}" for s in previous_steps)
+        or "aucune"
+    )
+
+    prompt = get_prompt("ACTION_REVIEW_USER").format(
+        action=action,
+        params=json.dumps(params, ensure_ascii=False, default=str),
+        context=context_str,
+        previous_steps=steps_summary,
+        criteria=criteria_str,
+    )
+
+    try:
+        content = await call_llm_async(
+            [
+                {"role": "system", "content": get_prompt("ACTION_REVIEW_SYSTEM")},
+                {"role": "user", "content": prompt},
+            ],
+            model=REASONING_MODEL,
+            api_url=REASONING_API_URL,
+            api_key=REASONING_API_KEY,
+            temperature=0.1,
+            max_tokens=THINKING_BUDGET_TOKENS + 300,  # think block + JSON court (execute + reason)
+            json_response=True,
+            no_think=False,  # jugement contextuel — thinking améliore la qualité
+            timeout=30.0,
+        )
+        result = extract_llm_json(content)
+        execute = bool(result.get("execute", True))
+        reason = result.get("reason", "")
+        return execute, reason
+    except Exception as exc:
+        logger.warning("Action self-review failed (%s) — allowing action by default", exc)
+        return True, "review failed — defaulting to execute"
 
 
 # ══════════════════════════════════════════════════
@@ -2096,6 +2247,18 @@ async def run_self_reflection() -> dict:
         focus, action, reason, params, stop = _run_chain_step(
             result, global_steps, _GLOBAL_ACTIONS, f"P1-step{i+1}"
         )
+        params.setdefault("reason", reason)  # forward top-level reason into _action_nothing
+
+        if action in _REVIEW_REQUIRED_ACTIONS:
+            approved, rev_reason = await _llm_review_before_action(
+                action, params, global_ctx, None, global_steps
+            )
+            if not approved:
+                logger.info("P1 self-review rejected %s: %s", action, rev_reason)
+                action = "nothing"
+                params = {"reason": f"self-review: {rev_reason}"}
+                stop = True
+
         outcome = await asyncio.to_thread(_execute_action, action, params)
 
         step = {
@@ -2139,6 +2302,8 @@ async def run_self_reflection() -> dict:
             if not focus:
                 focus = ufocus
 
+            params.setdefault("reason", reason)  # forward top-level reason into _action_nothing
+
             # Inject user_code into params for all user-scoped actions so the
             # LLM doesn't need to carry it reliably across iterations.
             _user_scoped = {
@@ -2149,8 +2314,7 @@ async def run_self_reflection() -> dict:
             if action in _user_scoped and not params.get("user_code"):
                 params["user_code"] = user_code
 
-            # Don't retry an action that already hit a system-level constraint
-            # (cooldown, invalid key, push unavailable, …).
+            # Don't retry an action that already hit a system-level constraint this cycle
             if action in _failed_actions:
                 logger.info(
                     "P2 %s step %d/%d: action=%s previously failed — skipping to nothing",
@@ -2158,6 +2322,18 @@ async def run_self_reflection() -> dict:
                 )
                 action = "nothing"
                 params = {"reason": f"previous {action} hit a system constraint — not retrying"}
+
+            if action in _REVIEW_REQUIRED_ACTIONS:
+                approved, rev_reason = await _llm_review_before_action(
+                    action, params, global_ctx, user_ctx, user_steps
+                )
+                if not approved:
+                    logger.info(
+                        "P2 %s self-review rejected %s: %s", user_code, action, rev_reason
+                    )
+                    action = "nothing"
+                    params = {"reason": f"self-review: {rev_reason}"}
+                    stop = True
 
             outcome = await asyncio.to_thread(_execute_action, action, params)
 

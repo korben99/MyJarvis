@@ -22,6 +22,7 @@ from config import (
     PRIMARY_API_URL,
     PRIMARY_MODEL,
     PRIMARY_TIMEOUT,
+    REASONING_MODEL,
     ROUTER_MODEL,
     VISION_API_KEY,
     VISION_API_URL,
@@ -30,7 +31,7 @@ from config import (
     tokens_param,
 )
 
-_LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL} if LLM_LOCAL else set()
+_LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL, REASONING_MODEL} if LLM_LOCAL else set()
 from deps import get_stream_client
 from helpers import get_logger
 
@@ -68,6 +69,7 @@ async def stream_openai(
     timeout: float = 30.0,
     no_think: bool = False,
     session_id: str = "",
+    max_tokens: int = 10000,
 ) -> AsyncGenerator[str, None]:
 
     # ── Local path (MLX) ───────────────────────────────────────────
@@ -77,6 +79,7 @@ async def stream_openai(
             model,
             no_think=no_think,
             session_id=session_id,
+            max_tokens=max_tokens,
         ):
             yield chunk
         return
@@ -150,62 +153,6 @@ async def stream_openai(
                         "Invalid JSON chunk: %s",
                         payload_str[:100],
                     )
-                    continue
-
-    except httpx.RequestError as e:
-        logger.error("OpenAI request error: %s", e)
-
-
-async def stream_openaiOLD(
-    messages: list,
-    model: str,
-    api_url: str = OPENAI_API_URL,
-    api_key: str = OPENAI_API_KEY,
-    timeout: float = 30.0,
-    no_think: bool = False,
-    session_id: str = "",
-) -> AsyncGenerator[str, None]:
-    if LLM_LOCAL and model in _LOCAL_MODELS:
-        async for chunk in stream_local(
-            messages, model, no_think=no_think, session_id=session_id
-        ):
-            yield chunk
-        return
-
-    try:
-        client = get_stream_client(timeout)
-        async with client.stream(
-            "POST",
-            f"{api_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": messages,
-                "stream": True,
-            },
-        ) as response:
-            if response.status_code != 200:
-                logger.error("OpenAI streaming error: %s", response.status_code)
-                return
-
-            async for line in response.aiter_lines():
-                if not line or not line.startswith("data: "):
-                    continue
-                payload = line[6:]
-                if payload == "[DONE]":
-                    break
-                try:
-                    data = json.loads(payload)
-                    content = (
-                        data.get("choices", [{}])[0].get("delta", {}).get("content")
-                    )
-                    if content:
-                        yield content
-                except json.JSONDecodeError:
-                    logger.debug("Invalid JSON chunk: %s", payload[:100])
                     continue
 
     except httpx.RequestError as e:

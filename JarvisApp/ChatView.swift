@@ -213,6 +213,15 @@ struct MessageBubble: View, Equatable {
         lhs.message == rhs.message
     }
 
+    /// Renders the message content as an AttributedString so that Markdown
+    /// inline syntax (**bold**, *italic*, `code`, etc.) is displayed correctly.
+    /// Falls back to plain text if parsing fails.
+    private var renderedContent: AttributedString {
+        let raw = message.content + (message.isStreaming ? " ●" : "")
+        let opts = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: raw, options: opts)) ?? AttributedString(raw)
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             if isUser { Spacer(minLength: 48) }
@@ -237,7 +246,7 @@ struct MessageBubble: View, Equatable {
                 }
 
                 if !message.content.isEmpty || message.isStreaming {
-                    Text(message.content + (message.isStreaming ? " ●" : ""))
+                    Text(renderedContent)
                         .font(.system(size: 15))
                         .foregroundColor(isUser ? .white : .white.opacity(0.9))
                         .padding(.horizontal, 14).padding(.vertical, 10)

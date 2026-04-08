@@ -47,6 +47,7 @@ from config import (
 
 if LLM_LOCAL:
     from llm_local import preload_models
+from embed_router import preload_embed_router
 from deps import HTTP_CLIENT, _STREAM_CLIENTS, QDRANT_CLIENT
 from google_services import is_google_available
 from helpers import get_logger, setup_logging
@@ -86,6 +87,7 @@ async def lifespan(app: FastAPI):
     logger.info("RAG: %s, collection: %s, top_k: %d", QDRANT_URL, QDRANT_COLLECTION, RAG_TOP_K)
 
     deps.EMBED_MODEL = get_embed_model()
+    await asyncio.to_thread(preload_embed_router)
 
     scheduler = None
     try:
@@ -134,7 +136,7 @@ async def lifespan(app: FastAPI):
             trigger="interval",
             hours=1,
             id="trade_check",
-            next_run_time=datetime.now(tz) + timedelta(minutes=5),
+            next_run_time=datetime.now(tz) + timedelta(minutes=8),
         )
         logger.info("Trading surveillance scheduled every 1 h")
 

@@ -229,6 +229,25 @@ def _unwrap(val, default):
     return val
 
 
+_NEWS_GARBAGE = (
+    "fil info", "en direct", "direct live", "retrouver", "abonnez",
+    "flux rss", "rss feed", "regarder en", "nous suivre", "newsletter",
+)
+
+
+def _is_quality_article(r: dict) -> bool:
+    """Rejette les résultats DDG qui sont des pages RSS/homepage plutôt que des articles."""
+    title = r.get("title", "").lower()
+    body = r.get("body", "")
+    # Le body DDG a le format "[date | source] contenu" — extraire le contenu réel
+    body_content = body.split("] ", 1)[1] if body.startswith("[") and "] " in body else body
+    if any(m in title for m in _NEWS_GARBAGE):
+        return False
+    if len(body_content.strip()) < 40:  # snippet vide ou stub sans contenu
+        return False
+    return True
+
+
 async def _fetch_news(interests: list[str]) -> list[str]:
     """
     Fetch recent headlines: 2 parallel queries (professional + general).
@@ -260,6 +279,10 @@ async def _fetch_news(interests: list[str]) -> list[str]:
     else:
         gen_results = await _fetch_one(general_query, 6)
         pro_results = []
+
+    # Filtrer les résultats RSS/homepage avant le merge
+    pro_results = [r for r in pro_results if _is_quality_article(r)]
+    gen_results = [r for r in gen_results if _is_quality_article(r)]
 
     # Interleave: 1 pro, 1 general, 1 pro, 1 general...
     seen_titles: set = set()
@@ -425,7 +448,10 @@ async def gather_briefing(user_code: str) -> BriefingResult:
     calendar = _unwrap(results[0], [])
     gmail = _unwrap(results[1], [])
     weather_hits = _unwrap(results[2], [])
-    weather = weather_hits[0]["body"] if weather_hits else ""
+    # weather_hits[0] = conditions actuelles, weather_hits[1] = prévisions 3 jours.
+    # Passer les deux au LLM pour éviter de reporter la température du matin (07:30)
+    # comme température de la journée.
+    weather = "\n".join(r["body"] for r in weather_hits) if weather_hits else ""
     news = _unwrap(results[3], [])
     portfolio = _unwrap(results[4], "")
 

@@ -48,7 +48,6 @@ from memory import (
     update_user_profile,
 )
 from pipeline import (
-    augment_user_message,
     build_context,
     build_dynamic_prefix,
     build_system_prompt,
@@ -273,11 +272,16 @@ async def _handle_calendar_write(
 
     event = await extract_calendar_event_llm(req.message)
     if not event:
-        # Date ou heure manquante — demander sans passer par le LLM principal
         return _instant_reply(
             req,
             user_code,
             "Je n'ai pas trouvé la date ou l'heure du rendez-vous. Peux-tu préciser ?",
+        )
+    if not event.get("title"):
+        return _instant_reply(
+            req,
+            user_code,
+            "Pour quel événement ? Donne-moi le nom du rendez-vous.",
         )
 
     try:
@@ -420,10 +424,16 @@ async def chat(req: ChatRequest):
 
     if _embed_result is not None:
         # Fast-path: no LLM router — load prefix, history, memory in parallel.
+        # Opinions and tomorrow_suggestions are only useful for conversational intents.
+        _rich_intent = bool(
+            _embed_result.use_memory or _embed_result.use_rag
+            or _embed_result.use_web or _embed_result.use_self
+        )
         _gather_ep = await asyncio.gather(
             asyncio.to_thread(
                 build_dynamic_prefix,
                 req.session_id, user_code, user_name or "", req.voice_mode,
+                _rich_intent, _rich_intent,  # include_opinions, include_suggestions
             ),
             asyncio.to_thread(get_conversation, user_code, req.session_id, _HIST_WINDOW),
             _spec_mem_task,
@@ -670,17 +680,6 @@ async def chat(req: ChatRequest):
             "Analyse-la étape par étape avant de répondre."
         )
 
-    extra_ctx_parts = []
-    if dynamic_prefix:
-        extra_ctx_parts.append(dynamic_prefix)
-    if assembled:
-        extra_ctx_parts.append(
-            "Utilise le contexte suivant pour répondre. Cite les sources si pertinent.\n\n"
-            + assembled
-        )
-    if reasoning_hint:
-        extra_ctx_parts.append(reasoning_hint.strip())
-
     raw_user_content = req.message
     if image_description:
         raw_user_content = (
@@ -689,8 +688,18 @@ async def chat(req: ChatRequest):
             f"{image_description}"
         )
 
-    full_prefix = "\n\n".join(extra_ctx_parts)
-    user_content = augment_user_message(full_prefix, raw_user_content)
+    # Build the user message: [dynamic_prefix] → [context] → ## MESSAGE UTILISATEUR
+    # Question under explicit heading — Qwen3 responds to a labelled question in prose,
+    # not to structured data (which triggers JSON output).
+    msg_parts = []
+    if dynamic_prefix:
+        msg_parts.append(dynamic_prefix)
+    if assembled:
+        msg_parts.append(assembled)
+    if reasoning_hint:
+        msg_parts.append(reasoning_hint.strip())
+    msg_parts.append("## MESSAGE UTILISATEUR\n" + raw_user_content)
+    user_content = "\n\n".join(msg_parts)
 
     # Window: last 8 messages (4 exchanges).
     # Raw messages (no dynamic prefix) are stored in Redis → history stays compact.
@@ -731,6 +740,7 @@ async def chat(req: ChatRequest):
                     _use_timeout,
                     no_think=chat_no_think,
                     session_id=req.session_id,
+                    max_tokens=4000 if not chat_no_think else 1500,
                 ):
                     full += chunk
 
