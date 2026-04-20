@@ -56,6 +56,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from datetime import date, datetime
 from logging.handlers import RotatingFileHandler
 from threading import Lock
@@ -294,6 +295,16 @@ def rel_time_fr(ts: float) -> str:
         return f"il y a {mo} mois"
     y = int(delta / (365 * 86400))
     return f"il y a {y} an{'s' if y > 1 else ''}"
+
+
+def normalize_key(s: str) -> str:
+    """Normalize a string for case- and accent-insensitive comparison.
+
+    Strips diacritics (NFD decomposition → ASCII), lowercases.
+    Used for Redis profile key deduplication.
+    Examples: 'Spécialité' → 'specialite', 'option:SI' → 'option:si'
+    """
+    return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode().lower()
 
 
 # ══════════════════════════════════════════════════

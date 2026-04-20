@@ -194,24 +194,31 @@ class JarvisAPI: ObservableObject {
             }
         } catch {
             // Classify the error before touching connection state.
-            // A URLError lets us distinguish a slow LLM (timedOut) from a real
-            // network failure (host unreachable, no internet, …).
+            //
+            // Three distinct cases:
+            // 1. timedOut              — server reachable but LLM slow → try recovery reload
+            // 2. networkConnectionLost — TCP dropped mid-stream (app backgrounded, screen
+            //                           locked, network handoff) → try recovery reload.
+            //                           NOT the same as being offline: the connection was
+            //                           established and the server may have finished.
+            // 3. notConnectedToInternet / cannotConnectToHost / cannotFindHost
+            //                         — server truly unreachable → surface error, clear URL.
             let urlErr = error as? URLError
-            let isNetworkDown = [
+            let isServerUnreachable = [
                 URLError.Code.notConnectedToInternet,
                 .cannotConnectToHost,
                 .cannotFindHost,
-                .networkConnectionLost,
             ].contains(urlErr?.code)
 
             if let pos = messages.firstIndex(where: { $0.id == assistantID }) {
                 switch urlErr?.code {
                 case .timedOut:
-                    // Server is reachable but inference took too long.
-                    // We'll try to reload — if the server finished we get the real answer.
                     messages[pos].content = "⏱ Pas de réponse dans les délais — rechargement…"
-                case .networkConnectionLost, .notConnectedToInternet,
-                     .cannotConnectToHost, .cannotFindHost:
+                case .networkConnectionLost:
+                    // Connection dropped (backgrounding, screen lock, network switch).
+                    // Server-side the response was saved — reload will recover it.
+                    messages[pos].content = "Connexion interrompue — rechargement…"
+                case .notConnectedToInternet, .cannotConnectToHost, .cannotFindHost:
                     messages[pos].content = "Réseau inaccessible."
                 default:
                     messages[pos].content = "Erreur : \(error.localizedDescription)"
@@ -219,15 +226,14 @@ class JarvisAPI: ObservableObject {
                 messages[pos].isStreaming = false
             }
 
-            if isNetworkDown {
-                // Server is genuinely unreachable — clear cached URL so next send
+            if isServerUnreachable {
+                // Server genuinely unreachable — clear cached URL so next send
                 // triggers a fresh probe, and surface the disconnected state.
                 resolvedURL = ""
                 connectionState = .error("Serveur inaccessible")
             } else {
-                // Timeout or transient error — server is probably still up.
-                // Reload conversation: if the server finished processing the request
-                // after the client-side timeout, we'll recover the actual response.
+                // Timeout or connection-lost — server is probably still up and may
+                // have finished generating the response. Reload to recover it.
                 await loadConversation()
             }
         }

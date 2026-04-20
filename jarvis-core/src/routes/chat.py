@@ -789,6 +789,21 @@ async def chat(req: ChatRequest):
                 )
             except asyncio.CancelledError:
                 logger.info("Client disconnected")
+                if full_parts:
+                    try:
+                        full_clean = re.sub(r"<think>.*?</think>", "", "".join(full_parts), flags=re.DOTALL)
+                        full_clean = re.sub(r"<think>.*$", "", full_clean, flags=re.DOTALL).strip()
+                        if full_clean:
+                            append_conversation_message(user_code, req.session_id, "user", raw_user_content)
+                            append_conversation_message(user_code, req.session_id, "assistant", full_clean)
+                            asyncio.create_task(
+                                post_analysis(req.session_id, user_code, req.message, full_clean)
+                            )
+                            logger.info(
+                                "Saved response to Redis after disconnect (%d chars)", len(full_clean)
+                            )
+                    except Exception as _save_err:
+                        logger.warning("Failed to save on disconnect: %s", _save_err)
 
         return StreamingResponse(
             sse(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}

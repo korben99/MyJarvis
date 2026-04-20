@@ -72,7 +72,7 @@ from config import (
     USER_CODES,
 )
 
-from helpers import call_llm, extract_llm_json, get_logger, get_qdrant, get_redis, redis_get_json, redis_set_json, rel_time_fr
+from helpers import call_llm, extract_llm_json, get_logger, get_qdrant, get_redis, normalize_key, redis_get_json, redis_set_json, rel_time_fr
 
 
 logger = get_logger("jarvis-memory")
@@ -317,11 +317,12 @@ def _normalize_profile_key(user_code: str, new_key: str, existing_keys: list[str
     if not existing_keys or new_key in existing_keys:
         return None
 
-    # Stage 0: case-insensitive exact match (e.g. option:si vs option:SI) — no LLM needed
-    new_key_lower = new_key.lower()
+    # Stage 0: case + accent-insensitive exact match
+    # Handles: option:si vs option:SI, specialite:maths vs spécialité:maths
+    new_key_norm = normalize_key(new_key)
     for k in existing_keys:
-        if k.lower() == new_key_lower and k != new_key:
-            logger.info("User %s profile key '%s' → case match '%s' (no LLM)", user_code, new_key, k)
+        if normalize_key(k) == new_key_norm and k != new_key:
+            logger.info("User %s profile key '%s' → case/accent match '%s' (no LLM)", user_code, new_key, k)
             return k
 
     # Stage 1: scalar canonical alias
