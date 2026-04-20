@@ -28,7 +28,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Optional
 
 from config import (
     LLM_LOCAL,
@@ -200,16 +200,13 @@ _sys_kv: dict[str, tuple[int, Any]] = {}  # model_path → (sys_hash, base_cache
 _sys_kv_lock = threading.Lock()  # protects lazy build of the base cache
 
 
-def _first_complete_json(text: str) -> str | None:
+def _first_complete_json(text: str) -> Optional[str]:
     """
-    Return the first complete top-level JSON object or array found in *text*, or None.
+    Return the first valid complete top-level JSON object or array found in *text*, or None.
+    """
 
-    Scans character-by-character tracking brace/bracket depth and string escapes.
-    Used by _generate_sync to stop streaming as soon as JSON output is complete.
-    """
     start = -1
-    open_char = close_char = ""
-    depth = 0
+    stack = []
     in_string = False
     escape_next = False
 
@@ -217,26 +214,52 @@ def _first_complete_json(text: str) -> str | None:
         if escape_next:
             escape_next = False
             continue
+
         if c == "\\" and in_string:
             escape_next = True
             continue
+
         if c == '"':
             in_string = not in_string
             continue
+
         if in_string:
             continue
+
         if start == -1:
-            if c == "{":
-                start, open_char, close_char, depth = i, "{", "}", 1
-            elif c == "[":
-                start, open_char, close_char, depth = i, "[", "]", 1
-        else:
-            if c == open_char:
-                depth += 1
-            elif c == close_char:
-                depth -= 1
-                if depth == 0:
-                    return text[start : i + 1]
+            if c in "{[":
+                start = i
+                stack.append(c)
+            continue
+
+        # Gestion des ouvertures imbriquées
+        if c in "{[":
+            stack.append(c)
+
+        elif c in "}]":
+            if not stack:
+                continue
+
+            last = stack.pop()
+
+            # Vérification cohérence {} vs []
+            if (last == "{" and c != "}") or (last == "[" and c != "]"):
+                # reset complet si incohérent
+                start = -1
+                stack.clear()
+                continue
+
+            if not stack:
+                candidate = text[start : i + 1]
+
+                # Validation JSON réelle
+                try:
+                    json.loads(candidate)
+                    return candidate
+                except Exception:
+                    # si invalide → on continue à chercher
+                    start = -1
+
     return None
 
 
@@ -364,8 +387,8 @@ def preload_models() -> None:
     try:
         import mlx.core as _mx
 
-        _mx.set_cache_limit(4 * 1024**3)
-        logger.info("MLX Metal cache limit set to 4 GB")
+        _mx.set_cache_limit(12 * 1024**3)
+        logger.info("MLX Metal cache limit set to 12 GB")
     except Exception as exc:
         logger.warning("MLX set_cache_limit failed (non-fatal): %s", exc)
 
@@ -386,7 +409,7 @@ def preload_models() -> None:
                 path,
                 warmup_msgs,
                 temperature=0.0,
-                max_tokens=50,  # assez pour le JIT sans déclencher le warning de troncature
+                max_tokens=100,  # assez pour le JIT sans déclencher le warning de troncature
                 no_think=True,
             )
             logger.info("MLX warmup OK : %s", path)
@@ -538,7 +561,9 @@ def _generate_sync(
 
                 # Manual stop-token check (mlx_lm.generate/stream_generate do not
                 # accept a `stop` kwarg — handle it in the loop instead).
-                if profile.stop_tokens and any(t in raw_so_far for t in profile.stop_tokens):
+                if profile.stop_tokens and any(
+                    t in raw_so_far for t in profile.stop_tokens
+                ):
                     early_stopped = True
                     break
 
@@ -838,7 +863,7 @@ async def stream_local(
                         acc = "".join(raw_chunks) + text
                         for st in profile.stop_tokens:
                             if st in acc:
-                                text = acc.split(st, 1)[0][len("".join(raw_chunks)):]
+                                text = acc.split(st, 1)[0][len("".join(raw_chunks)) :]
                                 stop_hit = True
                                 break
 

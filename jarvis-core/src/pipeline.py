@@ -101,7 +101,7 @@ def build_dynamic_prefix(
         include_suggestions=include_suggestions,
     )
     if memory_ctx:
-        parts.append(f"{get_prompt('MEMORY_HEADER_FR')}\n{memory_ctx}")
+        parts.append(f"<contexte>\n{memory_ctx}\n</contexte>")
 
     if include_opinions:
         opinions = self_mem.get("opinions", [])
@@ -109,7 +109,7 @@ def build_dynamic_prefix(
             ops_lines = "\n".join(
                 f"- {o['topic']} : {o['opinion']}" for o in opinions[-5:]
             )
-            parts.append(f"## MES AVIS\n{ops_lines}")
+            parts.append(f"<mes_avis>\n{ops_lines}\n</mes_avis>")
 
     if voice_mode:
         parts.append(get_prompt("VOICE_SUFFIX_FR").strip())
@@ -152,19 +152,23 @@ def build_context(
     # 1. WEB
     if web_results == INTERNET_ERROR:
         context_parts.append(
-            "## ACCÈS INTERNET\n"
+            "<acces_internet>\n"
             "La connexion internet est actuellement indisponible. "
             "Informe l'utilisateur que tu ne peux pas effectuer la recherche demandée "
-            "et propose-lui de réessayer plus tard."
+            "et propose-lui de réessayer plus tard.\n"
+            "</acces_internet>"
         )
         logger.warning("web: internet unavailable — injecting error context")
     elif web_results:
         web_selected = trim_chunks(web_results, WEB_CHAR_BUDGET, text_key="body")
         if web_selected:
-            context_parts.append("## RÉSULTATS WEB")
+            web_lines = []
             for i, body in enumerate(web_selected):
                 r = web_results[i]
-                context_parts.append(f"[{r['title']}]\n{body}\nSource: {r['url']}")
+                web_lines.append(f"[{r['title']}]\n{body}\nSource: {r['url']}")
+            context_parts.append(
+                "<resultats_web>\n" + "\n\n".join(web_lines) + "\n</resultats_web>"
+            )
         logger.info(
             "web recall %d/%d (budget=%d)",
             len(web_selected),
@@ -176,14 +180,15 @@ def build_context(
     if rag_chunks:
         rag_selected_texts = trim_chunks(rag_chunks, RAG_CHAR_BUDGET)
         if rag_selected_texts:
-            context_parts.append("## DOCUMENTS PERSONNELS")
+            rag_lines = []
             selected_set = set(rag_selected_texts)
             for chunk in rag_chunks:
                 text = chunk["text"][:800]
                 if text in selected_set:
-                    context_parts.append(
-                        f"[Doc {chunk['source']} ({chunk['score']:.2f})]\n{text}"
-                    )
+                    rag_lines.append(f"[Doc {chunk['source']} ({chunk['score']:.2f})]\n{text}")
+            context_parts.append(
+                "<documents_personnels>\n" + "\n\n".join(rag_lines) + "\n</documents_personnels>"
+            )
         logger.info(
             "rag recall %d/%d (budget=%d)",
             len(rag_selected_texts),
@@ -216,8 +221,9 @@ def build_context(
 
         selected_memories = trim_chunks(stamped, MEMORY_CHAR_BUDGET)
         if selected_memories:
-            context_parts.append("## SOUVENIRS PERTINENTS")
-            context_parts.extend(selected_memories)
+            context_parts.append(
+                "<souvenirs_pertinents>\n" + "\n".join(selected_memories) + "\n</souvenirs_pertinents>"
+            )
         logger.info(
             "memory recall %d/%d (budget=%d)",
             len(selected_memories),
@@ -227,7 +233,7 @@ def build_context(
 
     # 4a. CALENDAR
     if calendar_results:
-        context_parts.append("## AGENDA")
+        cal_lines = []
         for evt in calendar_results:
             if evt.get("all_day"):
                 line = f"{evt['start']} — {evt['summary']} [journée entière]"
@@ -235,12 +241,13 @@ def build_context(
                 line = f"{fmt_event_time(evt['start'], user_code)} — {evt['summary']}"
             if evt.get("location"):
                 line += f" ({evt['location']})"
-            context_parts.append(line)
+            cal_lines.append(line)
+        context_parts.append("<agenda>\n" + "\n".join(cal_lines) + "\n</agenda>")
         logger.info("calendar context: %d events injected", len(calendar_results))
 
     # 4b. GMAIL
     if gmail_results:
-        context_parts.append("## EMAILS REÇUS")
+        gmail_lines = []
         total_chars = 0
         injected = 0
         for msg in gmail_results:
@@ -251,9 +258,13 @@ def build_context(
             )
             if total_chars + len(entry) > GOOGLE_CHAR_BUDGET:
                 break
-            context_parts.append(entry)
+            gmail_lines.append(entry)
             total_chars += len(entry)
             injected += 1
+        if gmail_lines:
+            context_parts.append(
+                "<emails_recus>\n" + "\n\n".join(gmail_lines) + "\n</emails_recus>"
+            )
         logger.info(
             "gmail context: %d/%d messages injected (%d chars)",
             injected,
@@ -272,10 +283,10 @@ def build_context(
     try:
         pending_alerts = pop_pending_alerts(user_code)
         if pending_alerts:
-            alert_lines = ["## ALERTES BOURSIÈRES"]
-            for a in pending_alerts:
-                alert_lines.append(f"• {a['message']} (détecté à {a['at'][:16]})")
-            context_parts.append("\n".join(alert_lines))
+            alert_lines = [f"• {a['message']} (détecté à {a['at'][:16]})" for a in pending_alerts]
+            context_parts.append(
+                "<alertes_boursieres>\n" + "\n".join(alert_lines) + "\n</alertes_boursieres>"
+            )
             logger.info(
                 "trade alerts injected for %s: %d alert(s)",
                 user_code,
@@ -299,7 +310,7 @@ def build_context(
         # RELATION already injected in build_dynamic_prefix prefix — skip here
         # to avoid double injection (~80 tokens) when use_self=True.
         self_ctx = (
-            f"## ÉTAT INTERNE\n"
+            f"<etat_interne>\n"
             f"Objectifs : {goals_text}\n"
             f"Focus : {focus or 'pas encore défini'}\n"
             f"Dernière action autonome : {last_action}"
@@ -310,6 +321,7 @@ def build_context(
                 if pending_proposals
                 else ""
             )
+            + "\n</etat_interne>"
         )
         context_parts.append(self_ctx)
         logger.info("self context injected for %s", user_code)

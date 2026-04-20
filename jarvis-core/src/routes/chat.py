@@ -38,13 +38,13 @@ from google_services import (
     is_calendar_write,
     is_google_available,
 )
-from helpers import build_iso_dt, call_llm_async, get_logger
+from helpers import build_iso_dt, call_llm_async, filter_think_chunk, get_logger
 from llm_client import describe_images, stream_openai
 from llm_router import llm_route
 from memory import (
     append_conversation_message,
+    async_search_memory,
     get_conversation,
-    search_memory,
     update_user_profile,
 )
 from pipeline import (
@@ -68,6 +68,10 @@ logger = get_logger("jarvis-chat")
 
 router = APIRouter()
 _HIST_WINDOW = 8  # HISTORIQUE DES MESSAGES DANS LE PROMPT INJECTE
+
+# user_codes whose Redis profile has been initialised this process lifetime.
+# Avoids a Redis hget on every request — populated on first message per user.
+_profile_initialised: set[str] = set()
 
 # Compiled once at module level — used in STEP 5 URL detection.
 _URL_RE = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]{5,}')
@@ -315,7 +319,11 @@ async def _handle_calendar_write(
         return _instant_reply(req, user_code, confirm_msg)
     except Exception as exc:
         logger.warning("Calendar write prep failed: %s", type(exc).__name__)
-        return None  # fall-through vers le pipeline
+        return _instant_reply(
+            req,
+            user_code,
+            "Je n'ai pas pu préparer l'événement (erreur interne). Peux-tu réessayer ?",
+        )
 
 
 def _handle_proposal(
@@ -419,7 +427,7 @@ async def chat(req: ChatRequest):
     # If routing decides use_memory=False the result is discarded (cost: one
     # embedding call, ~2–3 s CPU, no GPU impact).
     _spec_mem_task: asyncio.Task = asyncio.ensure_future(
-        asyncio.to_thread(search_memory, user_code, req.message, 5)
+        async_search_memory(user_code, req.message, 5)
     )
 
     if _embed_result is not None:
@@ -633,7 +641,6 @@ async def chat(req: ChatRequest):
         not web_results
         and not rag_chunks
         and not inline_url_results
-        and not (use_web_auto or req.use_web)
         and _auto_web_needed(req.message, memory_chunks)
     ):
         logger.info("chat: auto-web fallback — factual query, thin context")
@@ -648,9 +655,11 @@ async def chat(req: ChatRequest):
     # STEP 6 — MESSAGE ASSEMBLY — context + prefix + history → final prompt
     # ════════════════════════════════════════════════════════════════════════
 
-    # Write user name once — avoids HKEYS + LLM normalisation on every request
-    if user_name and not REDIS_CLIENT.hget(f"user:{user_code}:profile", "name"):
-        update_user_profile(user_code, "name", user_name)
+    # Write user name once per process lifetime — skips Redis hget on every request
+    if user_name and user_code not in _profile_initialised:
+        if not REDIS_CLIENT.hget(f"user:{user_code}:profile", "name"):
+            update_user_profile(user_code, "name", user_name)
+        _profile_initialised.add(user_code)
 
     assembled = build_context(
         rag_chunks,
@@ -688,9 +697,8 @@ async def chat(req: ChatRequest):
             f"{image_description}"
         )
 
-    # Build the user message: [dynamic_prefix] → [context] → ## MESSAGE UTILISATEUR
-    # Question under explicit heading — Qwen3 responds to a labelled question in prose,
-    # not to structured data (which triggers JSON output).
+    # Build the user message: [dynamic_prefix] → [context] → <message_utilisateur>
+    # XML tag clearly delimits the actual question from all injected context above.
     msg_parts = []
     if dynamic_prefix:
         msg_parts.append(dynamic_prefix)
@@ -698,7 +706,7 @@ async def chat(req: ChatRequest):
         msg_parts.append(assembled)
     if reasoning_hint:
         msg_parts.append(reasoning_hint.strip())
-    msg_parts.append("## MESSAGE UTILISATEUR\n" + raw_user_content)
+    msg_parts.append("<message_utilisateur>\n" + raw_user_content + "\n</message_utilisateur>")
     user_content = "\n\n".join(msg_parts)
 
     # Window: last 8 messages (4 exchanges).
@@ -727,7 +735,7 @@ async def chat(req: ChatRequest):
     if req.stream:
 
         async def sse():
-            full = ""
+            full_parts: list[str] = []
             try:
                 in_think = False
                 first_chunk = True
@@ -742,42 +750,29 @@ async def chat(req: ChatRequest):
                     session_id=req.session_id,
                     max_tokens=4000 if not chat_no_think else 1500,
                 ):
-                    full += chunk
+                    full_parts.append(chunk)
 
                     # ── Think filtering ─────────────────────────────────────
-                    # Special case: <think> and </think> in the same chunk
-                    # (e.g. Qwen3.5 no-think mode → "<think>\n\n</think>\n\n").
-                    # Doing `continue` on <think> alone would miss the </think>
-                    # → in_think stays True → the entire response is swallowed.
-                    if "<think>" in chunk:
-                        in_think = True
-                        if "</think>" in chunk:
-                            in_think = False  # empty block entirely in this chunk
-                        continue
-
-                    if "</think>" in chunk:
-                        in_think = False
-                        continue
-
-                    if in_think:
-                        continue
-
-                    clean = chunk
+                    # filter_think_chunk handles text before <think> and after
+                    # </think> in the same chunk — cases the old flag-only
+                    # approach silently dropped.
+                    clean, in_think = filter_think_chunk(chunk, in_think)
 
                     if first_chunk:
                         clean = clean.lstrip("\n")
-                        logger.debug(
-                            "[TTFT] first visible token yielded — %.3fs since request",
-                            time.time() - _t0,
-                        )
-                        first_chunk = False
+                        if clean:
+                            logger.debug(
+                                "[TTFT] first visible token yielded — %.3fs since request",
+                                time.time() - _t0,
+                            )
+                            first_chunk = False
 
                     if clean:
                         yield f"data: {json.dumps({'content': clean})}\n\n"
 
                 # Strip complete think blocks, then any truncated open <think>
                 # (e.g. model hit token budget mid-reasoning — no closing </think>).
-                full_clean = re.sub(r"<think>.*?</think>", "", full, flags=re.DOTALL)
+                full_clean = re.sub(r"<think>.*?</think>", "", "".join(full_parts), flags=re.DOTALL)
                 full_clean = re.sub(
                     r"<think>.*$", "", full_clean, flags=re.DOTALL
                 ).strip()

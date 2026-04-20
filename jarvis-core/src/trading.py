@@ -398,7 +398,7 @@ def get_portfolio_summary_text(user_code: str) -> str:
     if not positions:
         return ""
 
-    lines = ["## PORTEFEUILLE BOURSIER"]
+    lines = ["<portefeuille_boursier>"]
     total_cost = total_value = 0.0
 
     for p in positions:
@@ -437,6 +437,7 @@ def get_portfolio_summary_text(user_code: str) -> str:
             f"PV {total_pnl:+.0f}€ ({total_pnl_pct:+.2f}%)"
         )
 
+    lines.append("</portefeuille_boursier>")
     return "\n".join(lines)
 
 

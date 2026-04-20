@@ -27,12 +27,14 @@ SYSTEM_BASE_FR = (
     "Personnalité assumée : humour, avis et préférences sont bienvenus. "
     "Tu as accès à Gmail et Google Agenda. Cite ta source lors d'une recherche web. "
     "Intègre tes souvenirs naturellement — ce que l'utilisateur dit maintenant prime sur tout souvenir antérieur. "
-    "Si ## MES AVIS est présent : ce sont tes avis, intègre-les naturellement en prose — ne crée jamais de section ## MES AVIS ni ## TES OPINIONS dans ta réponse. "
+    "Si <mes_avis> est présent : ce sont tes avis, intègre-les naturellement en prose — ne reproduis jamais de balise <mes_avis> dans ta réponse. "
     "Réponds toujours en prose sauf si l'utilisateur demande explicitement du JSON ou du code."
 )
-# Section headers injected into the system prompt when memory context is present
-MEMORY_HEADER_EN = "\n\n## CONTEXT ##"
-MEMORY_HEADER_FR = "\n\n## CONTEXTE ##"
+# XML tags used to delimit injected context blocks (replacing ## Markdown headers).
+# XML tags are more watertight: the closing tag prevents the model from confusing
+# injected context with its own output or with adjacent sections.
+MEMORY_HEADER_EN = "<context>"   # closing </context> added at injection site
+MEMORY_HEADER_FR = "<contexte>"  # closing </contexte> added at injection site
 
 # Appended to the system prompt in voice mode
 VOICE_SUFFIX_EN = "\n\nVOICE MODE: 1-2 sentences max. Natural speech, no markdown."
@@ -127,6 +129,7 @@ ROUTER_USER = "Message : {message}"
 # de prompt sans problème.
 
 ANALYSIS_PROMPT = """\
+<instruction>
 Date courante : {current_date}.
 Analyse cet échange entre un utilisateur et Jarvis.
 Retourne UNIQUEMENT un JSON valide avec ces champs :
@@ -147,8 +150,6 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
     "entraînement" → sport ou simulateur), la valeur DOIT préciser le domaine explicitement.
     Mauvais : {{"key":"hobby:aviation","value":"tours de piste"}}
     Bon     : {{"key":"hobby:aviation","value":"tours de piste en avion ULM"}}
-  - Clés existantes dans le profil : [{existing_profile_keys}]
-    → Réutilise EXACTEMENT ces clés si le fait correspond. Nouvelle clé uniquement si genuinement absent.
   - Nommage (clés nouvelles seulement, en minuscule et sans accents) :
     Fait scalaire → clé simple : "profession"
     Multi-valeur → "categorie:item" : "hobby:kart", "skill:python"
@@ -163,11 +164,9 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
 "projects" : liste de "create:nom", "update:nom", "done:nom" ou "rename:ancien->nouveau"
   - Un projet = initiative structurée sur plusieurs SEMAINES avec un livrable ou objectif clair. Doute → [].
   - PAS un projet : tâche technique isolée, optimisation, debug, analyse, RDV, voyage, week-end, sujet de conversation.
-  - Projets connus : {existing_projects}
   -> Utilise le NOM EXACT d'un projet existant pour "update" et "done". Ne jamais inventer de variante.
   -> "rename:ancien->nouveau" uniquement si l'utilisateur change explicitement le nom d'un projet existant.
   - "create" uniquement si l'utilisateur annonce EXPLICITEMENT un tout nouveau projet absent de la liste.
-  - "rename:ancien->nouveau" uniquement si l'utilisateur change explicitement le nom d'un projet existant.
   Noms de 2 à 4 mots.
   - Exemples :
     "update:Jarvis v9" → modification d'un projet existant
@@ -201,9 +200,16 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
   Format : phrase courte décrivant le fait à effacer (ex: "ne travaille plus chez X").
 
 JSON uniquement, en français.
-
+</instruction>
+<knowledge_base>
+Clés profil existantes : [{existing_profile_keys}]
+  → Réutilise EXACTEMENT ces clés si le fait correspond. Nouvelle clé uniquement si genuinement absent.
+Projets connus : {existing_projects}
+</knowledge_base>
+<echange>
 Utilisateur : {user_message}
-Jarvis : {assistant_message}"""
+Jarvis : {assistant_message}
+</echange>"""
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -261,27 +267,19 @@ Version texte : pas de markdown (sera lue en chat ou à voix haute).
 Version HTML : structurée pour un email avec titres et listes."""
 
 BRIEFING_USER = """\
-Briefing matinal de {user_name} — {date}
-
-AGENDA DU JOUR :
-{calendar}
-
-EMAILS NON LUS (24h) :
-{gmail}
-
-MÉTÉO :
-{weather}
-
-ACTUALITÉS (centres d'intérêt : {interests}) :
-{news}
-
-PROJETS EN COURS :
-{projects}
-
-PORTEFEUILLE :
-{portfolio}
-
----
+<briefing_context>
+Utilisateur : {user_name} | Date : {date}
+Centres d'intérêt : {interests}
+</briefing_context>
+<data_sources>
+<agenda>{calendar}</agenda>
+<emails>{gmail}</emails>
+<meteo>{weather}</meteo>
+<actualites>{news}</actualites>
+<projets>{projects}</projets>
+<portefeuille>{portfolio}</portefeuille>
+</data_sources>
+<task>
 Génère deux versions en JSON :
 
 "text" : briefing conversationnel, 250-400 mots.
@@ -299,7 +297,8 @@ Génère deux versions en JSON :
 Exemple de format attendu :
 {{"text":"Salut {user_name} ! Ce matin il fait 12°C...","html":"<h2>Météo</h2><p>Ce matin..."}}
 
-JSON uniquement."""
+JSON uniquement.
+</task>"""
 
 
 # ══════════════════════════════════════════════════════════════════════════

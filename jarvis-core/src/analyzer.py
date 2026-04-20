@@ -111,10 +111,10 @@ async def analyze_exchange(
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.1,
-            max_tokens=3500,  # 1024 thinking + ~2500 multi-fact JSON
+            max_tokens=8000,  # thinking can exceed 4000 tok on rich conversations
             json_response=True,
             no_think=False,  # thinking improves fact extraction accuracy
-            timeout=60.0,
+            timeout=90.0,
         )
         logger.debug(f"[ANALYZER RAW] {content[:300]}")
         try:
@@ -197,8 +197,10 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
     accumulated cross-session context (chronologically merged).
 
     Watermark — Redis key `analysis_wm:{user_code}:{session_id}`:
-      Stores the LLEN of the chat list at the time of the last analysis.
-      lrange(key, wm, -1) returns only new, unanalyzed messages.
+      Stores the float timestamp (ts) of the last analyzed message.
+      Messages with ts > watermark are considered new.
+      Immune to ltrim truncation: LLEN-based watermarks break once the list
+      hits CHAT_MAX_MESSAGES because llen stops growing — timestamps don't.
       Snapshot is taken BEFORE the LLM call so messages that arrive during
       analysis are included in the next batch (never dropped).
 
@@ -251,28 +253,34 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
 
             # ── Collect new messages (since watermark) from all sessions ──
             all_new: list[dict] = []
-            wm_updates: dict[str, int] = {}  # wm_key → new watermark (snapshot)
+            wm_updates: dict[str, float] = {}  # wm_key → new watermark ts (snapshot)
 
             for chat_key in session_keys:
                 session_id = chat_key.removeprefix(f"chat:{uc}:")
                 wm_key = f"analysis_wm:{uc}:{session_id}"
 
-                wm = int(r.get(wm_key) or 0)
-                current_len = r.llen(chat_key)
+                # Watermark is the float timestamp of the last analyzed message.
+                # Using ts instead of LLEN makes the watermark immune to ltrim:
+                # once the list is capped at CHAT_MAX_MESSAGES, llen stops
+                # growing and llen-based watermarks silently freeze.
+                wm_ts = float(r.get(wm_key) or 0)
 
-                if current_len <= wm:
-                    continue  # nothing new in this session
-
-                # Snapshot BEFORE the LLM call
-                wm_updates[wm_key] = current_len
-
-                for raw in r.lrange(chat_key, wm, -1):
+                session_new: list[dict] = []
+                for raw in r.lrange(chat_key, 0, -1):
                     try:
                         msg = json.loads(raw)
-                        msg["_session_id"] = session_id
-                        all_new.append(msg)
+                        if msg.get("ts", 0) > wm_ts:
+                            msg["_session_id"] = session_id
+                            session_new.append(msg)
                     except (json.JSONDecodeError, ValueError):
                         pass
+
+                if not session_new:
+                    continue
+
+                # Snapshot BEFORE the LLM call: record max ts seen in this batch
+                wm_updates[wm_key] = max(m["ts"] for m in session_new)
+                all_new.extend(session_new)
 
             if not all_new:
                 logger.debug("[SCHEDULER] analyse_recent_conversations: no new messages for %s", uc)
@@ -298,8 +306,8 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
             )
 
             # ── Update watermarks (analysis succeeded) ────────────────────
-            for wm_key, new_wm in wm_updates.items():
-                r.set(wm_key, new_wm, ex=CHAT_LOG_TTL)
+            for wm_key, new_wm_ts in wm_updates.items():
+                r.set(wm_key, new_wm_ts, ex=CHAT_LOG_TTL)
 
             # ── Apply results ─────────────────────────────────────────────
             importance     = analysis.get("importance", 0)

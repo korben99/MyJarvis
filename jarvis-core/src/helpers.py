@@ -46,6 +46,7 @@ LLM calls
 
 LLM parsing
   extract_llm_json(raw)             -> dict  (raises json.JSONDecodeError on failure)
+  filter_think_chunk(chunk, in_think) -> (visible_text, new_in_think)  (streaming)
 
 Weather
   WEATHER_CODES                     -> dict[int, str]
@@ -366,6 +367,36 @@ def _repair_json(text: str) -> str:
       Pattern: a bare word followed by `":` that is NOT already preceded by `"`.
     """
     return re.sub(r'(?<!")\b([a-zA-Z_]\w*)(":\s*)', r'"\1\2', text)
+
+
+def filter_think_chunk(chunk: str, in_think: bool) -> tuple[str, bool]:
+    """Filter <think>…</think> blocks from a single SSE streaming chunk.
+
+    Unlike a simple ``"<think>" in chunk`` flag, this correctly handles chunks
+    that carry *visible text before* an opening tag or *after* a closing tag —
+    cases the flag-only approach silently dropped.
+
+    Returns:
+        (visible_text, new_in_think_state)
+    """
+    visible: list[str] = []
+    while chunk:
+        if not in_think:
+            pos = chunk.find("<think>")
+            if pos == -1:
+                visible.append(chunk)
+                break
+            if pos > 0:
+                visible.append(chunk[:pos])
+            chunk = chunk[pos + 7:]  # advance past <think>
+            in_think = True
+        else:
+            pos = chunk.find("</think>")
+            if pos == -1:
+                break  # discard remainder — still inside think block
+            chunk = chunk[pos + 8:]  # advance past </think>
+            in_think = False
+    return "".join(visible), in_think
 
 
 def extract_llm_json(text: str) -> dict:

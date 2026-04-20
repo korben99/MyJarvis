@@ -96,13 +96,12 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
     ],
     # ── Emails / Gmail ───────────────────────────────────────────────────────
     "gmail": [
-        "mes mails",
+        "lit mon dernier mail",
+        "lit mes mails non lus",
+        "lit mes mails",
         "vérifie mes emails",
-        "nouveaux mails ?",
-        "résume mes emails d'aujourd'hui",
-        "montre-moi mes messages récents",
-        "emails avec le mot facture",
-        "j'ai reçu quelque chose d'important ?",
+        "résume mes emails non lus",
+        "recherche dans mes mails",
         "check mes mails",
         "regarde dans mes mails",
     ],

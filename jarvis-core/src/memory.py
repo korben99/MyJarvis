@@ -81,28 +81,44 @@ logger = get_logger("jarvis-memory")
 MODEL_CACHE_DIR = os.getenv("MODEL_CACHE_DIR", "/opt/jarvis/jarvis-core/JarvisData/model_cache")
 _embed_model = None
 _embed_lock = Lock()
+
+def _best_device() -> str:
+    """Return 'mps' on Apple Silicon, 'cuda' if available, else 'cpu'."""
+    try:
+        import torch
+        if torch.backends.mps.is_available():
+            return "mps"
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
 def get_embed_model():
     global _embed_model
     if _embed_model is None:
         with _embed_lock:
             if _embed_model is None:
                 os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
+                device = _best_device()
                 try:
                     # Fast path: model already on disk, no network call
                     _embed_model = SentenceTransformer(
                         EMBED_MODEL_NAME,
                         cache_folder=MODEL_CACHE_DIR,
                         local_files_only=True,
+                        device=device,
                     )
-                    logger.info("Embedding model loaded from local cache (%s)", MODEL_CACHE_DIR)
+                    logger.info("Embedding model loaded from local cache (%s) on %s", MODEL_CACHE_DIR, device)
                 except Exception:
                     # First run or cache missing — download from HuggingFace
                     logger.info("Downloading embedding model from HuggingFace (one-time)...")
                     _embed_model = SentenceTransformer(
                         EMBED_MODEL_NAME,
                         cache_folder=MODEL_CACHE_DIR,
+                        device=device,
                     )
-                    logger.info("Embedding model downloaded and cached at %s", MODEL_CACHE_DIR)
+                    logger.info("Embedding model downloaded and cached at %s on %s", MODEL_CACHE_DIR, device)
     return _embed_model
 
 
@@ -128,6 +144,7 @@ def set_working_memory(session_id: str, key: str, value: str, ttl: int = 86400):
 
 _CONCERN_DECAY_PER_HOUR = 0.05   # concern loses 0.05/h → fully decayed in 20h
 _ENERGY_DECAY_PER_HOUR  = 0.02   # energy drifts back to 0.7 baseline at 0.02/h
+_emotional_state_lock   = Lock()  # guards the read-modify-write decay cycle
 
 def get_emotional_state() -> dict:
     """Get Jarvis's current emotional state, with time-based decay applied.
@@ -144,47 +161,48 @@ def get_emotional_state() -> dict:
         "concern": 0.0,
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }
-    state = redis_get_json("jarvis:emotional_state")
-    if not state:
-        return _default
+    with _emotional_state_lock:
+        state = redis_get_json("jarvis:emotional_state")
+        if not state:
+            return _default
 
-    last_updated = state.get("last_updated")
-    if last_updated:
-        try:
-            elapsed_h = (
-                datetime.now(timezone.utc) - datetime.fromisoformat(last_updated)
-            ).total_seconds() / 3600
+        last_updated = state.get("last_updated")
+        if last_updated:
+            try:
+                elapsed_h = (
+                    datetime.now(timezone.utc) - datetime.fromisoformat(last_updated)
+                ).total_seconds() / 3600
 
-            changed = False
+                changed = False
 
-            # concern → decay toward 0.0
-            concern = state.get("concern", 0.0)
-            if concern > 0:
-                new_concern = max(0.0, concern - elapsed_h * _CONCERN_DECAY_PER_HOUR)
-                if abs(new_concern - concern) > 0.001:
-                    state["concern"] = round(new_concern, 3)
-                    changed = True
+                # concern → decay toward 0.0
+                concern = state.get("concern", 0.0)
+                if concern > 0:
+                    new_concern = max(0.0, concern - elapsed_h * _CONCERN_DECAY_PER_HOUR)
+                    if abs(new_concern - concern) > 0.001:
+                        state["concern"] = round(new_concern, 3)
+                        changed = True
 
-            # energy → drift toward 0.7 baseline
-            energy = state.get("energy", 0.7)
-            if abs(energy - 0.7) > 0.001:
-                direction = 1 if energy < 0.7 else -1
-                new_energy = energy + direction * elapsed_h * _ENERGY_DECAY_PER_HOUR
-                # Don't overshoot baseline
-                if direction == 1:
-                    new_energy = min(0.7, new_energy)
-                else:
-                    new_energy = max(0.7, new_energy)
-                if abs(new_energy - energy) > 0.001:
-                    state["energy"] = round(new_energy, 3)
-                    changed = True
+                # energy → drift toward 0.7 baseline
+                energy = state.get("energy", 0.7)
+                if abs(energy - 0.7) > 0.001:
+                    direction = 1 if energy < 0.7 else -1
+                    new_energy = energy + direction * elapsed_h * _ENERGY_DECAY_PER_HOUR
+                    # Don't overshoot baseline
+                    if direction == 1:
+                        new_energy = min(0.7, new_energy)
+                    else:
+                        new_energy = max(0.7, new_energy)
+                    if abs(new_energy - energy) > 0.001:
+                        state["energy"] = round(new_energy, 3)
+                        changed = True
 
-            if changed:
-                state["last_updated"] = datetime.now(timezone.utc).isoformat()
-                redis_set_json("jarvis:emotional_state", state)
+                if changed:
+                    state["last_updated"] = datetime.now(timezone.utc).isoformat()
+                    redis_set_json("jarvis:emotional_state", state)
 
-        except (ValueError, TypeError):
-            pass
+            except (ValueError, TypeError):
+                pass
 
     return state
 
@@ -299,8 +317,15 @@ def _normalize_profile_key(user_code: str, new_key: str, existing_keys: list[str
     if not existing_keys or new_key in existing_keys:
         return None
 
+    # Stage 0: case-insensitive exact match (e.g. option:si vs option:SI) — no LLM needed
+    new_key_lower = new_key.lower()
+    for k in existing_keys:
+        if k.lower() == new_key_lower and k != new_key:
+            logger.info("User %s profile key '%s' → case match '%s' (no LLM)", user_code, new_key, k)
+            return k
+
     # Stage 1: scalar canonical alias
-    stripped = new_key.lower().replace("-", "_").replace(" ", "_")
+    stripped = new_key_lower.replace("-", "_").replace(" ", "_")
     if stripped in _SCALAR_CANONICAL:
         canonical = _SCALAR_CANONICAL[stripped]
         if canonical in existing_keys:
@@ -335,7 +360,7 @@ def _normalize_profile_key(user_code: str, new_key: str, existing_keys: list[str
             api_url=ROUTER_API_URL,
             api_key=ROUTER_API_KEY,
             temperature=0.1,
-            max_tokens=80,
+            max_tokens=150,
             json_response=True,
             no_think=True,
             timeout=ROUTER_TIMEOUT,
@@ -1001,6 +1026,20 @@ def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str 
         return []
 
 
+async def async_search_memory(
+    user_code: str, query: str, limit: int = 5, memory_scope: str = "auto"
+) -> list:
+    """Async-safe wrapper for search_memory.
+
+    search_memory calls model.encode() which is CPU/GPU-bound and synchronous.
+    Calling it directly from an async route would block the event loop.
+    This wrapper always delegates to a thread pool — callers never need to
+    remember to wrap it themselves.
+    """
+    import asyncio
+    return await asyncio.to_thread(search_memory, user_code, query, limit, memory_scope)
+
+
 # ══════════════════════════════════════════════════
 #  SELF MEMORY LOCK
 # ══════════════════════════════════════════════════
@@ -1216,7 +1255,6 @@ def build_memory_context(
 
     # User profile — namespaced keys (hobby:kart) are grouped by category for readability
     if profile:
-        parts.append("## PROFIL UTILISATEUR")
         grouped: dict[str, list[str]] = {}
         scalars: list[tuple[str, str]] = []
         for k, v in profile.items():
@@ -1225,16 +1263,14 @@ def build_memory_context(
                 grouped.setdefault(category, []).append(f"{subkey}={v}")
             else:
                 scalars.append((k, v))
-        for k, v in scalars:
-            parts.append(f"- {k}: {v}")
-        for category, values in grouped.items():
-            parts.append(f"- {category}: {', '.join(values)}")
+        plines = [f"- {k}: {v}" for k, v in scalars]
+        plines += [f"- {cat}: {', '.join(vals)}" for cat, vals in grouped.items()]
+        parts.append("<profil_utilisateur>\n" + "\n".join(plines) + "\n</profil_utilisateur>")
 
     # User preferences
     if prefs:
-        parts.append("\n## PRÉFÉRENCES")
-        for k, v in prefs.items():
-            parts.append(f"- {k}: {v}")
+        plines = [f"- {k}: {v}" for k, v in prefs.items()]
+        parts.append("<preferences>\n" + "\n".join(plines) + "\n</preferences>")
 
     # Active projects only — done projects are not useful context for chat
     try:
@@ -1243,9 +1279,8 @@ def build_memory_context(
         projects = []
     active_projects = [p for p in projects if isinstance(p, dict) and p.get("status") != "done"]
     if active_projects:
-        parts.append("\n## PROJETS ACTIFS")
-        for p in active_projects:
-            parts.append(f"- {p.get('name', 'sans nom')}")
+        plines = [f"- {p.get('name', 'sans nom')}" for p in active_projects]
+        parts.append("<projets_actifs>\n" + "\n".join(plines) + "\n</projets_actifs>")
 
     # Emotional state
     try:
@@ -1255,26 +1290,19 @@ def build_memory_context(
     if not emotion:
         emotion = {"mood": "neutral", "energy": 0.7, "confidence": 0.8, "curiosity": 0.6, "concern": 0.0}
     if emotion.get("mood") != "neutral":
-        parts.append("\n## ÉTAT ÉMOTIONNEL")
-        parts.append(f"Humeur actuelle : {emotion['mood']}")
+        parts.append(f"<etat_emotionnel>\nHumeur actuelle : {emotion['mood']}\n</etat_emotionnel>")
 
     # Self identity
     if self_mem.get("learnings"):
         recent_learnings = self_mem["learnings"][-3:]
-        parts.append("\n## APPRENTISSAGES RÉCENTS")
-        for ln in recent_learnings:
-            parts.append(f"- {ln['text']}")
+        plines = [f"- {ln['text']}" for ln in recent_learnings]
+        parts.append("<apprentissages_recents>\n" + "\n".join(plines) + "\n</apprentissages_recents>")
 
-    # User Timeline
+    # User Timeline — sorted by importance+recency desc, top 5
     timeline = get_user_timeline(user_code)
-
     if timeline:
-        parts.append("\n## FRISE CHRONOLOGIQUE")
-
-        # timeline is already sorted by importance+recency desc — take the top 5
-        for event in timeline[:5]:
-            rel = rel_time_fr(event["timestamp"])
-            parts.append(f"({rel}) {event['text']}")
+        plines = [f"({rel_time_fr(event['timestamp'])}) {event['text']}" for event in timeline[:5]]
+        parts.append("<frise_chronologique>\n" + "\n".join(plines) + "\n</frise_chronologique>")
 
     # Tomorrow suggestions — written by nightly review, consumed today.
     # Skipped for pure utility intents (weather/calendar/gmail) — irrelevant noise.
@@ -1284,9 +1312,8 @@ def build_memory_context(
         except Exception:
             suggestions = []
         if suggestions:
-            parts.append("\n## SUJETS À ABORDER")
-            for s in suggestions:
-                parts.append(f"- {s}")
+            plines = [f"- {s}" for s in suggestions]
+            parts.append("<sujets_a_aborder>\n" + "\n".join(plines) + "\n</sujets_a_aborder>")
 
     # User relation — always injected so every conversation has a tonal directive.
     # self_mem is already loaded at the top of this function (no extra I/O).
@@ -1294,12 +1321,15 @@ def build_memory_context(
     rel = {**_default_rel, **self_mem.get("user_relations", {}).get(user_code, {})}
     _aff = rel["affinity"]
     _aff_label = "forte" if _aff >= 0.8 else "bonne" if _aff >= 0.6 else "modérée" if _aff >= 0.4 else "faible"
-    parts.append("\n## RELATION")
-    parts.append(f"- Affinité : {_aff_label}")
-    parts.append(f"- Style de communication préféré : {rel['interaction_style']}")
-    parts.append(f"- Humeur moyenne des échanges : {rel['average_interaction_mood']}")
+    parts.append(
+        f"<relation>\n"
+        f"- Affinité : {_aff_label}\n"
+        f"- Style de communication préféré : {rel['interaction_style']}\n"
+        f"- Humeur moyenne des échanges : {rel['average_interaction_mood']}\n"
+        f"</relation>"
+    )
 
-    return "\n".join(parts) if parts else ""
+    return "\n\n".join(parts) if parts else ""
 
 
 # ══════════════════════════════════════════════════

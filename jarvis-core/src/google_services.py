@@ -543,6 +543,8 @@ def send_gmail_message(
 _CALENDAR_WRITE_KEYWORDS = (
     # crée
     "crée un rendez-vous",
+    "crée un rdv",
+    "crée une réunion",
     # ajoute
     "ajoutes un rendez-vous",
     "ajoutes un rendez vous",
@@ -561,16 +563,8 @@ _CALENDAR_WRITE_KEYWORDS = (
     # planifie
     "planifie une réunion",
     # mets
-    "mets dans mon agenda",
     "mets un rdv",
     "mets un rendez-vous",
-    # prends rdv
-    "prendre rendez-vous",
-    "dans mon agenda",
-    # nouveau
-    "nouveau rendez-vous",
-    "nouvel événement",
-    "nouvelle réunion",
 )
 
 
@@ -603,6 +597,7 @@ _TEMPORAL_WORDS = {
     "soir",
     "midi",
     "après-midi",
+    "bientôt",
 }
 
 
@@ -680,8 +675,6 @@ async def extract_calendar_event_llm(message: str) -> dict | None:
 # ══════════════════════════════════════════════════
 #  CALENDAR WRITE — API CALLS
 # ══════════════════════════════════════════════════
-
-
 def _invalidate_calendar_cache() -> None:
     """Delete all Google calendar Redis cache entries so next read is fresh."""
     try:

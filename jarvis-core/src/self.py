@@ -89,6 +89,39 @@ from trade_keys import idx_key, pos_key
 
 logger = get_logger("jarvis-self")
 
+# ── Namespace guards for correct_profile ─────────────────────────────────
+# Each entry describes one protected domain: which key prefixes belong to it
+# and which terms must appear in the value for the write to be allowed.
+# Add a new domain here without touching _action_correct_profile logic.
+# extra_check: optional callable(value_lower) -> bool for non-keyword rules.
+_NS_GUARDS: list[dict] = [
+    {
+        "name": "financial",
+        "key_prefixes": frozenset({
+            "placement", "capital", "per", "pea", "livret_a",
+            "investissement", "epargne",
+        }),
+        "required_terms": frozenset({
+            "€", "$", "%", "fonds", "fond", "etf", "action", "obligation",
+            "livret", "pea", "per", "scpi", "crypto", "bourse", "placement",
+            "investissement", "epargne", "portefeuille", "rendement", "taux",
+            "assurance", "virement", "depot", "retrait", "titre",
+        }),
+        "extra_check": lambda v: any(c.isdigit() for c in v),
+        "error_hint": "financial context (amount, fund name, asset type, %, €, etc.)",
+    },
+    {
+        "name": "travel",
+        "key_prefixes": frozenset({"travel_plans", "travel_preference", "voyages_prevus"}),
+        "required_terms": frozenset({
+            "voyage", "travel", "trip", "vacances", "destination", "hotel", "vol",
+            "billet", "trajet", "sejour", "partir", "avion", "train", "city", "ville",
+        }),
+        "extra_check": None,
+        "error_hint": "travel context",
+    },
+]
+
 # ── Redis keys ────────────────────────────────────────────────────────────
 _REFLECTION_LOG_KEY = "jarvis:self:reflection_log"
 _REFLECTION_LOG_MAX = 30
@@ -481,9 +514,10 @@ def _fmt_user_profiles() -> str:
         profile = {k: v for k, v in get_user_profile(code).items() if v}
         if not profile:
             continue
-        lines = [f"## PROFIL {name} ({code})"]
+        lines = [f"<profil user=\"{name}\" code=\"{code}\">"]
         for k, v in list(profile.items())[:20]:  # cap at 20 keys for token budget
             lines.append(f"  {k} = {str(v)[:80]}")
+        lines.append("</profil>")
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks) or "  No profiles."
 
@@ -908,53 +942,29 @@ def _action_correct_profile(params: dict) -> str:
 
     # ── Namespace protection: block cross-domain value contamination ────────
     # Prevents reflection from writing hobby/travel/unrelated values into
-    # financial keys (e.g. placement:amp20 = "pilote de kart").
+    # domain-specific keys (e.g. placement:amp20 = "pilote de kart").
+    # Guard rules are declared in _NS_GUARDS at module level — add new
+    # domains there without touching this function.
     if value is not None:
         _key_prefix_ns = key.split(":")[0]
         _value_lower = value.lower()
-        _FINANCIAL_NS = frozenset({
-            "placement", "capital", "per", "pea", "livret_a",
-            "investissement", "epargne",
-        })
-        _FINANCIAL_TERMS = frozenset({
-            "€", "$", "%", "fonds", "fond", "etf", "action", "obligation",
-            "livret", "pea", "per", "scpi", "crypto", "bourse", "placement",
-            "investissement", "epargne", "portefeuille", "rendement", "taux",
-            "assurance", "virement", "depot", "retrait", "titre",
-        })
-        _TRAVEL_NS = frozenset({"travel_plans", "travel_preference", "voyages_prevus"})
-        _TRAVEL_TERMS = frozenset({
-            "voyage", "travel", "trip", "vacances", "destination", "hotel", "vol",
-            "billet", "trajet", "sejour", "partir", "avion", "train", "city", "ville",
-        })
 
-        if _key_prefix_ns in _FINANCIAL_NS or key in _FINANCIAL_NS:
-            _has_financial = any(t in _value_lower for t in _FINANCIAL_TERMS) or any(
-                c.isdigit() for c in _value_lower
-            )
-            if not _has_financial:
+        for _guard in _NS_GUARDS:
+            _in_ns = _key_prefix_ns in _guard["key_prefixes"] or key in _guard["key_prefixes"]
+            if not _in_ns:
+                continue
+            _has_match = any(t in _value_lower for t in _guard["required_terms"])
+            if not _has_match and _guard["extra_check"]:
+                _has_match = _guard["extra_check"](_value_lower)
+            if not _has_match:
                 logger.warning(
                     "Self correct_profile: BLOCKED '%s' = '%s' for %s — "
-                    "financial namespace requires financial context (namespace protection)",
-                    key, value, user_code,
+                    "%s namespace requires %s (namespace protection)",
+                    key, value, user_code, _guard["name"], _guard["error_hint"],
                 )
                 return (
                     f"correct_profile: BLOCKED '{key}' = '{value}' — "
-                    "financial namespace requires a value with financial context "
-                    "(amount, fund name, asset type, %, €, etc.)"
-                )
-
-        if key in _TRAVEL_NS or _key_prefix_ns in _TRAVEL_NS:
-            _has_travel = any(t in _value_lower for t in _TRAVEL_TERMS)
-            if not _has_travel:
-                logger.warning(
-                    "Self correct_profile: BLOCKED '%s' = '%s' for %s — "
-                    "travel namespace requires travel context (namespace protection)",
-                    key, value, user_code,
-                )
-                return (
-                    f"correct_profile: BLOCKED '{key}' = '{value}' — "
-                    "travel namespace requires a value with travel context"
+                    f"{_guard['name']} namespace requires {_guard['error_hint']}"
                 )
 
     update_user_profile(user_code, key, value if value is not None else None)
