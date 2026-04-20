@@ -12,6 +12,7 @@ class JarvisAPI: ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var isProcessing = false
     @Published var activeNetwork: NetworkRoute = .unknown
+    @Published var thinkingText: String = ""
 
     private var localServerURL = ""
     private var vpnServerURL   = ""
@@ -112,7 +113,11 @@ class JarvisAPI: ObservableObject {
         let assistantID = assistantMessage.id
 
         isProcessing = true
-        defer { isProcessing = false }
+        thinkingText = ""
+        defer {
+            isProcessing = false
+            thinkingText = ""   // safety net: always cleared when sendMessage exits
+        }
 
         // Re-resolve if we don't have a working URL (initial state, or cleared after a failure).
         if resolvedURL.isEmpty {
@@ -172,9 +177,16 @@ class JarvisAPI: ObservableObject {
                       let chunk = try? JSONDecoder().decode(StreamChunk.self, from: data)
                 else { continue }
 
-                if let content = chunk.content { pendingContent += content }
+                if let think = chunk.think {
+                    thinkingText += think
+                }
+                if let content = chunk.content {
+                    if !thinkingText.isEmpty { thinkingText = "" }  // thinking phase ended
+                    pendingContent += content
+                }
 
                 let isDone = chunk.done == true
+                if isDone { thinkingText = "" }
                 let now = ContinuousClock.now
                 if isDone || now - lastFlush >= .milliseconds(100) {
                     if let pos = messages.firstIndex(where: { $0.id == assistantID }) {

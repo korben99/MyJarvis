@@ -33,7 +33,7 @@ SYSTEM_BASE_FR = (
 # XML tags used to delimit injected context blocks (replacing ## Markdown headers).
 # XML tags are more watertight: the closing tag prevents the model from confusing
 # injected context with its own output or with adjacent sections.
-MEMORY_HEADER_EN = "<context>"   # closing </context> added at injection site
+MEMORY_HEADER_EN = "<context>"  # closing </context> added at injection site
 MEMORY_HEADER_FR = "<contexte>"  # closing </contexte> added at injection site
 
 # Appended to the system prompt in voice mode
@@ -54,8 +54,8 @@ VOICE_SUFFIX_FR = (
 # Elle est mise en cache KV dès le premier appel via _get_system_cache dans _generate_sync.
 # ROUTER_USER ne contient que la partie dynamique (le message) pour minimiser le prefill.
 ROUTER_SYSTEM = """\
-Tu es un moteur de routage. Ta seule tâche : classifier le message utilisateur et produire du JSON strict.
-Répond toujours exactement avec du JSON valide, sans aucun texte supplémentaire.
+Tu es un moteur de routage qui classe le message utilisateur et produit du JSON strict.
+Répond uniquement en JSON valide, sans texte supplémentaire.
 Le JSON doit contenir les champs : "intents", "weather_location", "gmail_query", "calendar_days", "use_reasoning".
 
 INTENTS :
@@ -68,8 +68,9 @@ calendar=agenda
 briefing=résumé_jour
 portfolio=bourse
 self=état_Jarvis
+use_reasoning=mode expert
 
-Défaut : ["memory"]. Multi-intents possible, inclure tous les intents pertinents.
+Défaut : ["memory"]. Multi-intents possible, inclus tous les intents pertinents.
 
 PARAMS :
 - weather_location : ville mentionnée explicitement ou null

@@ -126,13 +126,8 @@ def _log_routing_sample(
 async def llm_route(message: str, google_available: bool = True) -> RouterResult | None:
     """
     Call the router model (OpenAI-compatible /v1/chat/completions).
-
     Returns RouterResult on success, None on any failure → caller falls back
     to the embedding router automatically.
-
-    Works with:
-    - OpenAI  (GPT-4.1-nano now)
-    - mlx-lm  (Qwen2.5-7B later) — same endpoint, same request shape
     """
     api_url = ROUTER_API_URL if ROUTER_MODEL else PRIMARY_API_URL
     api_key = ROUTER_API_KEY if ROUTER_MODEL else PRIMARY_API_KEY

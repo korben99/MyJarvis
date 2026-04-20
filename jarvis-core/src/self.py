@@ -672,15 +672,20 @@ async def _call_user_reflection_llm(
     ]
     for attempt in range(2):
         try:
+            # On first attempt: allow thinking (improves profile decision quality).
+            # On retry: disable thinking — the token budget was likely exhausted by
+            # the think block leaving no room for JSON output, which is why we got
+            # an empty response.  Without thinking the model outputs JSON directly.
+            use_think = attempt == 0
             content = await call_llm_async(
                 messages,
                 model=REASONING_MODEL,
                 api_url=REASONING_API_URL,
                 api_key=REASONING_API_KEY,
                 temperature=0.2,
-                max_tokens=THINKING_BUDGET_TOKENS + 1500,  # think block + action JSON
+                max_tokens=THINKING_BUDGET_TOKENS + 1500 if use_think else 1500,
                 json_response=True,
-                no_think=False,  # thinking improves profile decision quality
+                no_think=not use_think,
                 timeout=90.0,
             )
             return extract_llm_json(content)

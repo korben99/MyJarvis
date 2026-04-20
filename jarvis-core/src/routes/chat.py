@@ -753,10 +753,14 @@ async def chat(req: ChatRequest):
                     full_parts.append(chunk)
 
                     # ── Think filtering ─────────────────────────────────────
-                    # filter_think_chunk handles text before <think> and after
-                    # </think> in the same chunk — cases the old flag-only
-                    # approach silently dropped.
-                    clean, in_think = filter_think_chunk(chunk, in_think)
+                    # filter_think_chunk splits each chunk into visible text and
+                    # think-block content. Think fragments are forwarded as a
+                    # separate SSE event so the iOS client can display them as a
+                    # live ticker without mixing them into the chat bubble.
+                    clean, think_frag, in_think = filter_think_chunk(chunk, in_think)
+
+                    if think_frag:
+                        yield f"data: {json.dumps({'think': think_frag})}\n\n"
 
                     if first_chunk:
                         clean = clean.lstrip("\n")

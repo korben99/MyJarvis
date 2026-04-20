@@ -18,6 +18,7 @@ struct ChatView: View {
     // suspended so they can read earlier content. Resets when a new message
     // arrives or streaming ends.
     @State private var isAutoScrollEnabled = true
+    @State private var showThinking = false
 
     var body: some View {
         NavigationStack {
@@ -107,8 +108,24 @@ struct ChatView: View {
                 }
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
+            .onChange(of: api.thinkingText.isEmpty) { _, isEmpty in
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showThinking = !isEmpty && api.isProcessing
+                }
+            }
+            .onChange(of: api.isProcessing) { _, processing in
+                if !processing {
+                    withAnimation(.easeInOut(duration: 0.2)) { showThinking = false }
+                }
+            }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 0) {
+                    // Thinking ticker — visible during the <think> phase only
+                    if showThinking {
+                        ThinkingBanner(text: api.thinkingText)
+                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
+
                     // Image preview strip
                     if let img = selectedImage {
                         HStack {

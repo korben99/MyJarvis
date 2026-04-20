@@ -391,8 +391,8 @@ User message
     → Pending trade alerts injected if any are queued
     → Self context injected: internal state (focus, goals, last action)
                            + per-user relation (affinity, style, tonal directives)
-    → user_content = dynamic_prefix + assembled_context + raw_message
-      (stored in Redis history with \x00 separator; stripped on /history endpoint)
+    → user_content = dynamic_prefix + assembled_context + ## MESSAGE UTILISATEUR + raw_message
+      (stored in Redis history; /history endpoint returns the raw message for display)
     → Tier 2 PRIMARY or Tier 3 REASONING (messages list + session KV cache → streaming)
     →   MLX KV cache: only new tokens computed from turn 2 onward (session_id scoped)
     →   streaming via shared per-timeout httpx.AsyncClient (connection pool reused)

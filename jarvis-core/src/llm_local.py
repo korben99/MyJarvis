@@ -782,6 +782,9 @@ async def stream_local(
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[str | None] = asyncio.Queue()
+    # Set by the finally block when the caller (SSE generator) is cancelled so the
+    # worker thread can stop generating tokens instead of running to completion.
+    stop_flag = threading.Event()
 
     # ====DEBUG====
     import time as _time
@@ -854,6 +857,9 @@ async def stream_local(
                 **({"prompt_cache": kv_cache} if kv_cache is not None else {}),
                 **quant_kwargs,
             ):
+                if stop_flag.is_set():
+                    break
+
                 if chunk.text:
                     text = chunk.text
                     stop_hit = False
@@ -929,4 +935,9 @@ async def stream_local(
                 break
             yield chunk
     finally:
+        # Signal the worker to stop (no-op if it already finished normally).
+        # This prevents the MLX generation loop from continuing to run after a
+        # client disconnect (CancelledError), which would otherwise hold the
+        # GPU busy and make a second concurrent inference possible.
+        stop_flag.set()
         _infer_lock.release()

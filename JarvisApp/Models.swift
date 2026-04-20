@@ -51,8 +51,9 @@ struct ChatRequest: Codable {
 
 struct StreamChunk: Codable {
     let content: String?
-    let done: Bool?
-    let model: String?
+    let think:   String?
+    let done:    Bool?
+    let model:   String?
     let duration_ms: Int?
 }
 

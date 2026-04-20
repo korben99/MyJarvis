@@ -298,13 +298,26 @@ def rel_time_fr(ts: float) -> str:
 
 
 def normalize_key(s: str) -> str:
-    """Normalize a string for case- and accent-insensitive comparison.
-
-    Strips diacritics (NFD decomposition → ASCII), lowercases.
-    Used for Redis profile key deduplication.
-    Examples: 'Spécialité' → 'specialite', 'option:SI' → 'option:si'
     """
-    return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode().lower()
+    Strong normalization for profile keys:
+    - lowercase
+    - remove accents
+    - normalize separators (space, dash → underscore)
+    - trim
+    - collapse multiple underscores
+    """
+    if not s:
+        return ""
+    # Unicode normalize + remove accents
+    s = unicodedata.normalize("NFKD", s)
+    s = s.encode("ascii", "ignore").decode("ascii")
+    # Lowercase + trim
+    s = s.lower().strip()
+    # Normalize separators
+    s = s.replace("-", "_").replace(" ", "_")
+    # Collapse multiple underscores
+    s = re.sub(r"_+", "_", s)
+    return s
 
 
 # ══════════════════════════════════════════════════
@@ -370,6 +383,7 @@ def redis_set_json(key: str, data, ttl: int | None = None) -> None:
 #  LLM JSON EXTRACTION
 # ══════════════════════════════════════════════════
 
+
 def _repair_json(text: str) -> str:
     """Best-effort repair of common LLM JSON generation mistakes.
 
@@ -380,17 +394,17 @@ def _repair_json(text: str) -> str:
     return re.sub(r'(?<!")\b([a-zA-Z_]\w*)(":\s*)', r'"\1\2', text)
 
 
-def filter_think_chunk(chunk: str, in_think: bool) -> tuple[str, bool]:
-    """Filter <think>…</think> blocks from a single SSE streaming chunk.
+def filter_think_chunk(chunk: str, in_think: bool) -> tuple[str, str, bool]:
+    """Split a single SSE chunk into visible text and think-block content.
 
-    Unlike a simple ``"<think>" in chunk`` flag, this correctly handles chunks
-    that carry *visible text before* an opening tag or *after* a closing tag —
-    cases the flag-only approach silently dropped.
+    Correctly handles chunks that carry text *before* an opening tag or *after*
+    a closing tag — cases a simple flag-only approach silently drops.
 
     Returns:
-        (visible_text, new_in_think_state)
+        (visible_text, think_fragment, new_in_think_state)
     """
     visible: list[str] = []
+    thinking: list[str] = []
     while chunk:
         if not in_think:
             pos = chunk.find("<think>")
@@ -399,15 +413,17 @@ def filter_think_chunk(chunk: str, in_think: bool) -> tuple[str, bool]:
                 break
             if pos > 0:
                 visible.append(chunk[:pos])
-            chunk = chunk[pos + 7:]  # advance past <think>
+            chunk = chunk[pos + 7 :]  # advance past <think>
             in_think = True
         else:
             pos = chunk.find("</think>")
             if pos == -1:
-                break  # discard remainder — still inside think block
-            chunk = chunk[pos + 8:]  # advance past </think>
+                thinking.append(chunk)  # whole remainder is think content
+                break
+            thinking.append(chunk[:pos])
+            chunk = chunk[pos + 8 :]  # advance past </think>
             in_think = False
-    return "".join(visible), in_think
+    return "".join(visible), "".join(thinking), in_think
 
 
 def extract_llm_json(text: str) -> dict:
@@ -524,7 +540,9 @@ def _llm_headers(api_key: str) -> dict:
     }
 
 
-_LOCAL_DEFAULT_MAX_TOKENS = 10000  # global ceiling — thinking + output are counted together in mlx-lm
+_LOCAL_DEFAULT_MAX_TOKENS = (
+    10000  # global ceiling — thinking + output are counted together in mlx-lm
+)
 
 
 def _llm_body(
@@ -587,9 +605,7 @@ def call_llm(
     resp = _get_llm_sync_client().post(
         f"{api_url}/chat/completions",
         headers=_llm_headers(api_key),
-        json=_llm_body(
-            messages, model, temperature, max_tokens, json_response
-        ),
+        json=_llm_body(messages, model, temperature, max_tokens, json_response),
         timeout=timeout,
     )
     resp.raise_for_status()
@@ -627,9 +643,7 @@ async def call_llm_async(
     resp = await _get_llm_async_client().post(
         f"{api_url}/chat/completions",
         headers=_llm_headers(api_key),
-        json=_llm_body(
-            messages, model, temperature, max_tokens, json_response
-        ),
+        json=_llm_body(messages, model, temperature, max_tokens, json_response),
         timeout=timeout,
     )
     resp.raise_for_status()

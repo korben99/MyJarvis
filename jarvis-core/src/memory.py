@@ -26,34 +26,29 @@ Compression memory added, to be runned every month.
 
 """
 
-import hashlib
 import json
 import os
-import pickle
-from collections import Counter
 import tempfile
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from threading import Lock
-
-from qdrant_client.models import PointIdsList
-from sentence_transformers import SentenceTransformer
 
 from config import (
     AUTOBIO_DEDUP_THRESHOLD,
     AUTOBIO_IMPORTANCE_THRESHOLD,
     AUTOBIO_RECENCY_WINDOW_DAYS,
-    EPISODIC_RETENTION_DAYS,
     CHAT_LOG_TTL,
-    DONE_PROJECT_TTL_DAYS,
     CHAT_MAX_MESSAGES,
+    DONE_PROJECT_TTL_DAYS,
     EMBED_MODEL_NAME,
+    EPISODIC_RETENTION_DAYS,
     IMPORTANCE_THRESHOLD,
+    MEMORY_CONSOLIDATION_IMPORTANCE,
+    MEMORY_DECAY_DURABLE_MIN,
     MEMORY_DECAY_FACTOR,
     MEMORY_DECAY_THRESHOLD,
-    MEMORY_DECAY_DURABLE_MIN,
-    MEMORY_CONSOLIDATION_IMPORTANCE,
     NOVELTY_THRESHOLD,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
@@ -71,21 +66,35 @@ from config import (
     SELF_MEMORY_PATH,
     USER_CODES,
 )
-
-from helpers import call_llm, extract_llm_json, get_logger, get_qdrant, get_redis, normalize_key, redis_get_json, redis_set_json, rel_time_fr
-
+from helpers import (
+    call_llm,
+    extract_llm_json,
+    get_logger,
+    get_qdrant,
+    get_redis,
+    normalize_key,
+    redis_get_json,
+    redis_set_json,
+    rel_time_fr,
+)
+from qdrant_client.models import PointIdsList
+from sentence_transformers import SentenceTransformer
 
 logger = get_logger("jarvis-memory")
 
 # ── Embedding model — local-first, HF fallback ───────────────────────────
-MODEL_CACHE_DIR = os.getenv("MODEL_CACHE_DIR", "/opt/jarvis/jarvis-core/JarvisData/model_cache")
+MODEL_CACHE_DIR = os.getenv(
+    "MODEL_CACHE_DIR", "/opt/jarvis/jarvis-core/JarvisData/model_cache"
+)
 _embed_model = None
 _embed_lock = Lock()
+
 
 def _best_device() -> str:
     """Return 'mps' on Apple Silicon, 'cuda' if available, else 'cpu'."""
     try:
         import torch
+
         if torch.backends.mps.is_available():
             return "mps"
         if torch.cuda.is_available():
@@ -93,6 +102,7 @@ def _best_device() -> str:
     except Exception:
         pass
     return "cpu"
+
 
 def get_embed_model():
     global _embed_model
@@ -109,18 +119,27 @@ def get_embed_model():
                         local_files_only=True,
                         device=device,
                     )
-                    logger.info("Embedding model loaded from local cache (%s) on %s", MODEL_CACHE_DIR, device)
+                    logger.info(
+                        "Embedding model loaded from local cache (%s) on %s",
+                        MODEL_CACHE_DIR,
+                        device,
+                    )
                 except Exception:
                     # First run or cache missing — download from HuggingFace
-                    logger.info("Downloading embedding model from HuggingFace (one-time)...")
+                    logger.info(
+                        "Downloading embedding model from HuggingFace (one-time)..."
+                    )
                     _embed_model = SentenceTransformer(
                         EMBED_MODEL_NAME,
                         cache_folder=MODEL_CACHE_DIR,
                         device=device,
                     )
-                    logger.info("Embedding model downloaded and cached at %s on %s", MODEL_CACHE_DIR, device)
+                    logger.info(
+                        "Embedding model downloaded and cached at %s on %s",
+                        MODEL_CACHE_DIR,
+                        device,
+                    )
     return _embed_model
-
 
 
 # ══════════════════════════════════════════════════
@@ -142,9 +161,10 @@ def set_working_memory(session_id: str, key: str, value: str, ttl: int = 86400):
     r.expire(f"working:{session_id}", ttl)
 
 
-_CONCERN_DECAY_PER_HOUR = 0.05   # concern loses 0.05/h → fully decayed in 20h
-_ENERGY_DECAY_PER_HOUR  = 0.02   # energy drifts back to 0.7 baseline at 0.02/h
-_emotional_state_lock   = Lock()  # guards the read-modify-write decay cycle
+_CONCERN_DECAY_PER_HOUR = 0.05  # concern loses 0.05/h → fully decayed in 20h
+_ENERGY_DECAY_PER_HOUR = 0.02  # energy drifts back to 0.7 baseline at 0.02/h
+_emotional_state_lock = Lock()  # guards the read-modify-write decay cycle
+
 
 def get_emotional_state() -> dict:
     """Get Jarvis's current emotional state, with time-based decay applied.
@@ -178,7 +198,9 @@ def get_emotional_state() -> dict:
                 # concern → decay toward 0.0
                 concern = state.get("concern", 0.0)
                 if concern > 0:
-                    new_concern = max(0.0, concern - elapsed_h * _CONCERN_DECAY_PER_HOUR)
+                    new_concern = max(
+                        0.0, concern - elapsed_h * _CONCERN_DECAY_PER_HOUR
+                    )
                     if abs(new_concern - concern) > 0.001:
                         state["concern"] = round(new_concern, 3)
                         changed = True
@@ -262,22 +284,28 @@ def get_conversation(user_code: str, session_id: str, limit: int | None = None):
 
 # Scalar aliases: O(1) resolution before any LLM call
 _SCALAR_CANONICAL: dict[str, str] = {
-    "ville": "location",    "city": "location",
-    "metier": "profession", "emploi": "profession",
-    "employeur": "current_employer", "entreprise": "current_employer",
-    "societe": "current_employer",   "company": "current_employer",
-    "prenom": "name",       "prénom": "name",
-    "revenu": "capital",    "patrimoine": "capital",
+    "ville": "location",
+    "city": "location",
+    "metier": "profession",
+    "emploi": "profession",
+    "employeur": "current_employer",
+    "entreprise": "current_employer",
+    "societe": "current_employer",
+    "company": "current_employer",
+    "prenom": "name",
+    "prénom": "name",
+    "revenu": "capital",
+    "patrimoine": "capital",
     "inquietude": "concerns",
     "voyages_prevus": "travel_plans",
 }
 
 # Namespace families: keys in the same family are compared together
 _NS_FAMILY: dict[str, frozenset] = {
-    "hobby":         frozenset({"hobby", "interest", "loisir", "passion", "activite"}),
-    "skill":         frozenset({"skill", "competence", "technologie", "outil"}),
-    "placement":     frozenset({"placement", "investissement", "epargne"}),
-    "projet":        frozenset({"projet", "project"}),
+    "hobby": frozenset({"hobby", "interest", "loisir", "passion", "activite"}),
+    "skill": frozenset({"skill", "competence", "technologie", "outil"}),
+    "placement": frozenset({"placement", "investissement", "epargne"}),
+    "projet": frozenset({"projet", "project"}),
     "preoccupation": frozenset({"preoccupation", "concerns", "inquietude"}),
 }
 
@@ -304,7 +332,9 @@ def get_user_profile(user_code: str) -> dict:
     return data or {}
 
 
-def _normalize_profile_key(user_code: str, new_key: str, existing_keys: list[str]) -> str | None:
+def _normalize_profile_key(
+    user_code: str, new_key: str, existing_keys: list[str]
+) -> str | None:
     """
     Find whether new_key is semantically equivalent to an existing profile key.
     Returns the existing key to evict, or None if new_key is genuinely new.
@@ -317,20 +347,31 @@ def _normalize_profile_key(user_code: str, new_key: str, existing_keys: list[str
     if not existing_keys or new_key in existing_keys:
         return None
 
-    # Stage 0: case + accent-insensitive exact match
-    # Handles: option:si vs option:SI, specialite:maths vs spécialité:maths
+    # Normalize once, reuse everywhere
     new_key_norm = normalize_key(new_key)
+
+    # Stage 0: case + accent-insensitive exact match
     for k in existing_keys:
         if normalize_key(k) == new_key_norm and k != new_key:
-            logger.info("User %s profile key '%s' → case/accent match '%s' (no LLM)", user_code, new_key, k)
+            logger.info(
+                "User %s profile key '%s' → case/accent match '%s' (no LLM)",
+                user_code,
+                new_key,
+                k,
+            )
             return k
 
-    # Stage 1: scalar canonical alias
-    stripped = new_key_lower.replace("-", "_").replace(" ", "_")
+    # Stage 1: scalar canonical alias (based on normalized key)
+    stripped = new_key_norm.replace("-", "_").replace(" ", "_")
     if stripped in _SCALAR_CANONICAL:
         canonical = _SCALAR_CANONICAL[stripped]
         if canonical in existing_keys:
-            logger.info("User %s profile key '%s' → canonical '%s' (no LLM)", user_code, new_key, canonical)
+            logger.info(
+                "User %s profile key '%s' → canonical '%s' (no LLM)",
+                user_code,
+                new_key,
+                canonical,
+            )
             return canonical
 
     if not ROUTER_MODEL:
@@ -345,13 +386,14 @@ def _normalize_profile_key(user_code: str, new_key: str, existing_keys: list[str
         keys_list = ", ".join(f'"{k}"' for k in candidates)
         prompt = (
             f"Clés existantes (même catégorie) : [{keys_list}]\n"
-            f"Nouvelle clé : \"{new_key}\"\n\n"
+            f'Nouvelle clé : "{new_key}"\n\n'
             f"DOUBLON = même concept sous un nom ou préfixe différent :\n"
-            f"  • \"hobby:ia\" == \"interest:ia\" → OUI\n"
-            f"  • \"hobby:kart\" == \"loisir:kart\" → OUI\n"
-            f"  • \"hobby:kart\" == \"hobby:tennis\" → NON\n"
+            f'  • "hobby:ia" == "interest:ia" → OUI\n'
+            f'  • "hobby:kart" == "loisir:kart" → OUI\n'
+            f'  • "hobby:kart" == "hobby:tennis" → NON\n'
             f'JSON uniquement : {{"match": "clé_existante"}} ou {{"match": null}}'
         )
+
         raw = call_llm(
             [
                 {"role": "system", "content": "JSON uniquement. Aucun autre texte."},
@@ -366,11 +408,16 @@ def _normalize_profile_key(user_code: str, new_key: str, existing_keys: list[str
             no_think=True,
             timeout=ROUTER_TIMEOUT,
         )
+
         parsed = extract_llm_json(raw)
         match = parsed.get("match")
+
         if match and match in existing_keys:
-            logger.info("User %s profile key '%s' deduped → '%s'", user_code, new_key, match)
+            logger.info(
+                "User %s profile key '%s' deduped → '%s'", user_code, new_key, match
+            )
             return match
+
         return None
 
     except Exception as exc:
@@ -390,13 +437,18 @@ def update_user_profile(user_code: str, key: str, value: str | None):
     """
     r = get_redis()
     profile_redis_key = f"user:{user_code}:profile"
-    profile_ts_key    = f"user:{user_code}:profile:ts"
+    profile_ts_key = f"user:{user_code}:profile:ts"
 
     if not value:  # None or empty string → delete
         old_val = r.hget(profile_redis_key, key)
         r.hdel(profile_redis_key, key)
         r.hdel(profile_ts_key, key)
-        logger.info("User %s profile deleted: %s (was: %s)", user_code, key, old_val or "(empty)")
+        logger.info(
+            "User %s profile deleted: %s (was: %s)",
+            user_code,
+            key,
+            old_val or "(empty)",
+        )
     else:
         existing_keys = r.hkeys(profile_redis_key)
 
@@ -406,8 +458,13 @@ def update_user_profile(user_code: str, key: str, value: str | None):
         duplicate = _normalize_profile_key(user_code, key, existing_keys)
         if duplicate:
             old_dup_val = r.hget(profile_redis_key, duplicate)
-            logger.info("User %s profile key normalized: '%s' (was: %s) → replaced by '%s'",
-                        user_code, duplicate, old_dup_val or "(empty)", key)
+            logger.info(
+                "User %s profile key normalized: '%s' (was: %s) → replaced by '%s'",
+                user_code,
+                duplicate,
+                old_dup_val or "(empty)",
+                key,
+            )
             r.hdel(profile_redis_key, duplicate)
             r.hdel(profile_ts_key, duplicate)
 
@@ -453,10 +510,10 @@ def update_user_projects(user_code: str, projects: list):
             except (ValueError, TypeError):
                 pass
         entry = {
-            "name":            p["name"],
-            "status":          p.get("status", "in_progress"),
+            "name": p["name"],
+            "status": p.get("status", "in_progress"),
             "first_mentioned": p.get("first_mentioned"),
-            "last_update":     p.get("last_update"),
+            "last_update": p.get("last_update"),
         }
         if p.get("description"):
             entry["description"] = p["description"]
@@ -482,8 +539,27 @@ def update_user_preference(user_code: str, key: str, value: str):
 # ══════════════════════════════════════════════════
 
 
-_SAT_POSITIVE = ("merci", "parfait", "super", "excellent", "exactement", "nickel", "génial", "top", "c'est ça")
-_SAT_NEGATIVE = ("non,", "non.", "c'est pas ça", "tu n'as pas", "pas compris", "faux", "incorrect", "erreur")
+_SAT_POSITIVE = (
+    "merci",
+    "parfait",
+    "super",
+    "excellent",
+    "exactement",
+    "nickel",
+    "génial",
+    "top",
+    "c'est ça",
+)
+_SAT_NEGATIVE = (
+    "non,",
+    "non.",
+    "c'est pas ça",
+    "tu n'as pas",
+    "pas compris",
+    "faux",
+    "incorrect",
+    "erreur",
+)
 
 
 def _detect_satisfaction(user_msg: str) -> str:
@@ -585,7 +661,9 @@ def get_conversation_summary(user_code: str, days: int = 7) -> str:
     return summary
 
 
-def _fuzzy_project_name(name: str, project_map: dict, threshold: float = 0.6) -> str | None:
+def _fuzzy_project_name(
+    name: str, project_map: dict, threshold: float = 0.6
+) -> str | None:
     """
     Find the best matching project name by word overlap (≥threshold).
 
@@ -607,8 +685,8 @@ def _fuzzy_project_name(name: str, project_map: dict, threshold: float = 0.6) ->
         if overlap == 0:
             continue
         general = overlap / max(len(words_new), len(words_ex))
-        subset  = overlap / min(len(words_new), len(words_ex))
-        score   = max(general, subset)
+        subset = overlap / min(len(words_new), len(words_ex))
+        score = max(general, subset)
         if score > best_score and score >= threshold:
             best_score = score
             best_match = existing_name
@@ -632,7 +710,11 @@ def apply_project_updates(user_code: str, project_events: list[str]):
             continue
 
         # Exact match first, then fuzzy — prevents name drift duplicates
-        resolved = name if name in project_map else (_fuzzy_project_name(name, project_map) or name)
+        resolved = (
+            name
+            if name in project_map
+            else (_fuzzy_project_name(name, project_map) or name)
+        )
 
         if action == "create":
             if resolved not in project_map:
@@ -644,7 +726,8 @@ def apply_project_updates(user_code: str, project_events: list[str]):
                     project_map[resolved]["last_update"] = now
                     logger.debug(
                         "Project create: '%s' soft-matched to existing '%s' — skipping create",
-                        name, soft_match,
+                        name,
+                        soft_match,
                     )
                 else:
                     project_map[resolved] = {
@@ -681,7 +764,11 @@ def apply_project_updates(user_code: str, project_events: list[str]):
             new_name = new_name.strip()
             if not new_name:
                 continue
-            old_resolved = old_raw if old_raw in project_map else (_fuzzy_project_name(old_raw, project_map) or old_raw)
+            old_resolved = (
+                old_raw
+                if old_raw in project_map
+                else (_fuzzy_project_name(old_raw, project_map) or old_raw)
+            )
             if old_resolved in project_map:
                 entry = project_map.pop(old_resolved)
                 entry["name"] = new_name
@@ -690,12 +777,15 @@ def apply_project_updates(user_code: str, project_events: list[str]):
 
     update_user_projects(user_code, list(project_map.values()))
 
+
 # ══════════════════════════════════════════════════
 #  COMPLETE MEMORY TO QDRANT — Conversation history + summaries + AUTOBIOGRAPHIE
 # ══════════════════════════════════════════════════
 
 
-def compute_memory_novelty(user_code: str, text: str, vector: list | None = None, limit: int = 5):
+def compute_memory_novelty(
+    user_code: str, text: str, vector: list | None = None, limit: int = 5
+):
     """
     Estimate novelty of a memory by comparing it with recent vector memories.
     Returns a value between 0 and 1.
@@ -720,7 +810,10 @@ def compute_memory_novelty(user_code: str, text: str, vector: list | None = None
                     {
                         "should": [
                             {"key": "memory_type", "match": {"value": "episodic"}},
-                            {"key": "memory_type", "match": {"value": "autobiographical"}},
+                            {
+                                "key": "memory_type",
+                                "match": {"value": "autobiographical"},
+                            },
                         ]
                     },
                 ],
@@ -811,8 +904,8 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
             limit=1,
             query_filter={
                 "must": [
-                    {"key": "user_code",    "match": {"value": user_code}},
-                    {"key": "memory_type",  "match": {"value": "autobiographical"}},
+                    {"key": "user_code", "match": {"value": user_code}},
+                    {"key": "memory_type", "match": {"value": "autobiographical"}},
                 ]
             },
         ).points
@@ -831,11 +924,15 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
                 )
                 logger.debug(
                     "Autobio dedup: reinforced '%s' %.2f → %.2f",
-                    summary[:60], existing_importance, importance,
+                    summary[:60],
+                    existing_importance,
+                    importance,
                 )
             else:
                 logger.debug(
-                    "Autobio dedup: skipping '%s' (similar=%.2f)", summary[:60], dedup_score
+                    "Autobio dedup: skipping '%s' (similar=%.2f)",
+                    summary[:60],
+                    dedup_score,
                 )
             return
 
@@ -865,7 +962,9 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
         logger.error("Autobiographical memory failed: %s", e)
 
 
-def retract_autobiographical_event(user_code: str, query: str, threshold: float = 0.78) -> int:
+def retract_autobiographical_event(
+    user_code: str, query: str, threshold: float = 0.78
+) -> int:
     """Delete autobiographical memories semantically matching the query.
     Returns the number of deleted points. Used when the user corrects a past fact."""
     try:
@@ -878,7 +977,7 @@ def retract_autobiographical_event(user_code: str, query: str, threshold: float 
             limit=5,
             query_filter={
                 "must": [
-                    {"key": "user_code",   "match": {"value": user_code}},
+                    {"key": "user_code", "match": {"value": user_code}},
                     {"key": "memory_type", "match": {"value": "autobiographical"}},
                 ]
             },
@@ -890,14 +989,18 @@ def retract_autobiographical_event(user_code: str, query: str, threshold: float 
                 points_selector=PointIdsList(points=to_delete),
             )
             _invalidate_timeline_cache(user_code)
-            logger.info("Autobio retracted %d point(s) for '%s'", len(to_delete), query[:60])
+            logger.info(
+                "Autobio retracted %d point(s) for '%s'", len(to_delete), query[:60]
+            )
         return len(to_delete)
     except Exception as e:
         logger.error("retract_autobiographical_event failed: %s", e)
         return 0
 
 
-def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str = "auto"):
+def search_memory(
+    user_code: str, query: str, limit: int = 5, memory_scope: str = "auto"
+):
     """Search vector memory. memory_scope filters to a specific layer or searches all ('auto')."""
     # Profile scope has no Qdrant data — Redis profile is already injected via build_memory_context()
     if memory_scope == "profile":
@@ -910,9 +1013,13 @@ def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str 
         vector = model.encode(query, normalize_embeddings=True).tolist()
 
         if memory_scope == "episodic":
-            type_filter = {"must": [{"key": "memory_type", "match": {"value": "episodic"}}]}
+            type_filter = {
+                "must": [{"key": "memory_type", "match": {"value": "episodic"}}]
+            }
         elif memory_scope == "autobiographical":
-            type_filter = {"must": [{"key": "memory_type", "match": {"value": "autobiographical"}}]}
+            type_filter = {
+                "must": [{"key": "memory_type", "match": {"value": "autobiographical"}}]
+            }
         else:  # "auto" — search both layers
             type_filter = {
                 "should": [
@@ -967,9 +1074,7 @@ def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str 
             # Weighted blend: semantic similarity (primary) + importance + recency
             # All weights sum to 1.0 so the score stays in ~[0, 1]
             final_score = (
-                sim * 0.65
-                + payload.get("importance", 0) * 0.25
-                + recency_bonus * 0.1
+                sim * 0.65 + payload.get("importance", 0) * 0.25 + recency_bonus * 0.1
             )
 
             memories.append(
@@ -977,8 +1082,8 @@ def search_memory(user_code: str, query: str, limit: int = 5, memory_scope: str 
                     "text": payload["text"],
                     "timestamp": timestamp,
                     "score": final_score,
-                    "_id":       r.id,
-                    "_sim":      sim,           # clamped similarity — used for reconsolidation gate
+                    "_id": r.id,
+                    "_sim": sim,  # clamped similarity — used for reconsolidation gate
                     "_mem_type": mem_type,
                     "_importance": payload.get("importance", 0),
                 }
@@ -1038,6 +1143,7 @@ async def async_search_memory(
     remember to wrap it themselves.
     """
     import asyncio
+
     return await asyncio.to_thread(search_memory, user_code, query, limit, memory_scope)
 
 
@@ -1054,6 +1160,7 @@ self_memory_lock = Lock()
 # ══════════════════════════════════════════════════
 #  ATOMIC FILE WRITE
 # ══════════════════════════════════════════════════
+
 
 def atomic_json_write(path: str, data, indent: int = 2) -> None:
     """
@@ -1123,13 +1230,14 @@ def add_self_learning(learning: str):
     """Add a Jarvis self-improvement note (not a user fact)."""
     with self_memory_lock:
         data = get_self_memory()
-        data.setdefault("learnings", []).append({
-            "text": learning,
-            "date": datetime.now(timezone.utc).isoformat(),
-        })
+        data.setdefault("learnings", []).append(
+            {
+                "text": learning,
+                "date": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         data["learnings"] = data["learnings"][-100:]
         save_self_memory(data)
-
 
 
 # ══════════════════════════════════════════════════
@@ -1199,7 +1307,11 @@ def get_user_timeline(user_code: str, limit: int = 20):
 
         # Cache top-50 (more than enough for any prompt injection)
         try:
-            r.setex(cache_key, _TIMELINE_CACHE_TTL, json.dumps(timeline[:50], ensure_ascii=False))
+            r.setex(
+                cache_key,
+                _TIMELINE_CACHE_TTL,
+                json.dumps(timeline[:50], ensure_ascii=False),
+            )
         except Exception:
             pass
 
@@ -1241,18 +1353,18 @@ def build_memory_context(
     # ── Single Redis pipeline round-trip for all scalar/hash reads ──────────
     r = get_redis()
     pipe = r.pipeline(transaction=False)
-    pipe.hgetall(f"user:{user_code}:profile")            # 0
-    pipe.hgetall(f"user:{user_code}:preferences")        # 1
-    pipe.get(f"user:{user_code}:projects")               # 2
-    pipe.get("jarvis:emotional_state")                   # 3
-    pipe.get(f"jarvis:{user_code}:tomorrow_suggestions") # 4
+    pipe.hgetall(f"user:{user_code}:profile")  # 0
+    pipe.hgetall(f"user:{user_code}:preferences")  # 1
+    pipe.get(f"user:{user_code}:projects")  # 2
+    pipe.get("jarvis:emotional_state")  # 3
+    pipe.get(f"jarvis:{user_code}:tomorrow_suggestions")  # 4
     _pipe_results = pipe.execute()
 
-    profile      = _pipe_results[0] or {}
-    prefs        = _pipe_results[1] or {}
-    _proj_raw    = _pipe_results[2]
+    profile = _pipe_results[0] or {}
+    prefs = _pipe_results[1] or {}
+    _proj_raw = _pipe_results[2]
     _emotion_raw = _pipe_results[3]
-    _sugg_raw    = _pipe_results[4]
+    _sugg_raw = _pipe_results[4]
 
     # User profile — namespaced keys (hobby:kart) are grouped by category for readability
     if profile:
@@ -1266,7 +1378,9 @@ def build_memory_context(
                 scalars.append((k, v))
         plines = [f"- {k}: {v}" for k, v in scalars]
         plines += [f"- {cat}: {', '.join(vals)}" for cat, vals in grouped.items()]
-        parts.append("<profil_utilisateur>\n" + "\n".join(plines) + "\n</profil_utilisateur>")
+        parts.append(
+            "<profil_utilisateur>\n" + "\n".join(plines) + "\n</profil_utilisateur>"
+        )
 
     # User preferences
     if prefs:
@@ -1278,7 +1392,9 @@ def build_memory_context(
         projects = json.loads(_proj_raw) if _proj_raw else []
     except Exception:
         projects = []
-    active_projects = [p for p in projects if isinstance(p, dict) and p.get("status") != "done"]
+    active_projects = [
+        p for p in projects if isinstance(p, dict) and p.get("status") != "done"
+    ]
     if active_projects:
         plines = [f"- {p.get('name', 'sans nom')}" for p in active_projects]
         parts.append("<projets_actifs>\n" + "\n".join(plines) + "\n</projets_actifs>")
@@ -1289,21 +1405,38 @@ def build_memory_context(
     except Exception:
         emotion = {}
     if not emotion:
-        emotion = {"mood": "neutral", "energy": 0.7, "confidence": 0.8, "curiosity": 0.6, "concern": 0.0}
+        emotion = {
+            "mood": "neutral",
+            "energy": 0.7,
+            "confidence": 0.8,
+            "curiosity": 0.6,
+            "concern": 0.0,
+        }
     if emotion.get("mood") != "neutral":
-        parts.append(f"<etat_emotionnel>\nHumeur actuelle : {emotion['mood']}\n</etat_emotionnel>")
+        parts.append(
+            f"<etat_emotionnel>\nHumeur actuelle : {emotion['mood']}\n</etat_emotionnel>"
+        )
 
     # Self identity
     if self_mem.get("learnings"):
         recent_learnings = self_mem["learnings"][-3:]
         plines = [f"- {ln['text']}" for ln in recent_learnings]
-        parts.append("<apprentissages_recents>\n" + "\n".join(plines) + "\n</apprentissages_recents>")
+        parts.append(
+            "<apprentissages_recents>\n"
+            + "\n".join(plines)
+            + "\n</apprentissages_recents>"
+        )
 
     # User Timeline — sorted by importance+recency desc, top 5
     timeline = get_user_timeline(user_code)
     if timeline:
-        plines = [f"({rel_time_fr(event['timestamp'])}) {event['text']}" for event in timeline[:5]]
-        parts.append("<frise_chronologique>\n" + "\n".join(plines) + "\n</frise_chronologique>")
+        plines = [
+            f"({rel_time_fr(event['timestamp'])}) {event['text']}"
+            for event in timeline[:5]
+        ]
+        parts.append(
+            "<frise_chronologique>\n" + "\n".join(plines) + "\n</frise_chronologique>"
+        )
 
     # Tomorrow suggestions — written by nightly review, consumed today.
     # Skipped for pure utility intents (weather/calendar/gmail) — irrelevant noise.
@@ -1314,14 +1447,28 @@ def build_memory_context(
             suggestions = []
         if suggestions:
             plines = [f"- {s}" for s in suggestions]
-            parts.append("<sujets_a_aborder>\n" + "\n".join(plines) + "\n</sujets_a_aborder>")
+            parts.append(
+                "<sujets_a_aborder>\n" + "\n".join(plines) + "\n</sujets_a_aborder>"
+            )
 
     # User relation — always injected so every conversation has a tonal directive.
     # self_mem is already loaded at the top of this function (no extra I/O).
-    _default_rel = {"affinity": 0.5, "interaction_style": "direct", "average_interaction_mood": "measured"}
+    _default_rel = {
+        "affinity": 0.5,
+        "interaction_style": "direct",
+        "average_interaction_mood": "measured",
+    }
     rel = {**_default_rel, **self_mem.get("user_relations", {}).get(user_code, {})}
     _aff = rel["affinity"]
-    _aff_label = "forte" if _aff >= 0.8 else "bonne" if _aff >= 0.6 else "modérée" if _aff >= 0.4 else "faible"
+    _aff_label = (
+        "forte"
+        if _aff >= 0.8
+        else "bonne"
+        if _aff >= 0.6
+        else "modérée"
+        if _aff >= 0.4
+        else "faible"
+    )
     parts.append(
         f"<relation>\n"
         f"- Affinité : {_aff_label}\n"
@@ -1356,9 +1503,9 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
                 collection_name=QDRANT_MEMORY_COLLECTION,
                 scroll_filter={
                     "must": [
-                        {"key": "user_code",   "match": {"value": user_code}},
+                        {"key": "user_code", "match": {"value": user_code}},
                         {"key": "memory_type", "match": {"value": "episodic"}},
-                        {"key": "timestamp",   "range": {"lt": cutoff_ts}},
+                        {"key": "timestamp", "range": {"lt": cutoff_ts}},
                     ]
                 },
                 order_by={"key": "timestamp", "direction": "asc"},
@@ -1395,17 +1542,24 @@ Si aucun fait durable : {{"facts": []}}"""
 
             parsed = extract_llm_json(raw)
             facts = parsed.get("facts", []) if isinstance(parsed, dict) else []
-            facts = [f.strip().strip('"\'')[:300] for f in facts if isinstance(f, str) and f.strip()]
+            facts = [
+                f.strip().strip("\"'")[:300]
+                for f in facts
+                if isinstance(f, str) and f.strip()
+            ]
 
             if not facts:
                 logger.warning(
                     "[%s] Consolidation: LLM returned 0 facts for %d episodic points — skipping deletion",
-                    user_code, len(point_ids),
+                    user_code,
+                    len(point_ids),
                 )
                 break
 
             for fact in facts:
-                store_autobiographical_event(user_code, fact, MEMORY_CONSOLIDATION_IMPORTANCE)
+                store_autobiographical_event(
+                    user_code, fact, MEMORY_CONSOLIDATION_IMPORTANCE
+                )
 
             qdrant.delete(
                 collection_name=QDRANT_MEMORY_COLLECTION,
@@ -1415,7 +1569,9 @@ Si aucun fait durable : {{"facts": []}}"""
             total_deleted += len(point_ids)
             logger.info(
                 "[%s] Consolidation batch: %d facts stored, %d points deleted",
-                user_code, len(facts), len(point_ids),
+                user_code,
+                len(facts),
+                len(point_ids),
             )
 
         except Exception as e:
@@ -1423,7 +1579,11 @@ Si aucun fait durable : {{"facts": []}}"""
             break
 
     if total_deleted:
-        logger.info("[%s] Memory consolidation complete: %d episodic points total", user_code, total_deleted)
+        logger.info(
+            "[%s] Memory consolidation complete: %d episodic points total",
+            user_code,
+            total_deleted,
+        )
 
 
 def _curative_profile_cleanup(user_code: str):
@@ -1442,13 +1602,15 @@ def _curative_profile_cleanup(user_code: str):
     """
     r = get_redis()
     profile_redis_key = f"user:{user_code}:profile"
-    profile_ts_key    = f"user:{user_code}:profile:ts"
+    profile_ts_key = f"user:{user_code}:profile:ts"
     profile = r.hgetall(profile_redis_key)
     if len(profile) < 5:
         return
 
     try:
-        timestamps = r.hgetall(profile_ts_key)  # key → unix timestamp string (may be empty for old keys)
+        timestamps = r.hgetall(
+            profile_ts_key
+        )  # key → unix timestamp string (may be empty for old keys)
 
         def _fmt_ts(k: str) -> str:
             raw = timestamps.get(k)
@@ -1478,17 +1640,19 @@ def _curative_profile_cleanup(user_code: str):
             f"ou {{'updates': {{}}, 'keys_to_delete': []}} si le profil est propre."
         )
 
-        parsed = extract_llm_json(call_llm(
-            [{"role": "user", "content": prompt}],
-            model=PRIMARY_MODEL,
-            api_url=PRIMARY_API_URL,
-            api_key=PRIMARY_API_KEY,
-            temperature=0.1,
-            max_tokens=600,   # profil ~20 clés → output JSON potentiellement >200 tok
-            json_response=True,
-            no_think=True,
-            timeout=30.0,
-        ))
+        parsed = extract_llm_json(
+            call_llm(
+                [{"role": "user", "content": prompt}],
+                model=PRIMARY_MODEL,
+                api_url=PRIMARY_API_URL,
+                api_key=PRIMARY_API_KEY,
+                temperature=0.1,
+                max_tokens=600,  # profil ~20 clés → output JSON potentiellement >200 tok
+                json_response=True,
+                no_think=True,
+                timeout=30.0,
+            )
+        )
 
         # Apply consolidation updates BEFORE any deletion (merge-before-delete)
         updates = parsed.get("updates", {}) if isinstance(parsed, dict) else {}
@@ -1497,7 +1661,12 @@ def _curative_profile_cleanup(user_code: str):
             if key in profile and isinstance(value, str) and value.strip():
                 r.hset(profile_redis_key, key, value.strip())
                 r.hset(profile_ts_key, key, now_ts)
-                logger.info("[%s] Curative profile update: '%s' → '%s'", user_code, key, value.strip())
+                logger.info(
+                    "[%s] Curative profile update: '%s' → '%s'",
+                    user_code,
+                    key,
+                    value.strip(),
+                )
 
         # Only delete keys that actually exist in the profile (safety guard)
         keys_to_delete = [k for k in parsed.get("keys_to_delete", []) if k in profile]
@@ -1510,11 +1679,16 @@ def _curative_profile_cleanup(user_code: str):
                 old_val = r.hget(profile_redis_key, key)
                 logger.warning(
                     "[%s] Curative profile cleanup: DELETE '%s' (was: %s, ts: %s)",
-                    user_code, key, old_val or "(empty)", _fmt_ts(key),
+                    user_code,
+                    key,
+                    old_val or "(empty)",
+                    _fmt_ts(key),
                 )
             r.hdel(profile_redis_key, *keys_to_delete)
             r.hdel(profile_ts_key, *keys_to_delete)
-            logger.info("[%s] Curative profile cleanup: deleted %s", user_code, keys_to_delete)
+            logger.info(
+                "[%s] Curative profile cleanup: deleted %s", user_code, keys_to_delete
+            )
         elif not updates:
             logger.info("[%s] Curative profile cleanup: profile is clean", user_code)
 
@@ -1534,18 +1708,18 @@ def _decay_autobiographical_memories(user_code: str) -> int:
 
     Returns the number of memories deleted.
     """
-    qdrant    = get_qdrant()
-    now_ts    = time.time()
-    deleted   = 0
-    updated   = 0
-    offset    = None
+    qdrant = get_qdrant()
+    now_ts = time.time()
+    deleted = 0
+    updated = 0
+    offset = None
 
     while True:
         results, next_offset = qdrant.scroll(
             collection_name=QDRANT_MEMORY_COLLECTION,
             scroll_filter={
                 "must": [
-                    {"key": "user_code",   "match": {"value": user_code}},
+                    {"key": "user_code", "match": {"value": user_code}},
                     {"key": "memory_type", "match": {"value": "autobiographical"}},
                 ]
             },
@@ -1587,7 +1761,11 @@ def _decay_autobiographical_memories(user_code: str) -> int:
                 points_selector=PointIdsList(points=to_delete),
             )
             deleted += len(to_delete)
-            logger.info("[%s] Autobio decay: %d stale memories deleted", user_code, len(to_delete))
+            logger.info(
+                "[%s] Autobio decay: %d stale memories deleted",
+                user_code,
+                len(to_delete),
+            )
 
         offset = next_offset
         if offset is None:
@@ -1596,7 +1774,9 @@ def _decay_autobiographical_memories(user_code: str) -> int:
     if deleted or updated:
         logger.info(
             "[%s] Autobio decay complete: %d deleted, %d importance updated",
-            user_code, deleted, updated,
+            user_code,
+            deleted,
+            updated,
         )
     return deleted
 
