@@ -339,21 +339,24 @@ Date et heure actuelles — formatted in French, user timezone, with season
     ↓
 Tu parles avec <user_name>.
     ↓
-MEMORY_HEADER_FR + build_memory_context()  — only if memory is available
+<contexte> build_memory_context() </contexte>  — only if memory is available
     ↓
-=== TES OPINIONS ===  — only if opinions exist
+<mes_avis> opinions </mes_avis>  — only if opinions exist (SYSTEM_BASE_FR instructs: never output as a section)
     ↓
 VOICE_SUFFIX_FR  — only if voice_mode=True
 ```
 
 **Per-turn assembled context** — appended after the dynamic prefix, before the user's raw message:
 ```
-=== RÉSULTATS WEB / SOUVENIRS / DOCUMENTS / AGENDA / EMAILS ===  — fetched in parallel
+<resultats_web> / <souvenirs_pertinents> / <documents_personnels> / <agenda> / <emails_recus>  — fetched in parallel
     ↓
 "Analyse étape par étape..."  — only if use_reasoning=True
+    ↓
+## MESSAGE UTILISATEUR
+{raw user message}        ← always last, most salient for generation
 ```
 
-The full user message stored in Redis history = `dynamic_prefix \x00 raw_message`. The null-byte separator lets the `/history` endpoint recover the original text for display to the iOS app.
+The final user message = `dynamic_prefix + assembled_context + ## MESSAGE UTILISATEUR\n{raw_message}`. Storing this in Redis history preserves the full context per turn; the `/history` endpoint strips the prefix to show only the raw message to the iOS app.
 
 **`build_memory_context()` — sections injected in order:**
 
@@ -432,7 +435,7 @@ Tour 2 : [SYS ~100 tok] + [CTX1+msg1+rep1 ~900 tok] + [CTX2+msg2 ~600 tok]
 Tour N : skip de (N-1) × ~900 tokens → seulement ~600 tokens nouveaux
 ```
 
-Le système prompt est **token-identique** à chaque tour (SYSTEM_BASE_FR pur, sans date ni profil). Le contexte dynamique (date, profil, mémoires, opinions) est préfixé dans le message utilisateur courant, stocké en historique Redis avec séparateur `\x00`, et stripped à l'affichage.
+Le système prompt est **token-identique** à chaque tour (SYSTEM_BASE_FR pur, sans date ni profil). Le contexte dynamique (date, profil, mémoires, opinions) est préfixé dans le message utilisateur courant, suivi du marqueur `## MESSAGE UTILISATEUR` puis du message brut. Le préfixe est strippé à l'affichage dans `/history`.
 
 ### Mesures de référence
 
@@ -823,16 +826,19 @@ Jarvis maintains a slow-evolving perception of each user, updated exclusively du
 At each conversation, these three values are translated into **explicit directives** and injected into the system prompt alongside the internal state block:
 
 ```
-=== ÉTAT INTERNE ===
+<etat_interne>
+Objectifs : G1: ... | G2: ...
 Focus : ...
-Objectifs : ...
 Dernière action autonome : ...
+</etat_interne>
 
-=== RELATION AVEC CET UTILISATEUR ===
-Affinité : 0.8/1.0 → Tu apprécies cet utilisateur, investis-toi pleinement.
-Style : direct → Réponds sans détours, va droit au but.
-Tonalité Jarvis : warm → Adopte un ton chaleureux et bienveillant.
+RELATION AVEC CET UTILISATEUR (injecté dans build_memory_context) :
+- Affinité : forte          ← label sémantique (forte/bonne/modérée/faible), pas de score numérique
+- Style : direct
+- Humeur moyenne : warm
 ```
+
+L'affinité est exprimée en label sémantique (`forte` ≥ 0.8 · `bonne` ≥ 0.6 · `modérée` ≥ 0.4 · `faible` < 0.4) plutôt qu'en score numérique — le LLM interprète mieux une valeur qualitative.
 
 **Design principle:** in-conversation mood is already perceived by the LLM from the message history — no real-time state update is needed. The relation captures only what cannot be inferred from a single exchange.
 

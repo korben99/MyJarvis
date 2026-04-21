@@ -30,11 +30,10 @@ from config import (
     VISION_TIMEOUT,
     tokens_param,
 )
-
-_LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL, REASONING_MODEL} if LLM_LOCAL else set()
 from deps import get_stream_client
 from helpers import get_logger
 
+_LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL, REASONING_MODEL} if LLM_LOCAL else set()
 if LLM_LOCAL:
     from llm_local import stream_local
 

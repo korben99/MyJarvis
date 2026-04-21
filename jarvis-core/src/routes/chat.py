@@ -14,6 +14,7 @@ from briefing import gather_briefing, get_stored_briefing, store_briefing
 from config import (
     BRIEFING_TIMEZONE,
     IOS_MAX_MESSAGES,
+    LLM_LOCAL,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
@@ -25,6 +26,7 @@ from config import (
     USER_CODES,
     USER_TIMEZONES,
     VISION_MODEL,
+    is_qwen3,
 )
 from deps import REDIS_CLIENT
 from embed_router import embed_route
@@ -508,12 +510,14 @@ async def chat(req: ChatRequest):
         _llm_gmail_query = llm_result.gmail_query
         _llm_cal_days = llm_result.calendar_days
         _llm_weather_location = llm_result.weather_location
+        _llm_rag_query = llm_result.rag_query
     else:
         use_memory = use_rag = use_web_auto = use_gmail = use_calendar = False
         use_briefing = use_self = use_portfolio = use_weather_auto = False
         _llm_gmail_query = None
         _llm_cal_days = None
         _llm_weather_location = ""
+        _llm_rag_query = ""
 
     # ── Model selection ─────────────────────────────────────────────────────
     # Always PRIMARY infrastructure — reasoning is handled via no_think flag only.
@@ -591,7 +595,7 @@ async def chat(req: ChatRequest):
         return _prefetched_memory if (_prefetched_memory is not None) else []
 
     _gather2 = await asyncio.gather(
-        search_documents(req.message) if (req.use_rag or use_rag) else _empty(),
+        search_documents(_llm_rag_query or req.message) if (req.use_rag or use_rag) else _empty(),
         _resolved_memory() if use_memory else _empty(),
         search_weather(_weather_query)
         if use_weather_auto
@@ -737,7 +741,13 @@ async def chat(req: ChatRequest):
         async def sse():
             full_parts: list[str] = []
             try:
-                in_think = False
+                # With Qwen3 local + enable_thinking=True, apply_chat_template appends
+                # <think>\n to the prompt (not to the output).  The model's first output
+                # tokens are already INSIDE the think block — no opening <think> tag ever
+                # arrives in the stream.  Starting in_think=True ensures filter_think_chunk
+                # correctly routes those tokens as {"think":…} SSE events to the iOS banner.
+                # For no_think=True or remote models, in_think stays False (normal path).
+                in_think = LLM_LOCAL and is_qwen3(use_model) and not chat_no_think
                 first_chunk = True
 
                 async for chunk in stream_openai(

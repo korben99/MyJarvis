@@ -370,6 +370,33 @@ def fetch_gmail_messages(
 # ══════════════════════════════════════════════════
 
 
+def _localize_event_dt(raw: str, tz_name: str) -> str:
+    """
+    Ensure a Google Calendar dateTime string is timezone-aware.
+
+    Google can return naive dateTime values (no UTC offset, no Z) when the
+    event carries a separate "timeZone" field — e.g.:
+        {"dateTime": "2026-04-20T11:30:00", "timeZone": "Europe/Paris"}
+    Without this function, fromisoformat() would produce a naive datetime that
+    helpers.fmt_event_time() silently treats as UTC, adding a spurious +2h
+    offset for European users (CET/CEST).
+
+    - If raw is date-only ("2026-04-20") or empty → returned unchanged.
+    - If already offset-aware ("...+02:00" or "...Z") → returned unchanged.
+    - If naive → localized to tz_name using pytz.localize() (DST-correct).
+    """
+    if not raw or len(raw) <= 10:
+        return raw  # date-only all-day event
+    if "Z" in raw or ("+" in raw[10:]) or ("-" in raw[10:]):
+        return raw  # already offset-aware
+    try:
+        tz = pytz.timezone(tz_name)
+        dt = datetime.fromisoformat(raw)
+        return tz.localize(dt).isoformat()
+    except Exception:
+        return raw
+
+
 def fetch_calendar_events(
     days: int = 7,
     date: date_type | None = None,
@@ -446,11 +473,20 @@ def fetch_calendar_events(
                     seen_ids.add(event_id)
                 start = event.get("start", {})
                 end = event.get("end", {})
+                # Google can return naive dateTime (no offset) when the event
+                # has a separate "timeZone" field. Localize using that timezone
+                # (fallback: effective_tz) so fmt_event_time doesn't interpret
+                # them as UTC and add a spurious +2h offset.
+                event_tz = start.get("timeZone") or end.get("timeZone") or effective_tz
                 results.append(
                     {
                         "summary": event.get("summary", "(sans titre)"),
-                        "start": start.get("dateTime", start.get("date", "")),
-                        "end": end.get("dateTime", end.get("date", "")),
+                        "start": _localize_event_dt(
+                            start.get("dateTime", start.get("date", "")), event_tz
+                        ),
+                        "end": _localize_event_dt(
+                            end.get("dateTime", end.get("date", "")), event_tz
+                        ),
                         "location": event.get("location", ""),
                         "description": (event.get("description") or "")[:200],
                         "all_day": "dateTime" not in start,

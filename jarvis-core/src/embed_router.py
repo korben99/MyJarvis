@@ -268,6 +268,22 @@ def _extract_calendar_days(message: str) -> int:
     return 7
 
 
+def _extract_rag_query(message: str) -> str:
+    """Retire les phrases de commande du message pour n'en garder que les mots-clés sémantiques."""
+    cleaned = re.sub(
+        r"\b(cherche(?:r)?|retrouve(?:r)?|trouve(?:r)?|recherche(?:r)?|regarde(?:r)?|"
+        r"dans mes (documents?|notes?|fichiers?|base documentaire)|"
+        r"mes (documents?|notes?|fichiers?)|"
+        r"mode expert\s*:?|j'ai un fichier sur|RAG|rag)\b",
+        " ",
+        message,
+        flags=re.IGNORECASE,
+    ).strip()
+    # Collapse whitespace
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ?,!.")
+    return cleaned or message
+
+
 def _extract_gmail_query(message: str) -> str:
     """Construit une requête Gmail depuis le message."""
     m = message.lower()
@@ -449,4 +465,5 @@ def _build_result(intent: str, message: str, google_available: bool) -> RouterRe
         weather_location=_extract_weather_location(message)
         if intent == "weather"
         else "",
+        rag_query=_extract_rag_query(message) if intent == "rag" else "",
     )

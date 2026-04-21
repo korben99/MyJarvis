@@ -452,9 +452,16 @@ def _build_prompt(
                 "thinking_budget": 0,
             }
         else:
+            # thinking_budget intentionally NOT passed.
+            # Root cause (Qwen3-30B-A3B-4bit-DWQ-0508): the DWQ checkpoint bundles a
+            # patched tokenizer whose jinja2 template interprets thinking_budget=N as
+            # "budget already consumed" and immediately closes the <think> block before
+            # generation starts → prompt ends with <think>\n</think>\n\n → model sees
+            # an empty think block and generates ~2 tokens then EOS (nothing visible).
+            # The official HF tokenizer injects a <budget_remaining>N</budget_remaining>
+            # marker inside the open block instead — behaviour differs per checkpoint.
+            # Token budget is enforced via max_tokens at the call site instead.
             think_kwargs = {"enable_thinking": True}
-            if THINKING_BUDGET_TOKENS > 0:
-                think_kwargs["thinking_budget"] = THINKING_BUDGET_TOKENS
 
         # Try full kwargs; fall back if tokenizer version is too old
         try:

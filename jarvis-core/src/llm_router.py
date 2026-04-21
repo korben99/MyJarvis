@@ -63,6 +63,7 @@ class RouterResult:
     gmail_query: str
     calendar_days: int
     weather_location: str = field(default="")
+    rag_query: str = field(default="")
 
 
 # ── Training data collector ───────────────────────────────────────────────
@@ -107,6 +108,7 @@ def _log_routing_sample(
             "gmail_query": result.gmail_query,
             "calendar_days": result.calendar_days,
             "weather_location": result.weather_location,
+            "rag_query": result.rag_query,
             "use_reasoning": result.use_reasoning,
         },
         "model": model,
@@ -193,6 +195,7 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
         gmail_query: str = parsed.get("gmail_query") or ""
         calendar_days: int = int(parsed.get("calendar_days") or 7)
         weather_location: str = parsed.get("weather_location") or ""
+        rag_query: str = parsed.get("rag_query") or ""
         use_reasoning: bool = bool(parsed.get("use_reasoning", False))
     except Exception as exc:
         logger.warning(
@@ -231,13 +234,8 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
         gmail_query=gmail_query,
         calendar_days=calendar_days,
         weather_location=weather_location,
+        rag_query=rag_query,
     )
-
-    # ── Guardrail 2: reasoning only allowed with complex intents ──
-    if result.use_reasoning and not (
-        result.use_rag or result.use_web or result.use_portfolio
-    ):
-        result.use_reasoning = False
 
     logger.info(
         "LLM router [%s]: intents=%s | reasoning=%s → final=%s",

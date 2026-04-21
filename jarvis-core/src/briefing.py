@@ -248,17 +248,20 @@ def _is_quality_article(r: dict) -> bool:
     return True
 
 
-async def _fetch_news(interests: list[str]) -> list[str]:
+def _news_snippet(body: str) -> str:
+    """Strip the [date | source] DDG prefix and return up to 160 chars of content."""
+    content = body.split("] ", 1)[1] if body.startswith("[") and "] " in body else body
+    return content[:160]
+
+
+async def _fetch_news(interests: list[str]) -> list[dict]:
     """
-    Fetch recent headlines: 2 parallel queries (professional + general).
-    - Pro query: top 1-2 interest keywords, timelimit=day
-    - General query: "actualités france", timelimit=day
-    Results are interleaved (alternating) so neither dominates.
+    Fetch recent headlines in parallel: one query per interest (up to 3) +
+    one general French news query.
+
+    Returns list of dicts {title, snippet, url} — URL kept for briefing links.
+    Interest results appear first (priority), then general news fills the rest.
     """
-    # Use last word of each interest phrase — more generic than the full phrase
-    # e.g. "stratège cybersécurité" → "cybersécurité", "Fortinet" → "Fortinet"
-    pro_keywords = [kw.split()[-1] for kw in interests[:2]]
-    pro_query = " ".join(pro_keywords) if interests else ""
     general_query = "actualités france"
 
     async def _fetch_one(query: str, n: int) -> list[dict]:
@@ -266,43 +269,36 @@ async def _fetch_news(interests: list[str]) -> list[str]:
             results = await search_news(query, n, region="fr-fr", timelimit="d")
             if not results:
                 results = await search_news(query, n, region="fr-fr", timelimit="w")
-            return results
+            return [r for r in results if _is_quality_article(r)]
         except Exception as exc:
             logger.warning("News fetch failed for %r: %s", query, type(exc).__name__)
             return []
 
-    if pro_query:
-        pro_results, gen_results = await asyncio.gather(
-            _fetch_one(pro_query, 3),
-            _fetch_one(general_query, 4),
-        )
-    else:
-        gen_results = await _fetch_one(general_query, 6)
-        pro_results = []
+    # One task per interest (full phrase, not just last word) + general fallback
+    tasks = [_fetch_one(general_query, 4)] + [
+        _fetch_one(kw, 2) for kw in interests[:3]
+    ]
+    results_lists = await asyncio.gather(*tasks)
+    gen_results = results_lists[0]
+    interest_results = [r for sub in results_lists[1:] for r in sub]
 
-    # Filtrer les résultats RSS/homepage avant le merge
-    pro_results = [r for r in pro_results if _is_quality_article(r)]
-    gen_results = [r for r in gen_results if _is_quality_article(r)]
-
-    # Interleave: 1 pro, 1 general, 1 pro, 1 general...
+    # Interest articles first, then general — deduplicate by title
     seen_titles: set = set()
     merged = []
-    for pair in zip(pro_results, gen_results):
-        for r in pair:
-            t = r.get("title", "")
-            if t not in seen_titles:
-                seen_titles.add(t)
-                merged.append(r)
-    # Append remaining items from the longer list
-    for r in (pro_results if len(pro_results) > len(gen_results) else gen_results)[
-        len(merged) // 2 :
-    ]:
-        t = r.get("title", "")
-        if t not in seen_titles:
+    for r in interest_results + gen_results:
+        t = r.get("title", "").strip()
+        if t and t not in seen_titles:
             seen_titles.add(t)
             merged.append(r)
 
-    return [f"{r['title']} — {r.get('body', '')[:120]}" for r in merged[:6]]
+    return [
+        {
+            "title": r["title"],
+            "snippet": _news_snippet(r.get("body", "")),
+            "url": r.get("url", ""),
+        }
+        for r in merged[:7]
+    ]
 
 
 # ── LLM assembly ──────────────────────────────────────────────────────────
@@ -340,7 +336,13 @@ async def _assemble_with_llm(
     weather_text = sections.get("weather", "") or "Données météo indisponibles."
     news_items = sections.get("news", [])
     news_text = (
-        "\n".join(f"- {n}" for n in news_items) or "Aucune actualité disponible."
+        "\n".join(
+            f"- {n['title']} — {n['snippet']} [URL: {n['url']}]"
+            if isinstance(n, dict)
+            else f"- {n}"
+            for n in news_items
+        )
+        or "Aucune actualité disponible."
     )
     interests_text = ", ".join(sections.get("interests", [])) or "généralistes"
     projects_text = (

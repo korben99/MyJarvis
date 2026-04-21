@@ -191,7 +191,7 @@ EPISODIC_RETENTION_DAYS = int(os.getenv("EPISODIC_RETENTION_DAYS", "45"))
 # considéré comme un doublon et ignoré (pas de stockage Qdrant).
 # 0.85 = très similaire en sens mais formulation différente tolérée.
 # Augmenter vers 0.95 pour être plus permissif (moins de dédup).
-AUTOBIO_DEDUP_THRESHOLD = float(os.getenv("AUTOBIO_DEDUP_THRESHOLD", "0.85"))
+AUTOBIO_DEDUP_THRESHOLD = float(os.getenv("AUTOBIO_DEDUP_THRESHOLD", "0.82"))
 
 # Décroissance mémorielle mensuelle des souvenirs autobiographiques.
 # DECAY_FACTOR        : multiplicateur appliqué à importance à chaque passe (0.85 = -15 %/mois).

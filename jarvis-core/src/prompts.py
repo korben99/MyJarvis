@@ -54,69 +54,60 @@ VOICE_SUFFIX_FR = (
 # Elle est mise en cache KV dès le premier appel via _get_system_cache dans _generate_sync.
 # ROUTER_USER ne contient que la partie dynamique (le message) pour minimiser le prefill.
 ROUTER_SYSTEM = """\
-Tu es un moteur de routage qui classe le message utilisateur et produit du JSON strict.
-Répond uniquement en JSON valide, sans texte supplémentaire.
-Le JSON doit contenir les champs : "intents", "weather_location", "gmail_query", "calendar_days", "use_reasoning".
+Tu es un moteur de routage JSON. Réponds UNIQUEMENT en JSON strict, aucun texte.
+Champs : "intents", "weather_location", "gmail_query", "calendar_days", "rag_query", "use_reasoning".
 
-INTENTS :
-memory=conversation/explication
-rag=docs_perso
-web=info_externe
-weather=météo
-gmail=emails
-calendar=agenda
-briefing=résumé_jour
-portfolio=bourse
-self=état_Jarvis
-use_reasoning=mode expert
-
-Défaut : ["memory"]. Multi-intents possible, inclus tous les intents pertinents.
+INTENTS (liste, multi-intents OK, défaut ["memory"]) :
+memory=conversation/aide/explication  rag=docs_perso  web=info_externe
+weather=météo  gmail=emails  calendar=agenda
+briefing=résumé_jour  portfolio=bourse  self=état_Jarvis
 
 PARAMS :
-- weather_location : ville mentionnée explicitement ou null
-- gmail_query : syntaxe Gmail ou null
-- calendar_days : 7, 30 ou null
-- use_reasoning : true si le message demande une explication, un mécanisme, une analyse ou de l'aide pédagogique. Mots-clés : "explique", "comprendre", "comment fonctionne", "pourquoi", "mécanisme", "analyse", "réfléchis", "debug", "mode expert"
+weather_location : ville explicite dans le message, sinon null
+gmail_query      : syntaxe Gmail ("is:unread", "subject:facture", "newer_than:7d"…) ou null
+calendar_days    : entier 1-90 ou null
+rag_query        : si intent rag → 3-5 mots-clés sémantiques, SANS verbes de commande ni phrases d'intro
+                   ("contrat location" depuis "cherche dans mes docs le contrat de location")
+                   sinon null
+use_reasoning    : true UNIQUEMENT si le message demande explicitement une analyse experte, un raisonnement juridique/technique complexe ou un debug avancé ("mode expert", "analyse approfondie", "raisonne étape par étape")
+                   false pour les explications simples, résumés, conversations, traductions
 
-RÈGLE URL : si le message contient une URL http(s), ne pas utiliser l'intent "web". Inclure "memory" à la place.
+RÈGLE URL : URL http(s) dans le message → ["memory"] uniquement, jamais "web"
 
 EXEMPLES :
 
 "salut ça va ?"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
 
 "météo Lyon demain"
-{"intents":["weather"],"weather_location":"Lyon","gmail_query":null,"calendar_days":null,"use_reasoning":false}
+{"intents":["weather"],"weather_location":"Lyon","gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
 
 "résume mes mails non lus"
-{"intents":["gmail"],"weather_location":null,"gmail_query":"is:unread","calendar_days":null,"use_reasoning":false}
+{"intents":["gmail"],"weather_location":null,"gmail_query":"is:unread","calendar_days":null,"rag_query":null,"use_reasoning":false}
 
 "mon agenda cette semaine"
-{"intents":["calendar"],"weather_location":null,"gmail_query":null,"calendar_days":7,"use_reasoning":false}
-
-"peux-tu m'aider à comprendre comment fonctionnent les muscles ?"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":true}
-
-"mode expert, explique la mécanique quantique"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":true}
-
-"lis cette page https://example.com/article et résume"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}
-
-"météo Paris demain et résume mes mails non lus"
-{"intents":["weather","gmail"],"weather_location":"Paris","gmail_query":"is:unread","calendar_days":null,"use_reasoning":false}
-
-"agenda + briefing sur les événements de la semaine"
-{"intents":["calendar","briefing"],"weather_location":null,"gmail_query":null,"calendar_days":7,"use_reasoning":false}
+{"intents":["calendar"],"weather_location":null,"gmail_query":null,"calendar_days":7,"rag_query":null,"use_reasoning":false}
 
 "cherche dans mes documents le contrat de location"
-{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}
+{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"contrat location","use_reasoning":false}
+
+"dans mes notes retrouve la stratégie marketing Q3"
+{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"stratégie marketing Q3","use_reasoning":false}
+
+"mode expert: quels sont les risques de monter une LLC aux US ?"
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":true}
+
+"explique-moi comment fonctionne un moteur à combustion"
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
+
+"météo Paris et résume mes mails non lus"
+{"intents":["weather","gmail"],"weather_location":"Paris","gmail_query":"is:unread","calendar_days":null,"rag_query":null,"use_reasoning":false}
 
 "comment se porte mon portefeuille ?"
-{"intents":["portfolio"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}
+{"intents":["portfolio"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
 
-"comment tu vas ? quel est ton état actuel ?"
-{"intents":["self"],"weather_location":null,"gmail_query":null,"calendar_days":null,"use_reasoning":false}
+"quel est ton état interne ?"
+{"intents":["self"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
 """
 
 ROUTER_USER = "Message : {message}"
@@ -287,7 +278,8 @@ Génère deux versions en JSON :
   Ordre : accroche météo → agenda → emails notables → actu → portefeuille (si données) → rappel projet.
   Météo : décris les conditions actuelles ET les prévisions des jours suivants.
   Agenda : détaille chaque événement (heure, lieu si précisé, contexte si utile).
-  Actualités : couvre chaque article en 2-3 phrases — titre + résumé de l'information clé.
+  Actualités : couvre chaque article en 2-3 phrases — titre + résumé de l'information clé. Cite la source si disponible.
+  Dans la version HTML uniquement : termine chaque article par <a href="URL">Lire l'article</a> si une URL est fournie.
   Portefeuille : mentionne les mouvements notables (>1% intraday) ou alertes actives ; omet si aucune donnée.
   Projets : rappelle brièvement l'état de chaque projet actif.
   Omet les sections sans données — ne mentionne pas qu'une section est vide.
@@ -295,9 +287,9 @@ Génère deux versions en JSON :
 "html" : même contenu en HTML email propre.
   <h2> pour les sections, <ul>/<li> pour les listes, styles inline sobres.
 
-Exemple de format attendu :
-{{"text":"Salut {user_name} ! Ce matin il fait 12°C...","html":"<h2>Météo</h2><p>Ce matin..."}}
+RÈGLE MÉTÉO : utilise UNIQUEMENT les données fournies dans <meteo>. N'invente jamais de température, condition ou prévision. Si <meteo> est vide, indique "pas de données météo exploitables".
 
+Format attendu : {{"text":"...","html":"..."}}
 JSON uniquement.
 </task>"""
 
