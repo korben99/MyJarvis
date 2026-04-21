@@ -146,6 +146,8 @@ def setup_logging(log_file: str = "/opt/jarvis/logs/jarvis-api.log") -> None:
         "h2",
         "reqwest",
         "hyper",
+        "ddgs",
+        "ddgs.ddgs",
     ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 

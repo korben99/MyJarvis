@@ -387,16 +387,22 @@ def _normalize_profile_key(
         prompt = (
             f"Clés existantes (même catégorie) : [{keys_list}]\n"
             f'Nouvelle clé : "{new_key}"\n\n'
-            f"DOUBLON = même concept sous un nom ou préfixe différent :\n"
-            f'  • "hobby:ia" == "interest:ia" → OUI\n'
-            f'  • "hobby:kart" == "loisir:kart" → OUI\n'
-            f'  • "hobby:kart" == "hobby:tennis" → NON\n'
-            f'JSON uniquement : {{"match": "clé_existante"}} ou {{"match": null}}'
+            f'Est-ce un doublon ? Réponds : {{"match": "clé_existante"}} ou {{"match": null}}'
         )
 
         raw = call_llm(
             [
-                {"role": "system", "content": "JSON uniquement. Aucun autre texte."},
+                {
+                    "role": "system",
+                    "content": (
+                        "Tu es un détecteur de doublons de clés de profil. "
+                        "Réponds UNIQUEMENT avec du JSON valide, sans aucun autre texte.\n"
+                        "Exemples :\n"
+                        '  "hobby:ia" vs "interest:ia" → {"match": "hobby:ia"}\n'
+                        '  "hobby:kart" vs "loisir:kart" → {"match": "hobby:kart"}\n'
+                        '  "hobby:kart" vs "hobby:tennis" → {"match": null}'
+                    ),
+                },
                 {"role": "user", "content": prompt},
             ],
             model=ROUTER_MODEL,

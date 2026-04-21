@@ -1,6 +1,14 @@
 # Jarvis v9 — On-Premise Personal AI Assistant
 
 Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonomous reflection, and integration with Gmail, Google Calendar, web search, and a document knowledge base.
+# Arrêter
+launchctl stop com.jarvis.api
+# Redémarrer (ex: après un update)
+alias jarvis-reload='launchctl kickstart -k gui/$(id -u)/com.jarvis.api'
+# Désactiver définitivement
+launchctl unload ~/Library/LaunchAgents/com.jarvis.api.plist
+# Logs en live
+tail -f /opt/jarvis/logs/jarvis-service.log
 
 ---
 
