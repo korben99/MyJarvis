@@ -99,8 +99,8 @@ async def analyze_exchange(
         )
         prompt = get_prompt("ANALYSIS_PROMPT").format(
             current_date=date.today().isoformat(),
-            user_message=user_msg[:2500],
-            assistant_message=assistant_msg[:2500],
+            user_message=user_msg[:1500],
+            assistant_message=assistant_msg[:1500],
             existing_projects=projects_context,
             existing_profile_keys=profile_keys_str,
         )
@@ -177,6 +177,7 @@ async def analyze_exchange(
         return {
             "topics": [],
             "mood": "neutral",
+            "satisfaction": "unknown",
             "user_facts": [],
             "projects": [],
             "importance": 0.0,
@@ -205,10 +206,9 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
       analysis are included in the next batch (never dropped).
 
     After analysis:
-      - user_facts  → Redis profile via update_user_profile
+      - user_facts  → Redis profile via update_user_profile_batch
       - projects    → apply_project_updates
       - mood        → update_emotional_state
-      - retractions → retract_autobiographical_event
       - importance > IMPORTANCE_THRESHOLD   → store_memory_vector (Qdrant épisodique)
       - importance > AUTOBIO_IMPORTANCE_THRESHOLD → store_autobiographical_event
     """
@@ -217,12 +217,11 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
         apply_project_updates,
         get_user_profile,
         get_user_projects,
-        retract_autobiographical_event,
         set_interest_weight,
         store_autobiographical_event,
         store_memory_vector,
         update_emotional_state,
-        update_user_profile,
+        update_user_profile_batch,
     )
 
     r = get_redis()
@@ -313,23 +312,40 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
             importance     = analysis.get("importance", 0)
             mood           = analysis.get("mood", "neutral")
             memory_summary = analysis.get("memory_summary")
+            satisfaction   = analysis.get("satisfaction", "unknown")
 
             if mood in _mood_to_state:
                 update_emotional_state(_mood_to_state[mood])
+
+            # ── Back-fill LLM satisfaction into convlog entries ───────────
+            # Replaces the regex-based _detect_satisfaction() stored at log time.
+            if satisfaction in ("positive", "negative"):
+                _ts_list = [m.get("ts", 0) for m in all_new if m.get("ts")]
+                if _ts_list:
+                    _min_ts = min(_ts_list) - 1
+                    _max_ts = max(_ts_list) + 1
+                    _clog_key = f"convlog:{uc}"
+                    _raw_entries = r.zrangebyscore(_clog_key, _min_ts, _max_ts, withscores=True)
+                    if _raw_entries:
+                        _pipe = r.pipeline()
+                        for _raw, _score in _raw_entries:
+                            try:
+                                _e = json.loads(_raw)
+                                if _e.get("satisfaction") != satisfaction:
+                                    _e["satisfaction"] = satisfaction
+                                    _pipe.zrem(_clog_key, _raw)
+                                    _pipe.zadd(_clog_key, {json.dumps(_e, ensure_ascii=False): _score})
+                            except (json.JSONDecodeError, ValueError):
+                                pass
+                        _pipe.execute()
 
             projects = analysis.get("projects", [])
             if projects:
                 apply_project_updates(uc, projects)
 
-            for fact in analysis.get("user_facts", []):
-                if "key" in fact and "value" in fact:
-                    await asyncio.to_thread(
-                        update_user_profile, uc, fact["key"], fact["value"] or None
-                    )
-
-            for retraction in analysis.get("retractions") or []:
-                if isinstance(retraction, str) and retraction.strip():
-                    await asyncio.to_thread(retract_autobiographical_event, uc, retraction)
+            user_facts = [f for f in analysis.get("user_facts", []) if "key" in f and "value" in f]
+            if user_facts:
+                await asyncio.to_thread(update_user_profile_batch, uc, user_facts)
 
             for iw in analysis.get("interest_weights") or []:
                 if "term" in iw and "weight" in iw:

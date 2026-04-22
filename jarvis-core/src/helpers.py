@@ -56,6 +56,7 @@ import json
 import logging
 import os
 import re
+import time
 import unicodedata
 from datetime import date, datetime
 from logging.handlers import RotatingFileHandler
@@ -277,9 +278,7 @@ def rel_time_fr(ts: float) -> str:
 
     Examples: 'il y a 3 jours', 'il y a 2 semaines', 'il y a 1 mois'
     """
-    import time as _time
-
-    delta = _time.time() - ts
+    delta = time.time() - ts
     if delta < 3600:
         m = max(1, int(delta / 60))
         return f"il y a {m} min"

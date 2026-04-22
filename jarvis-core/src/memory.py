@@ -31,8 +31,7 @@ import os
 import tempfile
 import time
 import uuid
-from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from threading import Lock
 
 from config import (
@@ -77,6 +76,7 @@ from helpers import (
     redis_set_json,
     rel_time_fr,
 )
+from prompts import get_prompt
 from qdrant_client.models import PointIdsList
 from sentence_transformers import SentenceTransformer
 
@@ -314,6 +314,27 @@ def _key_prefix(key: str) -> str | None:
     return key.split(":")[0] if ":" in key else None
 
 
+def _profile_key_fast_match(new_key: str, existing_keys: list[str]) -> str | None:
+    """Stages 0–1 of profile key dedup — no LLM call.
+
+    Stage 0: case/accent-insensitive exact match via normalize_key().
+    Stage 1: scalar canonical alias lookup (_SCALAR_CANONICAL dict).
+
+    Returns the matching existing key to evict, or None.
+    Called by both _normalize_profile_key (single) and _normalize_profile_keys_batch.
+    """
+    new_key_norm = normalize_key(new_key)
+    # Stage 0: case/accent-insensitive exact match
+    for k in existing_keys:
+        if normalize_key(k) == new_key_norm and k != new_key:
+            return k
+    # Stage 1: scalar canonical alias (new_key_norm already lowercased + normalised)
+    canonical = _SCALAR_CANONICAL.get(new_key_norm)
+    if canonical and canonical in existing_keys:
+        return canonical
+    return None
+
+
 def _candidate_keys(new_key: str, existing_keys: list[str]) -> list[str]:
     """Narrow the dedup candidate set to the same namespace family."""
     new_prefix = _key_prefix(new_key)
@@ -324,6 +345,123 @@ def _candidate_keys(new_key: str, existing_keys: list[str]) -> list[str]:
         frozenset({new_prefix}),
     )
     return [k for k in existing_keys if _key_prefix(k) in family]
+
+
+def _normalize_profile_keys_batch(
+    user_code: str, new_keys: list[str], existing_keys: list[str]
+) -> dict[str, str | None]:
+    """
+    Batch version of _normalize_profile_key.
+    Returns {new_key: existing_key_to_evict_or_None} for all new_keys.
+
+    Fast paths (stages 0-1) are applied per key with no LLM.
+    Remaining unresolved keys are grouped by prefix family and sent in a
+    single LLM call per group — O(families) instead of O(keys).
+    """
+    result: dict[str, str | None] = {k: None for k in new_keys}
+    unresolved: list[str] = []
+
+    for new_key in new_keys:
+        if new_key in existing_keys:
+            continue  # exact match already present — just overwrite, no eviction
+        fast = _profile_key_fast_match(new_key, existing_keys)
+        if fast:
+            logger.info(
+                "User %s profile key '%s' → fast match '%s' (no LLM)",
+                user_code, new_key, fast,
+            )
+            result[new_key] = fast
+            continue
+        unresolved.append(new_key)
+
+    if not unresolved or not ROUTER_MODEL:
+        return result
+
+    # Stage 2: group unresolved by prefix family, one LLM call per group
+    groups: dict[str, list[str]] = {}
+    for new_key in unresolved:
+        prefix = _key_prefix(new_key)
+        family_key = next(
+            (fk for fk, members in _NS_FAMILY.items() if prefix in members),
+            prefix or "__none__",
+        )
+        groups.setdefault(family_key, []).append(new_key)
+
+    for _family, group_keys in groups.items():
+        seen: set[str] = set()
+        candidates: list[str] = []
+        for new_key in group_keys:
+            for c in _candidate_keys(new_key, existing_keys):
+                if c not in seen:
+                    seen.add(c)
+                    candidates.append(c)
+        if not candidates:
+            continue
+
+        try:
+            keys_list = ", ".join(f'"{k}"' for k in candidates)
+            new_list = ", ".join(f'"{k}"' for k in group_keys)
+            # Response wrapped in {"matches": [...]} so extract_llm_json (object-only)
+            # can parse it without modification.
+            prompt = (
+                f"Clés existantes : [{keys_list}]\n"
+                f"Nouvelles clés  : [{new_list}]\n\n"
+                "Pour chaque nouvelle clé, indique le doublon exact parmi les existantes "
+                "(même concept, catégorie synonyme). Si aucun → null.\n"
+                'Réponds : {"matches": [{"new": "clé", "match": "existante_ou_null"}, ...]}'
+            )
+            raw = call_llm(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Tu es un détecteur de doublons de clés de profil. "
+                            "Réponds UNIQUEMENT avec du JSON valide.\n"
+                            "Exemples :\n"
+                            '  existantes: ["hobby:kart"] nouvelles: ["loisir:kart"] '
+                            '→ {"matches": [{"new": "loisir:kart", "match": "hobby:kart"}]}\n'
+                            '  existantes: ["hobby:kart"] nouvelles: ["hobby:tennis"] '
+                            '→ {"matches": [{"new": "hobby:tennis", "match": null}]}'
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                model=ROUTER_MODEL,
+                api_url=ROUTER_API_URL,
+                api_key=ROUTER_API_KEY,
+                temperature=0.1,
+                max_tokens=250,
+                json_response=True,
+                no_think=True,
+                timeout=ROUTER_TIMEOUT,
+            )
+            parsed = extract_llm_json(raw)
+            matches = parsed.get("matches") if isinstance(parsed, dict) else None
+            if not isinstance(matches, list):
+                logger.warning(
+                    "Batch profile key normalization: unexpected response format for group (%s)",
+                    ", ".join(group_keys),
+                )
+            else:
+                for item in matches:
+                    nk = item.get("new")
+                    match = item.get("match")
+                    if nk in group_keys and match and match in existing_keys:
+                        logger.info(
+                            "User %s profile key batch '%s' deduped → '%s'",
+                            user_code,
+                            nk,
+                            match,
+                        )
+                        result[nk] = match
+        except Exception as exc:
+            logger.warning(
+                "Batch profile key normalization failed for group (%s): %s",
+                ", ".join(group_keys),
+                exc,
+            )
+
+    return result
 
 
 def get_user_profile(user_code: str) -> dict:
@@ -347,32 +485,14 @@ def _normalize_profile_key(
     if not existing_keys or new_key in existing_keys:
         return None
 
-    # Normalize once, reuse everywhere
-    new_key_norm = normalize_key(new_key)
-
-    # Stage 0: case + accent-insensitive exact match
-    for k in existing_keys:
-        if normalize_key(k) == new_key_norm and k != new_key:
-            logger.info(
-                "User %s profile key '%s' → case/accent match '%s' (no LLM)",
-                user_code,
-                new_key,
-                k,
-            )
-            return k
-
-    # Stage 1: scalar canonical alias (based on normalized key)
-    stripped = new_key_norm.replace("-", "_").replace(" ", "_")
-    if stripped in _SCALAR_CANONICAL:
-        canonical = _SCALAR_CANONICAL[stripped]
-        if canonical in existing_keys:
-            logger.info(
-                "User %s profile key '%s' → canonical '%s' (no LLM)",
-                user_code,
-                new_key,
-                canonical,
-            )
-            return canonical
+    # Stages 0–1: fast path (no LLM)
+    fast = _profile_key_fast_match(new_key, existing_keys)
+    if fast:
+        logger.info(
+            "User %s profile key '%s' → fast match '%s' (no LLM)",
+            user_code, new_key, fast,
+        )
+        return fast
 
     if not ROUTER_MODEL:
         return None
@@ -479,6 +599,67 @@ def update_user_profile(user_code: str, key: str, value: str | None):
         logger.info("User %s profile updated: %s = %s", user_code, key, value)
 
 
+def update_user_profile_batch(user_code: str, facts: list[dict]) -> None:
+    """
+    Apply a list of profile facts in one batch:
+    - single Redis hkeys read shared across all facts
+    - one LLM dedup call per prefix family (instead of one per key)
+    - all writes applied sequentially after dedup resolution
+    """
+    if not facts:
+        return
+
+    r = get_redis()
+    profile_redis_key = f"user:{user_code}:profile"
+    profile_ts_key = f"user:{user_code}:profile:ts"
+
+    existing_keys = r.hkeys(profile_redis_key)
+
+    new_facts = [f for f in facts if "key" in f and f.get("value")]
+    delete_facts = [f for f in facts if "key" in f and not f.get("value")]
+
+    dedup_map = (
+        _normalize_profile_keys_batch(
+            user_code, [f["key"] for f in new_facts], existing_keys
+        )
+        if new_facts
+        else {}
+    )
+
+    now_ts = int(time.time())
+
+    for fact in delete_facts:
+        key = fact["key"]
+        old_val = r.hget(profile_redis_key, key)
+        r.hdel(profile_redis_key, key)
+        r.hdel(profile_ts_key, key)
+        logger.info(
+            "User %s profile deleted: %s (was: %s)",
+            user_code,
+            key,
+            old_val or "(empty)",
+        )
+
+    for fact in new_facts:
+        key = fact["key"]
+        value = fact["value"]
+        duplicate = dedup_map.get(key)
+        if duplicate:
+            old_dup_val = r.hget(profile_redis_key, duplicate)
+            logger.info(
+                "User %s profile key normalized: '%s' (was: %s) → replaced by '%s'",
+                user_code,
+                duplicate,
+                old_dup_val or "(empty)",
+                key,
+            )
+            r.hdel(profile_redis_key, duplicate)
+            r.hdel(profile_ts_key, duplicate)
+        r.hset(profile_redis_key, key, value)
+        r.hset(profile_ts_key, key, now_ts)
+        logger.info("User %s profile updated: %s = %s", user_code, key, value)
+
+
 def set_interest_weight(user_code: str, term: str, weight: float):
     """
     Set the importance weight for an interest term (0.0 = forgotten, 1.0 = normal, 2.0 = top).
@@ -545,39 +726,6 @@ def update_user_preference(user_code: str, key: str, value: str):
 # ══════════════════════════════════════════════════
 
 
-_SAT_POSITIVE = (
-    "merci",
-    "parfait",
-    "super",
-    "excellent",
-    "exactement",
-    "nickel",
-    "génial",
-    "top",
-    "c'est ça",
-)
-_SAT_NEGATIVE = (
-    "non,",
-    "non.",
-    "c'est pas ça",
-    "tu n'as pas",
-    "pas compris",
-    "faux",
-    "incorrect",
-    "erreur",
-)
-
-
-def _detect_satisfaction(user_msg: str) -> str:
-    """Detect implicit satisfaction signal from the user's message (proxy on previous response)."""
-    lower = user_msg.lower().strip()
-    if any(lower.startswith(p) or f" {p}" in lower for p in _SAT_POSITIVE):
-        return "positive"
-    if any(lower.startswith(n) or f" {n}" in lower for n in _SAT_NEGATIVE):
-        return "negative"
-    return "unknown"
-
-
 def log_conversation(
     user_code: str,
     session_id: str,
@@ -600,7 +748,7 @@ def log_conversation(
         "topics": topics or [],
         "importance": importance,
         "memory_summary": memory_summary,
-        "satisfaction": _detect_satisfaction(user_msg),
+        "satisfaction": "unknown",  # back-filled by analyzer (LLM) after each batch
     }
     # Store in a sorted set by timestamp for easy retrieval
     r.zadd(f"convlog:{user_code}", {json.dumps(entry): _now})
@@ -609,11 +757,15 @@ def log_conversation(
     r.zremrangebyrank(f"convlog:{user_code}", 0, -1001)
     # Storage as embedded to Qdrant , is importance high enough (VARIABLE TO ADJUST)
 
+    # NOTE: pipeline.py calls log_conversation with importance=0 (default) —
+    # the thresholds below are never crossed at call time.
+    # Actual vectorisation and autobio storage happen in analyse_recent_conversations()
+    # (scheduler, every 30 min) once the LLM has assigned a real importance score.
+    # These paths exist as a fallback for any caller that provides a pre-computed score.
     if entry.get("importance", 0) > IMPORTANCE_THRESHOLD:
         store_memory_vector(user_code, entry)
 
     summary = entry.get("memory_summary")
-
     if summary and entry.get("importance", 0) > AUTOBIO_IMPORTANCE_THRESHOLD:
         store_autobiographical_event(user_code, summary, entry["importance"])
 
@@ -632,39 +784,6 @@ def get_recent_conversations(user_code: str, hours: int = 24, limit: int = 20) -
         except (json.JSONDecodeError, ValueError):
             logger.warning("Skipping corrupted convlog entry for %s", user_code)
     return result
-
-
-def get_conversation_summary(user_code: str, days: int = 7) -> str:
-    """Get a text summary of recent conversations."""
-    r = get_redis()
-    cutoff = time.time() - (days * 86400)
-    entries = r.zrangebyscore(f"convlog:{user_code}", cutoff, "+inf")
-    parsed = []
-    for e in entries:
-        try:
-            parsed.append(json.loads(e))
-        except (json.JSONDecodeError, ValueError):
-            logger.warning("Skipping corrupted convlog entry for %s", user_code)
-
-    if not parsed:
-        return "No recent conversations."
-
-    topics_seen = set()
-    moods = []
-    for e in parsed:
-        topics_seen.update(e.get("topics", []))
-        moods.append(e.get("mood", "neutral"))
-
-    summary = f"Ces {days} derniers jours : {len(parsed)} échanges. "
-    if topics_seen:
-        summary += f"Sujets abordés : {', '.join(topics_seen)}. "
-    if moods:
-        mood_counts = Counter(moods).most_common(3)
-        summary += (
-            f"Humeurs dominantes : {', '.join(f'{m}({c})' for m, c in mood_counts)}."
-        )
-
-    return summary
 
 
 def _fuzzy_project_name(
@@ -953,6 +1072,7 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
                     "payload": {
                         "user_code": user_code,
                         "memory_type": "autobiographical",
+                        "status": "current",  # explicit — archive sets this to "past"
                         "text": summary,
                         "importance": importance,
                         "timestamp": time.time(),
@@ -969,10 +1089,12 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
 
 
 def retract_autobiographical_event(
-    user_code: str, query: str, threshold: float = 0.78
+    user_code: str, query: str, threshold: float = 0.88
 ) -> int:
     """Delete autobiographical memories semantically matching the query.
-    Returns the number of deleted points. Used when the user corrects a past fact."""
+    Reserved for genuine errors and strict duplicates — not for outdated facts.
+    Higher threshold than archive (0.88 vs 0.78) — hard delete requires stricter match.
+    Returns the number of deleted points."""
     try:
         model = get_embed_model()
         qdrant = get_qdrant()
@@ -1002,6 +1124,75 @@ def retract_autobiographical_event(
     except Exception as e:
         logger.error("retract_autobiographical_event failed: %s", e)
         return 0
+
+
+def archive_autobiographical_event(
+    user_code: str, query: str, threshold: float = 0.78
+) -> int:
+    """Mark autobiographical memories as past (status='past') without deleting them.
+    Used when a fact is no longer current but retains historical value
+    (e.g. changed jobs, stopped a hobby). The memory remains searchable but is
+    deprioritised in recall scoring via a status_factor penalty.
+    Returns the number of archived points."""
+    try:
+        model = get_embed_model()
+        qdrant = get_qdrant()
+        vector = model.encode(query, normalize_embeddings=True).tolist()
+        results = qdrant.query_points(
+            collection_name=QDRANT_MEMORY_COLLECTION,
+            query=vector,
+            limit=5,
+            query_filter={
+                "must": [
+                    {"key": "user_code", "match": {"value": user_code}},
+                    {"key": "memory_type", "match": {"value": "autobiographical"}},
+                ],
+                # Only archive current facts — skip already-archived ones
+                "must_not": [{"key": "status", "match": {"value": "past"}}],
+            },
+        ).points
+        to_archive = [r.id for r in results if min(r.score, 1.0) >= threshold]
+        if to_archive:
+            qdrant.set_payload(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                payload={"status": "past", "archived_date": date.today().isoformat()},
+                points=to_archive,
+            )
+            _invalidate_timeline_cache(user_code)
+            logger.info(
+                "Autobio archived %d point(s) for '%s'", len(to_archive), query[:60]
+            )
+        return len(to_archive)
+    except Exception as e:
+        logger.error("archive_autobiographical_event failed: %s", e)
+        return 0
+
+
+def get_autobiographical_facts(user_code: str, limit: int = 40) -> list[str]:
+    """Return current (non-archived) autobiographical memory summaries sorted
+    chronologically (oldest first) — intended for the nightly cleaning prompt
+    so the LLM can spot temporal evolution and outdated facts."""
+    try:
+        qdrant = get_qdrant()
+        results = qdrant.scroll(
+            collection_name=QDRANT_MEMORY_COLLECTION,
+            scroll_filter={
+                "must": [
+                    {"key": "user_code", "match": {"value": user_code}},
+                    {"key": "memory_type", "match": {"value": "autobiographical"}},
+                ],
+                "must_not": [{"key": "status", "match": {"value": "past"}}],
+            },
+            limit=max(limit * 2, 100),
+            with_payload=True,
+        )[0]
+
+        # Sort oldest first so temporal progression is visible to the LLM
+        results.sort(key=lambda r: r.payload.get("timestamp", 0))
+        return [r.payload["text"] for r in results[:limit]]
+    except Exception as e:
+        logger.error("get_autobiographical_facts failed: %s", e)
+        return []
 
 
 def search_memory(
@@ -1077,11 +1268,15 @@ def search_memory(
                 else 30 * 86400
             )
             recency_bonus = max(0, min(1, 1 - recency / recency_window))
+            # Archived (past) facts are still findable but ranked lower so current
+            # facts take priority; a 0.4 factor ensures past facts appear in
+            # positions ~4-5 when a semantically close current fact scores higher.
+            status_factor = 0.4 if payload.get("status") == "past" else 1.0
             # Weighted blend: semantic similarity (primary) + importance + recency
             # All weights sum to 1.0 so the score stays in ~[0, 1]
             final_score = (
                 sim * 0.65 + payload.get("importance", 0) * 0.25 + recency_bonus * 0.1
-            )
+            ) * status_factor
 
             memories.append(
                 {
@@ -1092,6 +1287,7 @@ def search_memory(
                     "_sim": sim,  # clamped similarity — used for reconsolidation gate
                     "_mem_type": mem_type,
                     "_importance": payload.get("importance", 0),
+                    "_status": payload.get("status", "current"),
                 }
             )
         # cognitive ranking
@@ -1110,6 +1306,8 @@ def search_memory(
         try:
             for m in top:
                 if m["_mem_type"] != "autobiographical":
+                    continue
+                if m["_status"] == "past":  # don't reinforce archived memories
                     continue
                 if m["_sim"] < _REINFORCE_SIM_THRESHOLD:
                     continue
@@ -1130,6 +1328,7 @@ def search_memory(
             m.pop("_sim", None)
             m.pop("_mem_type", None)
             m.pop("_importance", None)
+            m.pop("_status", None)
 
         return top
 
@@ -1283,7 +1482,11 @@ def get_user_timeline(user_code: str, limit: int = 20):
                 "must": [
                     {"key": "user_code", "match": {"value": user_code}},
                     {"key": "memory_type", "match": {"value": "autobiographical"}},
-                ]
+                ],
+                # Archived (past) facts are excluded from the chat timeline —
+                # they remain searchable via search_memory but are not injected
+                # into every conversation as if they were still current.
+                "must_not": [{"key": "status", "match": {"value": "past"}}],
             },
             limit=200,  # over-fetch then rank — scroll order is arbitrary
         )[0]
@@ -1526,16 +1729,8 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
 
             combined = "\n".join(texts)
 
-            summary_prompt = f"""Voici des souvenirs de conversations avec un utilisateur :
-
-{combined}
-
-Identifie les faits durables et distincts sur cet utilisateur (habitudes, préférences, projets, traits de caractère…).
-Retourne uniquement du JSON : {{"facts": ["fait 1", "fait 2"]}}
-Si aucun fait durable : {{"facts": []}}"""
-
             raw = call_llm(
-                [{"role": "user", "content": summary_prompt}],
+                [{"role": "user", "content": get_prompt("CONSOLIDATION_PROMPT").format(combined=combined)}],
                 model=PRIMARY_MODEL,
                 api_url=PRIMARY_API_URL,
                 api_key=PRIMARY_API_KEY,
@@ -1592,17 +1787,18 @@ Si aucun fait durable : {{"facts": []}}"""
         )
 
 
-def _curative_profile_cleanup(user_code: str):
+def curative_profile_cleanup(user_code: str):
     """
-    Nightly curative cleanup of the Redis user profile hash.
+    Curative cleanup of the Redis user profile hash. Called nightly by the nightly
+    review scheduler (run_nightly_interaction_review). Separated from monthly
+    consolidation so duplicate keys are caught within 24 h instead of 30 days.
 
     Sends the full profile to the analysis LLM and asks it to identify:
     - Semantic duplicates (same fact under two different key names)
     - Obsolete/contradictory keys superseded by a more recent entry
 
-    The LLM returns {"keys_to_delete": ["key1", "key2"]}  — each key is then
-    deleted via HDEL.  The surviving key keeps the most up-to-date value.
-    No write is performed other than deletions (values are never rewritten here).
+    The LLM returns {"updates": {...}, "keys_to_delete": ["key1"]} — updates are
+    applied first (merge-before-delete), then duplicates are deleted via HDEL.
 
     Skip condition: profile has fewer than 5 keys (not worth the LLM call).
     """
@@ -1630,20 +1826,9 @@ def _curative_profile_cleanup(user_code: str):
         profile_str = "\n".join(
             f'- "{k}" (mis à jour : {_fmt_ts(k)}): {v}' for k, v in profile.items()
         )
-        prompt = (
-            f"Voici le profil Redis d'un utilisateur ({len(profile)} clés) :\n"
-            f"{profile_str}\n\n"
-            f"Identifie les doublons sémantiques (même information sous deux noms différents) "
-            f"et les entrées obsolètes (contredites par une clé plus récente).\n\n"
-            f"RÈGLE OBLIGATOIRE pour les doublons :\n"
-            f"  step 1 — consolide la valeur sur la clé à conserver dans 'updates'\n"
-            f"  step 2 — liste la clé à supprimer dans 'keys_to_delete'\n"
-            f"  En cas de doute sur laquelle garder, préfère la plus récente (date dans le profil).\n"
-            f"  Ne jamais mettre les DEUX clés du même concept dans 'keys_to_delete'.\n\n"
-            f"Format JSON strict :\n"
-            f'{{"updates": {{"cle_a_garder": "valeur_consolidee"}}, '
-            f'"keys_to_delete": ["cle_doublon"]}}\n'
-            f"ou {{'updates': {{}}, 'keys_to_delete': []}} si le profil est propre."
+        prompt = get_prompt("CURATIVE_CLEANUP_PROMPT").format(
+            profile_count=len(profile),
+            profile_str=profile_str,
         )
 
         parsed = extract_llm_json(
@@ -1668,7 +1853,7 @@ def _curative_profile_cleanup(user_code: str):
                 r.hset(profile_redis_key, key, value.strip())
                 r.hset(profile_ts_key, key, now_ts)
                 logger.info(
-                    "[%s] Curative profile update: '%s' → '%s'",
+                    "[%s] curative_profile_cleanup: UPDATE '%s' → '%s'",
                     user_code,
                     key,
                     value.strip(),
@@ -1684,7 +1869,7 @@ def _curative_profile_cleanup(user_code: str):
             for key in keys_to_delete:
                 old_val = r.hget(profile_redis_key, key)
                 logger.warning(
-                    "[%s] Curative profile cleanup: DELETE '%s' (was: %s, ts: %s)",
+                    "[%s] curative_profile_cleanup: DELETE '%s' (was: %s, ts: %s)",
                     user_code,
                     key,
                     old_val or "(empty)",
@@ -1693,13 +1878,13 @@ def _curative_profile_cleanup(user_code: str):
             r.hdel(profile_redis_key, *keys_to_delete)
             r.hdel(profile_ts_key, *keys_to_delete)
             logger.info(
-                "[%s] Curative profile cleanup: deleted %s", user_code, keys_to_delete
+                "[%s] curative_profile_cleanup: deleted %s", user_code, keys_to_delete
             )
         elif not updates:
-            logger.info("[%s] Curative profile cleanup: profile is clean", user_code)
+            logger.info("[%s] curative_profile_cleanup: profile is clean", user_code)
 
     except Exception as exc:
-        logger.error("Curative profile cleanup failed for %s: %s", user_code, exc)
+        logger.error("curative_profile_cleanup failed for %s: %s", user_code, exc)
 
 
 def _decay_autobiographical_memories(user_code: str) -> int:
@@ -1715,7 +1900,6 @@ def _decay_autobiographical_memories(user_code: str) -> int:
     Returns the number of memories deleted.
     """
     qdrant = get_qdrant()
-    now_ts = time.time()
     deleted = 0
     updated = 0
     offset = None
@@ -1798,7 +1982,9 @@ def consolidate_memories(user_code: str = None, max_items: int = 20):
     Steps per user:
     1. Episodic consolidation  → compress episodic memories into autobiographical milestones
     2. Autobiographical decay  → reduce importance over time, delete stale memories
-    3. Curative profile cleanup → remove duplicate / stale Redis profile keys
+
+    Note: curative_profile_cleanup() is NOT called here — it runs nightly so duplicates
+    are caught within 24 h rather than waiting up to 30 days.
     """
     users = [user_code] if user_code else list(USER_CODES.keys())
     for uc in users:
@@ -1806,7 +1992,6 @@ def consolidate_memories(user_code: str = None, max_items: int = 20):
         try:
             _consolidate_user_memories(uc, max_items)
             _decay_autobiographical_memories(uc)
-            _curative_profile_cleanup(uc)
             logger.info("Memory consolidation done for user %s", uc)
         except Exception as e:
             logger.error("Memory consolidation failed for user %s: %s", uc, e)

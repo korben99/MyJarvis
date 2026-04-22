@@ -16,35 +16,44 @@ tail -f /opt/jarvis/logs/jarvis-service.log
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                      -Open WebUI (port 3000)               │
-│                     - Chat interface / clients             │
-└────────────────────────┬────────────────────────────────┘
-                         │ OpenAI-compatible API
-┌────────────────────────▼────────────────────────────────┐
+│              DOCKER  (containerized services)            │
+│                                                          │
+│  ┌──────────────────┐  ┌───────────┐  ┌─────────────┐   │
+│  │  Open WebUI      │  │  Qdrant   │  │   Redis     │   │
+│  │  port 3000       │  │ port 6333 │  │  port 6379  │   │
+│  │  Chat UI / iOS   │  │ Vector DB │  │ Session /   │   │
+│  │  OpenAI-compat.  │  │ RAG+Mem.  │  │ Working mem │   │
+│  └────────┬─────────┘  └─────┬─────┘  └──────┬──────┘   │
+└───────────┼──────────────────┼───────────────┼──────────┘
+            │ OpenAI-compat.   │ gRPC/HTTP      │ TCP 6379
+            │ HTTP /v1/*       │               │
+┌───────────▼──────────────────▼───────────────▼──────────┐
+│           NATIVE  (Metal / MLX — Apple Silicon)          │
 │                   Jarvis API (port 8000)                 │
 │                   FastAPI / Python 3.13                  │
 │                                                          │
+│  ┌──────────────────────────┐  ┌──────────────────────┐  │
+│  │  LLM Router (Tier 1)     │  │  Primary LLM (T2)    │  │
+│  │  Hermes-3-Llama-3.2-3B   │  │  Qwen3-30B-A3B       │  │
+│  │  MLX · ~2 GB · KV-cached │  │  MLX-6bit · ~18 GB   │  │
+│  └──────────────────────────┘  └──────────────────────┘  │
 │  ┌──────────────┐  ┌───────────┐  ┌──────────────────┐  │
-│  │  LLM Router  │  │  Memory   │  │  Proto-Self /    │  │
-│  │  (Tier 1)    │  │  System   │  │  Reflection Loop │  │
-│  │ Hermes-3-3B  │  │ 5 layers  │  │  Autonomous      │  │
+│  │  Memory Sys  │  │  Briefing │  │  Proto-Self /    │  │
+│  │  5 layers    │  │ Scheduler │  │  Reflection Loop │  │
 │  └──────────────┘  └───────────┘  └──────────────────┘  │
 │  ┌──────────────┐  ┌───────────┐  ┌──────────────────┐  │
-│  │  RAG Engine  │  │ Briefing  │  │ Google Services  │  │
-│  │  (Qdrant)    │  │ Scheduler │  │ (Gmail/Calendar) │  │
+│  │  RAG Engine  │  │ Embed     │  │ Google Services  │  │
+│  │  (Qdrant)    │  │ Router    │  │ (Gmail/Calendar) │  │
 │  └──────────────┘  └───────────┘  └──────────────────┘  │
-│  ┌──────────────┐  ┌──────────────────────────────────┐  │
-│  │ Embed Router │  │  Trading Surveillance            │  │
-│  │ (fast-path)  │  │  yfinance + Redis · AI alerts    │  │
-│  └──────────────┘  └──────────────────────────────────┘  │
-└────────┬────────────────┬────────────────────────────────┘
-         │                │
-┌────────▼──────┐  ┌──────▼──────────┐
-│  Qdrant       │  │  Redis          │
-│  (port 6333)  │  │  (port 6379)    │
-│  Vector DB    │  │  Session cache  │
-│  RAG + Memory │  │  Working mem.   │
-└───────────────┘  └─────────────────┘
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  Trading Surveillance  yfinance + Redis · alerts │    │
+│  └──────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
+            │ HTTPS (cloud fallback)
+┌───────────▼──────────────────────────────────────────────┐
+│  Cloud Reasoning  (Tier 3 — use_reasoning=True only)     │
+│  Claude Sonnet  ·  GPT-4.x                               │
+└──────────────────────────────────────────────────────────┘
 ```
 ## MEMORY STRUCTURE
   ┌──────────────────────────────────┬───────────┬────────────────────────────────────────────────────────────────────────┐
@@ -53,21 +62,29 @@ tail -f /opt/jarvis/logs/jarvis-service.log
   │ jarvis-self.json                 │ self.py   │ Jarvis's identity, goals, focus, self-notes, reflection log,           │
   │                                  │           │ per-user relations (affinity, interaction style, tonal preference)     │
   ├──────────────────────────────────┼───────────┼────────────────────────────────────────────────────────────────────────┤
-  │ Redis hashes user:profile:{code} │ memory.py │ User facts, preferences, interests                                     │
+  │ Redis hashes user:profile:{code} │ memory.py │ User facts, preferences, interests (always current state)              │
   ├──────────────────────────────────┼───────────┼────────────────────────────────────────────────────────────────────────┤
-  │ Qdrant episodic                  │ memory.py │ Per-user conversation summaries                                        │
+  │ Qdrant episodic                  │ memory.py │ Per-user conversation summaries (transient, consolidated monthly)       │
   ├──────────────────────────────────┼───────────┼────────────────────────────────────────────────────────────────────────┤
-  │ Qdrant autobiographical          │ memory.py │ Long-term facts about the user                                         │
+  │ Qdrant autobiographical          │ memory.py │ Long-term facts about the user.                                        │
+  │                                  │           │ status="current" → actif, recall normal                                │
+  │                                  │           │ status="past"    → archivé, recall dépriorisé (×0.4), hors timeline    │
   └──────────────────────────────────┴───────────┴────────────────────────────────────────────────────────────────────────┘
 
   ┌────────────────────────────────────────────────┬──────────────────────────────────────┬─────────────────────────────────────────────────────────┐
   │                      Data                      │             Destination              │                           Key                           │
   ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
-  │ Facts about the user (user_insights)           │ store_autobiographical_event() →     │ memory_type: autobiographical                           │
+  │ Facts about the user (user_insights)           │ store_autobiographical_event() →     │ memory_type: autobiographical, status: current          │
   │                                                │ Qdrant                               │                                                         │
   ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
   │ Insights from store_insight action             │ store_autobiographical_event() →     │ same                                                    │
   │                                                │ Qdrant                               │                                                         │
+  ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+  │ Outdated facts (nightly cleaning)              │ archive_autobiographical_event() →   │ payload update: status="past", archived_date            │
+  │                                                │ Qdrant payload update                │                                                         │
+  ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+  │ Duplicate/erroneous facts (nightly cleaning)   │ retract_autobiographical_event() →   │ delete from Qdrant                                      │
+  │                                                │ Qdrant delete                        │                                                         │
   ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
   │ Jarvis behavioural self-improvements           │ jarvis-self.json → learnings[]       │ no user_code                                            │
   │ (self_reflections)                             │                                      │                                                         │
@@ -82,12 +99,13 @@ tail -f /opt/jarvis/logs/jarvis-service.log
   ┌────────────────────────────┬────────────────────────────────────────────────────────────────┬───────────────────────────┐
   │           Modèle           │                              Rôle                              │         no_think          │
   ├────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────────────────┤
-  │ Qwen2.5-3B-8bit (router)   │ routing, dédup profil, judge web                               │ True                      │
+  │ Hermes-3-Llama-3.2-3B      │ routing, dédup profil, judge web                               │ True                      │
+  │ (router — local MLX ~2 GB) │                                                                │                           │
   ├────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────────────────┤
-  │ Qwen3.5-35B-A3B-5.5bit     │ briefing, analyse conv, refine prompt, réflexion, nightly      │ False pour RAG/web/reason │
-  │ (primary — local MLX)      │ review, trading, calendrier, extraction, chat standard         │ True pour chat simple     │
+  │ Qwen3-30B-A3B-MLX-6bit     │ briefing, analyse conv, refine prompt, réflexion, nightly      │ False pour RAG/web/reason │
+  │ (primary — local MLX ~18G) │ review, trading, calendrier, extraction, chat standard         │ True pour chat simple     │
   ├────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────────────────┤
-  │ Claude Sonnet / GPT-5.x    │ mode expert uniquement (use_reasoning=True via router)         │ —                         │
+  │ Claude Sonnet / GPT-4.x    │ mode expert uniquement (use_reasoning=True via router)         │ —                         │
   │ (reasoning — cloud)        │                                                                │                           │
   └────────────────────────────┴────────────────────────────────────────────────────────────────┴───────────────────────────┘
 
@@ -244,7 +262,7 @@ Stage 1 prevents ~90 % of duplicates at the source. Stages 2–3 are safety nets
 
 #### Profile Write Governance
 
-Profile key **creation** is restricted exclusively to the conversation analyzer (`analyze_exchange` → `update_user_profile`). The analyzer reads actual user messages and only extracts facts explicitly stated by the user.
+Profile key **creation** is restricted exclusively to the conversation analyzer (`analyze_exchange` → `update_user_profile_batch`). The analyzer reads actual user messages and only extracts facts explicitly stated by the user.
 
 The autonomous reflection loop (`self.py`) can **modify or delete existing keys** via the `correct_profile` action, but is blocked from creating new keys — enforced both in code (`_action_correct_profile` checks `hexists` before any write) and in the reflection prompt. This prevents the reflection model from hallucinating profile facts from its own context or perpetuating garbage keys across cycles.
 
@@ -261,12 +279,14 @@ Projects are stored as JSON objects with `name`, `status` (`in_progress` / `done
 `search_memory()` re-ranks Qdrant results using a weighted blend before returning:
 
 ```
-final_score = semantic_similarity × 0.65 + importance × 0.25 + recency_bonus × 0.10
+final_score = (semantic_similarity × 0.65 + importance × 0.25 + recency_bonus × 0.10) × status_factor
 ```
+
+`status_factor = 0.4` for autobiographical facts with `status="past"` (archived), `1.0` otherwise. The function fetches `limit × 3` candidates from Qdrant (no pre-filter on status), re-ranks with the penalty applied, and returns the top `limit` — so archived facts naturally fall to positions 4–5 when current facts score higher, but are still recalled if semantically close enough.
 
 The recency window is **type-aware**: episodic memories use a 30-day window, autobiographical memories use a 365-day window (`AUTOBIO_RECENCY_WINDOW_DAYS`). Without this distinction, a stable milestone from 6 months ago (e.g. "Sébastien gave a talk at Insomnihack") would always score `recency_bonus = 0` and be outranked by trivial recent events.
 
-`build_memory_context()` surfaces the **top 5 autobiographical events by importance + recency** (importance weight 0.7, recency 0.3 over a 1-year window) rather than the 5 most recent — so a critical event from months ago is not displaced by routine recent exchanges.
+`build_memory_context()` surfaces the **top 5 autobiographical events by importance + recency** (importance weight 0.7, recency 0.3 over a 1-year window) rather than the 5 most recent — so a critical event from months ago is not displaced by routine recent exchanges. Facts with `status="past"` are excluded from `build_memory_context()` via `get_user_timeline()` (`must_not` filter in Qdrant scroll).
 
 #### Autobiographical Memory Deduplication and Reinforcement
 
@@ -278,9 +298,13 @@ The threshold is tunable: raise toward 0.95 to allow more variations, lower towa
 
 #### Autobiographical Memory — Fact Correction
 
-When a user explicitly corrects a past fact ("je ne travaille plus chez X", "on n'a finalement pas fait ça"), `ANALYSIS_PROMPT` extracts a `retractions` list. Each entry is a short phrase describing the fact to erase. `post_analysis()` calls `retract_autobiographical_event(user_code, query, threshold=0.88)` for each one: the function encodes the query, searches Qdrant, and deletes any autobiographical point with cosine similarity ≥ 0.88. The timeline cache is invalidated on deletion.
+Two distinct operations handle outdated or incorrect autobiographical facts:
 
-The threshold (0.88, slightly above dedup at 0.85) avoids collateral deletions when the retraction query is semantically close to *related but different* facts.
+**`archive_autobiographical_event(user_code, query, threshold=0.78)`** — called by the nightly cleaning pass when a fact is no longer current (e.g. "ne travaille plus chez X", "a changé de ville"). The function finds the best matching point in Qdrant via semantic search and updates its payload: `status="past"`, `archived_date=today`. The point is never deleted — it remains searchable but is deprioritized (`status_factor=0.4` in `search_memory`) and excluded from the timeline (`get_user_timeline` uses `must_not: status=past`). This preserves history: Jarvis knows you changed jobs, not just that you have a current job. The timeline cache is invalidated after archiving.
+
+**`retract_autobiographical_event(user_code, query, threshold=0.88)`** — hard delete from Qdrant. Reserved exclusively for **factual errors or strict duplicates** — information that should never have been stored. The higher threshold (0.88 vs dedup at 0.85) avoids collateral deletions when the query is semantically close to *related but different* facts. The timeline cache is invalidated on deletion.
+
+Both operations are triggered exclusively by the nightly cleaning LLM call (`NIGHTLY_CLEANING_PROMPT`), which receives the full list of current autobiographical facts and outputs `{"to_archive": [...], "to_delete": [...]}`. The cleaning prompt is instructed to be very conservative: archive superseded facts, delete only proven errors or exact duplicates.
 
 #### Implicit Satisfaction Signal
 
@@ -311,6 +335,85 @@ Time is injected at three levels to prevent date hallucination and give the LLM 
 #### Memory Reconsolidation on Recall
 
 Each time `search_memory()` returns a result, every recalled memory receives a small importance boost (`+0.05`, capped at `MEMORY_DECAY_DURABLE_MIN - 0.05 = 0.95`). This models the neuroscience principle of reconsolidation: the act of recalling a memory strengthens it. A memory accessed frequently resists decay; a memory never accessed fades at the normal rate.
+
+#### Memory Function Map
+
+When each memory function is called, what triggers it, and where it writes.
+
+```
+REAL-TIME — per chat message
+  pipeline.py
+    └── log_conversation()
+          └── Redis chat:{user}:{session}  (conversation history, ltrim at CHAT_MAX_MESSAGES)
+              [importance=0 default → store_memory_vector/store_autobiographical never triggered here]
+
+EVERY 30 MIN — analyzer.py → analyse_recent_conversations()
+  ├── analyze_exchange()  [LLM: ANALYSIS_PROMPT]
+  │     extracts: user_facts, projects, mood, topics, memory_summary, importance (ESS score)
+  ├── update_user_profile_batch()       → Redis user:{code}:profile (hash)
+  │     └── _normalize_profile_keys_batch()  [LLM: 1 call/namespace group, only when needed]
+  ├── apply_project_updates()           → Redis user:{code}:projects
+  ├── update_emotional_state()          → Redis jarvis:emotional_state
+  ├── set_interest_weight()             → Redis user:{code}:interests
+  ├── store_memory_vector()             → Qdrant episodic     [if importance > 0.35]
+  └── store_autobiographical_event()   → Qdrant autobio      [if importance > 0.60]
+
+EVERY 2H — self.py → run_self_reflection()
+  ├── search_memory()                  [read Qdrant — memory context assembled for LLM]
+  │     └── reconsolidation: +0.05 importance on every recalled point (capped at 0.95)
+  ├── _action_store_insight()
+  │     └── store_autobiographical_event()  → Qdrant autobio  (importance=0.80)
+  ├── _action_correct_profile()
+  │     └── Redis user:{code}:profile  (update/delete existing keys only — no new key creation)
+  └── generate_proactive_push()
+        └── Redis jarvis:push:pending:{code}  (TTL, 2h cooldown per user)
+
+23:00 NIGHTLY — self.py → run_nightly_interaction_review()  [4 sequential calls/user]
+  ├── Call 1 — NIGHTLY_FACTS  (user insight + relation update)
+  │     ├── store_autobiographical_event()   → Qdrant autobio  (importance=0.70)
+  │     ├── Redis jarvis:{code}:tomorrow_suggestions  (TTL 24h)
+  │     └── jarvis-self.json → user_relations{}
+  ├── Call 2 — NIGHTLY_SELF  (Jarvis self-reflection)
+  │     └── jarvis-self.json → learnings[], growth_log[], opinions[]
+  ├── Call 3 — NIGHTLY_CLEANING  (Qdrant autobio curation)
+  │     ├── get_autobiographical_facts()  [read Qdrant autobio — status≠past, chronological]
+  │     ├── archive_autobiographical_event()   → Qdrant autobio payload update
+  │     │     sets status="past", archived_date — recalled at ×0.4, excluded from timeline
+  │     └── retract_autobiographical_event()   → Qdrant hard delete
+  │           reserved for factual errors and exact duplicates only
+  └── Call 4 — curative_profile_cleanup()  (Redis profile hash dedup — sync LLM call)
+        └── Redis user:{code}:profile  — merge-before-delete: updates then deletes duplicates
+              skip if profile < 5 keys
+
+1st OF MONTH — self.py → consolidate_memories()  [per user]
+  ├── _consolidate_user_memories()
+  │     ├── LLM summary of episodic batches (50 at a time, oldest first)
+  │     │     → store_autobiographical_event()  → Qdrant autobio  (importance=1.0, permanent)
+  │     └── processed episodic points deleted from Qdrant
+  └── _decay_autobiographical_memories()
+        └── Qdrant autobio: importance × MEMORY_DECAY_FACTOR (0.85)
+              → delete if importance < MEMORY_DECAY_THRESHOLD (0.15)
+              → skip if importance >= MEMORY_DECAY_DURABLE_MIN (1.0)
+```
+
+**Per-function reference:**
+
+| Function | Module | Trigger | Destination | Notes |
+|----------|--------|---------|-------------|-------|
+| `log_conversation()` | memory.py | Every message | Redis chat history | Qdrant paths dead (importance=0) |
+| `update_user_profile_batch()` | memory.py | Every 30 min | Redis profile hash | batch dedup via 3-stage pipeline |
+| `_normalize_profile_keys_batch()` | memory.py | Inside batch update | — | groups by NS prefix; 1 LLM call/group |
+| `apply_project_updates()` | memory.py | Every 30 min | Redis projects | fuzzy name match ≥ 60% |
+| `update_emotional_state()` | memory.py | Every 30 min | Redis emotional state | mood → preset state dict |
+| `store_memory_vector()` | memory.py | Every 30 min (ESS > 0.35) | Qdrant episodic | — |
+| `store_autobiographical_event()` | memory.py | 30 min / nightly / reflect / monthly | Qdrant autobio | dedup + reinforce check before write |
+| `archive_autobiographical_event()` | memory.py | Nightly cleaning | Qdrant autobio payload | status="past"; invalidates timeline cache |
+| `retract_autobiographical_event()` | memory.py | Nightly cleaning (errors/dupes) | Qdrant delete | threshold 0.88; invalidates timeline cache |
+| `search_memory()` | memory.py | Every chat (memory intent) | read Qdrant | past facts ×0.4; +0.05 reconsolidation |
+| `get_user_timeline()` | memory.py | Every chat (build_memory_context) | read Qdrant autobio | must_not status=past |
+| `get_autobiographical_facts()` | memory.py | Nightly cleaning | read Qdrant autobio | status≠past, chronological for LLM |
+| `curative_profile_cleanup()` | memory.py | Nightly (Call 4) | Redis profile hash | LLM dedup: merge-before-delete; skipped if < 5 keys |
+| `consolidate_memories()` | memory.py | 1st of month / on-demand | Qdrant | episodic compress + autobio decay only |
 
 #### Autobiographical Memory Decay
 
@@ -409,11 +512,11 @@ User message
     →   streaming via shared per-timeout httpx.AsyncClient (connection pool reused)
     → Conversation analyzer / PRIMARY_MODEL (extract facts, mood, topics, importance, memory_summary)
     →   current date (ISO 8601) injected into ANALYSIS_PROMPT — prevents date hallucination
-    →   user_facts → update_user_profile() — ONLY path authorised to create new profile keys
+    →   user_facts → update_user_profile_batch() — ONLY path authorised to create new profile keys
+    →     _normalize_profile_keys_batch(): stage 0 (case), stage 1 (alias dict), stage 2 (LLM/namespace)
     → Memory storage: importance > 0.35 → Qdrant episodic | importance > 0.60 → autobiographical
     →   store_autobiographical_event: dedup check (DOT score clamped to [0,1] ≥ 0.85 → skip or reinforce)
-    →   search_memory recalls: +0.05 reconsolidation boost on returned points
-    →   retractions from ANALYSIS_PROMPT → retract_autobiographical_event (semantic delete, threshold 0.88)
+    →   search_memory recalls: +0.05 reconsolidation boost on returned points; past facts ×0.4 penalty
     →   satisfaction signal written to convlog entry (positive/negative/unknown — proxy on previous response)
 ```
 
@@ -749,7 +852,14 @@ Jarvis maintains two autonomous cognitive cycles:
 
 **Reflection loop** (every 2 h) — global self-observation. Jarvis reviews system health, user activity, and knowledge gaps, then picks one action from the catalog. At the end of each cycle Jarvis also runs a per-user **proactive push** check. Outcome and new focus are persisted to `jarvis-self.json`.
 
-**Nightly review** (23:00) — per-user conversation review. Conversations from the day are sorted by importance score descending before being passed to the LLM (up to 6 000 chars), so the most significant exchanges are always visible even on high-volume days. For each user Jarvis extracts durable user facts (→ Qdrant autobiographical, dedup-checked), self-improvement notes (→ `learnings[]`), updates the **user relation**, and writes `tomorrow_suggestions` to Redis (TTL 24 h) for injection in the next day's system prompt.
+**Nightly review** (23:00) — per-user conversation review using **4 sequential calls** per user:
+
+1. **`NIGHTLY_FACTS`** — extracts durable user insights (→ Qdrant autobiographical, dedup-checked at importance 0.70), updates the per-user relation in `jarvis-self.json`, and writes `tomorrow_suggestions` to Redis (TTL 24 h) for injection in the next day's system prompt.
+2. **`NIGHTLY_SELF`** — Jarvis self-reflection on the day's interactions: self-improvement notes (→ `learnings[]`), formed opinions (→ `opinions[]`), day diary entry (→ `growth_log[]`).
+3. **`NIGHTLY_CLEANING`** — Qdrant autobio curation. Receives the full list of current autobiographical facts plus `user_insights` from call 1 as a signal for what is now superseded. Outputs `to_archive` (outdated facts → `archive_autobiographical_event`) and `to_delete` (errors/duplicates → `retract_autobiographical_event`). Very conservative by design.
+4. **`curative_profile_cleanup()`** — Redis profile hash dedup. Sync LLM call that identifies semantic duplicates and obsolete keys, applies consolidation updates (merge-before-delete), then deletes redundant keys. Skipped if profile has fewer than 5 keys. Previously monthly — now nightly so duplicate keys are caught within 24 h.
+
+Conversations from the day are sorted by importance score descending before being passed to each LLM call (up to 6 000 chars), so the most significant exchanges are always visible even on high-volume days.
 
 **Reflection context** — what the LLM sees at each reflection cycle (`gather_context()`):
 
@@ -788,10 +898,11 @@ Jarvis maintains two autonomous cognitive cycles:
 | `update_trade_threshold` | Update `threshold_high` / `threshold_low` for a portfolio position autonomously |
 | `refine_prompt` | Propose an improved version of a prompt (see Prompt Self-Modification below) |
 
-**Memory consolidation** — `consolidate_memories()` is the single entry point. It runs on the 1st of each month (nightly review scheduler) and on demand via the `consolidate_memory` self-action. It executes three steps in order for each user:
+**Memory consolidation** — `consolidate_memories()` is the single entry point. It runs on the 1st of each month (nightly review scheduler) and on demand via the `consolidate_memory` self-action. It executes two steps in order for each user:
 1. `_consolidate_user_memories()` — processes episodic points in batches of 50 (oldest first), summarises each batch into one autobiographical milestone via LLM (stored at `importance = MEMORY_CONSOLIDATION_IMPORTANCE = 1.0`), deletes the processed points, loops until fewer than 5 remain.
 2. `_decay_autobiographical_memories()` — decays and prunes autobiographical points (see Autobiographical Memory Decay section above).
-3. `_curative_profile_cleanup()` — asks the LLM to identify and delete duplicate or obsolete keys from the Redis user profile hash.
+
+Profile dedup (`curative_profile_cleanup()`) is **not** part of monthly consolidation — it runs nightly (Call 4 of the nightly review) so duplicates are caught within 24 h rather than up to 30 days.
 
 #### Proactive Push Notifications (Phase 1 — polling)
 
@@ -1188,12 +1299,15 @@ Reflection cycle detects repeated knowledge gap
 | `BRIEFING_USER` | Morning briefing assembly instructions |
 | `ANALYSIS_PROMPT` | Conversation analysis (mood/fact extraction) |
 | `ROUTER_USER` | LLM intent router decision criteria |
-| `NIGHTLY_PROMPT` | Per-user conversation review instructions |
-| `NIGHTLY_SYSTEM` | System context for nightly review |
-| `REFLECTION_PROMPT` | Autonomous reflection action selection |
-| `REFLECTION_SYSTEM` | System context for reflection cycle |
+| `NIGHTLY_FACTS_SYSTEM` / `NIGHTLY_FACTS_PROMPT` | Nightly call 1 — user insight extraction, relation update, suggestions |
+| `NIGHTLY_SELF_SYSTEM` / `NIGHTLY_SELF_PROMPT` | Nightly call 2 — Jarvis self-reflection, opinions, day diary |
+| `NIGHTLY_CLEANING_SYSTEM` / `NIGHTLY_CLEANING_PROMPT` | Nightly call 3 — Qdrant autobio curation (archive outdated, delete errors) |
+| `CONSOLIDATION_PROMPT` | Monthly episodic → autobio fact extraction (called in `_consolidate_user_memories`) |
+| `CURATIVE_CLEANUP_PROMPT` | Nightly Redis profile dedup (called in `curative_profile_cleanup`) |
+| `REFLECTION_PROMPT` / `REFLECTION_SYSTEM` | Global autonomous reflection — action selection + system context |
+| `REFLECTION_USER_PROMPT` / `REFLECTION_USER_SYSTEM` | Per-user autonomous reflection — personalized action selection |
 
-The first four are user-facing quality prompts. The last four are internal autonomy prompts — they can also be refined when the reflection loop identifies recurring self-improvement opportunities.
+The first four are user-facing quality prompts. The remaining seven are internal autonomy and memory prompts — they can also be refined when the reflection loop identifies recurring self-improvement opportunities.
 
 ### Data files
 

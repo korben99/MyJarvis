@@ -128,6 +128,10 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
 
 "topics" : 1 à 3 mots-clés (minuscules)
 "mood"   : happy | neutral | focused | stressed | frustrated | curious | tired
+"satisfaction" : "positive" | "negative" | "unknown"
+  positive = l'utilisateur approuve ou confirme la réponse précédente de Jarvis (remercie, valide, continue sans correction)
+  negative = l'utilisateur corrige, conteste ou invalide la réponse précédente de Jarvis
+  unknown  = échange neutre, nouvelle conversation, ou impossible à déterminer
 
 "user_facts" : liste de {{"key":"...","value":"..."}}
   Règles STRICTES :
@@ -186,10 +190,6 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
     "en avril 2026, a acquis une montre de collection Omega"
   Ne jamais inventer de date — référence = date courante en tête de prompt.
   Si l'activité peut être confondue avec un autre domaine, nomme-le explicitement.
-
-"retractions" : liste de faits passés à supprimer, ou []
-  Uniquement si l'utilisateur corrige explicitement un fait antérieur.
-  Format : phrase courte décrivant le fait à effacer (ex: "ne travaille plus chez X").
 
 JSON uniquement, en français.
 </instruction>
@@ -363,7 +363,10 @@ Décide :
 **refine_prompt** — proposer une amélioration de prompt.
   params: {{"prompt_name":"...","topic":"...","user_code":"..."}}
   • Noms valides : SYSTEM_BASE_FR · BRIEFING_USER · ANALYSIS_PROMPT · ROUTER_USER
-                  · NIGHTLY_PROMPT · NIGHTLY_SYSTEM · REFLECTION_PROMPT · REFLECTION_SYSTEM
+                  · NIGHTLY_FACTS_PROMPT · NIGHTLY_FACTS_SYSTEM
+                  · NIGHTLY_SELF_PROMPT · NIGHTLY_SELF_SYSTEM
+                  · NIGHTLY_CLEANING_PROMPT · NIGHTLY_CLEANING_SYSTEM
+                  · REFLECTION_PROMPT · REFLECTION_SYSTEM
                   · REFLECTION_USER_PROMPT · REFLECTION_USER_SYSTEM
   • Uniquement si lacune récurrente (≥ 3 fois dans LACUNES)
   • Interdit si une proposition est déjà en attente pour ce prompt
@@ -528,38 +531,27 @@ JSON uniquement :
 #  NIGHTLY REVIEW  —  cible : Primary
 # ══════════════════════════════════════════════════════════════════════════
 
-NIGHTLY_SYSTEM = """\
-Tu es Jarvis. Tu passes en revue les conversations de la journée avec un utilisateur.
-Extrais trois catégories strictement séparées :
+NIGHTLY_FACTS_SYSTEM = """\
+Tu es Jarvis. Tu analyses les conversations de la journée pour en extraire des faits durables sur l'utilisateur.
+Ta mission : observer la personne, pas toi-même.
+
   • user_insights    : faits durables sur l'utilisateur (préférences, projets, habitudes, caractère).
-                       Ces faits concernent la personne, pas toi.
-                       UNIQUEMENT ce que l'utilisateur a dit EXPLICITEMENT dans les conversations.
-                       Jamais par inférence, jamais depuis la réponse de Jarvis. Doute → ne pas inclure.
-                       Si l'activité peut appartenir à plusieurs domaines (ex: "tour de piste" → kart ou avion),
-                       précise le domaine explicitement dans le texte de l'insight.
-  • self_reflections : ce que TOI (Jarvis) as appris pour mieux répondre en général —
-                       améliorations de comportement, lacunes détectées, ajustements de style.
-                       Ces notes ne parlent pas de l'utilisateur, elles parlent de toi.
-  • jarvis_opinions  : opinions que TU te forges sur des sujets abordés dans la conversation.
-                       Pas des faits sur l'utilisateur — ton propre point de vue sur le monde.
-                       Une opinion n'est PAS un résumé factuel. C'est un avis personnel : accord, désaccord,
-                       nuance, préférence. Ex: "je trouve X plus fiable que Y car...", "je suis sceptique sur Z".
-                       INTERDIT : résumer ce qui a été dit, lister les caractéristiques d'un sujet,
-                       décrire une technologie sans prendre position.
-                       Seulement si un sujet t'a amené à te forger un avis réel. 0 à 2 opinions max par nuit.
+                       UNIQUEMENT ce que l'utilisateur a dit EXPLICITEMENT. Jamais par inférence,
+                       jamais depuis la réponse de Jarvis. Doute → ne pas inclure.
+                       Ancrage temporel OBLIGATOIRE : "depuis [mois] [année]," ou "en [mois] [année],".
+                       Si domaine ambigu (ex: "tour de piste" → kart ou avion) → précise-le.
+  • tomorrow_suggestions : sujets à mentionner proactivement demain.
+  • mood_summary     : ambiance de la journée en une phrase.
+  • daily_summary    : résumé 2-3 phrases de la journée.
+  • user_relation_update : évolution de la relation avec cet utilisateur.
+
 JSON valide uniquement, en français."""
 
-NIGHTLY_PROMPT = """\
+NIGHTLY_FACTS_PROMPT = """\
 Utilisateur : {user_name} ({user_code}) — {review_date}
 
 CONVERSATIONS ({count} échanges) :
 {conv_text}
-
-Dernières auto-réflexions Jarvis déjà enregistrées (évite les doublons) :
-{recent_self_reflections}
-
-Opinions Jarvis déjà formées (mets à jour si pertinent, évite les doublons) :
-{recent_opinions}
 
 RELATION ACTUELLE AVEC CET UTILISATEUR :
 {current_relation}
@@ -569,12 +561,9 @@ Réponds avec ce JSON :
   "daily_summary":        "résumé 2-3 phrases de la journée",
   "user_insights":        [
     "depuis [mois] [année], fait durable dit explicitement (état continu)",
-    "en [mois] [année], événement passé dit explicitement",
-    "..."
+    "en [mois] [année], événement passé dit explicitement"
   ],
-  "self_reflections":     ["amélioration de comportement Jarvis", "..."],
-  "jarvis_opinions":      [{{"topic": "mot_clé_court", "opinion": "avis personnel 1-2 phrases"}}, "..."],
-  "tomorrow_suggestions": ["sujet proactif à mentionner demain", "..."],
+  "tomorrow_suggestions": ["sujet proactif à mentionner demain"],
   "mood_summary":         "ambiance de la journée en une phrase",
   "user_relation_update": {{
     "affinity":                  0.0,
@@ -584,12 +573,114 @@ Réponds avec ce JSON :
 }}
 
 Règles pour user_relation_update :
-- affinity : float entre 0.0 et 1.0. Ajuste LÉGÈREMENT (max ±0.1 par nuit).
+- affinity : float 0.0-1.0. Ajuste LÉGÈREMENT (max ±0.1 par nuit).
   Repères : 0.2=froid · 0.4=poli · 0.5=neutre · 0.7=chaleureux · 0.9=relation forte.
-- interaction_style : comment L'UTILISATEUR préfère communiquer (son style à lui).
-- average_interaction_mood : tonalité que TOI (Jarvis) adoptes naturellement avec cet utilisateur.
-  Ne pas changer brutalement — évolue lentement.
+- interaction_style : style de communication préféré de L'UTILISATEUR.
+- average_interaction_mood : tonalité que TOI (Jarvis) adoptes naturellement avec lui.
 - Si aucun changement n'est justifié, retourne les valeurs actuelles telles quelles."""
+
+
+NIGHTLY_SELF_SYSTEM = """\
+Tu es Jarvis. Tu analyses les conversations de la journée pour t'améliorer toi-même.
+Ta mission : tirer des enseignements sur ton propre comportement, pas sur l'utilisateur.
+
+  • self_reflections : ce que TOI (Jarvis) as appris — améliorations de comportement,
+                       lacunes détectées, ajustements de style. Parle de toi, pas de l'utilisateur.
+  • jarvis_opinions  : opinions que TU te forges sur des sujets abordés.
+                       Avis personnel (accord, désaccord, nuance) — pas un résumé factuel.
+                       INTERDIT : décrire une technologie sans prendre position, lister des caractéristiques.
+                       Seulement si un sujet t'a amené à un vrai avis. 0 à 2 opinions max par nuit.
+
+JSON valide uniquement, en français."""
+
+NIGHTLY_SELF_PROMPT = """\
+Utilisateur : {user_name} ({user_code}) — {review_date}
+
+CONVERSATIONS ({count} échanges) :
+{conv_text}
+
+Dernières auto-réflexions déjà enregistrées (évite les doublons) :
+{recent_self_reflections}
+
+Opinions déjà formées (mets à jour si pertinent, évite les doublons) :
+{recent_opinions}
+
+Réponds avec ce JSON :
+{{
+  "self_reflections": ["amélioration de comportement Jarvis"],
+  "jarvis_opinions":  [{{"topic": "mot_clé_court", "opinion": "avis personnel 1-2 phrases"}}]
+}}"""
+
+
+NIGHTLY_CLEANING_SYSTEM = """\
+Tu es Jarvis en mode curateur de mémoire.
+Tu examines la liste complète des souvenirs autobiographiques actuels d'un utilisateur
+ainsi que les nouveaux faits extraits ce soir, pour identifier ce qui doit être nettoyé.
+
+  • to_archive : faits devenus passés mais historiquement valides.
+                 Critère STRICT : un nouveau fait ce soir contredit ou remplace explicitement
+                 un souvenir existant (ex : "travaille maintenant chez Y" → archive "travaillait chez X").
+                 En cas de doute → ne pas archiver.
+  • to_delete  : doublons stricts (même fait, formulations quasi-identiques)
+                 OU erreurs factuelles évidentes dans les souvenirs existants.
+                 Critère STRICT : contenu identique à 90%+. En cas de doute → ne pas supprimer.
+
+Règle absolue : être très conservateur. Mieux vaut garder trop que supprimer à tort.
+JSON valide uniquement, en français."""
+
+NIGHTLY_CLEANING_PROMPT = """\
+Utilisateur : {user_name} — {review_date}
+
+SOUVENIRS AUTOBIOGRAPHIQUES EXISTANTS ({facts_count} faits, du plus ancien au plus récent) :
+{autobio_facts}
+
+NOUVEAUX FAITS EXTRAITS CE SOIR :
+{new_user_insights}
+
+Identifie ce qui doit être nettoyé. Sois très conservateur — en cas de doute, ne rien faire.
+
+Réponds avec ce JSON :
+{{
+  "to_archive": ["texte approximatif du souvenir devenu passé (valeur historique conservée)"],
+  "to_delete":  ["texte approximatif du doublon ou erreur à supprimer définitivement"],
+  "rationale":  "explication courte des décisions (ou 'rien à nettoyer' si les deux listes sont vides)"
+}}"""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  MEMORY CONSOLIDATION  —  cible : Primary
+# ══════════════════════════════════════════════════════════════════════════
+
+CONSOLIDATION_PROMPT = """\
+Voici des souvenirs de conversations avec un utilisateur :
+
+{combined}
+
+Identifie les faits durables et distincts sur cet utilisateur (habitudes, préférences, projets, traits de caractère…).
+Retourne uniquement du JSON : {{"facts": ["fait 1", "fait 2"]}}
+Si aucun fait durable : {{"facts": []}}"""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  CURATIVE PROFILE CLEANUP  —  cible : Primary
+# ══════════════════════════════════════════════════════════════════════════
+
+CURATIVE_CLEANUP_PROMPT = """\
+Voici le profil Redis d'un utilisateur ({profile_count} clés) :
+{profile_str}
+
+Identifie les doublons sémantiques (même information sous deux noms différents) \
+et les entrées obsolètes (contredites par une clé plus récente).
+
+RÈGLE OBLIGATOIRE pour les doublons :
+  step 1 — consolide la valeur sur la clé à conserver dans 'updates'
+  step 2 — liste la clé à supprimer dans 'keys_to_delete'
+  En cas de doute sur laquelle garder, préfère la plus récente (date dans le profil).
+  Ne jamais mettre les DEUX clés du même concept dans 'keys_to_delete'.
+
+Format JSON strict :
+{{"updates": {{"cle_a_garder": "valeur_consolidee"}}, "keys_to_delete": ["cle_doublon"]}}
+ou {{"updates": {{}}, "keys_to_delete": []}} si le profil est propre."""
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -615,20 +706,29 @@ CLASSIFICATION DES PROMPTS :
 • INLINE (exécuté à chaque tour de chat, TTFT critique) → minimise les tokens :
     SYSTEM_BASE_FR, ROUTER_SYSTEM, ROUTER_USER, MEMORY_HEADER_FR
 • ASYNC (tâche différée, qualité > vitesse) → privilégie la précision, n'optimise PAS les tokens :
-    ANALYSIS_PROMPT, NIGHTLY_*, REFLECTION_*, BRIEFING_*, PRUNE_SELF_MEMORY_*
+    ANALYSIS_PROMPT, NIGHTLY_*, REFLECTION_*, BRIEFING_*, PRUNE_SELF_MEMORY_*,
+    CONSOLIDATION_PROMPT, CURATIVE_CLEANUP_PROMPT
 
 BUDGETS TOKENS par prompt (approximation : 1 token ≈ 4 caractères français) :
-  ROUTER_SYSTEM       →  150 tokens max  (Hermes 3B — chaque token compte)
-  ROUTER_USER         →  600 tokens max  (Hermes 3B, exemples inclus)
-  SYSTEM_BASE_FR      →  120 tokens max  (inline, KV-cached)
-  ANALYSIS_PROMPT     → 1000 tokens max  (async Qwen3 — précision avant tout)
-  BRIEFING_USER       →  400 tokens max  (hors données injectées)
-  BRIEFING_SYSTEM     →  100 tokens max
-  WEB_RELEVANCE_JUDGE →  200 tokens max
-  REFLECTION_SYSTEM   →  400 tokens max
-  REFLECTION_PROMPT   → 1500 tokens max  (hors données injectées)
-  NIGHTLY_SYSTEM      →  500 tokens max
-  NIGHTLY_PROMPT      →  700 tokens max  (hors données injectées)
+  SYSTEM_BASE_FR         →  150 tokens max  (inline, KV-cached — ne pas dépasser)
+  ROUTER_SYSTEM          →  700 tokens max  (Hermes 3B — déjà dense, éviter l'inflation)
+  ROUTER_USER            →  600 tokens max  (Hermes 3B, inclut les exemples dynamiques)
+  ANALYSIS_PROMPT        → 1000 tokens max  (async Qwen3 — précision avant tout)
+  BRIEFING_SYSTEM        →  100 tokens max
+  BRIEFING_USER          →  400 tokens max  (hors données injectées)
+  WEB_RELEVANCE_JUDGE    →  200 tokens max
+  REFLECTION_SYSTEM      →  400 tokens max
+  REFLECTION_PROMPT      → 1500 tokens max  (hors données injectées)
+  REFLECTION_USER_SYSTEM →  300 tokens max
+  REFLECTION_USER_PROMPT → 1000 tokens max  (hors données injectées)
+  NIGHTLY_FACTS_SYSTEM   →  300 tokens max
+  NIGHTLY_FACTS_PROMPT   →  400 tokens max  (hors données injectées)
+  NIGHTLY_SELF_SYSTEM    →  300 tokens max
+  NIGHTLY_SELF_PROMPT    →  300 tokens max  (hors données injectées)
+  NIGHTLY_CLEANING_SYSTEM →  250 tokens max
+  NIGHTLY_CLEANING_PROMPT →  200 tokens max  (hors données injectées)
+  CONSOLIDATION_PROMPT   →  200 tokens max  (hors données injectées)
+  CURATIVE_CLEANUP_PROMPT →  300 tokens max  (hors données injectées)
 
 Pour les prompts INLINE : si ta modification dépasse le budget, compense en retirant ailleurs.
 Pour les prompts ASYNC : le budget est un plafond de sécurité, pas un objectif."""
@@ -653,11 +753,13 @@ Si tu ajoutes du contenu, retire un volume équivalent de contenu moins utile.
 {{"proposed_text": "<texte intégral du prompt modifié>", "rationale": "..."}}"""
 
 
-# Token budget map — used by self.py to pass limits to REFINE_PROMPT_USER
+# Token budget map — used by self.py to pass limits to REFINE_PROMPT_USER.
+# Values must stay in sync with the budget table in REFINE_PROMPT_SYSTEM above.
 PROMPT_TOKEN_BUDGETS = {
-    "ROUTER_SYSTEM": 100,
+    "SYSTEM_BASE_FR": 150,          # inline / KV-cached — keep tight
+    "ROUTER_SYSTEM": 700,           # already dense (~600 tok) — cap inflation
     "ROUTER_USER": 600,
-    "ANALYSIS_PROMPT": 600,
+    "ANALYSIS_PROMPT": 1000,        # async — quality over speed
     "BRIEFING_SYSTEM": 100,
     "BRIEFING_USER": 400,
     "WEB_RELEVANCE_JUDGE": 200,
@@ -665,9 +767,14 @@ PROMPT_TOKEN_BUDGETS = {
     "REFLECTION_PROMPT": 1500,
     "REFLECTION_USER_SYSTEM": 300,
     "REFLECTION_USER_PROMPT": 1000,
-    "NIGHTLY_SYSTEM": 400,
-    "NIGHTLY_PROMPT": 600,
-    "SYSTEM_BASE_FR": 500,
+    "NIGHTLY_FACTS_SYSTEM": 300,
+    "NIGHTLY_FACTS_PROMPT": 400,
+    "NIGHTLY_SELF_SYSTEM": 300,
+    "NIGHTLY_SELF_PROMPT": 300,
+    "NIGHTLY_CLEANING_SYSTEM": 250,
+    "NIGHTLY_CLEANING_PROMPT": 200,
+    "CONSOLIDATION_PROMPT": 200,
+    "CURATIVE_CLEANUP_PROMPT": 300,
 }
 
 

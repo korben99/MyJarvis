@@ -170,8 +170,8 @@ CHAT_LOG_TTL = (
 # ── Memory thresholds ─────────────────────────────────────────────────────
 IMPORTANCE_THRESHOLD = 0.35
 RECALL_MEMORY_SIMILARITY_THRESHOLD = 0.7
-AUTOBIO_IMPORTANCE_THRESHOLD = 0.6
-NOVELTY_THRESHOLD = 0.15
+AUTOBIO_IMPORTANCE_THRESHOLD = 0.45
+NOVELTY_THRESHOLD = 0.25
 PROJECT_THRESHOLD = 0.6
 
 # Fenêtre de récence pour le scoring des souvenirs autobiographiques dans search_memory().
