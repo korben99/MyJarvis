@@ -20,9 +20,6 @@ import httpx
 import pytz
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-
 from config import (
     BRIEFING_ENABLED,
     BRIEFING_TIME,
@@ -44,21 +41,19 @@ from config import (
     USER_CODES,
     USER_TRADING,
 )
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 if LLM_LOCAL:
     from llm_local import preload_models
+from analyzer import analyse_recent_conversations
+from deps import _STREAM_CLIENTS, HTTP_CLIENT, QDRANT_CLIENT
 from embed_router import preload_embed_router
-from deps import HTTP_CLIENT, _STREAM_CLIENTS, QDRANT_CLIENT
 from google_services import is_google_available
 from helpers import get_logger, setup_logging
 from llm_client import openai_headers
 from memory import get_embed_model, get_emotional_state
 from rag import search_documents
-from analyzer import analyse_recent_conversations
-from self import run_nightly_interaction_review, run_self_reflection
-from trading import run_trade_check
-from web_search import search_web
-
 from routes.briefing_routes import router as briefing_router
 from routes.briefing_routes import run_morning_briefings
 from routes.chat import router as chat_router
@@ -67,24 +62,31 @@ from routes.memory_routes import router as memory_router
 from routes.portfolio import router as portfolio_router
 from routes.proxy import router as proxy_router
 from routes.self_routes import router as self_router
+from self import run_nightly_interaction_review, run_self_reflection
+from trading import run_trade_check
+from web_search import search_web
 
 logger = get_logger("jarvis-api")
 
 
 # ── Application lifespan ───────────────────────────────────────────────────────
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
 
     logger.info(
-        "Jarvis API v8 starting — router: %s, reasoning: %s",
-        ROUTER_MODEL, REASONING_MODEL,
+        "Jarvis API v9 starting — router: %s, reasoning: %s",
+        ROUTER_MODEL,
+        REASONING_MODEL,
     )
 
     if LLM_LOCAL:
         await asyncio.to_thread(preload_models)
-    logger.info("RAG: %s, collection: %s, top_k: %d", QDRANT_URL, QDRANT_COLLECTION, RAG_TOP_K)
+    logger.info(
+        "RAG: %s, collection: %s, top_k: %d", QDRANT_URL, QDRANT_COLLECTION, RAG_TOP_K
+    )
 
     deps.EMBED_MODEL = get_embed_model()
     await asyncio.to_thread(preload_embed_router)
@@ -126,7 +128,11 @@ async def lifespan(app: FastAPI):
                 minute=minute,
                 id="morning_briefing",
             )
-            logger.info("Morning briefing scheduled at %s (%s)", BRIEFING_TIME, BRIEFING_TIMEZONE)
+            logger.info(
+                "Morning briefing scheduled at %s (%s)",
+                BRIEFING_TIME,
+                BRIEFING_TIMEZONE,
+            )
 
         async def _run_trade_checks():
             await run_trade_check(USER_TRADING)
@@ -134,14 +140,14 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(
             _run_trade_checks,
             trigger="interval",
-            hours=1,
+            hours=2,
             id="trade_check",
             next_run_time=datetime.now(tz) + timedelta(minutes=8),
         )
-        logger.info("Trading surveillance scheduled every 1 h")
+        logger.info("Trading surveillance scheduled every 2 h")
 
         scheduler.start()
-        logger.info("Self reflection scheduled every %dh", REFLECTION_INTERVAL_HOURS)
+        logger.info("Self reflection scheduled every %d h", REFLECTION_INTERVAL_HOURS)
         logger.info("Nightly review scheduled at 23:00 (%s)", BRIEFING_TIMEZONE)
     except Exception as exc:
         logger.error("Scheduler failed to start: %s", type(exc).__name__)
@@ -176,6 +182,7 @@ app.include_router(proxy_router)
 
 
 # ── Core utility endpoints ─────────────────────────────────────────────────────
+
 
 @app.get("/status")
 async def status():
@@ -267,6 +274,7 @@ async def web(q: str, max_results: int = 3):
 @app.delete("/conversations/{user_code}/{session_id}")
 async def clear(user_code: str, session_id: str):
     from deps import REDIS_CLIENT
+
     if user_code not in USER_CODES:
         raise HTTPException(404, "Unknown user")
     REDIS_CLIENT.delete(f"chat:{user_code}:{session_id}")

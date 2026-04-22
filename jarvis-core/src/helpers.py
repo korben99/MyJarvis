@@ -56,6 +56,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 import unicodedata
 from datetime import date, datetime
@@ -107,8 +108,8 @@ def setup_logging(log_file: str = "/opt/jarvis/logs/jarvis-api.log") -> None:
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
 
-    # Console — INFO only
-    sh = logging.StreamHandler()
+    # Console — INFO only (stdout so launchd's StandardOutPath captures it)
+    sh = logging.StreamHandler(sys.stdout)
     sh.setLevel(logging.INFO)
     sh.setFormatter(fmt)
     root.addHandler(sh)

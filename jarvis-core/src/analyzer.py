@@ -62,9 +62,7 @@ async def analyze_exchange(
     try:
         # Show in_progress projects clearly + recent done projects (last 90 days)
         # so the LLM can avoid re-creating finished or versioned projects.
-        import time as _t
-
-        _now_ts = _t.time()
+        _now_ts = time.time()
         _90d = 90 * 86400
 
         def _proj_label(p):
@@ -84,8 +82,8 @@ async def analyze_exchange(
                         p.get("last_update")
                         and (
                             _now_ts
-                            - _t.mktime(
-                                _t.strptime(p["last_update"][:19], "%Y-%m-%dT%H:%M:%S")
+                            - time.mktime(
+                                time.strptime(p["last_update"][:19], "%Y-%m-%dT%H:%M:%S")
                             )
                         )
                         < _90d

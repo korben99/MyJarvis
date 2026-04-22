@@ -26,6 +26,7 @@ Compression memory added, to be runned every month.
 
 """
 
+import asyncio
 import json
 import os
 import tempfile
@@ -551,6 +552,25 @@ def _normalize_profile_key(
         return None
 
 
+def _write_profile_fact(
+    r, profile_key: str, ts_key: str,
+    user_code: str, key: str, value: str,
+    duplicate: str | None, now_ts: int,
+) -> None:
+    """Apply a single profile key write (with optional duplicate eviction)."""
+    if duplicate:
+        old_dup_val = r.hget(profile_key, duplicate)
+        logger.info(
+            "User %s profile key normalized: '%s' (was: %s) → replaced by '%s'",
+            user_code, duplicate, old_dup_val or "(empty)", key,
+        )
+        r.hdel(profile_key, duplicate)
+        r.hdel(ts_key, duplicate)
+    r.hset(profile_key, key, value)
+    r.hset(ts_key, key, now_ts)
+    logger.info("User %s profile updated: %s = %s", user_code, key, value)
+
+
 def update_user_profile(user_code: str, key: str, value: str | None):
     """Add, update, or delete (value=None or "") a user profile fact.
 
@@ -582,21 +602,10 @@ def update_user_profile(user_code: str, key: str, value: str | None):
         # (same concept or same category:item under a synonym category), evict the old
         # key and write under the new name — no value merging, each key is atomic.
         duplicate = _normalize_profile_key(user_code, key, existing_keys)
-        if duplicate:
-            old_dup_val = r.hget(profile_redis_key, duplicate)
-            logger.info(
-                "User %s profile key normalized: '%s' (was: %s) → replaced by '%s'",
-                user_code,
-                duplicate,
-                old_dup_val or "(empty)",
-                key,
-            )
-            r.hdel(profile_redis_key, duplicate)
-            r.hdel(profile_ts_key, duplicate)
-
-        r.hset(profile_redis_key, key, value)
-        r.hset(profile_ts_key, key, int(time.time()))
-        logger.info("User %s profile updated: %s = %s", user_code, key, value)
+        _write_profile_fact(
+            r, profile_redis_key, profile_ts_key,
+            user_code, key, value, duplicate, int(time.time()),
+        )
 
 
 def update_user_profile_batch(user_code: str, facts: list[dict]) -> None:
@@ -641,23 +650,11 @@ def update_user_profile_batch(user_code: str, facts: list[dict]) -> None:
         )
 
     for fact in new_facts:
-        key = fact["key"]
-        value = fact["value"]
-        duplicate = dedup_map.get(key)
-        if duplicate:
-            old_dup_val = r.hget(profile_redis_key, duplicate)
-            logger.info(
-                "User %s profile key normalized: '%s' (was: %s) → replaced by '%s'",
-                user_code,
-                duplicate,
-                old_dup_val or "(empty)",
-                key,
-            )
-            r.hdel(profile_redis_key, duplicate)
-            r.hdel(profile_ts_key, duplicate)
-        r.hset(profile_redis_key, key, value)
-        r.hset(profile_ts_key, key, now_ts)
-        logger.info("User %s profile updated: %s = %s", user_code, key, value)
+        _write_profile_fact(
+            r, profile_redis_key, profile_ts_key,
+            user_code, fact["key"], fact["value"],
+            dedup_map.get(fact["key"]), now_ts,
+        )
 
 
 def set_interest_weight(user_code: str, term: str, weight: float):
@@ -755,19 +752,6 @@ def log_conversation(
 
     # Keep only last 1000 exchanges (prevent unbounded growth)
     r.zremrangebyrank(f"convlog:{user_code}", 0, -1001)
-    # Storage as embedded to Qdrant , is importance high enough (VARIABLE TO ADJUST)
-
-    # NOTE: pipeline.py calls log_conversation with importance=0 (default) —
-    # the thresholds below are never crossed at call time.
-    # Actual vectorisation and autobio storage happen in analyse_recent_conversations()
-    # (scheduler, every 30 min) once the LLM has assigned a real importance score.
-    # These paths exist as a fallback for any caller that provides a pre-computed score.
-    if entry.get("importance", 0) > IMPORTANCE_THRESHOLD:
-        store_memory_vector(user_code, entry)
-
-    summary = entry.get("memory_summary")
-    if summary and entry.get("importance", 0) > AUTOBIO_IMPORTANCE_THRESHOLD:
-        store_autobiographical_event(user_code, summary, entry["importance"])
 
 
 def get_recent_conversations(user_code: str, hours: int = 24, limit: int = 20) -> list:
@@ -1088,42 +1072,66 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
         logger.error("Autobiographical memory failed: %s", e)
 
 
+def _autobio_op(user_code: str, query: str, threshold: float, action: str) -> int:
+    """Shared implementation for retract/archive operations on autobiographical memories.
+
+    action="retract" → hard delete (reserved for errors/duplicates).
+    action="archive"  → payload update status="past" (outdated facts, keeps history).
+    """
+    try:
+        model = get_embed_model()
+        qdrant = get_qdrant()
+        vector = model.encode(query, normalize_embeddings=True).tolist()
+
+        filt: dict = {
+            "must": [
+                {"key": "user_code", "match": {"value": user_code}},
+                {"key": "memory_type", "match": {"value": "autobiographical"}},
+            ]
+        }
+        if action == "archive":
+            # Only archive current facts — already-archived ones are skipped
+            filt["must_not"] = [{"key": "status", "match": {"value": "past"}}]
+
+        results = qdrant.query_points(
+            collection_name=QDRANT_MEMORY_COLLECTION,
+            query=vector,
+            limit=5,
+            query_filter=filt,
+        ).points
+
+        to_act = [r.id for r in results if min(r.score, 1.0) >= threshold]
+        if not to_act:
+            return 0
+
+        if action == "retract":
+            qdrant.delete(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                points_selector=PointIdsList(points=to_act),
+            )
+            logger.info("Autobio retracted %d point(s) for '%s'", len(to_act), query[:60])
+        else:
+            qdrant.set_payload(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                payload={"status": "past", "archived_date": date.today().isoformat()},
+                points=to_act,
+            )
+            logger.info("Autobio archived %d point(s) for '%s'", len(to_act), query[:60])
+
+        _invalidate_timeline_cache(user_code)
+        return len(to_act)
+    except Exception as e:
+        logger.error("_autobio_op(%s) failed: %s", action, e)
+        return 0
+
+
 def retract_autobiographical_event(
     user_code: str, query: str, threshold: float = 0.88
 ) -> int:
     """Delete autobiographical memories semantically matching the query.
     Reserved for genuine errors and strict duplicates — not for outdated facts.
-    Higher threshold than archive (0.88 vs 0.78) — hard delete requires stricter match.
-    Returns the number of deleted points."""
-    try:
-        model = get_embed_model()
-        qdrant = get_qdrant()
-        vector = model.encode(query, normalize_embeddings=True).tolist()
-        results = qdrant.query_points(
-            collection_name=QDRANT_MEMORY_COLLECTION,
-            query=vector,
-            limit=5,
-            query_filter={
-                "must": [
-                    {"key": "user_code", "match": {"value": user_code}},
-                    {"key": "memory_type", "match": {"value": "autobiographical"}},
-                ]
-            },
-        ).points
-        to_delete = [r.id for r in results if min(r.score, 1.0) >= threshold]
-        if to_delete:
-            qdrant.delete(
-                collection_name=QDRANT_MEMORY_COLLECTION,
-                points_selector=PointIdsList(points=to_delete),
-            )
-            _invalidate_timeline_cache(user_code)
-            logger.info(
-                "Autobio retracted %d point(s) for '%s'", len(to_delete), query[:60]
-            )
-        return len(to_delete)
-    except Exception as e:
-        logger.error("retract_autobiographical_event failed: %s", e)
-        return 0
+    Higher threshold than archive (0.88 vs 0.78) — hard delete requires stricter match."""
+    return _autobio_op(user_code, query, threshold, "retract")
 
 
 def archive_autobiographical_event(
@@ -1131,41 +1139,8 @@ def archive_autobiographical_event(
 ) -> int:
     """Mark autobiographical memories as past (status='past') without deleting them.
     Used when a fact is no longer current but retains historical value
-    (e.g. changed jobs, stopped a hobby). The memory remains searchable but is
-    deprioritised in recall scoring via a status_factor penalty.
-    Returns the number of archived points."""
-    try:
-        model = get_embed_model()
-        qdrant = get_qdrant()
-        vector = model.encode(query, normalize_embeddings=True).tolist()
-        results = qdrant.query_points(
-            collection_name=QDRANT_MEMORY_COLLECTION,
-            query=vector,
-            limit=5,
-            query_filter={
-                "must": [
-                    {"key": "user_code", "match": {"value": user_code}},
-                    {"key": "memory_type", "match": {"value": "autobiographical"}},
-                ],
-                # Only archive current facts — skip already-archived ones
-                "must_not": [{"key": "status", "match": {"value": "past"}}],
-            },
-        ).points
-        to_archive = [r.id for r in results if min(r.score, 1.0) >= threshold]
-        if to_archive:
-            qdrant.set_payload(
-                collection_name=QDRANT_MEMORY_COLLECTION,
-                payload={"status": "past", "archived_date": date.today().isoformat()},
-                points=to_archive,
-            )
-            _invalidate_timeline_cache(user_code)
-            logger.info(
-                "Autobio archived %d point(s) for '%s'", len(to_archive), query[:60]
-            )
-        return len(to_archive)
-    except Exception as e:
-        logger.error("archive_autobiographical_event failed: %s", e)
-        return 0
+    (e.g. changed jobs, stopped a hobby). Deprioritised in recall via status_factor."""
+    return _autobio_op(user_code, query, threshold, "archive")
 
 
 def get_autobiographical_facts(user_code: str, limit: int = 40) -> list[str]:
@@ -1195,6 +1170,23 @@ def get_autobiographical_facts(user_code: str, limit: int = 40) -> list[str]:
         return []
 
 
+def _build_memory_filter(user_code: str, scope: str) -> dict:
+    """Build Qdrant query_filter for a memory search by scope."""
+    user_clause = {"key": "user_code", "match": {"value": user_code}}
+    if scope in ("episodic", "autobiographical"):
+        return {"must": [user_clause, {"key": "memory_type", "match": {"value": scope}}]}
+    # "auto" — both layers; must_not absent types from slipping in
+    return {
+        "must": [
+            user_clause,
+            {"should": [
+                {"key": "memory_type", "match": {"value": "episodic"}},
+                {"key": "memory_type", "match": {"value": "autobiographical"}},
+            ]},
+        ]
+    }
+
+
 def search_memory(
     user_code: str, query: str, limit: int = 5, memory_scope: str = "auto"
 ):
@@ -1209,40 +1201,11 @@ def search_memory(
 
         vector = model.encode(query, normalize_embeddings=True).tolist()
 
-        if memory_scope == "episodic":
-            type_filter = {
-                "must": [{"key": "memory_type", "match": {"value": "episodic"}}]
-            }
-        elif memory_scope == "autobiographical":
-            type_filter = {
-                "must": [{"key": "memory_type", "match": {"value": "autobiographical"}}]
-            }
-        else:  # "auto" — search both layers
-            type_filter = {
-                "should": [
-                    {"key": "memory_type", "match": {"value": "episodic"}},
-                    {"key": "memory_type", "match": {"value": "autobiographical"}},
-                ]
-            }
-
-        user_filter = {"key": "user_code", "match": {"value": user_code}}
-        if memory_scope in ("episodic", "autobiographical"):
-            query_filter = {"must": [user_filter, type_filter["must"][0]]}
-        else:
-            # Nested should inside must: user_code MUST match AND memory_type must be
-            # episodic OR autobiographical (explicit — points without memory_type excluded).
-            query_filter = {
-                "must": [
-                    user_filter,
-                    {"should": type_filter["should"]},
-                ]
-            }
-
         results = qdrant.query_points(
             collection_name=QDRANT_MEMORY_COLLECTION,
             query=vector,
             limit=limit * 3,
-            query_filter=query_filter,
+            query_filter=_build_memory_filter(user_code, memory_scope),
         ).points
 
         memories = []
@@ -1347,8 +1310,6 @@ async def async_search_memory(
     This wrapper always delegates to a thread pool — callers never need to
     remember to wrap it themselves.
     """
-    import asyncio
-
     return await asyncio.to_thread(search_memory, user_code, query, limit, memory_scope)
 
 
@@ -1562,11 +1523,12 @@ def build_memory_context(
     # ── Single Redis pipeline round-trip for all scalar/hash reads ──────────
     r = get_redis()
     pipe = r.pipeline(transaction=False)
-    pipe.hgetall(f"user:{user_code}:profile")  # 0
-    pipe.hgetall(f"user:{user_code}:preferences")  # 1
-    pipe.get(f"user:{user_code}:projects")  # 2
-    pipe.get("jarvis:emotional_state")  # 3
-    pipe.get(f"jarvis:{user_code}:tomorrow_suggestions")  # 4
+    pipe.hgetall(f"user:{user_code}:profile")              # 0
+    pipe.hgetall(f"user:{user_code}:preferences")          # 1
+    pipe.get(f"user:{user_code}:projects")                 # 2
+    pipe.get("jarvis:emotional_state")                     # 3
+    pipe.get(f"jarvis:{user_code}:tomorrow_suggestions")   # 4
+    pipe.get(f"cache:timeline:{user_code}")                # 5 — avoids 2nd Redis RTT
     _pipe_results = pipe.execute()
 
     profile = _pipe_results[0] or {}
@@ -1574,6 +1536,7 @@ def build_memory_context(
     _proj_raw = _pipe_results[2]
     _emotion_raw = _pipe_results[3]
     _sugg_raw = _pipe_results[4]
+    _timeline_cached = _pipe_results[5]
 
     # User profile — namespaced keys (hobby:kart) are grouped by category for readability
     if profile:
@@ -1608,19 +1571,28 @@ def build_memory_context(
         plines = [f"- {p.get('name', 'sans nom')}" for p in active_projects]
         parts.append("<projets_actifs>\n" + "\n".join(plines) + "\n</projets_actifs>")
 
-    # Emotional state
+    # Emotional state — read-only decay applied inline (no Redis write, no lock)
     try:
         emotion = json.loads(_emotion_raw) if _emotion_raw else {}
     except Exception:
         emotion = {}
     if not emotion:
-        emotion = {
-            "mood": "neutral",
-            "energy": 0.7,
-            "confidence": 0.8,
-            "curiosity": 0.6,
-            "concern": 0.0,
-        }
+        emotion = {"mood": "neutral", "energy": 0.7, "confidence": 0.8, "curiosity": 0.6, "concern": 0.0}
+    else:
+        _last = emotion.get("last_updated")
+        if _last:
+            try:
+                _eh = (datetime.now(timezone.utc) - datetime.fromisoformat(_last)).total_seconds() / 3600
+                _c = emotion.get("concern", 0.0)
+                if _c > 0:
+                    emotion["concern"] = max(0.0, round(_c - _eh * _CONCERN_DECAY_PER_HOUR, 3))
+                _e = emotion.get("energy", 0.7)
+                if abs(_e - 0.7) > 0.001:
+                    _d = 1 if _e < 0.7 else -1
+                    _ne = _e + _d * _eh * _ENERGY_DECAY_PER_HOUR
+                    emotion["energy"] = round(min(0.7, _ne) if _d == 1 else max(0.7, _ne), 3)
+            except (ValueError, TypeError):
+                pass
     if emotion.get("mood") != "neutral":
         parts.append(
             f"<etat_emotionnel>\nHumeur actuelle : {emotion['mood']}\n</etat_emotionnel>"
@@ -1636,12 +1608,18 @@ def build_memory_context(
             + "\n</apprentissages_recents>"
         )
 
-    # User Timeline — sorted by importance+recency desc, top 5
-    timeline = get_user_timeline(user_code)
+    # User Timeline — served from pipeline cache hit [5]; fallback to Qdrant on miss
+    if _timeline_cached:
+        try:
+            timeline = json.loads(_timeline_cached)[:5]
+        except Exception:
+            timeline = get_user_timeline(user_code, limit=5)
+    else:
+        timeline = get_user_timeline(user_code, limit=5)
     if timeline:
         plines = [
             f"({rel_time_fr(event['timestamp'])}) {event['text']}"
-            for event in timeline[:5]
+            for event in timeline
         ]
         parts.append(
             "<frise_chronologique>\n" + "\n".join(plines) + "\n</frise_chronologique>"

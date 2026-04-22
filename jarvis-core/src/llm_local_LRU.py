@@ -1,11 +1,15 @@
 """
-llm_local_KVCache.py — Inférence MLX avec cache système-prompt (KVCache classique)
-====================================================================================
-Variante stable de llm_local.py. Pour activer : cp llm_local_KVCache.py llm_local.py
+llm_local_LRU.py — Inférence MLX avec LRUPromptCache multi-tour (mlx_lm 0.31.2+)
+===================================================================================
+Variante LRU de llm_local.py. Pour activer : cp llm_local_LRU.py llm_local.py
 
-Différence vs llm_local_LRU.py :
-  Cache uniquement le prompt système (prefill une fois, deepcopy par appel).
-  Plus simple, aucune dépendance aux nouvelles API mlx_lm.
+Différence vs llm_local_KVCache.py :
+  LRUPromptCache remplace le cache système-seulement. fetch_nearest_cache() retrouve
+  le plus long préfixe commun parmi toutes les séquences précédentes (PromptTrie),
+  réduisant le prefill à uniquement les tokens nouveaux depuis le dernier tour.
+
+  Limitation mlx_lm 0.31.2 : QuantizedKVCache.nbytes appelle tree_reduce (non importé)
+  → insert_cache crashe si kv_bits est actif. LRU auto-désactivé quand QUANT_KV=yes.
 
 Actif uniquement quand LLM_LOCAL=yes dans .env.
 
@@ -29,7 +33,6 @@ Exports publics :
 """
 
 import asyncio
-import copy
 import datetime
 import json
 import logging
@@ -38,6 +41,8 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Optional
+
+import mlx.core as mx
 
 from config import (
     LLM_LOCAL,
@@ -49,7 +54,7 @@ from config import (
     is_qwen3,
 )
 from mlx_lm import generate, load, stream_generate
-from mlx_lm.models.cache import make_prompt_cache
+from mlx_lm.models.cache import LRUPromptCache, make_prompt_cache
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
 HF_HOME = os.getenv("HF_HOME", "/opt/jarvis/models")
@@ -187,17 +192,23 @@ _infer_lock = (
 # sync (call_llm_local via asyncio.to_thread) ET les appelants async (call_llm_local_async,
 # stream_local). asyncio.Lock est invisible depuis les threads → race GPU sans threading.Lock.
 
-# ── System prompt KV cache ────────────────────────────────────────────────
-# Caches the prefilled KV states for the system prompt (which is token-identical
-# across every turn). Each streaming inference gets a deepcopy of this cache so
-# only the conversation history + current user message need prefill processing.
+# ── LRU prompt cache (multi-turn KV reuse) ────────────────────────────────
+# LRUPromptCache (mlx_lm 0.31.2+) stores KV states keyed on the full token
+# sequence (prompt + response) via PromptTrie. On each call, fetch_nearest_cache()
+# finds the longest matching prefix, returning a trimmed cache copy and the
+# remaining tokens to process — enabling system-prompt and multi-turn reuse.
 #
-# Multi-turn session caching was removed: Qwen3's enable_thinking template adds
-# <think>…</think> tokens to the generation prompt that are absent from
-# historical message reconstruction, causing permanent token-sequence mismatch.
+# Key = prompt_tokens + response_token_ids (full processed sequence), so the
+# trie can trim any stored entry back to the longest common prefix with the
+# next call's prompt.
+#
+# insert_cache is skipped for streaming no_think=False: thinking-mode responses
+# are stripped of <think>…</think> before history storage, so the reconstructed
+# prompt on the next turn omits those tokens — common prefix would only reach
+# the assistant-turn boundary, leaving long think-token KV states wasting memory.
 
-_sys_kv: dict[str, tuple[int, Any]] = {}  # model_path → (sys_hash, base_cache)
-_sys_kv_lock = threading.Lock()  # protects lazy build of the base cache
+_prompt_caches: dict[str, LRUPromptCache] = {}  # model_path → LRUPromptCache
+_prompt_cache_lock = threading.Lock()
 
 
 def _first_complete_json(text: str) -> Optional[str]:
@@ -278,80 +289,17 @@ def _strip_thinking(text: str) -> str:
     return text
 
 
-def _make_system_kv(model_path: str, model, tokenizer, system_content: str) -> Any:
-    """
-    Pre-fill the system prompt into a fresh KV cache.
-    Called once per unique (model_path, system_content) pair — never call directly.
-
-    Strategy: run stream_generate for 1 token to drive the prefill, then trim
-    the cache offset back to the exact system token count so the 1 garbage
-    decode token is overwritten by real tokens on the first actual inference.
-    """
-    sys_messages = [{"role": "system", "content": system_content}]
-    sys_prompt_text = tokenizer.apply_chat_template(
-        sys_messages, tokenize=False, add_generation_prompt=False
-    )
-    sys_token_count = len(tokenizer.encode(sys_prompt_text))
-
-    profile = _model_profile(model_path)
-    quant_kwargs = (
-        {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if profile.use_quant_kv else {}
-    )
-    cache = make_prompt_cache(model)
-    sampler = make_sampler(temp=0.0, top_p=1.0, top_k=0, min_p=0.0)
-
-    try:
-        for _ in stream_generate(
-            model,
-            tokenizer,
-            prompt=sys_prompt_text,
-            max_tokens=1,
-            sampler=sampler,
-            prompt_cache=cache,
-            **quant_kwargs,
-        ):
-            break  # stop after prefill + 1 decode step
-
-        # Trim offset to system token count — the 1 garbage token will be
-        # overwritten by the first real token on the next call.
-        for layer_cache in cache:
-            if hasattr(layer_cache, "offset"):
-                layer_cache.offset = sys_token_count
-
-    except Exception as exc:
-        logger.warning("System KV cache build failed: %s", exc)
-        return None
-
-    logger.info(
-        "KV cache: system prompt prefilled (%d tok, model=%s)",
-        sys_token_count,
-        model_path.split("/")[-1],
-    )
-    return cache
-
-
-def _get_system_cache(model_path: str, model, tokenizer, system_content: str) -> Any:
-    """
-    Return a fresh deepcopy of the system prompt KV cache (lazy init, thread-safe).
-    Returns None on any failure → caller proceeds without cache.
-    Must be called from inside _infer_lock.
-    """
-    if not system_content:
-        return None
-    h = hash(system_content)
-    with _sys_kv_lock:
-        if model_path not in _sys_kv or _sys_kv[model_path][0] != h:
-            base = _make_system_kv(model_path, model, tokenizer, system_content)
-            if base is None:
-                return None
-            _sys_kv[model_path] = (h, base)
-        try:
-            return copy.deepcopy(_sys_kv[model_path][1])
-        except Exception as exc:
-            logger.warning(
-                "KV cache: deepcopy failed (%s) — running without cache", exc
-            )
-            return None
+def _get_lru(model_path: str) -> LRUPromptCache:
+    """Return (or lazily create) the per-model LRU prompt cache. Thread-safe via double-checked locking."""
+    lru = _prompt_caches.get(model_path)
+    if lru is None:
+        with _prompt_cache_lock:
+            if model_path not in _prompt_caches:
+                # max_size=6: up to 6 distinct conversation states per model.
+                # max_bytes=3 GB: hard cap on KV memory for this model's cache.
+                _prompt_caches[model_path] = LRUPromptCache(max_size=6, max_bytes=3 * 1024**3)
+            lru = _prompt_caches[model_path]
+    return lru
 
 
 def _load_model(model_path: str) -> tuple:
@@ -501,23 +449,34 @@ def _generate_sync(
     """
     model, tokenizer = _load_model(model_path)
     prompt = _build_prompt(messages, tokenizer, model_path, no_think)
-
-    prompt_tokens = len(tokenizer.encode(prompt))
     profile = _model_profile(model_path)
-    quant_kwargs = (
-        {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if profile.use_quant_kv else {}
-    )
     effective_max = min(max_tokens, 10000)
     model_short = model_path.split("/")[-1]
 
-    # System prompt KV cache — pre-filled once, deepcopied per call.
-    _sys_content = (
-        messages[0]["content"]
-        if messages and messages[0].get("role") == "system"
-        else ""
+    # LRU prompt cache — finds longest matching prefix across all prior calls.
+    # Key = prompt_ids + response_ids (full processed sequence), so the trie
+    # can trim any stored entry back to the common prefix with the next prompt.
+    token_ids = tokenizer.encode(prompt)
+    prompt_tokens = len(token_ids)
+    # LRU is skipped when kv_bits quantization is active: decode steps replace
+    # KVCache with QuantizedKVCache whose .nbytes calls tree_reduce — a missing
+    # import in mlx_lm 0.31.2 that crashes insert_cache (tracked upstream).
+    _use_lru = not profile.use_quant_kv
+    lru = _get_lru(model_path)
+    if _use_lru:
+        kv_cache, remaining = lru.fetch_nearest_cache(model_path, token_ids)
+        if kv_cache is None:
+            kv_cache = make_prompt_cache(model)
+            remaining = token_ids
+        elif not remaining:
+            remaining = token_ids[-1:]
+    else:
+        kv_cache = make_prompt_cache(model)
+        remaining = token_ids
+    prompt_input = mx.array(remaining)
+    quant_kwargs = (
+        {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if profile.use_quant_kv else {}
     )
-    kv_cache = _get_system_cache(model_path, model, tokenizer, _sys_content)
-    _cache_kwarg = {"prompt_cache": kv_cache} if kv_cache is not None else {}
 
     sampler = make_sampler(
         temp=temperature,
@@ -553,12 +512,12 @@ def _generate_sync(
         for chunk in stream_generate(
             model,
             tokenizer,
-            prompt=prompt,
+            prompt=prompt_input,
             max_tokens=effective_max,
             sampler=sampler,
             logits_processors=logits_procs,
+            prompt_cache=kv_cache,
             **quant_kwargs,
-            **_cache_kwarg,
         ):
             if chunk.text:
                 raw_so_far += chunk.text
@@ -587,6 +546,7 @@ def _generate_sync(
 
         # Truncate at stop token if hit
         raw = raw_so_far
+        _raw_for_cache = raw_so_far  # capture full generated text before extraction
         if profile.stop_tokens:
             for st in profile.stop_tokens:
                 if st in raw:
@@ -610,22 +570,28 @@ def _generate_sync(
         result = generate(
             model,
             tokenizer,
-            prompt=prompt,
+            prompt=prompt_input,
             max_tokens=effective_max,
             sampler=sampler,
             logits_processors=logits_procs,
             verbose=False,
+            prompt_cache=kv_cache,
             **quant_kwargs,
-            **_cache_kwarg,
         )
+        _raw_for_cache = result  # capture full generated text before stop token handling
         # Truncate at stop token (mlx_lm.generate does not accept a `stop` kwarg)
         if profile.stop_tokens:
             for st in profile.stop_tokens:
                 if st in result:
                     result = result.split(st, 1)[0]
 
+    # ── Cache prompt KV states for future prefix reuse ────────────
+    if _use_lru:
+        _resp_ids = tokenizer.encode(_raw_for_cache)
+        lru.insert_cache(model_path, list(token_ids) + _resp_ids, kv_cache)
+
     # ── Debug log brut (avant stripping) ──────────────────────────
-    _debug_log(model_short, no_think, prompt, result)
+    _debug_log(model_short, no_think, prompt, _raw_for_cache)
 
     # ── Stats réponse ──────────────────────────────────────────────
     resp_tokens = len(tokenizer.encode(result))
@@ -782,26 +748,39 @@ async def stream_local(
         logger.debug("[TTFT] stream_local: inference started (lock held %.3fs)", _t_infer - _t_lock_wait)
         mlx_model, tokenizer = _load_model(model)
         prompt = _build_prompt(messages, tokenizer, model, no_think)
-
-        # ── Encode prompt une seule fois (réutilisé pour cache validation ET stats) ─
-        prompt_tokens = len(tokenizer.encode(prompt))
         model_short = model.split("/")[-1]
+        profile = _model_profile(model)
 
-        # System prompt KV cache — pre-filled once, deepcopied per call.
-        # Only the tokens after the system prompt need prefill on each turn.
-        _sys_content = (
-            messages[0]["content"]
-            if messages and messages[0].get("role") == "system"
-            else ""
+        # LRU prompt cache — reduces prefill by reusing the longest matching prefix.
+        # Key = prompt_ids + response_ids so the trie can trim back to any common
+        # prefix on the next turn. Only inserted for no_think=True: thinking-mode
+        # responses are stripped before history storage → <think> tokens appear in
+        # the cache key but not in the next turn's reconstructed prompt, leaving
+        # only a short common prefix and wasting memory on think-token KV states.
+        token_ids = tokenizer.encode(prompt)
+        prompt_tokens = len(token_ids)
+        _use_lru = not profile.use_quant_kv
+        lru = _get_lru(model)
+        if _use_lru:
+            kv_cache, remaining = lru.fetch_nearest_cache(model, token_ids)
+            if kv_cache is None:
+                kv_cache = make_prompt_cache(mlx_model)
+                remaining = token_ids
+            elif not remaining:
+                remaining = token_ids[-1:]
+        else:
+            kv_cache = make_prompt_cache(mlx_model)
+            remaining = token_ids
+        prompt_input = mx.array(remaining)
+        quant_kwargs = (
+            {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if profile.use_quant_kv else {}
         )
-        kv_cache = _get_system_cache(model, mlx_model, tokenizer, _sys_content)
 
         first = True
         raw_chunks: list[str] = []  # accumule la réponse brute pour stats
         # Budget vient du pipeline : 1500 (no_think) ou 4000 (reasoning).
         # Hard cap à 10000 pour éviter les runaway en cas de mauvais passage.
         budget = min(max_tokens, 10000)
-        profile = _model_profile(model)
         # Température : utilise la valeur du profil par défaut (think vs no-think),
         # ou la valeur explicite si le caller en a passé une.
         effective_temp = (
@@ -809,16 +788,11 @@ async def stream_local(
             if temperature is not None
             else (profile.temp_nothink if no_think else profile.temp_think)
         )
-        quant_kwargs = (
-            {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64}
-            if profile.use_quant_kv
-            else {}
-        )
         try:
             for chunk in stream_generate(
                 mlx_model,
                 tokenizer,
-                prompt=prompt,
+                prompt=prompt_input,
                 max_tokens=budget,
                 sampler=make_sampler(
                     temp=effective_temp,
@@ -831,7 +805,7 @@ async def stream_local(
                     repetition_context_size=profile.repetition_context_size,
                     frequency_penalty=profile.frequency_penalty,
                 ),
-                **({"prompt_cache": kv_cache} if kv_cache is not None else {}),
+                prompt_cache=kv_cache,
                 **quant_kwargs,
             ):
                 if stop_flag.is_set():
@@ -868,8 +842,14 @@ async def stream_local(
         except Exception as exc:
             logger.error("stream_local erreur : %s", exc)
         finally:
-            # ── Stats réponse ──────────────────────────────────────
             raw_resp = "".join(raw_chunks)
+            # ── Cache prompt KV states for no_think turns ──────────
+            # Key = full processed sequence so next turn's prompt finds a prefix
+            # match and only needs to process the new user message and role tokens.
+            if _use_lru and no_think:
+                _resp_ids = tokenizer.encode(raw_resp)
+                lru.insert_cache(model, list(token_ids) + _resp_ids, kv_cache)
+            # ── Stats réponse ──────────────────────────────────────
             _debug_log(model_short, no_think, prompt, raw_resp)
             resp_tokens = len(tokenizer.encode(raw_resp))
             thinking_active = "</think>" in raw_resp
