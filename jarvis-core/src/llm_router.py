@@ -64,6 +64,7 @@ class RouterResult:
     calendar_days: int
     weather_location: str = field(default="")
     rag_query: str = field(default="")
+    use_small_talk: bool = field(default=False)  # skip profile/memory injection entirely
 
 
 # ── Training data collector ───────────────────────────────────────────────

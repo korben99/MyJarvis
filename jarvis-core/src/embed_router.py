@@ -50,39 +50,30 @@ AMBIGUITY_MARGIN: float = 0.06
 INTENT_EXAMPLES: dict[str, list[str]] = {
     # ── Conversation / mémoire générale ──────────────────────────────────────
     "memory": [
-        "salut, ça va ?",
-        "comment vas-tu Jarvis ?",
-        "en forme ?merci beaucoup",
-        "mercic'est quoi ton avis là-dessus ?",
+        # questions / demandes d'aide — nécessitent le profil pour personnaliser
+        "c'est quoi ton avis là-dessus ?",
         "aide-moi à rédiger un email",
-        "traduis ce texte en anglais",
         "explique-moi comment ça marche",
-        "tu te souviens de notre conversation sur",
         "qu'est-ce que tu penses de ça ?",
-        "c'est bon, parfait",
         "aide-moi avec ce code",
         "qu'est-ce que tu sais sur moi ?",
         "résume ce texte",
         "donne-moi des idées pour",
         "c'est quoi la différence entre",
-        # conversation personnelle / anecdotique
-        "j'aime beaucoup le",
-        "tu savais que j'aime",
-        "j'ai passé une bonne journée",
-        "aujourd'hui j'ai fait",
-        "hier soir j'étais",
-        "je t'avais dit que je",
-        "souviens-toi",
-        "rappelle-toi",
-        "j'en ai fait",
-        "je ne peux plus",
-        "j'ai toujours aimé",
-        "j'adore",
-        "je déteste",
+        # partage d'informations personnelles — profil à mettre à jour
+        "je viens de décider de",
+        "j'ai changé d'avis sur",
+        "depuis quelque temps je",
+        "j'adore ce sport",
+        "je déteste travailler le soir",
+        "j'ai toujours préféré",
+        "je ne supporte pas le",
+        # référence au passé / continuité de conversation
         "tu te souviens de",
-        "je préfère le",
-        "on peut parler de",
-        "dis-moi ce que tu penses de",
+        "comme je t'avais expliqué",
+        "rappelle-toi ce projet",
+        "on avait parlé de",
+        "tu sais ce que j'ai fait hier",
     ],
     # ── Météo ────────────────────────────────────────────────────────────────
     "weather": [
@@ -128,11 +119,11 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
     # ── Recherche web / actualités ───────────────────────────────────────────
     "web": [
         "cherche sur internet",
-        "dernières actualités sur",
-        "qu'est-ce qui se passe dans le monde ?",
-        "recherche des infos sur",
+        "cherche sur le net",
+        "dernières actualités",
+        "recherche des infos",
         "recherche sur le net",
-        "trouve-moi des informations sur",
+        "trouve-moi des informations",
         "quelles sont les news",
         "recherche en ligne",
     ],
@@ -158,12 +149,11 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "réfléchis bien",
         "raisonne sur",
         "raisonne étape par étape",
+        "raisonne par étape",
         "pense par étape",
-        "debug complet",
-        "analyse",
+        "debug",
         "analyse complète",
         "réflexion approfondie",
-        "explique-moi",
         "donne-moi ton analyse complète",
         "prends le temps de réfléchir",
     ],
@@ -174,7 +164,7 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "mes actions",
         "performance de mes actions",
         "analyse mon portefeuille",
-        "analyse mes actionsmes positions boursières",
+        "mes positions boursières",
         "comment va mon portefeuille ?",
     ],
     # ── État interne de Jarvis ───────────────────────────────────────────────
@@ -189,9 +179,11 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "donne-moi ton introspection",
         "tu as réfléchi à quoi récemment ?",
         "tes auto-réflexions",
+        "tes réflexions",
         "montre les propositions de prompt",
+        "montre les prompts en attente",
+        "montre les prompts",
         "liste les propositions en attente",
-        "quelles propositions de prompt as-tu ?",
         "accepte la proposition",
         "rejette la proposition",
         "montre la proposition",
@@ -346,8 +338,6 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
         return _build_result("reasoning", msg, google_available)
 
     # Commandes de gestion des propositions de prompt → self direct
-    import re as _re
-
     _proposal_explicit = (
         any(kw in msg_lower for kw in ("proposition", "proposals", "propositions"))
         and any(
@@ -365,7 +355,7 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
             )
         )
     ) or bool(
-        _re.search(r"\b[a-f0-9]{6,8}\b", msg_lower)
+        re.search(r"\b[a-f0-9]{6,8}\b", msg_lower)
         and any(
             kw in msg_lower
             for kw in ("accepte", "rejette", "approuve", "refuse", "montre")
@@ -374,6 +364,62 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
     if _proposal_explicit:
         logger.debug("Embed router: proposal trigger → self direct")
         return _build_result("self", msg, google_available)
+
+    # ── Small talk — acquiescements purs (≤ 50 chars, pas de ?, pas de contenu) ──
+    # Bypasse profil, mémoire et opinions : le LLM n'a besoin que de l'historique.
+    # WHITELIST conservative : uniquement mots qui n'apportent aucun fait nouveau.
+    # Critères bloquants : présence de "?" OU longueur > 50 chars → jamais small talk.
+    _SMALL_TALK_EXACT = {
+        "merci",
+        "merci !",
+        "merci beaucoup",
+        "super merci",
+        "merci bien",
+        "parfait",
+        "c'est parfait",
+        "top",
+        "génial",
+        "excellent",
+        "nickel",
+        "super",
+        "très bien",
+        "bien",
+        "c'est bon",
+        "c'est bien",
+        "ok",
+        "okay",
+        "oki",
+        "d'accord",
+        "ok ok",
+        "oui oui",
+        "non non",
+        "vas-y",
+        "go",
+        "continue",
+        "allez",
+        "fais-le",
+        "fais",
+        "bonne idée",
+        "oui bonne idée",
+        "oui c'est ça",
+        "ah ok",
+        "ah je vois",
+        "ah d'accord",
+        "ah oui",
+        "je vois",
+        "j'ai compris",
+        "compris",
+        "reçu",
+        "haha",
+        "lol",
+        "😄",
+        "👍",
+    }
+    if len(msg) <= 50 and "?" not in msg:
+        _norm = msg_lower.rstrip(" !.,")
+        if _norm in _SMALL_TALK_EXACT:
+            logger.debug("Embed router: small talk → no context injection")
+            return _build_result("small_talk", msg, google_available)
 
     # Messages très courts (≤ 12 chars) → memory (salutations, acquiescences)
     if len(msg) <= 12:
@@ -460,6 +506,7 @@ def _build_result(intent: str, message: str, google_available: bool) -> RouterRe
         use_self=intent == "self",
         use_portfolio=intent == "portfolio",
         use_reasoning=intent == "reasoning",
+        use_small_talk=intent == "small_talk",
         gmail_query=_extract_gmail_query(message) if intent == "gmail" else "",
         calendar_days=_extract_calendar_days(message) if intent == "calendar" else 7,
         weather_location=_extract_weather_location(message)

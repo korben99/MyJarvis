@@ -292,8 +292,8 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
             if not user_parts:
                 continue
 
-            acc_user = "\n---\n".join(user_parts)[:3000]
-            acc_asst  = "\n---\n".join(asst_parts)[:3000]
+            acc_user = "\nUtilisateur : ".join(user_parts)[:3000]
+            acc_asst  = "\nJarvis : ".join(asst_parts)[:3000]
 
             # ── LLM analysis ──────────────────────────────────────────────
             existing_projects = get_user_projects(uc)

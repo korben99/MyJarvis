@@ -447,7 +447,8 @@ def _normalize_profile_keys_batch(
                 for item in matches:
                     nk = item.get("new")
                     match = item.get("match")
-                    if nk in group_keys and match and match in existing_keys:
+                    # Skip if already resolved (model may return duplicate `new` entries)
+                    if nk in group_keys and nk not in result and match and match in existing_keys:
                         logger.info(
                             "User %s profile key batch '%s' deduped → '%s'",
                             user_code,

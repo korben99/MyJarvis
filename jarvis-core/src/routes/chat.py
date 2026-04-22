@@ -40,7 +40,7 @@ from google_services import (
     is_calendar_write,
     is_google_available,
 )
-from helpers import build_iso_dt, call_llm_async, filter_think_chunk, get_logger
+from helpers import build_iso_dt, call_llm_async, filter_think_chunk, fmt_now_fr, get_logger
 from llm_client import describe_images, stream_openai
 from llm_router import llm_route
 from memory import (
@@ -439,28 +439,42 @@ async def chat(req: ChatRequest):
             _embed_result.use_memory or _embed_result.use_rag
             or _embed_result.use_web or _embed_result.use_self
         )
-        _gather_ep = await asyncio.gather(
-            asyncio.to_thread(
-                build_dynamic_prefix,
-                req.session_id, user_code, user_name or "", req.voice_mode,
-                _rich_intent, _rich_intent,  # include_opinions, include_suggestions
-            ),
-            asyncio.to_thread(get_conversation, user_code, req.session_id, _HIST_WINDOW),
-            _spec_mem_task,
-            return_exceptions=True,
-        )
-        _pfx = _gather_ep[0]
-        if isinstance(_pfx, BaseException):
-            logger.error("build_dynamic_prefix failed: %s", _pfx)
-            dynamic_prefix, _self_mem = "", {}
+
+        if _embed_result.use_small_talk:
+            # Small talk (acquiescements purs) — pas de profil, pas de recall mémoire.
+            # Seul l'historique de conversation suffit.
+            _spec_mem_task.cancel()
+            tz = USER_TIMEZONES.get(user_code, "Europe/Paris")
+            _name_part = f" Tu parles avec {user_name}." if user_name else ""
+            dynamic_prefix = f"Date : {fmt_now_fr(tz)}.{_name_part}"
+            _self_mem = {}
+            hist = await asyncio.to_thread(get_conversation, user_code, req.session_id, _HIST_WINDOW)
+            _prefetched_memory = None
+            logger.debug("[TTFT] small talk — prefix minimal, no memory — %.3fs", time.time() - _t0)
         else:
-            dynamic_prefix, _self_mem = _pfx
-        hist = _gather_ep[1] if not isinstance(_gather_ep[1], BaseException) else []
-        if isinstance(_gather_ep[1], BaseException):
-            logger.error("get_conversation failed: %s", _gather_ep[1])
-        _prefetched_memory = _gather_ep[2] if not isinstance(_gather_ep[2], BaseException) else None
-        if isinstance(_gather_ep[2], BaseException):
-            logger.warning("speculative memory search failed: %s", _gather_ep[2])
+            _gather_ep = await asyncio.gather(
+                asyncio.to_thread(
+                    build_dynamic_prefix,
+                    req.session_id, user_code, user_name or "", req.voice_mode,
+                    _rich_intent, _rich_intent,  # include_opinions, include_suggestions
+                ),
+                asyncio.to_thread(get_conversation, user_code, req.session_id, _HIST_WINDOW),
+                _spec_mem_task,
+                return_exceptions=True,
+            )
+            _pfx = _gather_ep[0]
+            if isinstance(_pfx, BaseException):
+                logger.error("build_dynamic_prefix failed: %s", _pfx)
+                dynamic_prefix, _self_mem = "", {}
+            else:
+                dynamic_prefix, _self_mem = _pfx
+            hist = _gather_ep[1] if not isinstance(_gather_ep[1], BaseException) else []
+            if isinstance(_gather_ep[1], BaseException):
+                logger.error("get_conversation failed: %s", _gather_ep[1])
+            _prefetched_memory = _gather_ep[2] if not isinstance(_gather_ep[2], BaseException) else None
+            if isinstance(_gather_ep[2], BaseException):
+                logger.warning("speculative memory search failed: %s", _gather_ep[2])
+
         llm_result = _embed_result
         logger.debug(
             "[TTFT] embed router hit — LLM router skipped — %.3fs", time.time() - _t0
@@ -790,12 +804,13 @@ async def chat(req: ChatRequest):
                 full_clean = re.sub(
                     r"<think>.*$", "", full_clean, flags=re.DOTALL
                 ).strip()
-                append_conversation_message(
-                    user_code, req.session_id, "user", raw_user_content
-                )
-                append_conversation_message(
-                    user_code, req.session_id, "assistant", full_clean
-                )
+                if full_clean:
+                    append_conversation_message(
+                        user_code, req.session_id, "user", raw_user_content
+                    )
+                    append_conversation_message(
+                        user_code, req.session_id, "assistant", full_clean
+                    )
                 ms = int((time.time() - start) * 1000)
                 yield f"data: {json.dumps({'done': True, 'model': use_model, 'duration_ms': ms, 'rag_sources': [{'source': c['source'], 'score': c['score']} for c in rag_chunks], 'web_sources': [{'title': w['title'], 'url': w['url']} for w in _safe_web]})}\n\n"
                 asyncio.create_task(

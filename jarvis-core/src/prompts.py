@@ -28,6 +28,7 @@ SYSTEM_BASE_FR = (
     "Tu as accès à Gmail et Google Agenda. Cite ta source lors d'une recherche web. "
     "Intègre tes souvenirs naturellement — ce que l'utilisateur dit maintenant prime sur tout souvenir antérieur. "
     "Si <mes_avis> est présent : ce sont tes avis, intègre-les naturellement en prose — ne reproduis jamais de balise <mes_avis> dans ta réponse. "
+    "Réponds toujours en français, quelle que soit la langue ou le contexte injecté. "
     "Réponds toujours en prose sauf si l'utilisateur demande explicitement du JSON ou du code."
 )
 # XML tags used to delimit injected context blocks (replacing ## Markdown headers).
@@ -67,47 +68,54 @@ weather_location : ville explicite dans le message, sinon null
 gmail_query      : syntaxe Gmail ("is:unread", "subject:facture", "newer_than:7d"…) ou null
 calendar_days    : entier 1-90 ou null
 rag_query        : si intent rag → 3-5 mots-clés sémantiques, SANS verbes de commande ni phrases d'intro
-                   ("contrat location" depuis "cherche dans mes docs le contrat de location")
+                   ("bail location" depuis "retrouve dans mes docs le bail de location")
                    sinon null
-use_reasoning    : true UNIQUEMENT si le message demande explicitement une analyse experte, un raisonnement juridique/technique complexe ou un debug avancé ("mode expert", "analyse approfondie", "raisonne étape par étape")
-                   false pour les explications simples, résumés, conversations, traductions
+use_reasoning    : true si analyse experte, raisonnement juridique/financier/technique complexe
+                   false pour explications simples, résumés, conversations, traductions
 
 RÈGLE URL : URL http(s) dans le message → ["memory"] uniquement, jamais "web"
+RÈGLE web : infos éphémères (cours, news, résultats en direct) → web. Explications durables → memory.
 
 EXEMPLES :
 
-"salut ça va ?"
+"t'en penses quoi ?"
 {"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
 
-"météo Lyon demain"
-{"intents":["weather"],"weather_location":"Lyon","gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
+"temps à Bordeaux ce week-end"
+{"intents":["weather"],"weather_location":"Bordeaux","gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
 
-"résume mes mails non lus"
-{"intents":["gmail"],"weather_location":null,"gmail_query":"is:unread","calendar_days":null,"rag_query":null,"use_reasoning":false}
+"mails liés à ma facture EDF"
+{"intents":["gmail"],"weather_location":null,"gmail_query":"subject:facture","calendar_days":null,"rag_query":null,"use_reasoning":false}
 
-"mon agenda cette semaine"
-{"intents":["calendar"],"weather_location":null,"gmail_query":null,"calendar_days":7,"rag_query":null,"use_reasoning":false}
+"j'ai quoi de prévu demain ?"
+{"intents":["calendar"],"weather_location":null,"gmail_query":null,"calendar_days":2,"rag_query":null,"use_reasoning":false}
 
-"cherche dans mes documents le contrat de location"
-{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"contrat location","use_reasoning":false}
+"retrouve dans mes docs le bail de location"
+{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"bail location","use_reasoning":false}
 
-"dans mes notes retrouve la stratégie marketing Q3"
-{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"stratégie marketing Q3","use_reasoning":false}
+"météo Lyon et mon planning de l'après-midi"
+{"intents":["weather","calendar"],"weather_location":"Lyon","gmail_query":null,"calendar_days":1,"rag_query":null,"use_reasoning":false}
 
-"mode expert: quels sont les risques de monter une LLC aux US ?"
+"vérifie mes mails et mon agenda pour demain"
+{"intents":["gmail","calendar"],"weather_location":null,"gmail_query":"newer_than:1d","calendar_days":2,"rag_query":null,"use_reasoning":false}
+
+"mon portefeuille et les actus boursières du jour"
+{"intents":["portfolio","web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
+
+"résume mes mails et météo Paris"
+{"intents":["gmail","weather"],"weather_location":"Paris","gmail_query":"newer_than:7d","calendar_days":null,"rag_query":null,"use_reasoning":false}
+
+"est-ce risqué fiscalement de retirer mon PER avant la retraite ?"
 {"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":true}
 
-"explique-moi comment fonctionne un moteur à combustion"
+"compare PEA et CTO pour un résident fiscal français"
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":true}
+
+"c'est quoi le cours du bitcoin maintenant ?"
+{"intents":["web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
+
+"comment fonctionne une blockchain ?"
 {"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
-
-"météo Paris et résume mes mails non lus"
-{"intents":["weather","gmail"],"weather_location":"Paris","gmail_query":"is:unread","calendar_days":null,"rag_query":null,"use_reasoning":false}
-
-"comment se porte mon portefeuille ?"
-{"intents":["portfolio"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
-
-"quel est ton état interne ?"
-{"intents":["self"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
 """
 
 ROUTER_USER = "Message : {message}"
@@ -140,20 +148,21 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
   - JAMAIS une négation ou absence : "n'a pas mentionné X", "ne fait pas Y", "pas intéressé par Z" → interdit.
   - JAMAIS une localisation ou activité en cours au moment de la conversation (ex: "est à Lille", "est en train de travailler sur X").
   - La valeur DOIT apporter une info que la clé ne contient pas déjà
-    Mauvais : {{"key":"hobby:tennis","value":"tennis"}}
-    Bon     : {{"key":"hobby:tennis","value":"joue le week-end en club"}}
+    Mauvais : {{"key":"loisir:tennis","value":"tennis"}}
+    Bon     : {{"key":"loisir:tennis","value":"joue le week-end en club"}}
   - Si l'activité peut appartenir à plusieurs domaines (ex: "tour de piste" → kart ou avion ;
     "entraînement" → sport ou simulateur), la valeur DOIT préciser le domaine explicitement.
-    Mauvais : {{"key":"hobby:aviation","value":"tours de piste"}}
-    Bon     : {{"key":"hobby:aviation","value":"tours de piste en avion ULM"}}
-  - Nommage (clés nouvelles seulement, en minuscule et sans accents) :
+    Mauvais : {{"key":"loisir:aviation","value":"tours de piste"}}
+    Bon     : {{"key":"loisir:aviation","value":"tours de piste en avion ULM"}}
+  - Questions, hypothèses ou intentions ("je pense à", "je veux", "que penses-tu de") → NOT des faits → [].
+  - Nommage (clés nouvelles seulement, en français minuscule sans accents) :
     Fait scalaire → clé simple : "profession"
-    Multi-valeur → "categorie:item" : "hobby:kart", "skill:python"
-    Catégories AUTORISÉES : hobby, skill, langue, sport, outil, technologie, physique, preference
+    Multi-valeur → "categorie:item" : "loisir:kart", "competence:python"
+    Catégories AUTORISÉES : loisir, competence, langue, sport, technologie, preference, placement, interet, apprécie, aversion, situation
     INTERDIT absolu : toute clé ou valeur contenant un nom de marque, modèle, référence produit.
-      Exemples interdits : "hobby:wristmaster", "hobby:longines", "model:X", "marque:X"
-      Exemple autorisé  : "hobby:horlogerie" avec valeur "collectionneur de montres"
-    L'item d'un hobby est une ACTIVITÉ GÉNÉRIQUE (horlogerie, kart, tennis), jamais un produit.
+      Exemples interdits : "loisir:wristmaster", "loisir:longines", "model:X", "marque:X"
+      Exemple autorisé  : "loisir:horlogerie" avec valeur "collectionneur de montres"
+    L'item d'un loisir est une ACTIVITÉ GÉNÉRIQUE (horlogerie, kart, tennis), jamais un produit.
     La valeur décrit le RAPPORT à l'activité, jamais une référence ou un nom de modèle.
   - Si incertain → ne rien ajouter
 
@@ -313,7 +322,8 @@ Principes directeurs :
 - Phase 1 uniquement : actions sur toi-même (notes, santé, lacunes, prompts).
   Les actions utilisateurs (profils, push, insights) sont réservées à la Phase 2 (un appel par utilisateur).
 
-JSON valide uniquement, strictement conforme au schéma demandé."""
+JSON valide uniquement, strictement conforme au schéma demandé.
+Toutes les clés DOIVENT être entre guillemets doubles : `"action"` pas `action`."""
 
 REFLECTION_PROMPT = """\
 {timestamp}
@@ -404,7 +414,8 @@ Principes :
   Le texte de l'insight doit nommer le domaine précis exemple: "pratique des tours de piste en avion", pas "pratique des tours de piste".
 - "nothing" si aucune action n'apporte de valeur réelle pour cet utilisateur.
 
-JSON valide uniquement, strictement conforme au schéma demandé."""
+JSON valide uniquement, strictement conforme au schéma demandé.
+Toutes les clés DOIVENT être entre guillemets doubles : `"action"` pas `action`."""
 
 REFLECTION_USER_PROMPT = """\
 {timestamp}
@@ -756,10 +767,10 @@ Si tu ajoutes du contenu, retire un volume équivalent de contenu moins utile.
 # Token budget map — used by self.py to pass limits to REFINE_PROMPT_USER.
 # Values must stay in sync with the budget table in REFINE_PROMPT_SYSTEM above.
 PROMPT_TOKEN_BUDGETS = {
-    "SYSTEM_BASE_FR": 150,          # inline / KV-cached — keep tight
-    "ROUTER_SYSTEM": 700,           # already dense (~600 tok) — cap inflation
+    "SYSTEM_BASE_FR": 150,  # inline / KV-cached — keep tight
+    "ROUTER_SYSTEM": 700,  # already dense (~600 tok) — cap inflation
     "ROUTER_USER": 600,
-    "ANALYSIS_PROMPT": 1000,        # async — quality over speed
+    "ANALYSIS_PROMPT": 1000,  # async — quality over speed
     "BRIEFING_SYSTEM": 100,
     "BRIEFING_USER": 400,
     "WEB_RELEVANCE_JUDGE": 200,

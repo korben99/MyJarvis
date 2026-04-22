@@ -1835,6 +1835,17 @@ def handle_proposal_command(message: str, user_code: str) -> str | None:
             return "⛔ Seul un administrateur peut approuver une proposition de prompt."
         return approve_proposal(m.group(3))
 
+    # ── Approve sans ID ──
+    if re.search(r"\b(accepte?|approu?ve?)\b", msg) and "proposition" in msg:
+        proposals = list_pending_proposals()
+        if not proposals:
+            return "Aucune proposition de prompt en attente."
+        lines = ["ID manquant. Propositions en attente :"]
+        for p in proposals:
+            lines.append(f"- `{p['id']}` — **{p['prompt_name']}** : {p['rationale'][:80]}")
+        lines.append("\nDis « accepte la proposition [id] ».")
+        return "\n".join(lines)
+
     # ── Reject ──
     m = re.search(
         r"(rejette?|refu?se?|reject)\s+(la\s+proposition\s+)?([a-f0-9]{6,8})\b", msg
@@ -1843,6 +1854,17 @@ def handle_proposal_command(message: str, user_code: str) -> str | None:
         if user_code not in USER_ADMINS:
             return "⛔ Seul un administrateur peut rejeter une proposition de prompt."
         return reject_proposal(m.group(3))
+
+    # ── Reject sans ID ──
+    if re.search(r"\b(rejette?|refu?se?|reject)\b", msg) and "proposition" in msg:
+        proposals = list_pending_proposals()
+        if not proposals:
+            return "Aucune proposition de prompt en attente."
+        lines = ["ID manquant. Propositions en attente :"]
+        for p in proposals:
+            lines.append(f"- `{p['id']}` — **{p['prompt_name']}** : {p['rationale'][:80]}")
+        lines.append("\nDis « rejette la proposition [id] ».")
+        return "\n".join(lines)
 
     # ── Show specific proposal ──
     m = re.search(
