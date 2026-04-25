@@ -1,5 +1,5 @@
 """
-PROJECT JARVIS v8
+PROJECT JARVIS v9
 Jarvis Conversation Analyzer
 =============================
 After each exchange, extracts:
@@ -83,7 +83,9 @@ async def analyze_exchange(
                         and (
                             _now_ts
                             - time.mktime(
-                                time.strptime(p["last_update"][:19], "%Y-%m-%dT%H:%M:%S")
+                                time.strptime(
+                                    p["last_update"][:19], "%Y-%m-%dT%H:%M:%S"
+                                )
                             )
                         )
                         < _90d
@@ -226,12 +228,12 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
     users = [user_code] if user_code else list(USER_CODES.keys())
 
     _mood_to_state = {
-        "happy":      {"mood": "happy",     "energy": 0.8},
-        "stressed":   {"mood": "attentive",  "concern": 0.6},
+        "happy": {"mood": "happy", "energy": 0.8},
+        "stressed": {"mood": "attentive", "concern": 0.6},
         "frustrated": {"mood": "supportive", "concern": 0.7},
-        "curious":    {"mood": "engaged",    "curiosity": 0.8},
-        "tired":      {"mood": "gentle",     "energy": 0.4},
-        "focused":    {"mood": "focused",    "energy": 0.7},
+        "curious": {"mood": "engaged", "curiosity": 0.8},
+        "tired": {"mood": "gentle", "energy": 0.4},
+        "focused": {"mood": "focused", "energy": 0.7},
     }
 
     for uc in users:
@@ -241,7 +243,9 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
             cursor: int | str = "0"
             while True:
                 cursor, keys = r.scan(cursor, match=f"chat:{uc}:*", count=100)
-                session_keys.extend(k.decode() if isinstance(k, bytes) else k for k in keys)
+                session_keys.extend(
+                    k.decode() if isinstance(k, bytes) else k for k in keys
+                )
                 if str(cursor) == "0":
                     break
 
@@ -280,20 +284,23 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                 all_new.extend(session_new)
 
             if not all_new:
-                logger.debug("[SCHEDULER] analyse_recent_conversations: no new messages for %s", uc)
+                logger.debug(
+                    "[SCHEDULER] analyse_recent_conversations: no new messages for %s",
+                    uc,
+                )
                 continue
 
             # ── Merge chronologically across sessions ─────────────────────
             all_new.sort(key=lambda m: m.get("ts", 0))
 
             user_parts = [m["content"] for m in all_new if m.get("role") == "user"]
-            asst_parts  = [m["content"] for m in all_new if m.get("role") == "assistant"]
+            asst_parts = [m["content"] for m in all_new if m.get("role") == "assistant"]
 
             if not user_parts:
                 continue
 
             acc_user = "\nUtilisateur : ".join(user_parts)[:3000]
-            acc_asst  = "\nJarvis : ".join(asst_parts)[:3000]
+            acc_asst = "\nJarvis : ".join(asst_parts)[:3000]
 
             # ── LLM analysis ──────────────────────────────────────────────
             existing_projects = get_user_projects(uc)
@@ -307,10 +314,10 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                 r.set(wm_key, new_wm_ts, ex=CHAT_LOG_TTL)
 
             # ── Apply results ─────────────────────────────────────────────
-            importance     = analysis.get("importance", 0)
-            mood           = analysis.get("mood", "neutral")
+            importance = analysis.get("importance", 0)
+            mood = analysis.get("mood", "neutral")
             memory_summary = analysis.get("memory_summary")
-            satisfaction   = analysis.get("satisfaction", "unknown")
+            satisfaction = analysis.get("satisfaction", "unknown")
 
             if mood in _mood_to_state:
                 update_emotional_state(_mood_to_state[mood])
@@ -323,7 +330,9 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                     _min_ts = min(_ts_list) - 1
                     _max_ts = max(_ts_list) + 1
                     _clog_key = f"convlog:{uc}"
-                    _raw_entries = r.zrangebyscore(_clog_key, _min_ts, _max_ts, withscores=True)
+                    _raw_entries = r.zrangebyscore(
+                        _clog_key, _min_ts, _max_ts, withscores=True
+                    )
                     if _raw_entries:
                         _pipe = r.pipeline()
                         for _raw, _score in _raw_entries:
@@ -332,7 +341,10 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                                 if _e.get("satisfaction") != satisfaction:
                                     _e["satisfaction"] = satisfaction
                                     _pipe.zrem(_clog_key, _raw)
-                                    _pipe.zadd(_clog_key, {json.dumps(_e, ensure_ascii=False): _score})
+                                    _pipe.zadd(
+                                        _clog_key,
+                                        {json.dumps(_e, ensure_ascii=False): _score},
+                                    )
                             except (json.JSONDecodeError, ValueError):
                                 pass
                         _pipe.execute()
@@ -341,7 +353,9 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
             if projects:
                 apply_project_updates(uc, projects)
 
-            user_facts = [f for f in analysis.get("user_facts", []) if "key" in f and "value" in f]
+            user_facts = [
+                f for f in analysis.get("user_facts", []) if "key" in f and "value" in f
+            ]
             if user_facts:
                 await asyncio.to_thread(update_user_profile_batch, uc, user_facts)
 
@@ -371,8 +385,12 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
             logger.info(
                 "[SCHEDULER] analyse_recent_conversations: user=%s sessions=%d "
                 "new_msgs=%d mood=%s facts=%d importance=%.2f memory=%s",
-                uc, len(wm_updates), len(all_new), mood,
-                len(analysis.get("user_facts", [])), importance,
+                uc,
+                len(wm_updates),
+                len(all_new),
+                mood,
+                len(analysis.get("user_facts", [])),
+                importance,
                 "→Qdrant" if importance > IMPORTANCE_THRESHOLD else "skip",
             )
 

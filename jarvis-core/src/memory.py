@@ -1,5 +1,5 @@
 """
-PROJECT JARVIS v8
+PROJECT JARVIS v9
 Jarvis Memory System
 ====================
 - Working memory: Redis (current session, mood, active context)
@@ -369,7 +369,9 @@ def _normalize_profile_keys_batch(
         if fast:
             logger.info(
                 "User %s profile key '%s' → fast match '%s' (no LLM)",
-                user_code, new_key, fast,
+                user_code,
+                new_key,
+                fast,
             )
             result[new_key] = fast
             continue
@@ -448,7 +450,12 @@ def _normalize_profile_keys_batch(
                     nk = item.get("new")
                     match = item.get("match")
                     # Skip if already resolved (model may return duplicate `new` entries)
-                    if nk in group_keys and nk not in result and match and match in existing_keys:
+                    if (
+                        nk in group_keys
+                        and nk not in result
+                        and match
+                        and match in existing_keys
+                    ):
                         logger.info(
                             "User %s profile key batch '%s' deduped → '%s'",
                             user_code,
@@ -492,7 +499,9 @@ def _normalize_profile_key(
     if fast:
         logger.info(
             "User %s profile key '%s' → fast match '%s' (no LLM)",
-            user_code, new_key, fast,
+            user_code,
+            new_key,
+            fast,
         )
         return fast
 
@@ -554,16 +563,24 @@ def _normalize_profile_key(
 
 
 def _write_profile_fact(
-    r, profile_key: str, ts_key: str,
-    user_code: str, key: str, value: str,
-    duplicate: str | None, now_ts: int,
+    r,
+    profile_key: str,
+    ts_key: str,
+    user_code: str,
+    key: str,
+    value: str,
+    duplicate: str | None,
+    now_ts: int,
 ) -> None:
     """Apply a single profile key write (with optional duplicate eviction)."""
     if duplicate:
         old_dup_val = r.hget(profile_key, duplicate)
         logger.info(
             "User %s profile key normalized: '%s' (was: %s) → replaced by '%s'",
-            user_code, duplicate, old_dup_val or "(empty)", key,
+            user_code,
+            duplicate,
+            old_dup_val or "(empty)",
+            key,
         )
         r.hdel(profile_key, duplicate)
         r.hdel(ts_key, duplicate)
@@ -604,8 +621,14 @@ def update_user_profile(user_code: str, key: str, value: str | None):
         # key and write under the new name — no value merging, each key is atomic.
         duplicate = _normalize_profile_key(user_code, key, existing_keys)
         _write_profile_fact(
-            r, profile_redis_key, profile_ts_key,
-            user_code, key, value, duplicate, int(time.time()),
+            r,
+            profile_redis_key,
+            profile_ts_key,
+            user_code,
+            key,
+            value,
+            duplicate,
+            int(time.time()),
         )
 
 
@@ -652,9 +675,14 @@ def update_user_profile_batch(user_code: str, facts: list[dict]) -> None:
 
     for fact in new_facts:
         _write_profile_fact(
-            r, profile_redis_key, profile_ts_key,
-            user_code, fact["key"], fact["value"],
-            dedup_map.get(fact["key"]), now_ts,
+            r,
+            profile_redis_key,
+            profile_ts_key,
+            user_code,
+            fact["key"],
+            fact["value"],
+            dedup_map.get(fact["key"]),
+            now_ts,
         )
 
 
@@ -1110,14 +1138,18 @@ def _autobio_op(user_code: str, query: str, threshold: float, action: str) -> in
                 collection_name=QDRANT_MEMORY_COLLECTION,
                 points_selector=PointIdsList(points=to_act),
             )
-            logger.info("Autobio retracted %d point(s) for '%s'", len(to_act), query[:60])
+            logger.info(
+                "Autobio retracted %d point(s) for '%s'", len(to_act), query[:60]
+            )
         else:
             qdrant.set_payload(
                 collection_name=QDRANT_MEMORY_COLLECTION,
                 payload={"status": "past", "archived_date": date.today().isoformat()},
                 points=to_act,
             )
-            logger.info("Autobio archived %d point(s) for '%s'", len(to_act), query[:60])
+            logger.info(
+                "Autobio archived %d point(s) for '%s'", len(to_act), query[:60]
+            )
 
         _invalidate_timeline_cache(user_code)
         return len(to_act)
@@ -1175,15 +1207,19 @@ def _build_memory_filter(user_code: str, scope: str) -> dict:
     """Build Qdrant query_filter for a memory search by scope."""
     user_clause = {"key": "user_code", "match": {"value": user_code}}
     if scope in ("episodic", "autobiographical"):
-        return {"must": [user_clause, {"key": "memory_type", "match": {"value": scope}}]}
+        return {
+            "must": [user_clause, {"key": "memory_type", "match": {"value": scope}}]
+        }
     # "auto" — both layers; must_not absent types from slipping in
     return {
         "must": [
             user_clause,
-            {"should": [
-                {"key": "memory_type", "match": {"value": "episodic"}},
-                {"key": "memory_type", "match": {"value": "autobiographical"}},
-            ]},
+            {
+                "should": [
+                    {"key": "memory_type", "match": {"value": "episodic"}},
+                    {"key": "memory_type", "match": {"value": "autobiographical"}},
+                ]
+            },
         ]
     }
 
@@ -1524,12 +1560,12 @@ def build_memory_context(
     # ── Single Redis pipeline round-trip for all scalar/hash reads ──────────
     r = get_redis()
     pipe = r.pipeline(transaction=False)
-    pipe.hgetall(f"user:{user_code}:profile")              # 0
-    pipe.hgetall(f"user:{user_code}:preferences")          # 1
-    pipe.get(f"user:{user_code}:projects")                 # 2
-    pipe.get("jarvis:emotional_state")                     # 3
-    pipe.get(f"jarvis:{user_code}:tomorrow_suggestions")   # 4
-    pipe.get(f"cache:timeline:{user_code}")                # 5 — avoids 2nd Redis RTT
+    pipe.hgetall(f"user:{user_code}:profile")  # 0
+    pipe.hgetall(f"user:{user_code}:preferences")  # 1
+    pipe.get(f"user:{user_code}:projects")  # 2
+    pipe.get("jarvis:emotional_state")  # 3
+    pipe.get(f"jarvis:{user_code}:tomorrow_suggestions")  # 4
+    pipe.get(f"cache:timeline:{user_code}")  # 5 — avoids 2nd Redis RTT
     _pipe_results = pipe.execute()
 
     profile = _pipe_results[0] or {}
@@ -1578,20 +1614,32 @@ def build_memory_context(
     except Exception:
         emotion = {}
     if not emotion:
-        emotion = {"mood": "neutral", "energy": 0.7, "confidence": 0.8, "curiosity": 0.6, "concern": 0.0}
+        emotion = {
+            "mood": "neutral",
+            "energy": 0.7,
+            "confidence": 0.8,
+            "curiosity": 0.6,
+            "concern": 0.0,
+        }
     else:
         _last = emotion.get("last_updated")
         if _last:
             try:
-                _eh = (datetime.now(timezone.utc) - datetime.fromisoformat(_last)).total_seconds() / 3600
+                _eh = (
+                    datetime.now(timezone.utc) - datetime.fromisoformat(_last)
+                ).total_seconds() / 3600
                 _c = emotion.get("concern", 0.0)
                 if _c > 0:
-                    emotion["concern"] = max(0.0, round(_c - _eh * _CONCERN_DECAY_PER_HOUR, 3))
+                    emotion["concern"] = max(
+                        0.0, round(_c - _eh * _CONCERN_DECAY_PER_HOUR, 3)
+                    )
                 _e = emotion.get("energy", 0.7)
                 if abs(_e - 0.7) > 0.001:
                     _d = 1 if _e < 0.7 else -1
                     _ne = _e + _d * _eh * _ENERGY_DECAY_PER_HOUR
-                    emotion["energy"] = round(min(0.7, _ne) if _d == 1 else max(0.7, _ne), 3)
+                    emotion["energy"] = round(
+                        min(0.7, _ne) if _d == 1 else max(0.7, _ne), 3
+                    )
             except (ValueError, TypeError):
                 pass
     if emotion.get("mood") != "neutral":
@@ -1619,8 +1667,7 @@ def build_memory_context(
         timeline = get_user_timeline(user_code, limit=5)
     if timeline:
         plines = [
-            f"({rel_time_fr(event['timestamp'])}) {event['text']}"
-            for event in timeline
+            f"({rel_time_fr(event['timestamp'])}) {event['text']}" for event in timeline
         ]
         parts.append(
             "<frise_chronologique>\n" + "\n".join(plines) + "\n</frise_chronologique>"
@@ -1709,7 +1756,14 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
             combined = "\n".join(texts)
 
             raw = call_llm(
-                [{"role": "user", "content": get_prompt("CONSOLIDATION_PROMPT").format(combined=combined)}],
+                [
+                    {
+                        "role": "user",
+                        "content": get_prompt("CONSOLIDATION_PROMPT").format(
+                            combined=combined
+                        ),
+                    }
+                ],
                 model=PRIMARY_MODEL,
                 api_url=PRIMARY_API_URL,
                 api_key=PRIMARY_API_KEY,

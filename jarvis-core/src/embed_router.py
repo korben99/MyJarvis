@@ -39,6 +39,37 @@ EMBED_ROUTE_THRESHOLD: float = 0.74
 # Si les deux meilleurs intents sont à moins de cette marge, c'est ambigu → LLM
 AMBIGUITY_MARGIN: float = 0.06
 
+# ── Small talk whitelist ───────────────────────────────────────────────────────
+# Acquiescements purs : aucun contenu informationnel, le LLM n'a besoin que de
+# l'historique de conversation. Détectés dans chat.py AVANT le keyword dispatch
+# (step 1) pour bypasser les lectures Redis inutiles.
+# Critères bloquants appliqués par is_small_talk() : "?" présent, longueur > 50.
+# Garde calendrier : is_small_talk() doit être appelé uniquement s'il n'y a PAS
+# d'action calendrier en attente (oui/non peuvent être des confirmations).
+SMALL_TALK_EXACT: frozenset[str] = frozenset({
+    "merci", "merci !", "merci beaucoup", "super merci", "merci bien",
+    "parfait", "c'est parfait", "top", "génial", "excellent", "nickel",
+    "super", "très bien", "bien", "c'est bon", "c'est bien",
+    "ok", "okay", "oki", "d'accord", "ok ok",
+    "oui oui", "non non",
+    "vas-y", "go", "continue", "allez", "fais-le", "fais",
+    "bonne idée", "oui bonne idée", "oui c'est ça",
+    "ah ok", "ah je vois", "ah d'accord", "ah oui",
+    "je vois", "j'ai compris", "compris", "reçu",
+    "haha", "lol", "😄", "👍",
+})
+
+
+def is_small_talk(message: str) -> bool:
+    """
+    Retourne True si le message est un acquiescement pur (aucun contenu).
+    NE PAS appeler quand une action calendrier est en attente : oui/non/ok
+    peuvent être des confirmations d'événement.
+    """
+    if len(message) > 50 or "?" in message:
+        return False
+    return message.lower().rstrip(" !.,") in SMALL_TALK_EXACT
+
 # ── Phrases-exemples par intent (toutes en français) ─────────────────────────
 #
 # Règles d'édition :
@@ -365,67 +396,6 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
         logger.debug("Embed router: proposal trigger → self direct")
         return _build_result("self", msg, google_available)
 
-    # ── Small talk — acquiescements purs (≤ 50 chars, pas de ?, pas de contenu) ──
-    # Bypasse profil, mémoire et opinions : le LLM n'a besoin que de l'historique.
-    # WHITELIST conservative : uniquement mots qui n'apportent aucun fait nouveau.
-    # Critères bloquants : présence de "?" OU longueur > 50 chars → jamais small talk.
-    _SMALL_TALK_EXACT = {
-        "merci",
-        "merci !",
-        "merci beaucoup",
-        "super merci",
-        "merci bien",
-        "parfait",
-        "c'est parfait",
-        "top",
-        "génial",
-        "excellent",
-        "nickel",
-        "super",
-        "très bien",
-        "bien",
-        "c'est bon",
-        "c'est bien",
-        "ok",
-        "okay",
-        "oki",
-        "d'accord",
-        "ok ok",
-        "oui oui",
-        "non non",
-        "vas-y",
-        "go",
-        "continue",
-        "allez",
-        "fais-le",
-        "fais",
-        "bonne idée",
-        "oui bonne idée",
-        "oui c'est ça",
-        "ah ok",
-        "ah je vois",
-        "ah d'accord",
-        "ah oui",
-        "je vois",
-        "j'ai compris",
-        "compris",
-        "reçu",
-        "haha",
-        "lol",
-        "😄",
-        "👍",
-    }
-    if len(msg) <= 50 and "?" not in msg:
-        _norm = msg_lower.rstrip(" !.,")
-        if _norm in _SMALL_TALK_EXACT:
-            logger.debug("Embed router: small talk → no context injection")
-            return _build_result("small_talk", msg, google_available)
-
-    # Messages très courts (≤ 12 chars) → memory (salutations, acquiescences)
-    if len(msg) <= 12:
-        logger.debug("Embed router: message court → memory")
-        return _build_result("memory", msg, google_available)
-
     # Briefing exact (avant l'embedding, ces formulations sont sans ambiguïté)
     briefing_exact = {
         "briefing",
@@ -506,7 +476,7 @@ def _build_result(intent: str, message: str, google_available: bool) -> RouterRe
         use_self=intent == "self",
         use_portfolio=intent == "portfolio",
         use_reasoning=intent == "reasoning",
-        use_small_talk=intent == "small_talk",
+
         gmail_query=_extract_gmail_query(message) if intent == "gmail" else "",
         calendar_days=_extract_calendar_days(message) if intent == "calendar" else 7,
         weather_location=_extract_weather_location(message)

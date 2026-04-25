@@ -29,7 +29,7 @@ from config import (
     is_qwen3,
 )
 from deps import REDIS_CLIENT
-from embed_router import embed_route
+from embed_router import embed_route, is_small_talk
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from google_services import (
@@ -328,6 +328,43 @@ async def _handle_calendar_write(
         )
 
 
+async def _keyword_dispatch(
+    req: ChatRequest,
+    user_code: str,
+    google_available: bool,
+    pending_action: bytes | str | None,
+) -> "StreamingResponse | dict | None":
+    """
+    Fast-path keyword dispatch — runs before embedding/LLM router.
+    Handles unambiguous user actions that need no intent classification.
+
+    Order:
+      1. Pending calendar action (confirm / cancel an already-staged event)
+      2. Calendar write detection (only when no pending action — avoids overwrite)
+      3. Proposal management commands (montre / accepte / rejette)
+
+    `pending_action` is read once by the caller to avoid a double Redis round-trip.
+    Returns a response if an action was triggered, None to continue to routing.
+    """
+    # ── 1. Pending calendar action ───────────────────────────────────────────
+    if pending_action:
+        if (result := await _handle_calendar_pending(req, user_code, pending_action)) is not None:
+            return result
+        # Unrecognised word while a pending action exists → skip calendar write
+        # to avoid overwriting the staged event with a brand-new one.
+    else:
+        # ── 2. Calendar write (new event) ────────────────────────────────────
+        if (result := await _handle_calendar_write(req, user_code, google_available)) is not None:
+            return result
+
+    # ── 3. Proposal commands ─────────────────────────────────────────────────
+    proposal_resp = handle_proposal_command(req.message, user_code)
+    if proposal_resp is not None:
+        return _instant_reply(req, user_code, proposal_resp)
+
+    return None
+
+
 def _handle_proposal(
     req: ChatRequest,
     user_code: str,
@@ -388,32 +425,31 @@ async def chat(req: ChatRequest):
     if (result := _openwebui_passthrough(req)) is not None:
         return result
 
+    # Lire le pending calendar une seule fois — utilisé à la fois par le guard
+    # small talk et par _keyword_dispatch (évite un double aller-retour Redis).
+    _pending_action = REDIS_CLIENT.get(f"jarvis:{user_code}:pending_calendar_action")
+
+    # ── Small talk early detection ───────────────────────────────────────────
+    # Acquiescements purs : aucun contexte profil ni recall mémoire nécessaire.
+    # Guard : si une action calendrier est en attente, oui/non/ok peuvent être
+    # des confirmations → on laisse passer keyword dispatch en premier.
+    _use_small_talk = not _pending_action and is_small_talk(req.message)
+
     # ════════════════════════════════════════════════════════════════════════
     # STEP 1 — KEYWORD DISPATCH — fast paths, no LLM router cost
-    # Checks keyword-triggered actions before any embedding or LLM call.
+    # Skipped entirely when small talk is detected.
     # ════════════════════════════════════════════════════════════════════════
-
-    # ── 1a. Pending calendar action: confirm or cancel ──────────────────────
-    # If a pending action exists and the user confirms/cancels → act and return.
-    # If the word is unrecognised → skip calendar write check (avoids overwriting
-    # the existing pending event with a brand new one).
-    _pending_raw = REDIS_CLIENT.get(f"jarvis:{user_code}:pending_calendar_action")
-    if _pending_raw:
-        if (result := await _handle_calendar_pending(req, user_code, _pending_raw)) is not None:
-            return result
-        # Unrecognised word while pending → fall through to router, skip 1b.
-    else:
-        # ── 1b. Calendar write (keyword → LLM extraction, no router needed) ─
-        # Only checked when there is no pending action to avoid overwriting it.
-        if (result := await _handle_calendar_write(req, user_code, _google_available)) is not None:
+    if not _use_small_talk:
+        if (result := await _keyword_dispatch(req, user_code, _google_available, _pending_action)) is not None:
             return result
 
     # ════════════════════════════════════════════════════════════════════════
     # STEP 2 — EMBEDDING ROUTER — fast cosine-similarity intent classifier
     # ~2-5 ms. Skips the LLM router (~1.3 s) when confident.
     # Returns None when score is low or ambiguous → LLM router takes over.
+    # Skipped entirely when small talk is detected.
     # ════════════════════════════════════════════════════════════════════════
-    _embed_result = embed_route(req.message, google_available=_google_available)
+    _embed_result = None if _use_small_talk else embed_route(req.message, google_available=_google_available)
 
     # ════════════════════════════════════════════════════════════════════════
     # STEP 3 — LLM ROUTER + dynamic prefix + conversation history (parallel)
@@ -432,48 +468,48 @@ async def chat(req: ChatRequest):
         async_search_memory(user_code, req.message, 5)
     )
 
-    if _embed_result is not None:
+    if _use_small_talk:
+        # Small talk — acquiescements purs : prefix minimal, pas de recall mémoire.
+        # _spec_mem_task vient d'être lancé mais est inutile ici.
+        _spec_mem_task.cancel()
+        tz = USER_TIMEZONES.get(user_code, "Europe/Paris")
+        _name_part = f" Tu parles avec {user_name}." if user_name else ""
+        dynamic_prefix = f"Date : {fmt_now_fr(tz)}.{_name_part}"
+        _self_mem = {}
+        hist = await asyncio.to_thread(get_conversation, user_code, req.session_id, _HIST_WINDOW)
+        _prefetched_memory = None
+        llm_result = None  # → tous les flags use_* à False en aval
+        logger.debug("[TTFT] small talk — prefix minimal, no memory — %.3fs", time.time() - _t0)
+
+    elif _embed_result is not None:
         # Fast-path: no LLM router — load prefix, history, memory in parallel.
         # Opinions and tomorrow_suggestions are only useful for conversational intents.
         _rich_intent = bool(
             _embed_result.use_memory or _embed_result.use_rag
             or _embed_result.use_web or _embed_result.use_self
         )
-
-        if _embed_result.use_small_talk:
-            # Small talk (acquiescements purs) — pas de profil, pas de recall mémoire.
-            # Seul l'historique de conversation suffit.
-            _spec_mem_task.cancel()
-            tz = USER_TIMEZONES.get(user_code, "Europe/Paris")
-            _name_part = f" Tu parles avec {user_name}." if user_name else ""
-            dynamic_prefix = f"Date : {fmt_now_fr(tz)}.{_name_part}"
-            _self_mem = {}
-            hist = await asyncio.to_thread(get_conversation, user_code, req.session_id, _HIST_WINDOW)
-            _prefetched_memory = None
-            logger.debug("[TTFT] small talk — prefix minimal, no memory — %.3fs", time.time() - _t0)
+        _gather_ep = await asyncio.gather(
+            asyncio.to_thread(
+                build_dynamic_prefix,
+                req.session_id, user_code, user_name or "", req.voice_mode,
+                _rich_intent, _rich_intent,  # include_opinions, include_suggestions
+            ),
+            asyncio.to_thread(get_conversation, user_code, req.session_id, _HIST_WINDOW),
+            _spec_mem_task,
+            return_exceptions=True,
+        )
+        _pfx = _gather_ep[0]
+        if isinstance(_pfx, BaseException):
+            logger.error("build_dynamic_prefix failed: %s", _pfx)
+            dynamic_prefix, _self_mem = "", {}
         else:
-            _gather_ep = await asyncio.gather(
-                asyncio.to_thread(
-                    build_dynamic_prefix,
-                    req.session_id, user_code, user_name or "", req.voice_mode,
-                    _rich_intent, _rich_intent,  # include_opinions, include_suggestions
-                ),
-                asyncio.to_thread(get_conversation, user_code, req.session_id, _HIST_WINDOW),
-                _spec_mem_task,
-                return_exceptions=True,
-            )
-            _pfx = _gather_ep[0]
-            if isinstance(_pfx, BaseException):
-                logger.error("build_dynamic_prefix failed: %s", _pfx)
-                dynamic_prefix, _self_mem = "", {}
-            else:
-                dynamic_prefix, _self_mem = _pfx
-            hist = _gather_ep[1] if not isinstance(_gather_ep[1], BaseException) else []
-            if isinstance(_gather_ep[1], BaseException):
-                logger.error("get_conversation failed: %s", _gather_ep[1])
-            _prefetched_memory = _gather_ep[2] if not isinstance(_gather_ep[2], BaseException) else None
-            if isinstance(_gather_ep[2], BaseException):
-                logger.warning("speculative memory search failed: %s", _gather_ep[2])
+            dynamic_prefix, _self_mem = _pfx
+        hist = _gather_ep[1] if not isinstance(_gather_ep[1], BaseException) else []
+        if isinstance(_gather_ep[1], BaseException):
+            logger.error("get_conversation failed: %s", _gather_ep[1])
+        _prefetched_memory = _gather_ep[2] if not isinstance(_gather_ep[2], BaseException) else None
+        if isinstance(_gather_ep[2], BaseException):
+            logger.warning("speculative memory search failed: %s", _gather_ep[2])
 
         llm_result = _embed_result
         logger.debug(
@@ -574,7 +610,10 @@ async def chat(req: ChatRequest):
     # These intents return immediately, without going through context gather.
     # ════════════════════════════════════════════════════════════════════════
 
-    # ── 4a. Self: état interne Jarvis (proposals take priority over briefing) ─
+    # ── 4a. Self: état interne Jarvis ───────────────────────────────────────
+    # Proposal commands are handled early in _keyword_dispatch (step 1).
+    # _handle_proposal here is a fallback for unusual phrasings that passed
+    # keyword_dispatch but were still classified as self by the router.
     if use_self:
         use_briefing = False
         if (result := _handle_proposal(req, user_code, use_model)) is not None:

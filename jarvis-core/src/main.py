@@ -1,5 +1,5 @@
 """
-PROJECT JARVIS v8 — Bootstrap
+PROJECT JARVIS v9 — Bootstrap
 ==============================
 Endpoints découpés en modules dans routes/ :
   routes/chat.py          POST /chat, GET /users/{code}/history/{session}
