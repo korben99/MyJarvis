@@ -42,11 +42,13 @@ from typing import Any, AsyncGenerator, Optional
 from config import (
     LLM_LOCAL,
     PRIMARY_MODEL,
+    QWEN36_NINJA_TEMPLATE,
     REASONING_MODEL,
     ROUTER_MODEL,
     THINKING_BUDGET_TOKENS,
     is_hermes,
     is_qwen3,
+    is_qwen36,
 )
 from mlx_lm import generate, load, stream_generate
 from mlx_lm.models.cache import make_prompt_cache
@@ -120,12 +122,32 @@ class _ModelProfile:
 def _model_profile(model_path: str) -> _ModelProfile:
     """Return the inference profile for *model_path*.
 
-    Two profiles:
-    - Qwen3 (primary): thinking-aware sampler + KV quantisation allowed.
+    Three profiles (checked in priority order):
+    - Qwen3.6 (is_qwen36): temp_think=0.7, repetition_penalty=1.05.
+    - Qwen3   (is_qwen3) : temp_think=0.6, repetition_penalty=1.1.
+      is_qwen36() checked FIRST — it's a subset of is_qwen3().
     - Generic (router / non-Qwen3): relaxed sampler, no KV quantisation.
       Applying top_k=20 or 4-bit KV to small instruct models (e.g. Qwen2.5-3B-8bit)
       causes degenerate looping — these must stay at their default settings.
     """
+    if is_qwen36(model_path):
+        # Qwen3.6 official recommendations: temp_think=0.7 (conservative; official says 1.0
+        # for open-ended but 0.7 avoids hallucination on structured tasks like Jarvis uses).
+        # top_p / top_k identical to Qwen3. Slightly reduced repetition_penalty (1.05 vs 1.1)
+        # — Qwen3.6 has better native diversity from larger expert pool (256 vs 64).
+        return _ModelProfile(
+            temp_think=0.7,
+            temp_nothink=0.7,
+            top_p_think=0.95,
+            top_p_nothink=0.80,
+            top_k=20,
+            min_p=0.0,
+            repetition_penalty=1.05,
+            repetition_context_size=64,
+            frequency_penalty=0.05,
+            use_quant_kv=QUANT_KV,
+            stop_tokens=(),
+        )
     if is_qwen3(model_path):
         # Official Qwen3 recommendations: temp 0.6 (think) / 0.7 (no-think),
         # top_p 0.95 / 0.80, top_k 20, min_p 0.
@@ -180,12 +202,17 @@ def _model_profile(model_path: str) -> _ModelProfile:
 
 _model_cache: dict[str, tuple] = {}  # model_path → (model, tokenizer)
 _load_lock = threading.Lock()  # protège le chargement concurrent
-_infer_lock = (
-    threading.Lock()
-)  # sérialise toutes les inférences MLX (contrainte Metal GPU)
-# threading.Lock (pas asyncio.Lock) : garantit la mutual exclusion entre les appelants
-# sync (call_llm_local via asyncio.to_thread) ET les appelants async (call_llm_local_async,
-# stream_local). asyncio.Lock est invisible depuis les threads → race GPU sans threading.Lock.
+_infer_lock = threading.Lock()
+# _infer_lock sérialise TOUTES les inférences MLX (router + primary confondus).
+# Intentionnel : le GPU Metal est partagé et ne supporte pas deux kernels simultanés.
+# Si router et primary doivent être indépendants, remplacer par dict[str, Lock].
+
+# ── Chat priority tracker ─────────────────────────────────────────────────
+# Compteur thread-safe des appels chat en attente du lock.
+# Les tâches background (analyzer) cèdent le GPU si ce compteur > 0,
+# garantissant que le chat n'attend jamais derrière l'analyzer.
+_chat_waiters: int = 0
+_chat_waiters_lock = threading.Lock()
 
 # ── System prompt KV cache ────────────────────────────────────────────────
 # Caches the prefilled KV states for the system prompt (which is token-identical
@@ -288,9 +315,15 @@ def _make_system_kv(model_path: str, model, tokenizer, system_content: str) -> A
     decode token is overwritten by real tokens on the first actual inference.
     """
     sys_messages = [{"role": "system", "content": system_content}]
-    sys_prompt_text = tokenizer.apply_chat_template(
-        sys_messages, tokenize=False, add_generation_prompt=False
-    )
+    if is_qwen36(model_path):
+        # Qwen3.6 ninja-patch template requires ≥1 user message — system-only input
+        # raises jinja2.TemplateError("No user query found in messages.").
+        # Construct the system block directly: format is stable across Qwen3.x (ChatML).
+        sys_prompt_text = f"<|im_start|>system\n{system_content}<|im_end|>\n"
+    else:
+        sys_prompt_text = tokenizer.apply_chat_template(
+            sys_messages, tokenize=False, add_generation_prompt=False
+        )
     sys_token_count = len(tokenizer.encode(sys_prompt_text))
 
     profile = _model_profile(model_path)
@@ -367,6 +400,25 @@ def _load_model(model_path: str) -> tuple:
 
         logger.info("Chargement modèle MLX : %s", model_path)
         model, tokenizer = load(model_path)
+
+        # ── Ninja patch template (Qwen3.6 only) ─────────────────────────
+        # Chemin local défini par QWEN36_NINJA_TEMPLATE (config.py).
+        # Téléchargé via scripts/download_models.py — indépendant du cache HF.
+        # enable_thinking=False → aucun tag <think> dans le prompt (0 token overhead).
+        if is_qwen36(model_path):
+            if os.path.isfile(QWEN36_NINJA_TEMPLATE):
+                with open(QWEN36_NINJA_TEMPLATE, encoding="utf-8") as _f:
+                    tokenizer.chat_template = _f.read()
+                logger.info(
+                    "Ninja-patch template applied: %s", model_path.split("/")[-1]
+                )
+            else:
+                logger.warning(
+                    "Ninja-patch template introuvable (%s) — template par défaut utilisé. "
+                    "Lancer scripts/download_models.py pour le télécharger.",
+                    QWEN36_NINJA_TEMPLATE,
+                )
+
         _model_cache[model_path] = (model, tokenizer)
         logger.info("Modèle prêt : %s", model_path)
         return model, tokenizer
@@ -429,9 +481,16 @@ def _build_prompt(
     """
     Construit le prompt final via apply_chat_template.
 
-    Qwen3.x uniquement : passe enable_thinking pour contrôler le bloc <think>.
-      enable_thinking=False → <think>\\n\\n</think>\\n\\n inséré (no-think)
-      enable_thinking=True  → <think>\\n inséré (thinking libre)
+    Qwen3.x : passe enable_thinking pour contrôler le bloc <think>.
+      Qwen3 standard   enable_thinking=False → <think>\\n\\n</think>\\n\\n (no-think)
+      Qwen3.6 + ninja  enable_thinking=False → préfixe nu (pas de tag <think>)
+      Tout Qwen3.x     enable_thinking=True  → <think>\\n (thinking libre)
+
+    La ninja patch guard (en fin de fonction) normalise le suffixe brut :
+      - préfixe nu (ninja patch no_think) → injecte <think>\\n\\n</think>\\n\\n
+        car sans ce bloc le modèle génère <think> spontanément.
+      - bloc ouvert non fermé             → force-close </think>\\n\\n
+      - no_think=False sans <think>       → force-open <think>\\n
 
     Fallback : si enable_thinking n'est pas accepté (TypeError), réessaie sans.
     """
@@ -465,13 +524,13 @@ def _build_prompt(
 
         # Try full kwargs; fall back if tokenizer version is too old
         try:
-            return tokenizer.apply_chat_template(
+            prompt = tokenizer.apply_chat_template(
                 messages, **base_kwargs, **think_kwargs
             )
         except TypeError:
             # thinking_budget not supported → retry with only enable_thinking
             try:
-                return tokenizer.apply_chat_template(
+                prompt = tokenizer.apply_chat_template(
                     messages, **base_kwargs, enable_thinking=not no_think
                 )
             except TypeError:
@@ -479,6 +538,37 @@ def _build_prompt(
                     "enable_thinking not supported for %s — falling back to default template",
                     model_path.split("/")[-1],
                 )
+                prompt = tokenizer.apply_chat_template(messages, **base_kwargs)
+
+        # ── Ninja patch guard — enforce think state at raw string level ──
+        # Belt+suspenders on top of enable_thinking kwargs. Works with all template
+        # variants: standard Qwen3, Qwen3.6 ninja patch, and any broken fallback.
+        #
+        # no_think=True:
+        #   standard Qwen3  → ends with </think>\n\n            → no-op (already closed)
+        #   ninja patch     → ends with <|im_start|>assistant\n → inject empty block (*)
+        #   broken template → ends with <think>\n               → force-close
+        #
+        # (*) Without seeding, Qwen3.6 spontaneously generates <think> as its first token
+        # regardless of enable_thinking=False — the model defaults to thinking mode when it
+        # sees a bare assistant prefix. An explicit empty block prevents this.
+        #
+        # no_think=False:
+        #   standard/ninja  → ends with <think>\n               → no-op (already open)
+        #   broken fallback → ends without <think>              → force-open
+        if no_think:
+            if prompt.endswith("<think>\n") or prompt.rstrip().endswith("<think>"):
+                # Template opened think block but didn't close it → force-close
+                prompt = prompt.rstrip("\n") + "\n</think>\n\n"
+            elif "</think>" not in prompt[-30:]:
+                # No think block at all (ninja patch) → inject empty block
+                prompt = prompt.rstrip("\n") + "\n<think>\n\n</think>\n\n"
+            # else: standard template already closed the block → no-op
+        else:
+            if not (prompt.endswith("<think>\n") or prompt.rstrip().endswith("<think>")):
+                prompt = prompt.rstrip("\n") + "\n<think>\n"
+
+        return prompt
 
     return tokenizer.apply_chat_template(messages, **base_kwargs)
 
@@ -673,10 +763,13 @@ def _generate_sync(
         # mid-reasoning), there is no actual answer — return empty so callers
         # can detect the failure cleanly instead of receiving raw markdown.
         logger.warning(
-            "_generate_sync: thinking truncated before </think> (model=%s) — returning empty",
+            "_generate_sync: thinking truncated before </think> (model=%s) — returning raw",
             model_short,
         )
-        result = ""
+        # Retourner le début du raisonnement partiel plutôt que rien :
+        result = result.split("<think>", 1)[0].strip() if "<think>" in result else ""
+        if not result:
+            result = "⚠️ Réponse incomplète (budget de réflexion dépassé). Reformule ou augmente max_tokens."
 
     return _strip_thinking(result)
 
@@ -729,10 +822,23 @@ async def call_llm_local_async(
     Sérialisée par lock par modèle — router et primary indépendants.
     """
     _t0 = time.time()
-    logger.debug("[TTFT] call_llm_local_async: waiting for _infer_lock (model=%s)", model.split("/")[-1])
-    # Acquiert threading.Lock depuis un thread pool pour ne pas bloquer l'event loop.
-    await asyncio.to_thread(_infer_lock.acquire)
-    logger.debug("[TTFT] call_llm_local_async: lock acquired — waited %.3fs", time.time() - _t0)
+    logger.debug(
+        "[TTFT] call_llm_local_async: waiting for _infer_lock (model=%s)",
+        model.split("/")[-1],
+    )
+    # Signale qu'un appel chat haute priorité est en attente du lock.
+    # L'analyzer vérifie ce compteur via call_llm_local_async_bg et cède si > 0.
+    with _chat_waiters_lock:
+        global _chat_waiters
+        _chat_waiters += 1
+    try:
+        await asyncio.to_thread(_infer_lock.acquire)
+    finally:
+        with _chat_waiters_lock:
+            _chat_waiters -= 1
+    logger.debug(
+        "[TTFT] call_llm_local_async: lock acquired — waited %.3fs", time.time() - _t0
+    )
     try:
         result = await asyncio.to_thread(
             _generate_sync,
@@ -744,8 +850,62 @@ async def call_llm_local_async(
             session_id,
             json_response,
         )
-        logger.debug("[TTFT] call_llm_local_async: done — total %.3fs", time.time() - _t0)
+        logger.debug(
+            "[TTFT] call_llm_local_async: done — total %.3fs", time.time() - _t0
+        )
         return result
+    finally:
+        _infer_lock.release()
+
+
+async def call_llm_local_async_bg(
+    messages: list[dict],
+    *,
+    model: str,
+    temperature: float = 0.1,
+    max_tokens: int = 3000,
+    no_think: bool = False,
+    session_id: str = "",
+    json_response: bool = False,
+    **_kwargs,
+) -> str:
+    """
+    Inférence async non-streaming — priorité basse (tâches background).
+
+    Cède le GPU quand un appel chat est en attente (_chat_waiters > 0) :
+      - Tente d'acquérir _infer_lock sans bloquer (acquire(blocking=False))
+      - Si le lock est libre ET aucun chat en attente → acquiert immédiatement
+      - Sinon → attend 2s et réessaie (yield vers l'event loop entre les tentatives)
+
+    Garantie : un appel chat ne sera jamais bloqué par l'analyzer.
+    Limite : si l'analyzer est déjà en génération, le chat doit attendre la fin
+    du token courant (inévitable — le GPU Metal ne supporte pas la préemption).
+    """
+    _t0 = time.time()
+    while True:
+        with _chat_waiters_lock:
+            if _chat_waiters == 0:
+                acquired = _infer_lock.acquire(blocking=False)
+                if acquired:
+                    break
+        # Chat en attente ou lock pris — céder et réessayer
+        _waited = time.time() - _t0
+        if _waited > 5.0 and int(_waited) % 10 == 0:
+            logger.debug("[BG-INFER] waiting for GPU (chat priority) — %.0fs", _waited)
+        await asyncio.sleep(2.0)
+
+    logger.debug("[BG-INFER] lock acquired after %.3fs", time.time() - _t0)
+    try:
+        return await asyncio.to_thread(
+            _generate_sync,
+            model,
+            messages,
+            temperature,
+            max_tokens,
+            no_think,
+            session_id,
+            json_response,
+        )
     finally:
         _infer_lock.release()
 
@@ -775,11 +935,16 @@ async def stream_local(
     stop_flag = threading.Event()
 
     _t_lock_wait = time.time()
-    logger.debug("[TTFT] stream_local: waiting for _infer_lock (model=%s)", model.split("/")[-1])
+    logger.debug(
+        "[TTFT] stream_local: waiting for _infer_lock (model=%s)", model.split("/")[-1]
+    )
 
     def _worker():
         _t_infer = time.time()
-        logger.debug("[TTFT] stream_local: inference started (lock held %.3fs)", _t_infer - _t_lock_wait)
+        logger.debug(
+            "[TTFT] stream_local: inference started (lock held %.3fs)",
+            _t_infer - _t_lock_wait,
+        )
         mlx_model, tokenizer = _load_model(model)
         prompt = _build_prompt(messages, tokenizer, model, no_think)
 
@@ -894,9 +1059,18 @@ async def stream_local(
                 )
             loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinelle fin de flux
 
-    # Acquiert threading.Lock depuis un thread pool pour ne pas bloquer l'event loop.
-    await asyncio.to_thread(_infer_lock.acquire)
-    logger.debug("[TTFT] stream_local: lock acquired — waited %.3fs", time.time() - _t_lock_wait)
+    # Signale qu'un appel chat haute priorité est en attente du lock.
+    with _chat_waiters_lock:
+        global _chat_waiters
+        _chat_waiters += 1
+    try:
+        await asyncio.to_thread(_infer_lock.acquire)
+    finally:
+        with _chat_waiters_lock:
+            _chat_waiters -= 1
+    logger.debug(
+        "[TTFT] stream_local: lock acquired — waited %.3fs", time.time() - _t_lock_wait
+    )
     try:
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()

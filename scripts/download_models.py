@@ -1,7 +1,8 @@
 import os
+import shutil
 
 from dotenv import load_dotenv
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 
 # Charge le .env
 load_dotenv()
@@ -12,9 +13,24 @@ MODELS = [
     # "mlx-community/Qwen2.5-3B-Instruct-8bit",
     # "Qwen/Qwen3-30B-A3B-MLX-6bit",
     # "Qwen/Qwen3-14B-MLX-4bit",
-    "mlx-community/Qwen3-30B-A3B-4bit-DWQ-0508",
+    # "mlx-community/Qwen3-30B-A3B-4bit-DWQ-0508",
+    # "spicyneuron/Qwen3.6-35B-A3B-MLX-4.8bit"
+    "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit",
     # "NousResearch/Hermes-3-Llama-3.2-3B",
     # "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+]
+
+# Fichiers de template à télécharger séparément (indépendants du cache HF).
+# local_path doit correspondre à QWEN36_NINJA_TEMPLATE dans config.py.
+TEMPLATES = [
+    {
+        "repo_id": "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit",
+        "filename": "chat_template.optional.jinja",
+        "local_path": os.getenv(
+            "QWEN36_NINJA_TEMPLATE",
+            "/opt/jarvis/models/templates/qwen36_ninja.jinja",
+        ),
+    },
 ]
 
 # Récup variables
@@ -73,6 +89,26 @@ def download_model(model_name):
     )
 
 
+def download_template(entry: dict) -> None:
+    """Télécharge un fichier template depuis HF et le copie au chemin local."""
+    local_path = entry["local_path"]
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+    if os.path.isfile(local_path):
+        print(f"[SKIP] Template déjà présent : {local_path}")
+        return
+
+    print(f"[TEMPLATE] {entry['repo_id']} / {entry['filename']} → {local_path}")
+    cached = hf_hub_download(
+        repo_id=entry["repo_id"],
+        filename=entry["filename"],
+        cache_dir=HF_HUB_CACHE,
+        token=HF_TOKEN,
+    )
+    shutil.copy2(cached, local_path)
+    print(f"[TEMPLATE] OK → {local_path}")
+
+
 def main():
     print(f"[HF_HOME] {HF_HOME}")
     print(f"[TOKEN] {'OK' if HF_TOKEN else 'MISSING'}")
@@ -82,6 +118,9 @@ def main():
             print(f"[SKIP] Déjà présent : {model}")
         else:
             download_model(model)
+
+    for entry in TEMPLATES:
+        download_template(entry)
 
 
 if __name__ == "__main__":

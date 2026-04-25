@@ -41,12 +41,11 @@ from config import (
     AUTOBIO_IMPORTANCE_THRESHOLD,
     CHAT_LOG_TTL,
     IMPORTANCE_THRESHOLD,
-    PRIMARY_API_KEY,
-    PRIMARY_API_URL,
     PRIMARY_MODEL,
     USER_CODES,
 )
-from helpers import call_llm_async, extract_llm_json, get_logger, get_redis
+from helpers import extract_llm_json, get_logger, get_redis
+from llm_local import call_llm_local_async_bg
 from prompts import get_prompt
 
 logger = get_logger("jarvis-analyzer")
@@ -105,17 +104,16 @@ async def analyze_exchange(
             existing_profile_keys=profile_keys_str,
         )
 
-        content = await call_llm_async(
+        # Appel LLM : priorité basse (bg) pour ne pas bloquer le chat.
+        content = await call_llm_local_async_bg(
             [{"role": "user", "content": prompt}],
             model=PRIMARY_MODEL,
-            api_url=PRIMARY_API_URL,
-            api_key=PRIMARY_API_KEY,
             temperature=0.1,
-            max_tokens=8000,  # thinking can exceed 4000 tok on rich conversations
+            max_tokens=3000,
             json_response=True,
-            no_think=False,  # thinking improves fact extraction accuracy
-            timeout=90.0,
+            no_think=False,
         )
+
         logger.debug(f"[ANALYZER RAW] {content[:300]}")
         try:
             result = extract_llm_json(content)
@@ -141,7 +139,12 @@ async def analyze_exchange(
             importance += 0.40
 
         # Personal facts revealed by the user
-        importance += min(len(result.get("user_facts", [])), 3) * 0.20
+        _durable_facts = [
+            f
+            for f in result.get("user_facts", [])
+            if isinstance(f.get("value"), str) and len(f["value"]) > 10
+        ]
+        importance += min(len(_durable_facts), 3) * 0.10
 
         # Projects / goal context
         importance += min(len(result.get("projects", [])), 2) * 0.15
@@ -193,26 +196,18 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
     """
     Scheduled analysis of unanalyzed conversation exchanges (called every 30 min).
 
-    For each user, scans all active chat sessions, collects messages appended
-    since the last watermark, and runs a single analyze_exchange call on the
-    accumulated cross-session context (chronologically merged).
+    Analyse par session indépendante (vs batch multi-sessions précédent) :
+      - Précision : mood/satisfaction par session, pas moyennés sur tout le batch
+      - Résilience : watermark mis à jour session par session (succès partiel OK)
+      - Qdrant : un vecteur par session significative (vs un seul batch global)
+      - Back-fill convlog : satisfaction + importance + mood (vs satisfaction seule)
 
-    Watermark — Redis key `analysis_wm:{user_code}:{session_id}`:
-      Stores the float timestamp (ts) of the last analyzed message.
-      Messages with ts > watermark are considered new.
-      Immune to ltrim truncation: LLEN-based watermarks break once the list
-      hits CHAT_MAX_MESSAGES because llen stops growing — timestamps don't.
-      Snapshot is taken BEFORE the LLM call so messages that arrive during
-      analysis are included in the next batch (never dropped).
+    Non-bloquant GPU : utilise call_llm_local_async_bg → cède si chat en attente.
 
-    After analysis:
-      - user_facts  → Redis profile via update_user_profile_batch
-      - projects    → apply_project_updates
-      - mood        → update_emotional_state
-      - importance > IMPORTANCE_THRESHOLD   → store_memory_vector (Qdrant épisodique)
-      - importance > AUTOBIO_IMPORTANCE_THRESHOLD → store_autobiographical_event
+    Watermark — Redis key `analysis_wm:{user_code}:{session_id}` :
+      Float timestamp du dernier message analysé. Mis à jour immédiatement après
+      chaque analyse de session (immune à ltrim, résiliente aux échecs partiels).
     """
-    # Import here to avoid circular imports at module load time
     from memory import (
         apply_project_updates,
         get_user_profile,
@@ -234,11 +229,12 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
         "curious": {"mood": "engaged", "curiosity": 0.8},
         "tired": {"mood": "gentle", "energy": 0.4},
         "focused": {"mood": "focused", "energy": 0.7},
+        "neutral": {"mood": "neutral", "energy": 0.7, "concern": 0.0},
     }
 
     for uc in users:
         try:
-            # ── Discover active sessions ──────────────────────────────────
+            # ── Découverte des sessions actives ───────────────────────────
             session_keys: list[str] = []
             cursor: int | str = "0"
             while True:
@@ -252,18 +248,14 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
             if not session_keys:
                 continue
 
-            # ── Collect new messages (since watermark) from all sessions ──
-            all_new: list[dict] = []
-            wm_updates: dict[str, float] = {}  # wm_key → new watermark ts (snapshot)
+            # ── Collecte des nouveaux messages par session ─────────────────
+            existing_projects = get_user_projects(uc)
+            existing_profile_keys = list(get_user_profile(uc).keys())
 
+            sessions_data: list[dict] = []
             for chat_key in session_keys:
                 session_id = chat_key.removeprefix(f"chat:{uc}:")
                 wm_key = f"analysis_wm:{uc}:{session_id}"
-
-                # Watermark is the float timestamp of the last analyzed message.
-                # Using ts instead of LLEN makes the watermark immune to ltrim:
-                # once the list is capped at CHAT_MAX_MESSAGES, llen stops
-                # growing and llen-based watermarks silently freeze.
                 wm_ts = float(r.get(wm_key) or 0)
 
                 session_new: list[dict] = []
@@ -279,119 +271,182 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                 if not session_new:
                     continue
 
-                # Snapshot BEFORE the LLM call: record max ts seen in this batch
-                wm_updates[wm_key] = max(m["ts"] for m in session_new)
-                all_new.extend(session_new)
+                user_parts = [
+                    m["content"] for m in session_new if m.get("role") == "user"
+                ]
+                if not user_parts:
+                    continue
 
-            if not all_new:
-                logger.debug(
-                    "[SCHEDULER] analyse_recent_conversations: no new messages for %s",
-                    uc,
+                sessions_data.append(
+                    {
+                        "session_id": session_id,
+                        "wm_key": wm_key,
+                        "new_wm_ts": max(m["ts"] for m in session_new),
+                        "max_ts": max(m["ts"] for m in session_new),
+                        "msgs": session_new,
+                        "user_parts": user_parts,
+                        "asst_parts": [
+                            m["content"]
+                            for m in session_new
+                            if m.get("role") == "assistant"
+                        ],
+                    }
                 )
+
+            if not sessions_data:
+                logger.debug("[SCHEDULER] no new messages for %s", uc)
                 continue
 
-            # ── Merge chronologically across sessions ─────────────────────
-            all_new.sort(key=lambda m: m.get("ts", 0))
+            total_new_msgs = sum(len(sd["msgs"]) for sd in sessions_data)
 
-            user_parts = [m["content"] for m in all_new if m.get("role") == "user"]
-            asst_parts = [m["content"] for m in all_new if m.get("role") == "assistant"]
+            # ── Analyse par session — ordre chronologique ─────────────────
+            # Résultats à fusionner après toutes les sessions
+            merged_facts: dict[
+                str, dict
+            ] = {}  # key → fact (session la plus récente gagne)
+            all_projects: list[str] = []
+            merged_iw: dict[str, dict] = {}  # term → iw (poids max)
+            most_recent_analysis: dict | None = None
 
-            if not user_parts:
+            for sd in sorted(sessions_data, key=lambda x: x["max_ts"]):
+                acc_user = "\nUtilisateur : ".join(sd["user_parts"])[:3000]
+                acc_asst = "\nJarvis : ".join(sd["asst_parts"])[:3000]
+
+                try:
+                    analysis = await analyze_exchange(
+                        acc_user, acc_asst, existing_projects, existing_profile_keys
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "[SCHEDULER] analyze_exchange failed for %s/%s: %s",
+                        uc,
+                        sd["session_id"],
+                        exc,
+                    )
+                    continue
+
+                # Watermark mis à jour immédiatement — si la session suivante échoue,
+                # celle-ci est déjà marquée comme analysée (pas de double-analyse).
+                r.set(sd["wm_key"], sd["new_wm_ts"], ex=CHAT_LOG_TTL)
+                most_recent_analysis = analysis  # la dernière réussie en ordre chrono
+
+                # ── Fusion incrémentale ───────────────────────────────────
+                for f in analysis.get("user_facts", []):
+                    if "key" in f and "value" in f:
+                        merged_facts[f["key"]] = f  # session plus récente écrase
+
+                all_projects.extend(analysis.get("projects", []))
+
+                for iw in analysis.get("interest_weights") or []:
+                    if "term" in iw and "weight" in iw:
+                        t = iw["term"]
+                        if t not in merged_iw or float(iw["weight"]) > float(
+                            merged_iw[t]["weight"]
+                        ):
+                            merged_iw[t] = iw
+
+                # ── Back-fill convlog : satisfaction + importance + mood ────
+                # (#30 fix : filtre strict session_id — pas de contamination croisée)
+                # (#33 fix : importance + mood ajoutés au pipeline)
+                _sat = analysis.get("satisfaction", "unknown")
+                _imp = round(analysis.get("importance", 0.0), 3)
+                _mood_s = analysis.get("mood", "neutral")
+                _should_backfill = (
+                    _sat in ("positive", "negative") or _imp > 0 or _mood_s != "neutral"
+                )
+                if _should_backfill:
+                    _ts_list = [m.get("ts", 0) for m in sd["msgs"] if m.get("ts")]
+                    if _ts_list:
+                        _min_ts = min(_ts_list) - 1
+                        _max_ts_bf = max(_ts_list) + 1
+                        _clog_key = f"convlog:{uc}"
+                        _raw_entries = r.zrangebyscore(
+                            _clog_key, _min_ts, _max_ts_bf, withscores=True
+                        )
+                        if _raw_entries:
+                            _pipe = r.pipeline()
+                            for _raw, _score in _raw_entries:
+                                try:
+                                    _e = json.loads(_raw)
+                                    # Strict : ne toucher que les entrées de CETTE session
+                                    if _e.get("session_id") != sd["session_id"]:
+                                        continue
+                                    _changed = False
+                                    if (
+                                        _sat in ("positive", "negative")
+                                        and _e.get("satisfaction") != _sat
+                                    ):
+                                        _e["satisfaction"] = _sat
+                                        _changed = True
+                                    if _imp > 0 and _e.get("importance", 0.0) == 0.0:
+                                        _e["importance"] = _imp
+                                        _changed = True
+                                    if _mood_s != "neutral" and not _e.get("mood"):
+                                        _e["mood"] = _mood_s
+                                        _changed = True
+                                    if _changed:
+                                        _pipe.zrem(_clog_key, _raw)
+                                        _pipe.zadd(
+                                            _clog_key,
+                                            {
+                                                json.dumps(
+                                                    _e, ensure_ascii=False
+                                                ): _score
+                                            },
+                                        )
+                                except (json.JSONDecodeError, ValueError):
+                                    pass
+                            _pipe.execute()
+
+                # ── Qdrant par session (importance-gated) ─────────────────
+                _imp_s = analysis.get("importance", 0.0)
+                _mem_s = analysis.get("memory_summary")
+                if _imp_s > IMPORTANCE_THRESHOLD and _mem_s:
+                    entry = {
+                        "session_id": sd["session_id"],
+                        "timestamp": sd["max_ts"],
+                        "user": acc_user[:500],
+                        "assistant": acc_asst[:500],
+                        "mood": _mood_s,
+                        "topics": analysis.get("topics", []),
+                        "importance": _imp_s,
+                        "memory_summary": _mem_s,
+                    }
+                    await asyncio.to_thread(store_memory_vector, uc, entry)
+
+                if _imp_s > AUTOBIO_IMPORTANCE_THRESHOLD and _mem_s:
+                    await asyncio.to_thread(
+                        store_autobiographical_event, uc, _mem_s, _imp_s
+                    )
+
+            if most_recent_analysis is None:
+                logger.warning("[SCHEDULER] all sessions failed for %s", uc)
                 continue
 
-            acc_user = "\nUtilisateur : ".join(user_parts)[:3000]
-            acc_asst = "\nJarvis : ".join(asst_parts)[:3000]
-
-            # ── LLM analysis ──────────────────────────────────────────────
-            existing_projects = get_user_projects(uc)
-            existing_profile_keys = list(get_user_profile(uc).keys())
-            analysis = await analyze_exchange(
-                acc_user, acc_asst, existing_projects, existing_profile_keys
-            )
-
-            # ── Update watermarks (analysis succeeded) ────────────────────
-            for wm_key, new_wm_ts in wm_updates.items():
-                r.set(wm_key, new_wm_ts, ex=CHAT_LOG_TTL)
-
-            # ── Apply results ─────────────────────────────────────────────
-            importance = analysis.get("importance", 0)
-            mood = analysis.get("mood", "neutral")
-            memory_summary = analysis.get("memory_summary")
-            satisfaction = analysis.get("satisfaction", "unknown")
-
+            # ── Application des résultats fusionnés ───────────────────────
+            mood = most_recent_analysis.get("mood", "neutral")
             if mood in _mood_to_state:
                 update_emotional_state(_mood_to_state[mood])
 
-            # ── Back-fill LLM satisfaction into convlog entries ───────────
-            # Replaces the regex-based _detect_satisfaction() stored at log time.
-            if satisfaction in ("positive", "negative"):
-                _ts_list = [m.get("ts", 0) for m in all_new if m.get("ts")]
-                if _ts_list:
-                    _min_ts = min(_ts_list) - 1
-                    _max_ts = max(_ts_list) + 1
-                    _clog_key = f"convlog:{uc}"
-                    _raw_entries = r.zrangebyscore(
-                        _clog_key, _min_ts, _max_ts, withscores=True
-                    )
-                    if _raw_entries:
-                        _pipe = r.pipeline()
-                        for _raw, _score in _raw_entries:
-                            try:
-                                _e = json.loads(_raw)
-                                if _e.get("satisfaction") != satisfaction:
-                                    _e["satisfaction"] = satisfaction
-                                    _pipe.zrem(_clog_key, _raw)
-                                    _pipe.zadd(
-                                        _clog_key,
-                                        {json.dumps(_e, ensure_ascii=False): _score},
-                                    )
-                            except (json.JSONDecodeError, ValueError):
-                                pass
-                        _pipe.execute()
-
-            projects = analysis.get("projects", [])
-            if projects:
-                apply_project_updates(uc, projects)
-
-            user_facts = [
-                f for f in analysis.get("user_facts", []) if "key" in f and "value" in f
-            ]
-            if user_facts:
-                await asyncio.to_thread(update_user_profile_batch, uc, user_facts)
-
-            for iw in analysis.get("interest_weights") or []:
-                if "term" in iw and "weight" in iw:
-                    set_interest_weight(uc, iw["term"], float(iw["weight"]))
-
-            # ── Qdrant vectorisation (importance-gated) ───────────────────
-            if importance > IMPORTANCE_THRESHOLD and memory_summary:
-                entry = {
-                    "session_id": "batch",
-                    "timestamp": time.time(),
-                    "user": acc_user[:500],
-                    "assistant": acc_asst[:500],
-                    "mood": mood,
-                    "topics": analysis.get("topics", []),
-                    "importance": importance,
-                    "memory_summary": memory_summary,
-                }
-                await asyncio.to_thread(store_memory_vector, uc, entry)
-
-            if importance > AUTOBIO_IMPORTANCE_THRESHOLD and memory_summary:
+            if merged_facts:
                 await asyncio.to_thread(
-                    store_autobiographical_event, uc, memory_summary, importance
+                    update_user_profile_batch, uc, list(merged_facts.values())
                 )
 
+            if all_projects:
+                apply_project_updates(uc, all_projects)
+
+            for iw in merged_iw.values():
+                set_interest_weight(uc, iw["term"], float(iw["weight"]))
+
             logger.info(
-                "[SCHEDULER] analyse_recent_conversations: user=%s sessions=%d "
-                "new_msgs=%d mood=%s facts=%d importance=%.2f memory=%s",
+                "[SCHEDULER] analyse_recent_conversations: user=%s sessions_analysed=%d "
+                "new_msgs=%d mood=%s facts=%d",
                 uc,
-                len(wm_updates),
-                len(all_new),
+                len(sessions_data),
+                total_new_msgs,
                 mood,
-                len(analysis.get("user_facts", [])),
-                importance,
-                "→Qdrant" if importance > IMPORTANCE_THRESHOLD else "skip",
+                len(merged_facts),
             )
 
         except Exception as exc:

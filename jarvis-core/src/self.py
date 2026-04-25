@@ -59,7 +59,6 @@ from config import (
     REASONING_MODEL,
     REASONING_TIMEOUT,
     THINKING_BUDGET_TOKENS,
-
     USER_ADMINS,
     USER_CODES,
     USER_EMAILS,
@@ -102,26 +101,73 @@ logger = get_logger("jarvis-self")
 _NS_GUARDS: list[dict] = [
     {
         "name": "financial",
-        "key_prefixes": frozenset({
-            "placement", "capital", "per", "pea", "livret_a",
-            "investissement", "epargne",
-        }),
-        "required_terms": frozenset({
-            "€", "$", "%", "fonds", "fond", "etf", "action", "obligation",
-            "livret", "pea", "per", "scpi", "crypto", "bourse", "placement",
-            "investissement", "epargne", "portefeuille", "rendement", "taux",
-            "assurance", "virement", "depot", "retrait", "titre",
-        }),
+        "key_prefixes": frozenset(
+            {
+                "placement",
+                "capital",
+                "per",
+                "pea",
+                "livret_a",
+                "investissement",
+                "epargne",
+            }
+        ),
+        "required_terms": frozenset(
+            {
+                "€",
+                "$",
+                "%",
+                "fonds",
+                "fond",
+                "etf",
+                "action",
+                "obligation",
+                "livret",
+                "pea",
+                "per",
+                "scpi",
+                "crypto",
+                "bourse",
+                "placement",
+                "investissement",
+                "epargne",
+                "portefeuille",
+                "rendement",
+                "taux",
+                "assurance",
+                "virement",
+                "depot",
+                "retrait",
+                "titre",
+            }
+        ),
         "extra_check": lambda v: any(c.isdigit() for c in v),
         "error_hint": "financial context (amount, fund name, asset type, %, €, etc.)",
     },
     {
         "name": "travel",
-        "key_prefixes": frozenset({"travel_plans", "travel_preference", "voyages_prevus"}),
-        "required_terms": frozenset({
-            "voyage", "travel", "trip", "vacances", "destination", "hotel", "vol",
-            "billet", "trajet", "sejour", "partir", "avion", "train", "city", "ville",
-        }),
+        "key_prefixes": frozenset(
+            {"travel_plans", "travel_preference", "voyages_prevus"}
+        ),
+        "required_terms": frozenset(
+            {
+                "voyage",
+                "travel",
+                "trip",
+                "vacances",
+                "destination",
+                "hotel",
+                "vol",
+                "billet",
+                "trajet",
+                "sejour",
+                "partir",
+                "avion",
+                "train",
+                "city",
+                "ville",
+            }
+        ),
         "extra_check": None,
         "error_hint": "travel context",
     },
@@ -438,10 +484,14 @@ def gather_user_context(user_code: str) -> dict:
     has_push = bool(r.exists(f"{_DEVICE_TOKEN_PREFIX}:{user_code}"))
 
     cooldown_key = f"{_PUSH_COOLDOWN_PREFIX}:{user_code}"
-    cooldown_ttl = r.ttl(cooldown_key)  # -2 = key absent, -1 = no TTL, >0 = seconds remaining
+    cooldown_ttl = r.ttl(
+        cooldown_key
+    )  # -2 = key absent, -1 = no TTL, >0 = seconds remaining
     if cooldown_ttl > 0:
         h, m = divmod(cooldown_ttl // 60, 60)
-        push_cooldown_str = f"actif encore {h}h{m:02d}" if h else f"actif encore {m} min"
+        push_cooldown_str = (
+            f"actif encore {h}h{m:02d}" if h else f"actif encore {m} min"
+        )
     else:
         push_cooldown_str = "expiré (push disponible)"
 
@@ -519,7 +569,7 @@ def _fmt_user_profiles() -> str:
         profile = {k: v for k, v in get_user_profile(code).items() if v}
         if not profile:
             continue
-        lines = [f"<profil user=\"{name}\" code=\"{code}\">"]
+        lines = [f'<profil user="{name}" code="{code}">']
         for k, v in list(profile.items())[:20]:  # cap at 20 keys for token budget
             lines.append(f"  {k} = {str(v)[:80]}")
         lines.append("</profil>")
@@ -555,22 +605,35 @@ def _fmt_push_availability() -> str:
 # ─────────────────────────────────────────────────────────────────────────
 
 # Actions allowed per phase — LLM cannot hallucinate cross-phase actions
-_GLOBAL_ACTIONS = frozenset({
-    "nothing", "flag_knowledge_gap", "update_self_note",
-    "check_health", "prune_self_memory", "refine_prompt",
-})
-_USER_ACTIONS = frozenset({
-    "nothing", "store_insight", "send_notification", "queue_push",
-    "correct_profile", "ask_user", "consolidate_memory", "update_trade_threshold",
-})
+_GLOBAL_ACTIONS = frozenset(
+    {
+        "nothing",
+        "flag_knowledge_gap",
+        "update_self_note",
+        "check_health",
+        "prune_self_memory",
+        "refine_prompt",
+    }
+)
+_USER_ACTIONS = frozenset(
+    {
+        "nothing",
+        "store_insight",
+        "send_notification",
+        "queue_push",
+        "correct_profile",
+        "ask_user",
+        "consolidate_memory",
+        "update_trade_threshold",
+    }
+)
 
 
 def _fmt_previous_steps(steps: list[dict] | None) -> str:
     if not steps:
         return "  aucune (première itération)"
     return "\n".join(
-        f"  [{s['iteration']}] {s['action']} → {s['outcome']}"
-        for s in steps
+        f"  [{s['iteration']}] {s['action']} → {s['outcome']}" for s in steps
     )
 
 
@@ -626,11 +689,14 @@ async def _call_global_reflection_llm(
     except ValueError as exc:
         logger.error(
             "Global reflection LLM failed: %s — truncated or malformed JSON",
-            type(exc).__name__, exc_info=True,
+            type(exc).__name__,
+            exc_info=True,
         )
         return None
     except Exception as exc:
-        logger.error("Global reflection LLM failed: %s", type(exc).__name__, exc_info=True)
+        logger.error(
+            "Global reflection LLM failed: %s", type(exc).__name__, exc_info=True
+        )
         return None
 
 
@@ -653,9 +719,10 @@ async def _call_user_reflection_llm(
     user_code = user_ctx["user_code"]
     user_activity_entry = user_ctx["user_activity"]
     # Format as a single-user activity line using existing helper
-    activity_str = _fmt_activity(
-        {user_code: user_activity_entry} if user_activity_entry else {}
-    ) or "  Aucune activité récente."
+    activity_str = (
+        _fmt_activity({user_code: user_activity_entry} if user_activity_entry else {})
+        or "  Aucune activité récente."
+    )
 
     push_status = "disponible ✓" if user_ctx["has_push"] else "indisponible"
 
@@ -697,7 +764,9 @@ async def _call_user_reflection_llm(
         except ValueError as exc:
             if attempt == 0:
                 logger.warning(
-                    "User reflection LLM malformed JSON (%s), retrying — %s", user_code, exc
+                    "User reflection LLM malformed JSON (%s), retrying — %s",
+                    user_code,
+                    exc,
                 )
                 continue
             logger.error(
@@ -706,7 +775,10 @@ async def _call_user_reflection_llm(
             return None
         except Exception as exc:
             logger.error(
-                "User reflection LLM failed (%s): %s", user_code, type(exc).__name__, exc_info=True,
+                "User reflection LLM failed (%s): %s",
+                user_code,
+                type(exc).__name__,
+                exc_info=True,
             )
             return None
     return None
@@ -908,7 +980,8 @@ def _action_correct_profile(params: dict) -> str:
         logger.warning(
             "Self correct_profile: BLOCKED deletion of '%s' for %s — "
             "deletions are not allowed in the reflection phase (use nightly review)",
-            key, user_code,
+            key,
+            user_code,
         )
         return (
             f"correct_profile: deletion of '{key}' blocked — "
@@ -925,7 +998,8 @@ def _action_correct_profile(params: dict) -> str:
             logger.warning(
                 "Self correct_profile: REJECTED creation of new key '%s' for %s — "
                 "new keys can only be created by the conversation analyzer",
-                key, user_code,
+                key,
+                user_code,
             )
             return f"correct_profile: key '{key}' does not exist — use the analyzer to create new profile facts from conversation"
 
@@ -936,7 +1010,8 @@ def _action_correct_profile(params: dict) -> str:
             logger.warning(
                 "Self correct_profile: key '%s' does not exist for %s — "
                 "possible user confusion in reflection LLM (check _fmt_user_profiles context)",
-                key, user_code,
+                key,
+                user_code,
             )
             return (
                 f"correct_profile: key '{key}' does not exist for {user_code}. "
@@ -944,7 +1019,9 @@ def _action_correct_profile(params: dict) -> str:
             )
         logger.warning(
             "Self correct_profile: DELETE '%s' for %s (current value: %s)",
-            key, user_code, old_val if old_val else "(empty)"
+            key,
+            user_code,
+            old_val if old_val else "(empty)",
         )
 
     # ── Namespace protection: block cross-domain value contamination ────────
@@ -957,7 +1034,10 @@ def _action_correct_profile(params: dict) -> str:
         _value_lower = value.lower()
 
         for _guard in _NS_GUARDS:
-            _in_ns = _key_prefix_ns in _guard["key_prefixes"] or key in _guard["key_prefixes"]
+            _in_ns = (
+                _key_prefix_ns in _guard["key_prefixes"]
+                or key in _guard["key_prefixes"]
+            )
             if not _in_ns:
                 continue
             _has_match = any(t in _value_lower for t in _guard["required_terms"])
@@ -967,7 +1047,11 @@ def _action_correct_profile(params: dict) -> str:
                 logger.warning(
                     "Self correct_profile: BLOCKED '%s' = '%s' for %s — "
                     "%s namespace requires %s (namespace protection)",
-                    key, value, user_code, _guard["name"], _guard["error_hint"],
+                    key,
+                    value,
+                    user_code,
+                    _guard["name"],
+                    _guard["error_hint"],
                 )
                 return (
                     f"correct_profile: BLOCKED '{key}' = '{value}' — "
@@ -1083,7 +1167,9 @@ async def _nightly_facts_user(
         return extract_llm_json(content)
     except Exception as exc:
         logger.error(
-            "Nightly facts LLM call failed for %s: %s", user_code, type(exc).__name__,
+            "Nightly facts LLM call failed for %s: %s",
+            user_code,
+            type(exc).__name__,
             exc_info=True,
         )
         return None
@@ -1106,7 +1192,8 @@ async def _nightly_self_user(
         conv_text=_build_conv_text(conversations),
         recent_self_reflections=json.dumps(recent_self_reflections, ensure_ascii=False),
         recent_opinions=json.dumps(recent_opinions, ensure_ascii=False)
-        if recent_opinions else "aucune",
+        if recent_opinions
+        else "aucune",
     )
     try:
         content = await call_llm_async(
@@ -1126,7 +1213,9 @@ async def _nightly_self_user(
         return extract_llm_json(content)
     except Exception as exc:
         logger.error(
-            "Nightly self LLM call failed for %s: %s", user_code, type(exc).__name__,
+            "Nightly self LLM call failed for %s: %s",
+            user_code,
+            type(exc).__name__,
             exc_info=True,
         )
         return None
@@ -1172,7 +1261,9 @@ async def _nightly_cleaning_user(
         return extract_llm_json(content)
     except Exception as exc:
         logger.error(
-            "Nightly cleaning LLM call failed for %s: %s", user_code, type(exc).__name__,
+            "Nightly cleaning LLM call failed for %s: %s",
+            user_code,
+            type(exc).__name__,
             exc_info=True,
         )
         return None
@@ -1232,7 +1323,9 @@ async def run_nightly_interaction_review() -> None:
         )
 
         # ── Call 1: extract user facts ────────────────────────────────────
-        facts = await _nightly_facts_user(user_code, user_name, conversations, review_date)
+        facts = await _nightly_facts_user(
+            user_code, user_name, conversations, review_date
+        )
         user_insights: list[str] = []
 
         if facts:
@@ -1257,11 +1350,12 @@ async def run_nightly_interaction_review() -> None:
         )
 
         # ── Persist facts + self-reflection → jarvis-self.json ───────────
-        summary    = facts.get("daily_summary", "") if facts else ""
+        summary = facts.get("daily_summary", "") if facts else ""
         rel_update = facts.get("user_relation_update", {}) if facts else {}
         self_refls = [s for s in (self_result or {}).get("self_reflections", []) if s]
         new_opinions = [
-            o for o in (self_result or {}).get("jarvis_opinions", [])
+            o
+            for o in (self_result or {}).get("jarvis_opinions", [])
             if isinstance(o, dict) and o.get("topic") and o.get("opinion")
         ]
 
@@ -1318,10 +1412,15 @@ async def run_nightly_interaction_review() -> None:
                     }
                     logger.info(
                         "User relation updated for %s: affinity=%.2f style=%s mood=%s",
-                        user_code, new_affinity, new_style, new_mood,
+                        user_code,
+                        new_affinity,
+                        new_style,
+                        new_mood,
                     )
-                data["learnings"]  = data.get("learnings", [])[-100:]
-                data["growth_log"] = data.get("growth_log", [])[-GROWTH_LOG_MAX_ENTRIES:]
+                data["learnings"] = data.get("learnings", [])[-100:]
+                data["growth_log"] = data.get("growth_log", [])[
+                    -GROWTH_LOG_MAX_ENTRIES:
+                ]
                 data["last_nightly"] = review_date
                 save_self_memory(data)
 
@@ -1332,10 +1431,14 @@ async def run_nightly_interaction_review() -> None:
         if cleaning:
             for text in cleaning.get("to_archive", []):
                 if isinstance(text, str) and text.strip():
-                    await asyncio.to_thread(archive_autobiographical_event, user_code, text)
+                    await asyncio.to_thread(
+                        archive_autobiographical_event, user_code, text
+                    )
             for text in cleaning.get("to_delete", []):
                 if isinstance(text, str) and text.strip():
-                    await asyncio.to_thread(retract_autobiographical_event, user_code, text)
+                    await asyncio.to_thread(
+                        retract_autobiographical_event, user_code, text
+                    )
             rationale = cleaning.get("rationale", "")
             logger.info(
                 "Nightly cleaning for %s — archive:%d delete:%d — %s",
@@ -1503,7 +1606,9 @@ def approve_proposal(proposal_id: str) -> str:
             all_entries = []
         for e in all_entries:
             try:
-                e_slug = re.sub(r"\s+", "_", json.loads(e).get("topic", "").lower())[:40]
+                e_slug = re.sub(r"\s+", "_", json.loads(e).get("topic", "").lower())[
+                    :40
+                ]
                 if e_slug == topic_slug:
                     r.zrem(_KNOWLEDGE_GAPS_KEY, e)
             except Exception:
@@ -1581,13 +1686,21 @@ def _notify_proposal(user_code: str, proposal: dict) -> None:
         for line in lines:
             escaped = _html.escape(line)
             if line.startswith("+++") or line.startswith("---"):
-                parts.append(f"<span style='color:#555;font-weight:bold'>{escaped}</span>")
+                parts.append(
+                    f"<span style='color:#555;font-weight:bold'>{escaped}</span>"
+                )
             elif line.startswith("+"):
-                parts.append(f"<span style='background:#d4edda;color:#155724'>{escaped}</span>")
+                parts.append(
+                    f"<span style='background:#d4edda;color:#155724'>{escaped}</span>"
+                )
             elif line.startswith("-"):
-                parts.append(f"<span style='background:#f8d7da;color:#721c24'>{escaped}</span>")
+                parts.append(
+                    f"<span style='background:#f8d7da;color:#721c24'>{escaped}</span>"
+                )
             elif line.startswith("@@"):
-                parts.append(f"<span style='color:#0d6efd;font-weight:bold'>{escaped}</span>")
+                parts.append(
+                    f"<span style='color:#0d6efd;font-weight:bold'>{escaped}</span>"
+                )
             else:
                 parts.append(escaped)
         return "\n".join(parts)
@@ -1680,7 +1793,8 @@ def _action_refine_prompt(params: dict) -> str:
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=0.4,
-            max_tokens=THINKING_BUDGET_TOKENS + 4000,  # think block + proposed prompt text + rationale
+            max_tokens=THINKING_BUDGET_TOKENS
+            + 4000,  # think block + proposed prompt text + rationale
             json_response=True,
             no_think=False,
             timeout=REASONING_TIMEOUT,
@@ -1699,12 +1813,15 @@ def _action_refine_prompt(params: dict) -> str:
     # Guard: format-string safety — detect unescaped JSON braces in proposed_text.
     # JSON literals like {"key":"..."} must be escaped as {{"key":"..."}} in format templates.
     # An unescaped {word} that isn't a known placeholder would crash str.format() with KeyError.
-    _original_placeholders = set(re.findall(r'\{(\w+)\}', current_text))
-    _proposed_new = set(re.findall(r'\{(\w+)\}', proposed_text)) - _original_placeholders
+    _original_placeholders = set(re.findall(r"\{(\w+)\}", current_text))
+    _proposed_new = (
+        set(re.findall(r"\{(\w+)\}", proposed_text)) - _original_placeholders
+    )
     if _proposed_new:
         logger.warning(
             "refine_prompt: proposed text for %s contains unescaped braces: %s — rejecting",
-            prompt_name, _proposed_new,
+            prompt_name,
+            _proposed_new,
         )
         return (
             f"refine_prompt: proposed text contains unescaped brace placeholders {_proposed_new} "
@@ -1741,7 +1858,8 @@ def _action_refine_prompt(params: dict) -> str:
                 api_url=REASONING_API_URL,
                 api_key=REASONING_API_KEY,
                 temperature=0.3,
-                max_tokens=THINKING_BUDGET_TOKENS + 4000,  # retry — same budget as initial call
+                max_tokens=THINKING_BUDGET_TOKENS
+                + 4000,  # retry — same budget as initial call
                 json_response=True,
                 no_think=False,
                 timeout=REASONING_TIMEOUT,
@@ -1827,9 +1945,7 @@ def handle_proposal_command(message: str, user_code: str) -> str | None:
         return "\n".join(lines)
 
     # ── Approve ──
-    m = re.search(
-        r"(accepte?|approu?ve?)\s+(la\s+proposition\s+)?([a-f0-9]{6,8})\b", msg
-    )
+    m = re.search(r"(accepte?|approu?ve?)\s+la\s+proposition\s+([a-f0-9]{6,8})\b", msg)
     if m:
         if user_code not in USER_ADMINS:
             return "⛔ Seul un administrateur peut approuver une proposition de prompt."
@@ -1842,13 +1958,18 @@ def handle_proposal_command(message: str, user_code: str) -> str | None:
             return "Aucune proposition de prompt en attente."
         lines = ["ID manquant. Propositions en attente :"]
         for p in proposals:
-            lines.append(f"- `{p['id']}` — **{p['prompt_name']}** : {p['rationale'][:80]}")
+            lines.append(
+                f"- `{p['id']}` — **{p['prompt_name']}** : {p['rationale'][:80]}"
+            )
         lines.append("\nDis « accepte la proposition [id] ».")
         return "\n".join(lines)
 
     # ── Reject ──
     m = re.search(
         r"(rejette?|refu?se?|reject)\s+(la\s+proposition\s+)?([a-f0-9]{6,8})\b", msg
+    )
+    m = re.search(
+        r"(rejette?|refu?se?|reject)\s+la\s+proposition\s+([a-f0-9]{6,8})\b", msg
     )
     if m:
         if user_code not in USER_ADMINS:
@@ -1862,7 +1983,9 @@ def handle_proposal_command(message: str, user_code: str) -> str | None:
             return "Aucune proposition de prompt en attente."
         lines = ["ID manquant. Propositions en attente :"]
         for p in proposals:
-            lines.append(f"- `{p['id']}` — **{p['prompt_name']}** : {p['rationale'][:80]}")
+            lines.append(
+                f"- `{p['id']}` — **{p['prompt_name']}** : {p['rationale'][:80]}"
+            )
         lines.append("\nDis « rejette la proposition [id] ».")
         return "\n".join(lines)
 
@@ -1877,12 +2000,17 @@ def handle_proposal_command(message: str, user_code: str) -> str | None:
         if not found:
             return f"Proposition `{pid}` introuvable."
         import difflib as _difflib
+
         cur = found["current_text"]
         prop = found["proposed_text"]
         diff_lines = list(
             _difflib.unified_diff(
-                cur.splitlines(), prop.splitlines(),
-                fromfile="actuel", tofile="proposé", lineterm="", n=3,
+                cur.splitlines(),
+                prop.splitlines(),
+                fromfile="actuel",
+                tofile="proposé",
+                lineterm="",
+                n=3,
             )
         )
         diff_block = "\n".join(diff_lines) if diff_lines else "(aucune différence)"
@@ -2215,7 +2343,7 @@ def _build_review_context(
         # Recent proposal history for this prompt (last 3)
         all_proposals = _load_proposals()
         recent = [
-            f"{p.get('status','?')} le {p.get('created_at','?')[:10]}"
+            f"{p.get('status', '?')} le {p.get('created_at', '?')[:10]}"
             for p in all_proposals
             if p.get("prompt_name") == prompt_name
         ][-3:]
@@ -2273,7 +2401,9 @@ async def _llm_review_before_action(
     Returns (should_execute, reason).
     Fail-open: if the review call fails, the action is allowed.
     """
-    context_str, criteria_str = _build_review_context(action, global_ctx, user_ctx, params)
+    context_str, criteria_str = _build_review_context(
+        action, global_ctx, user_ctx, params
+    )
 
     steps_summary = (
         "; ".join(f"{s['action']}→{s['outcome'][:60]}" for s in previous_steps)
@@ -2298,7 +2428,8 @@ async def _llm_review_before_action(
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=0.1,
-            max_tokens=THINKING_BUDGET_TOKENS + 300,  # think block + JSON court (execute + reason)
+            max_tokens=THINKING_BUDGET_TOKENS
+            + 300,  # think block + JSON court (execute + reason)
             json_response=True,
             no_think=False,  # jugement contextuel — thinking améliore la qualité
             timeout=30.0,
@@ -2308,7 +2439,9 @@ async def _llm_review_before_action(
         reason = result.get("reason", "")
         return execute, reason
     except Exception as exc:
-        logger.warning("Action self-review failed (%s) — allowing action by default", exc)
+        logger.warning(
+            "Action self-review failed (%s) — allowing action by default", exc
+        )
         return True, "review failed — defaulting to execute"
 
 
@@ -2338,7 +2471,8 @@ def _run_chain_step(
     if action not in allowed_actions:
         logger.warning(
             "%s: invalid action %r (not in allowed set) — defaulting to nothing",
-            phase_label, action,
+            phase_label,
+            action,
         )
         action = "nothing"
         params = {"reason": f"invalid action for this phase: {result.get('action')}"}
@@ -2346,7 +2480,8 @@ def _run_chain_step(
     # Guard 2: detect exact duplicate to prevent infinite loops
     _sig = json.dumps({"action": action, "params": params}, sort_keys=True)
     if any(
-        json.dumps({"action": s["action"], "params": s["params"]}, sort_keys=True) == _sig
+        json.dumps({"action": s["action"], "params": s["params"]}, sort_keys=True)
+        == _sig
         for s in steps
     ):
         logger.info("%s: duplicate action=%s — stopping chain", phase_label, action)
@@ -2378,16 +2513,20 @@ async def run_self_reflection() -> dict:
     # ── Phase 1: global self-state ─────────────────────────────────────────
     logger.info("--- Phase 1: global self-state ---")
     for i in range(MAX_CHAIN_ITERATIONS):
-        result = await _call_global_reflection_llm(global_ctx, previous_steps=global_steps)
+        result = await _call_global_reflection_llm(
+            global_ctx, previous_steps=global_steps
+        )
 
         if result is None:
             logger.warning("Global reflection LLM failed at step %d — stopping", i + 1)
             break
 
         focus, action, reason, params, stop = _run_chain_step(
-            result, global_steps, _GLOBAL_ACTIONS, f"P1-step{i+1}"
+            result, global_steps, _GLOBAL_ACTIONS, f"P1-step{i + 1}"
         )
-        params.setdefault("reason", reason)  # forward top-level reason into _action_nothing
+        params.setdefault(
+            "reason", reason
+        )  # forward top-level reason into _action_nothing
 
         if action in _REVIEW_REQUIRED_ACTIONS:
             approved, rev_reason = await _llm_review_before_action(
@@ -2411,7 +2550,13 @@ async def run_self_reflection() -> dict:
             "outcome": outcome,
         }
         global_steps.append(step)
-        logger.info("P1 step %d/%d: action=%s outcome=%s", i + 1, MAX_CHAIN_ITERATIONS, action, outcome)
+        logger.info(
+            "P1 step %d/%d: action=%s outcome=%s",
+            i + 1,
+            MAX_CHAIN_ITERATIONS,
+            action,
+            outcome,
+        )
 
         if stop or action == "nothing":
             break
@@ -2423,32 +2568,43 @@ async def run_self_reflection() -> dict:
     for user_code in USER_CODES:
         user_ctx = gather_user_context(user_code)
         user_steps: list[dict] = []
-        _failed_actions: set[str] = set()  # actions that hit a system constraint this cycle
+        _failed_actions: set[str] = (
+            set()
+        )  # actions that hit a system constraint this cycle
         logger.info("--- User: %s (%s) ---", user_code, user_ctx["user_name"])
 
         for i in range(MAX_CHAIN_ITERATIONS):
-            result = await _call_user_reflection_llm(global_ctx, user_ctx, previous_steps=user_steps)
+            result = await _call_user_reflection_llm(
+                global_ctx, user_ctx, previous_steps=user_steps
+            )
 
             if result is None:
                 logger.warning(
                     "User reflection LLM failed at step %d for %s — stopping",
-                    i + 1, user_code,
+                    i + 1,
+                    user_code,
                 )
                 break
 
             ufocus, action, reason, params, stop = _run_chain_step(
-                result, user_steps, _USER_ACTIONS, f"P2-{user_code}-step{i+1}"
+                result, user_steps, _USER_ACTIONS, f"P2-{user_code}-step{i + 1}"
             )
             if not focus:
                 focus = ufocus
 
-            params.setdefault("reason", reason)  # forward top-level reason into _action_nothing
+            params.setdefault(
+                "reason", reason
+            )  # forward top-level reason into _action_nothing
 
             # Inject user_code into params for all user-scoped actions so the
             # LLM doesn't need to carry it reliably across iterations.
             _user_scoped = {
-                "correct_profile", "store_insight", "queue_push",
-                "send_notification", "ask_user", "consolidate_memory",
+                "correct_profile",
+                "store_insight",
+                "queue_push",
+                "send_notification",
+                "ask_user",
+                "consolidate_memory",
                 "update_trade_threshold",
             }
             if action in _user_scoped and not params.get("user_code"):
@@ -2458,10 +2614,15 @@ async def run_self_reflection() -> dict:
             if action in _failed_actions:
                 logger.info(
                     "P2 %s step %d/%d: action=%s previously failed — skipping to nothing",
-                    user_code, i + 1, MAX_CHAIN_ITERATIONS, action,
+                    user_code,
+                    i + 1,
+                    MAX_CHAIN_ITERATIONS,
+                    action,
                 )
                 action = "nothing"
-                params = {"reason": f"previous {action} hit a system constraint — not retrying"}
+                params = {
+                    "reason": f"previous {action} hit a system constraint — not retrying"
+                }
 
             if action in _REVIEW_REQUIRED_ACTIONS:
                 approved, rev_reason = await _llm_review_before_action(
@@ -2469,7 +2630,10 @@ async def run_self_reflection() -> dict:
                 )
                 if not approved:
                     logger.info(
-                        "P2 %s self-review rejected %s: %s", user_code, action, rev_reason
+                        "P2 %s self-review rejected %s: %s",
+                        user_code,
+                        action,
+                        rev_reason,
                     )
                     action = "nothing"
                     params = {"reason": f"self-review: {rev_reason}"}
@@ -2479,10 +2643,9 @@ async def run_self_reflection() -> dict:
 
             # Detect system-constraint failures: outcome format is "action: error"
             # (no "[user_code]" bracket), distinct from success "action [user_code]: ..."
-            _looks_like_error = (
-                outcome.startswith(f"{action}:")
-                and not outcome.startswith(f"{action} [")
-            )
+            _looks_like_error = outcome.startswith(
+                f"{action}:"
+            ) and not outcome.startswith(f"{action} [")
             if _looks_like_error and action != "nothing":
                 _failed_actions.add(action)
 
@@ -2499,7 +2662,11 @@ async def run_self_reflection() -> dict:
             all_user_steps.append(step)
             logger.info(
                 "P2 %s step %d/%d: action=%s outcome=%s",
-                user_code, i + 1, MAX_CHAIN_ITERATIONS, action, outcome,
+                user_code,
+                i + 1,
+                MAX_CHAIN_ITERATIONS,
+                action,
+                outcome,
             )
 
             if stop or action == "nothing":

@@ -31,6 +31,7 @@ from llm_router import RouterResult
 
 logger = get_logger("jarvis-embed-router")
 
+
 EMBED_ROUTER_ENABLED: bool = os.getenv("EMBED_ROUTER", "yes").lower() != "no"
 
 # Seuil minimum de similarité cosinus pour accepter un intent
@@ -38,37 +39,6 @@ EMBED_ROUTE_THRESHOLD: float = 0.74
 
 # Si les deux meilleurs intents sont à moins de cette marge, c'est ambigu → LLM
 AMBIGUITY_MARGIN: float = 0.06
-
-# ── Small talk whitelist ───────────────────────────────────────────────────────
-# Acquiescements purs : aucun contenu informationnel, le LLM n'a besoin que de
-# l'historique de conversation. Détectés dans chat.py AVANT le keyword dispatch
-# (step 1) pour bypasser les lectures Redis inutiles.
-# Critères bloquants appliqués par is_small_talk() : "?" présent, longueur > 50.
-# Garde calendrier : is_small_talk() doit être appelé uniquement s'il n'y a PAS
-# d'action calendrier en attente (oui/non peuvent être des confirmations).
-SMALL_TALK_EXACT: frozenset[str] = frozenset({
-    "merci", "merci !", "merci beaucoup", "super merci", "merci bien",
-    "parfait", "c'est parfait", "top", "génial", "excellent", "nickel",
-    "super", "très bien", "bien", "c'est bon", "c'est bien",
-    "ok", "okay", "oki", "d'accord", "ok ok",
-    "oui oui", "non non",
-    "vas-y", "go", "continue", "allez", "fais-le", "fais",
-    "bonne idée", "oui bonne idée", "oui c'est ça",
-    "ah ok", "ah je vois", "ah d'accord", "ah oui",
-    "je vois", "j'ai compris", "compris", "reçu",
-    "haha", "lol", "😄", "👍",
-})
-
-
-def is_small_talk(message: str) -> bool:
-    """
-    Retourne True si le message est un acquiescement pur (aucun contenu).
-    NE PAS appeler quand une action calendrier est en attente : oui/non/ok
-    peuvent être des confirmations d'événement.
-    """
-    if len(message) > 50 or "?" in message:
-        return False
-    return message.lower().rstrip(" !.,") in SMALL_TALK_EXACT
 
 # ── Phrases-exemples par intent (toutes en français) ─────────────────────────
 #
@@ -149,6 +119,9 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
     ],
     # ── Recherche web / actualités ───────────────────────────────────────────
     "web": [
+        "les news du jour",
+        "cours actuel du pétrole",
+        "qui a gagné le match hier",
         "cherche sur internet",
         "cherche sur le net",
         "dernières actualités",
@@ -171,22 +144,6 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "dans mes documents",
         "RAG",
         "rag",
-    ],
-    # ── Raisonnement / mode expert ───────────────────────────────────────────
-    "reasoning": [
-        "mode expert",
-        "analyse approfondie",
-        "réfléchis en profondeur",
-        "réfléchis bien",
-        "raisonne sur",
-        "raisonne étape par étape",
-        "raisonne par étape",
-        "pense par étape",
-        "debug",
-        "analyse complète",
-        "réflexion approfondie",
-        "donne-moi ton analyse complète",
-        "prends le temps de réfléchir",
     ],
     # ── Portefeuille boursier ────────────────────────────────────────────────
     "portfolio": [
@@ -219,12 +176,139 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "rejette la proposition",
         "montre la proposition",
         "approuve la proposition de prompt",
+        "parle-moi de toi",
+        "ton identité",
     ],
 }
 
 # ── Cache des embeddings d'exemples (initialisé une seule fois) ───────────────
 _cache_lock = threading.Lock()
 _examples_vectors: dict[str, np.ndarray] | None = None  # intent → (N, D) matrix
+
+
+_REASON_EXACT = {
+    "mode expert",
+    "analyse approfondie",
+    "analyse complète",
+    "analyse détaillée",
+    "réflexion approfondie",
+    "réfléchis en profondeur",
+    "réfléchis bien",
+    "prends le temps de réfléchir",
+    "prends le temps d'analyser",
+    "debug complet",
+}
+
+_REASON_REGEX = re.compile(
+    r"\braisonne\b|\bréfléchis\b|\bétape par étape\b|\bpas à pas\b|\ben profondeur\b",
+    re.IGNORECASE,
+)
+
+# ── Small talk — acquiescements purs (≤ 50 chars, pas de ?, pas de contenu) ──
+# Bypasse profil, mémoire et opinions : le LLM n'a besoin que de l'historique.
+# WHITELIST conservative : uniquement mots qui n'apportent aucun fait nouveau.
+# Critères bloquants : présence de "?" OU longueur > 50 chars → jamais small talk.
+_SMALL_TALK_EXACT = {
+    "merci",
+    "merci !",
+    "merci beaucoup",
+    "super merci",
+    "merci bien",
+    "parfait",
+    "c'est parfait",
+    "top",
+    "génial",
+    "excellent",
+    "nickel",
+    "super",
+    "très bien",
+    "bien",
+    "c'est bon",
+    "c'est bien",
+    "ok",
+    "okay",
+    "oki",
+    "d'accord",
+    "ok ok",
+    "oui oui",
+    "non non",
+    "vas-y",
+    "go",
+    "continue",
+    "allez",
+    "fais-le",
+    "fais",
+    "bonne idée",
+    "oui bonne idée",
+    "oui c'est ça",
+    "ah ok",
+    "ah je vois",
+    "ah d'accord",
+    "ah oui",
+    "je vois",
+    "j'ai compris",
+    "compris",
+    "reçu",
+    "haha",
+    "lol",
+    "😄",
+    "👍",
+    # Salutations pures (ajoutées)
+    "bonjour",
+    "salut",
+    "salut jarvis",
+    "hello",
+    "hey",
+    "yo",
+    "coucou",
+    "bonsoir",
+    "hi",
+    "hola",
+    "re",
+    "rebonjour",
+}
+
+# Briefing exact (avant l'embedding, ces formulations sont sans ambiguïté)
+_BRIEFING_EXACT = {
+    "briefing",
+    "mon briefing",
+    "briefing matinal",
+    "briefing du matin",
+    "lance le briefing",
+    "le briefing",
+    "fais le briefing",
+}
+
+# Liants minuscules dans les noms de villes françaises
+_FR_CITY_LIANTS = r"(?:de|du|des|le|la|les|aux|en|sur|sous|sainte?|saint)"
+
+# Capture une ville après préposition, en préservant les noms composés :
+# La Rochelle · Aix-en-Provence · Saint-Germain-en-Laye · Boulogne-sur-Mer
+_CITY_AFTER_PREP_RE = re.compile(
+    r"\b(?:à|au|aux|pour|sur|vers|en)\s+"
+    r"("
+    r"[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜÇ][\wÀ-ÿ'\-]*"
+    r"(?:[-\s]+(?:" + _FR_CITY_LIANTS + r"[-\s]+)?"
+    r"[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜÇ]?[\wÀ-ÿ'\-]+){0,3}"
+    r")"
+)
+
+# Faux positifs fréquents après préposition (jours, moments)
+_TEMPORAL_WORDS = {
+    "aujourd'hui",
+    "demain",
+    "hier",
+    "lundi",
+    "mardi",
+    "mercredi",
+    "jeudi",
+    "vendredi",
+    "samedi",
+    "dimanche",
+    "matin",
+    "soir",
+    "midi",
+}
 
 
 def preload_embed_router() -> None:
@@ -259,20 +343,41 @@ def _load_example_vectors() -> dict[str, np.ndarray]:
 
 
 def _extract_weather_location(message: str) -> str:
-    """Tente d'extraire une ville depuis un message météo."""
+    """Extrait une ville depuis un message météo.
+
+    Stratégie :
+      1. Après préposition (à|au|aux|pour|sur|vers|en), capture la séquence
+         capitalisée qui suit — gère les noms composés français.
+         Couverts : 'Paris', 'La Rochelle', 'Aix-en-Provence',
+                    'Saint-Germain-en-Laye', 'Boulogne-sur-Mer'.
+      2. Fallback : nettoyage + premier token significatif — pour les
+         messages en minuscules ou sans préposition ('météo paris').
+
+    Limitations acceptées (cas rares → Hermes rattrape) :
+      - 'météo Le Havre' (pas de préposition, minuscule liant) → 'Havre'
+      - 'météo à Lyon et Paris' (multi-villes) → 'Lyon' seulement
+    """
+    # ── 1. Séquence capitalisée après préposition ──
+    m = _CITY_AFTER_PREP_RE.search(message)
+    if m:
+        city = m.group(1).strip(" ,;:!?.")
+        first_word = city.split()[0].lower().rstrip("-")
+        if first_word not in _TEMPORAL_WORDS:
+            return city
+
+    # ── 2. Fallback (minuscules, villes simples) ──
     msg = message.lower()
-    # Retire les mots déclencheurs météo et temporels
     clean = re.sub(
         r"\b(météo|meteo|temps|température|temperature|prévisions?|pluie|"
         r"soleil|chaud|froid|vent|neige|orage|nuages?|brouillard|"
-        r"aujourd'hui|demain|ce soir|ce matin|ce week-?end|cette semaine|"
+        r"aujourd'hui|demain|hier|ce soir|ce matin|ce week-?end|cette semaine|"
         r"lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|"
-        r"là|la|dehors|extérieur|il fait|quel temps|parapluie)\b",
+        r"dehors|extérieur|il fait|quel temps|parapluie|"
+        r"à|au|aux|pour|sur|vers|en|de|du|des)\b",
         " ",
         msg,
         flags=re.IGNORECASE,
     ).strip()
-    # Les mots restants de > 2 caractères sont candidats ville
     words = [w.strip("?,!.") for w in clean.split() if len(w.strip("?,!.")) > 2]
     return words[0].capitalize() if words else ""
 
@@ -354,19 +459,10 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
         logger.debug("Embed router: URL détectée → memory")
         return _build_result("memory", msg, google_available)
 
-    # Requête "mode expert" / "analyse approfondie" → reasoning direct (no_think=False)
-    # Retourne use_reasoning=True sans passer par le LLM router.
-    reasoning_triggers = [
-        "mode expert",
-        "analyse approfondie",
-        "réfléchis en profondeur",
-        "raisonne",
-        "debug complet",
-        "analyse complète",
-    ]
-    if any(t in msg_lower for t in reasoning_triggers):
-        logger.debug("Embed router: reasoning trigger → reasoning direct")
-        return _build_result("reasoning", msg, google_available)
+    # Détection reasoning (flag, pas intent)
+    force_reasoning = bool(
+        any(t in msg_lower for t in _REASON_EXACT) or _REASON_REGEX.search(msg_lower)
+    )
 
     # Commandes de gestion des propositions de prompt → self direct
     _proposal_explicit = (
@@ -396,17 +492,13 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
         logger.debug("Embed router: proposal trigger → self direct")
         return _build_result("self", msg, google_available)
 
-    # Briefing exact (avant l'embedding, ces formulations sont sans ambiguïté)
-    briefing_exact = {
-        "briefing",
-        "mon briefing",
-        "briefing matinal",
-        "briefing du matin",
-        "lance le briefing",
-        "le briefing",
-        "fais le briefing",
-    }
-    if msg_lower.rstrip("! ?,") in briefing_exact:
+    if len(msg) <= 50 and "?" not in msg:
+        _norm = msg_lower.rstrip(" !.,")
+        if _norm in _SMALL_TALK_EXACT:
+            logger.debug("Embed router: small talk → no context injection")
+            return _build_result("small_talk", msg, google_available)
+
+    if msg_lower.rstrip("! ?,") in _BRIEFING_EXACT:
         logger.debug("Embed router: briefing exact → briefing")
         return _build_result("briefing", msg, google_available)
 
@@ -455,7 +547,10 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
             best_intent,
             best_score,
         )
-        return _build_result(best_intent, msg, google_available)
+        result = _build_result(best_intent, msg, google_available)
+        if force_reasoning:
+            result.use_reasoning = True
+        return result
 
     except Exception as exc:
         logger.warning("Embed router: erreur (%s) → LLM router", exc)
@@ -465,8 +560,7 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
 def _build_result(intent: str, message: str, google_available: bool) -> RouterResult:
     """Construit un RouterResult pour l'intent classifié."""
     return RouterResult(
-        use_memory=intent
-        in ("memory", "reasoning"),  # reasoning inclut le contexte mémoire
+        use_memory=intent == "memory",
         use_rag=intent == "rag",
         use_web=intent == "web",
         use_weather=intent == "weather",
@@ -475,8 +569,7 @@ def _build_result(intent: str, message: str, google_available: bool) -> RouterRe
         use_briefing=intent == "briefing",
         use_self=intent == "self",
         use_portfolio=intent == "portfolio",
-        use_reasoning=intent == "reasoning",
-
+        use_small_talk=intent == "small_talk",
         gmail_query=_extract_gmail_query(message) if intent == "gmail" else "",
         calendar_days=_extract_calendar_days(message) if intent == "calendar" else 7,
         weather_location=_extract_weather_location(message)

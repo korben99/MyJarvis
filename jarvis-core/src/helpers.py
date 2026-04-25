@@ -76,10 +76,8 @@ from config import (
     USERS,
     tokens_param,
 )
+from llm_local import call_llm_local, call_llm_local_async
 from qdrant_client import QdrantClient
-
-if LLM_LOCAL:
-    from llm_local import call_llm_local, call_llm_local_async
 
 _LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL, REASONING_MODEL} if LLM_LOCAL else set()
 
@@ -497,7 +495,7 @@ def extract_llm_json(text: str) -> dict:
     #   action: "nothing"  →  "action": "nothing"
     # Only quotes words preceded by {, comma, or newline (never inside string values).
 
-    _unquoted_key_re = re.compile(r'([{,\n]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:(?!\s*/))')
+    _unquoted_key_re = re.compile(r"([{,\n]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:(?!\s*/))")
 
     matches = re.findall(r"\{.*\}", text, re.DOTALL)
     for candidate in reversed(matches):  # try biggest first

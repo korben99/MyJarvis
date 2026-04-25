@@ -1,5 +1,5 @@
 """
-PROJECT JARVIS v9
+PROJECT JARVIS v8
 Jarvis Memory System
 ====================
 - Working memory: Redis (current session, mood, active context)
@@ -190,10 +190,14 @@ def get_emotional_state() -> dict:
         last_updated = state.get("last_updated")
         if last_updated:
             try:
-                elapsed_h = (
-                    datetime.now(timezone.utc) - datetime.fromisoformat(last_updated)
-                ).total_seconds() / 3600
-
+                elapsed_h = max(
+                    0.0,
+                    (
+                        datetime.now(timezone.utc)
+                        - datetime.fromisoformat(last_updated)
+                    ).total_seconds()
+                    / 3600,
+                )
                 changed = False
 
                 # concern → decay toward 0.0
@@ -377,7 +381,7 @@ def _normalize_profile_keys_batch(
             continue
         unresolved.append(new_key)
 
-    if not unresolved or not ROUTER_MODEL:
+    if not unresolved:
         return result
 
     # Stage 2: group unresolved by prefix family, one LLM call per group
@@ -504,9 +508,6 @@ def _normalize_profile_key(
             fast,
         )
         return fast
-
-    if not ROUTER_MODEL:
-        return None
 
     # Stage 2: category-aware LLM on reduced candidate set
     candidates = _candidate_keys(new_key, existing_keys)
@@ -1625,9 +1626,13 @@ def build_memory_context(
         _last = emotion.get("last_updated")
         if _last:
             try:
-                _eh = (
-                    datetime.now(timezone.utc) - datetime.fromisoformat(_last)
-                ).total_seconds() / 3600
+                _eh = max(
+                    0.0,
+                    (
+                        datetime.now(timezone.utc) - datetime.fromisoformat(_last)
+                    ).total_seconds()
+                    / 3600,
+                )
                 _c = emotion.get("concern", 0.0)
                 if _c > 0:
                     emotion["concern"] = max(
@@ -1642,9 +1647,23 @@ def build_memory_context(
                     )
             except (ValueError, TypeError):
                 pass
-    if emotion.get("mood") != "neutral":
+    # Injection etat emotionnel
+    _mood = emotion.get("mood", "neutral")
+    _concern = emotion.get("concern", 0.0)
+    _energy = emotion.get("energy", 0.7)
+    _emotion_lines = []
+    if _mood != "neutral":
+        _emotion_lines.append(f"Humeur : {_mood}")
+    if _concern > 0.3:
+        _emotion_lines.append(f"Préoccupation : {_concern:.1f}")
+    if abs(_energy - 0.7) > 0.15:
+        _energy_label = "élevée" if _energy > 0.7 else "basse"
+        _emotion_lines.append(f"Énergie : {_energy_label} ({_energy:.1f})")
+    if _emotion_lines:
         parts.append(
-            f"<etat_emotionnel>\nHumeur actuelle : {emotion['mood']}\n</etat_emotionnel>"
+            "<etat_emotionnel>\n"
+            + "\n".join(f"- {l}" for l in _emotion_lines)
+            + "\n</etat_emotionnel>"
         )
 
     # Self identity
@@ -1656,6 +1675,14 @@ def build_memory_context(
             + "\n".join(plines)
             + "\n</apprentissages_recents>"
         )
+
+    if self_mem.get("self_notes"):
+        recent_notes = self_mem["self_notes"][-3:]
+        _notes_lines = [f"- {n['text']}" for n in recent_notes if n.get("text")]
+        if _notes_lines:
+            parts.append(
+                "<notes_jarvis>\n" + "\n".join(_notes_lines) + "\n</notes_jarvis>"
+            )
 
     # User Timeline — served from pipeline cache hit [5]; fallback to Qdrant on miss
     if _timeline_cached:

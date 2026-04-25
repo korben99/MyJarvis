@@ -8,6 +8,7 @@ import asyncio
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import Optional
 
 from briefing import gather_briefing, get_stored_briefing, store_briefing
@@ -29,7 +30,7 @@ from config import (
     is_qwen3,
 )
 from deps import REDIS_CLIENT
-from embed_router import embed_route, is_small_talk
+from embed_router import embed_route
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from google_services import (
@@ -40,7 +41,13 @@ from google_services import (
     is_calendar_write,
     is_google_available,
 )
-from helpers import build_iso_dt, call_llm_async, filter_think_chunk, fmt_now_fr, get_logger
+from helpers import (
+    build_iso_dt,
+    call_llm_async,
+    filter_think_chunk,
+    fmt_now_fr,
+    get_logger,
+)
 from llm_client import describe_images, stream_openai
 from llm_router import llm_route
 from memory import (
@@ -82,16 +89,17 @@ _URL_RE = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]{5,}')
 # Factual patterns that strongly suggest external info is needed even when the
 # router classified the message as "memory" (conversational phrasing).
 _AUTO_WEB_RE = re.compile(
-    r'\bprix\b|\btarif\b|\bcombien\b|\bcoûte?\b'
-    r'|\bversion\b|\bmodèle\b'
-    r'|\bsorti\b|\bdisponible\b|\blancé\b'
-    r'|\bactuel\b|\bactuelle\b|\bactuellem?ent\b'
-    r'|\bdernier\b|\bdernière\b|\bnouveau\b|\bnouvelle\b'
-    r'|\bspecs?\b|\bcaractéristique\b'
-    r'|\bqui est\b|\bc\'est qui\b'
-    r'|\bcompar[e-]\b|\bregarde\b',
+    r"\bprix\b|\btarif\b|\bcombien\b|\bcoûte?\b"
+    r"|\bversion\b|\bmodèle\b"
+    r"|\bsorti\b|\bdisponible\b|\blancé\b"
+    r"|\bactuel\b|\bactuelle\b|\bactuellem?ent\b"
+    r"|\bdernier\b|\bdernière\b|\bnouveau\b|\bnouvelle\b"
+    r"|\bspecs?\b|\bcaractéristique\b"
+    r"|\bqui est\b|\bc\'est qui\b"
+    r"|\bcompar[e-]\b|\bregarde\b",
     re.IGNORECASE,
 )
+
 
 def _auto_web_needed(message: str, memory_chunks: list) -> bool:
     """True if the message looks factual but the context is thin.
@@ -107,6 +115,7 @@ def _auto_web_needed(message: str, memory_chunks: list) -> bool:
     if memory_chunks and any(m.get("score", 0) > 0.70 for m in memory_chunks):
         return False
     return bool(_AUTO_WEB_RE.search(message))
+
 
 # ── Request model ──────────────────────────────────────────────────────────────
 
@@ -140,6 +149,177 @@ async def _timed_thread(fn, *args, timeout: float = 15.0) -> list:
         return []
 
 
+async def _prefetched_or_empty(value) -> list:
+    """Retourne la valeur préchargée si disponible, sinon liste vide.
+
+    Remplace la closure _resolved_memory() qui était définie inline dans chat()
+    pour accéder à _prefetched_memory. Rend la coroutine compatible avec
+    asyncio.gather() sans fermeture sur des variables locales.
+    """
+    return value if value is not None else []
+
+
+# ── SSE streaming helpers ──────────────────────────────────────────────────────
+
+
+def _strip_sse_response(raw: str, started_in_think: bool) -> str:
+    """Retire le bloc de réflexion Qwen3 de la réponse brute accumulée.
+
+    Deux cas :
+    - started_in_think=True  : le template a injecté <think> dans le prompt,
+      l'output commence DANS le bloc (pas de tag ouvrant). On coupe à </think>.
+    - started_in_think=False : flux normal. On retire les blocs <think>…</think>
+      complets, puis tout <think> ouvert non fermé (troncature budget).
+    """
+    if started_in_think:
+        if "</think>" in raw:
+            return raw.split("</think>", 1)[1].strip()
+        # Truncation mid-reasoning : aucune réponse visible
+        return ""
+    # Flux normal (no_think ou modèle cloud)
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+    return re.sub(r"<think>.*$", "", cleaned, flags=re.DOTALL).strip()
+
+
+@dataclass
+class _SseCtx:
+    """Contexte transmis à _sse_stream() — regroupe toutes les variables de chat()
+    nécessaires au générateur SSE. Évite une fermeture sur les locals de chat()."""
+
+    messages: list
+    use_model: str
+    api_url: str
+    api_key: str
+    timeout: float
+    no_think: bool
+    session_id: str
+    t0: float  # timer global requête (pour les logs TTFT)
+    start: float  # timer démarrage appel LLM (pour duration_ms)
+    rag_chunks: list
+    safe_web: list
+    user_code: str
+    raw_user_content: str
+    original_message: str
+
+
+async def _sse_stream(ctx: _SseCtx):
+    """Générateur SSE pour le streaming Qwen3/cloud.
+
+    Extrait de la closure sse() qui était définie inline dans chat().
+    Reçoit toutes ses dépendances via _SseCtx — aucune fermeture sur chat().
+
+    Comportement :
+    - Filtre les blocs <think> en temps réel (filter_think_chunk).
+    - Envoie les fragments de réflexion via {"think": …} pour l'iOS.
+    - Sauvegarde la réponse nettoyée dans Redis (historique) en fin de flux.
+    - Gère la déconnexion client (CancelledError) : sauvegarde partielle.
+    """
+    full_parts: list[str] = []
+    try:
+        # With Qwen3 local + enable_thinking=True, apply_chat_template appends
+        # <think>\n to the prompt (not to the output).  The model's first output
+        # tokens are already INSIDE the think block — no opening <think> tag ever
+        # arrives in the stream.  Starting in_think=True ensures filter_think_chunk
+        # correctly routes those tokens as {"think":…} SSE events to the iOS banner.
+        # For no_think=True or remote models, in_think stays False (normal path).
+        in_think = LLM_LOCAL and is_qwen3(ctx.use_model) and not ctx.no_think
+        in_think_started = (
+            in_think  # snapshot avant la boucle (in_think mute dans le loop)
+        )
+        first_chunk = True
+
+        async for chunk in stream_openai(
+            ctx.messages,
+            ctx.use_model,
+            ctx.api_url,
+            ctx.api_key,
+            ctx.timeout,
+            no_think=ctx.no_think,
+            session_id=ctx.session_id,
+            max_tokens=4000 if not ctx.no_think else 1500,
+        ):
+            full_parts.append(chunk)
+
+            # ── Think filtering ─────────────────────────────────────────────
+            # filter_think_chunk splits each chunk into visible text and
+            # think-block content. Think fragments are forwarded as a
+            # separate SSE event so the iOS client can display them as a
+            # live ticker without mixing them into the chat bubble.
+            clean, think_frag, in_think = filter_think_chunk(chunk, in_think)
+
+            if think_frag:
+                yield f"data: {json.dumps({'think': think_frag})}\n\n"
+
+            if first_chunk:
+                clean = clean.lstrip("\n")
+                if clean:
+                    logger.debug(
+                        "[TTFT] first visible token yielded — %.3fs since request",
+                        time.time() - ctx.t0,
+                    )
+                    first_chunk = False
+
+            if clean:
+                yield f"data: {json.dumps({'content': clean})}\n\n"
+
+        # Strip thinking block before saving to Redis.
+        # in_think_started=True → output began INSIDE think block (no opening tag).
+        full_clean = _strip_sse_response("".join(full_parts), in_think_started)
+        if full_clean:
+            append_conversation_message(
+                ctx.user_code, ctx.session_id, "user", ctx.raw_user_content
+            )
+            append_conversation_message(
+                ctx.user_code, ctx.session_id, "assistant", full_clean
+            )
+        ms = int((time.time() - ctx.start) * 1000)
+        _done_payload = json.dumps(
+            {
+                "done": True,
+                "model": ctx.use_model,
+                "duration_ms": ms,
+                "rag_sources": [
+                    {"source": c["source"], "score": c["score"]} for c in ctx.rag_chunks
+                ],
+                "web_sources": [
+                    {"title": w["title"], "url": w["url"]} for w in ctx.safe_web
+                ],
+            }
+        )
+        yield f"data: {_done_payload}\n\n"
+        asyncio.create_task(
+            post_analysis(
+                ctx.session_id, ctx.user_code, ctx.original_message, full_clean
+            )
+        )
+    except asyncio.CancelledError:
+        logger.info("Client disconnected")
+        if full_parts:
+            try:
+                full_clean = _strip_sse_response("".join(full_parts), in_think_started)
+                if full_clean:
+                    append_conversation_message(
+                        ctx.user_code, ctx.session_id, "user", ctx.raw_user_content
+                    )
+                    append_conversation_message(
+                        ctx.user_code, ctx.session_id, "assistant", full_clean
+                    )
+                    asyncio.create_task(
+                        post_analysis(
+                            ctx.session_id,
+                            ctx.user_code,
+                            ctx.original_message,
+                            full_clean,
+                        )
+                    )
+                    logger.info(
+                        "Saved response to Redis after disconnect (%d chars)",
+                        len(full_clean),
+                    )
+            except Exception as _save_err:
+                logger.warning("Failed to save on disconnect: %s", _save_err)
+
+
 # ── Pipeline helpers ───────────────────────────────────────────────────────────
 
 _OPENWEBUI_KEYWORDS = (
@@ -153,6 +333,25 @@ _OPENWEBUI_KEYWORDS = (
     "followup question",
     "questions de suivi",
 )
+
+
+async def _owui_passthrough_stream(
+    message: str, model: str, api_url: str, api_key: str
+):
+    """Générateur SSE pour les requêtes système Open WebUI (titres, suggestions…).
+
+    Extrait de la closure _passthrough() qui était définie inline dans
+    _openwebui_passthrough(). Toutes les dépendances sont passées explicitement.
+    """
+    async for chunk in stream_openai(
+        [{"role": "user", "content": message}],
+        model,
+        api_url,
+        api_key,
+        no_think=True,
+    ):
+        yield f"data: {json.dumps({'content': chunk})}\n\n"
+    yield f"data: {json.dumps({'done': True})}\n\n"
 
 
 def _openwebui_passthrough(req: ChatRequest) -> "StreamingResponse | dict | None":
@@ -169,20 +368,24 @@ def _openwebui_passthrough(req: ChatRequest) -> "StreamingResponse | dict | None
     _owui_api_url = ROUTER_API_URL if ROUTER_MODEL else PRIMARY_API_URL
     _owui_api_key = ROUTER_API_KEY if ROUTER_MODEL else PRIMARY_API_KEY
 
-    async def _passthrough():
-        async for chunk in stream_openai(
-            [{"role": "user", "content": req.message}],
-            _owui_model,
-            _owui_api_url,
-            _owui_api_key,
-            no_think=True,
-        ):
-            yield f"data: {json.dumps({'content': chunk})}\n\n"
-        yield f"data: {json.dumps({'done': True})}\n\n"
-
     if req.stream:
-        return StreamingResponse(_passthrough(), media_type="text/event-stream")
+        return StreamingResponse(
+            _owui_passthrough_stream(
+                req.message, _owui_model, _owui_api_url, _owui_api_key
+            ),
+            media_type="text/event-stream",
+        )
     return {"response": req.message, "session_id": req.session_id}
+
+
+async def _instant_stream(text: str, model: str):
+    """Générateur SSE minimal pour les réponses immédiates sans appel LLM.
+
+    Extrait de la closure _stream() qui était définie inline dans _instant_reply().
+    Toutes les dépendances sont passées explicitement.
+    """
+    yield f"data: {json.dumps({'content': text})}\n\n"
+    yield f"data: {json.dumps({'done': True, 'model': model, 'duration_ms': 0})}\n\n"
 
 
 def _instant_reply(
@@ -199,13 +402,10 @@ def _instant_reply(
     append_conversation_message(user_code, req.session_id, "assistant", text)
 
     if req.stream:
-        _text = text  # capture pour la closure
-
-        async def _stream():
-            yield f"data: {json.dumps({'content': _text})}\n\n"
-            yield f"data: {json.dumps({'done': True, 'model': model, 'duration_ms': 0})}\n\n"
-
-        return StreamingResponse(_stream(), media_type="text/event-stream")
+        return StreamingResponse(
+            _instant_stream(text, model),
+            media_type="text/event-stream",
+        )
 
     return {
         "response": text,
@@ -225,9 +425,8 @@ async def _handle_calendar_pending(
     (clé Redis jarvis:{user_code}:pending_calendar_action).
     Retourne None si le message n'est ni "confirme" ni "annule" → pipeline normal.
     """
-    words = set(req.message.lower().split())
-
-    if words & {"confirme"}:
+    msg_lower = req.message.lower().strip()
+    if re.match(r"^(oui[,\s]*)?(confirme[sz]?|ok|yes)\s*[!.]?$", msg_lower):
         pending = json.loads(pending_raw)
         REDIS_CLIENT.delete(f"jarvis:{user_code}:pending_calendar_action")
         try:
@@ -254,7 +453,7 @@ async def _handle_calendar_pending(
         )
         return _instant_reply(req, user_code, reply)
 
-    if words & {"non", "annule", "annuler"}:
+    if re.match(r"^(non[,\s]*)?(annule[r]?)\s*[!.]?$", msg_lower):
         REDIS_CLIENT.delete(f"jarvis:{user_code}:pending_calendar_action")
         return _instant_reply(
             req, user_code, "D'accord, j'annule. L'événement n'a pas été créé."
@@ -328,43 +527,6 @@ async def _handle_calendar_write(
         )
 
 
-async def _keyword_dispatch(
-    req: ChatRequest,
-    user_code: str,
-    google_available: bool,
-    pending_action: bytes | str | None,
-) -> "StreamingResponse | dict | None":
-    """
-    Fast-path keyword dispatch — runs before embedding/LLM router.
-    Handles unambiguous user actions that need no intent classification.
-
-    Order:
-      1. Pending calendar action (confirm / cancel an already-staged event)
-      2. Calendar write detection (only when no pending action — avoids overwrite)
-      3. Proposal management commands (montre / accepte / rejette)
-
-    `pending_action` is read once by the caller to avoid a double Redis round-trip.
-    Returns a response if an action was triggered, None to continue to routing.
-    """
-    # ── 1. Pending calendar action ───────────────────────────────────────────
-    if pending_action:
-        if (result := await _handle_calendar_pending(req, user_code, pending_action)) is not None:
-            return result
-        # Unrecognised word while a pending action exists → skip calendar write
-        # to avoid overwriting the staged event with a brand-new one.
-    else:
-        # ── 2. Calendar write (new event) ────────────────────────────────────
-        if (result := await _handle_calendar_write(req, user_code, google_available)) is not None:
-            return result
-
-    # ── 3. Proposal commands ─────────────────────────────────────────────────
-    proposal_resp = handle_proposal_command(req.message, user_code)
-    if proposal_resp is not None:
-        return _instant_reply(req, user_code, proposal_resp)
-
-    return None
-
-
 def _handle_proposal(
     req: ChatRequest,
     user_code: str,
@@ -414,7 +576,9 @@ async def chat(req: ChatRequest):
 
     # Timer starts here — before any processing — so all TTFT logs are accurate.
     _t0 = time.time()
-    logger.debug("[TTFT] request received — user=%s msg=%r", user_code, req.message[:60])
+    logger.debug(
+        "[TTFT] request received — user=%s msg=%r", user_code, req.message[:60]
+    )
 
     # Compute once — reused in embed router, LLM router, calendar write, context gather.
     _google_available = is_google_available(user_code)
@@ -425,31 +589,36 @@ async def chat(req: ChatRequest):
     if (result := _openwebui_passthrough(req)) is not None:
         return result
 
-    # Lire le pending calendar une seule fois — utilisé à la fois par le guard
-    # small talk et par _keyword_dispatch (évite un double aller-retour Redis).
-    _pending_action = REDIS_CLIENT.get(f"jarvis:{user_code}:pending_calendar_action")
-
-    # ── Small talk early detection ───────────────────────────────────────────
-    # Acquiescements purs : aucun contexte profil ni recall mémoire nécessaire.
-    # Guard : si une action calendrier est en attente, oui/non/ok peuvent être
-    # des confirmations → on laisse passer keyword dispatch en premier.
-    _use_small_talk = not _pending_action and is_small_talk(req.message)
-
     # ════════════════════════════════════════════════════════════════════════
     # STEP 1 — KEYWORD DISPATCH — fast paths, no LLM router cost
-    # Skipped entirely when small talk is detected.
+    # Checks keyword-triggered actions before any embedding or LLM call.
     # ════════════════════════════════════════════════════════════════════════
-    if not _use_small_talk:
-        if (result := await _keyword_dispatch(req, user_code, _google_available, _pending_action)) is not None:
+
+    # ── 1a. Pending calendar action: confirm or cancel ──────────────────────
+    # If a pending action exists and the user confirms/cancels → act and return.
+    # If the word is unrecognised → skip calendar write check (avoids overwriting
+    # the existing pending event with a brand new one).
+    _pending_raw = REDIS_CLIENT.get(f"jarvis:{user_code}:pending_calendar_action")
+    if _pending_raw:
+        if (
+            result := await _handle_calendar_pending(req, user_code, _pending_raw)
+        ) is not None:
+            return result
+        # Unrecognised word while pending → fall through to router, skip 1b.
+    else:
+        # ── 1b. Calendar write (keyword → LLM extraction, no router needed) ─
+        # Only checked when there is no pending action to avoid overwriting it.
+        if (
+            result := await _handle_calendar_write(req, user_code, _google_available)
+        ) is not None:
             return result
 
     # ════════════════════════════════════════════════════════════════════════
     # STEP 2 — EMBEDDING ROUTER — fast cosine-similarity intent classifier
     # ~2-5 ms. Skips the LLM router (~1.3 s) when confident.
     # Returns None when score is low or ambiguous → LLM router takes over.
-    # Skipped entirely when small talk is detected.
     # ════════════════════════════════════════════════════════════════════════
-    _embed_result = None if _use_small_talk else embed_route(req.message, google_available=_google_available)
+    _embed_result = embed_route(req.message, google_available=_google_available)
 
     # ════════════════════════════════════════════════════════════════════════
     # STEP 3 — LLM ROUTER + dynamic prefix + conversation history (parallel)
@@ -468,48 +637,68 @@ async def chat(req: ChatRequest):
         async_search_memory(user_code, req.message, 5)
     )
 
-    if _use_small_talk:
-        # Small talk — acquiescements purs : prefix minimal, pas de recall mémoire.
-        # _spec_mem_task vient d'être lancé mais est inutile ici.
-        _spec_mem_task.cancel()
-        tz = USER_TIMEZONES.get(user_code, "Europe/Paris")
-        _name_part = f" Tu parles avec {user_name}." if user_name else ""
-        dynamic_prefix = f"Date : {fmt_now_fr(tz)}.{_name_part}"
-        _self_mem = {}
-        hist = await asyncio.to_thread(get_conversation, user_code, req.session_id, _HIST_WINDOW)
-        _prefetched_memory = None
-        llm_result = None  # → tous les flags use_* à False en aval
-        logger.debug("[TTFT] small talk — prefix minimal, no memory — %.3fs", time.time() - _t0)
-
-    elif _embed_result is not None:
+    if _embed_result is not None:
         # Fast-path: no LLM router — load prefix, history, memory in parallel.
         # Opinions and tomorrow_suggestions are only useful for conversational intents.
         _rich_intent = bool(
-            _embed_result.use_memory or _embed_result.use_rag
-            or _embed_result.use_web or _embed_result.use_self
+            _embed_result.use_memory
+            or _embed_result.use_rag
+            or _embed_result.use_web
+            or _embed_result.use_self
         )
-        _gather_ep = await asyncio.gather(
-            asyncio.to_thread(
-                build_dynamic_prefix,
-                req.session_id, user_code, user_name or "", req.voice_mode,
-                _rich_intent, _rich_intent,  # include_opinions, include_suggestions
-            ),
-            asyncio.to_thread(get_conversation, user_code, req.session_id, _HIST_WINDOW),
-            _spec_mem_task,
-            return_exceptions=True,
-        )
-        _pfx = _gather_ep[0]
-        if isinstance(_pfx, BaseException):
-            logger.error("build_dynamic_prefix failed: %s", _pfx)
-            dynamic_prefix, _self_mem = "", {}
+        if not _embed_result.use_memory:
+            _spec_mem_task.cancel()
+            _prefetched_memory_coro = _empty()
         else:
-            dynamic_prefix, _self_mem = _pfx
-        hist = _gather_ep[1] if not isinstance(_gather_ep[1], BaseException) else []
-        if isinstance(_gather_ep[1], BaseException):
-            logger.error("get_conversation failed: %s", _gather_ep[1])
-        _prefetched_memory = _gather_ep[2] if not isinstance(_gather_ep[2], BaseException) else None
-        if isinstance(_gather_ep[2], BaseException):
-            logger.warning("speculative memory search failed: %s", _gather_ep[2])
+            _prefetched_memory_coro = _spec_mem_task
+
+        if _embed_result.use_small_talk:
+            # Small talk (acquiescements purs) — pas de profil, pas de recall mémoire.
+            # Seul l'historique de conversation suffit.
+            _spec_mem_task.cancel()
+            tz = USER_TIMEZONES.get(user_code, "Europe/Paris")
+            _name_part = f" Tu parles avec {user_name}." if user_name else ""
+            dynamic_prefix = f"Date : {fmt_now_fr(tz)}.{_name_part}"
+            _self_mem = {}
+            hist = await asyncio.to_thread(
+                get_conversation, user_code, req.session_id, _HIST_WINDOW
+            )
+            _prefetched_memory = None
+            logger.debug(
+                "[TTFT] small talk — prefix minimal, no memory — %.3fs",
+                time.time() - _t0,
+            )
+        else:
+            _gather_ep = await asyncio.gather(
+                asyncio.to_thread(
+                    build_dynamic_prefix,
+                    req.session_id,
+                    user_code,
+                    user_name or "",
+                    req.voice_mode,
+                    _rich_intent,
+                    _rich_intent,  # include_opinions, include_suggestions
+                ),
+                asyncio.to_thread(
+                    get_conversation, user_code, req.session_id, _HIST_WINDOW
+                ),
+                _prefetched_memory_coro,
+                return_exceptions=True,
+            )
+            _pfx = _gather_ep[0]
+            if isinstance(_pfx, BaseException):
+                logger.error("build_dynamic_prefix failed: %s", _pfx)
+                dynamic_prefix, _self_mem = "", {}
+            else:
+                dynamic_prefix, _self_mem = _pfx
+            hist = _gather_ep[1] if not isinstance(_gather_ep[1], BaseException) else []
+            if isinstance(_gather_ep[1], BaseException):
+                logger.error("get_conversation failed: %s", _gather_ep[1])
+            _prefetched_memory = (
+                _gather_ep[2] if not isinstance(_gather_ep[2], BaseException) else None
+            )
+            if isinstance(_gather_ep[2], BaseException):
+                logger.warning("speculative memory search failed: %s", _gather_ep[2])
 
         llm_result = _embed_result
         logger.debug(
@@ -520,10 +709,15 @@ async def chat(req: ChatRequest):
         _gather1 = await asyncio.gather(
             asyncio.to_thread(
                 build_dynamic_prefix,
-                req.session_id, user_code, user_name or "", req.voice_mode,
+                req.session_id,
+                user_code,
+                user_name or "",
+                req.voice_mode,
             ),
             llm_route(req.message, google_available=_google_available),
-            asyncio.to_thread(get_conversation, user_code, req.session_id, _HIST_WINDOW),
+            asyncio.to_thread(
+                get_conversation, user_code, req.session_id, _HIST_WINDOW
+            ),
             _spec_mem_task,
             return_exceptions=True,
         )
@@ -535,7 +729,9 @@ async def chat(req: ChatRequest):
             dynamic_prefix, _self_mem = _pfx
         llm_result = _gather1[1] if not isinstance(_gather1[1], BaseException) else None
         hist = _gather1[2] if not isinstance(_gather1[2], BaseException) else []
-        _prefetched_memory = _gather1[3] if not isinstance(_gather1[3], BaseException) else None
+        _prefetched_memory = (
+            _gather1[3] if not isinstance(_gather1[3], BaseException) else None
+        )
         if isinstance(_gather1[1], BaseException):
             logger.error("llm_route failed: %s", _gather1[1])
         if isinstance(_gather1[2], BaseException):
@@ -543,7 +739,8 @@ async def chat(req: ChatRequest):
         if isinstance(_gather1[3], BaseException):
             logger.warning("speculative memory search failed: %s", _gather1[3])
         logger.debug(
-            "[TTFT] gather1 done (LLM router+dynamic_prefix+hist+mem) — %.3fs", time.time() - _t0
+            "[TTFT] gather1 done (LLM router+dynamic_prefix+hist+mem) — %.3fs",
+            time.time() - _t0,
         )
 
     # ── Router result extraction ────────────────────────────────────────────
@@ -579,7 +776,7 @@ async def chat(req: ChatRequest):
     # ── no_think for simple intents (memory/conversation) ──────────────────
     # Complex intents (web, RAG, reasoning) keep chain-of-thought.
     # Typical saving: ~4 s of TTFT on conversational exchanges.
-    _complex_intents = use_rag or use_web_auto
+    _complex_intents = use_rag or use_web_auto or req.use_web or req.use_rag
     chat_no_think = (
         False if (llm_result and llm_result.use_reasoning) else not _complex_intents
     )
@@ -599,7 +796,9 @@ async def chat(req: ChatRequest):
         if VISION_MODEL:
             image_description = await describe_images(req.image_parts, req.message)
             if image_description:
-                logger.info("Vision: image described (%d chars)", len(image_description))
+                logger.info(
+                    "Vision: image described (%d chars)", len(image_description)
+                )
         else:
             logger.warning(
                 "Vision: image received but VISION_MODEL not configured — ignored"
@@ -610,10 +809,7 @@ async def chat(req: ChatRequest):
     # These intents return immediately, without going through context gather.
     # ════════════════════════════════════════════════════════════════════════
 
-    # ── 4a. Self: état interne Jarvis ───────────────────────────────────────
-    # Proposal commands are handled early in _keyword_dispatch (step 1).
-    # _handle_proposal here is a fallback for unusual phrasings that passed
-    # keyword_dispatch but were still classified as self by the router.
+    # ── 4a. Self: état interne Jarvis (proposals take priority over briefing) ─
     if use_self:
         use_briefing = False
         if (result := _handle_proposal(req, user_code, use_model)) is not None:
@@ -643,13 +839,12 @@ async def chat(req: ChatRequest):
         time.time() - _t0,
     )
 
-    async def _resolved_memory():
-        """Retourne la recherche mémoire préchargée (gather1) ou [] si non requise."""
-        return _prefetched_memory if (_prefetched_memory is not None) else []
-
+    # _prefetched_or_empty() remplace la closure _resolved_memory() — voir module level.
     _gather2 = await asyncio.gather(
-        search_documents(_llm_rag_query or req.message) if (req.use_rag or use_rag) else _empty(),
-        _resolved_memory() if use_memory else _empty(),
+        search_documents(_llm_rag_query or req.message)
+        if (req.use_rag or use_rag)
+        else _empty(),
+        _prefetched_or_empty(_prefetched_memory) if use_memory else _empty(),
         search_weather(_weather_query)
         if use_weather_auto
         else search_web(optimize_web_query(req.message), original_message=req.message)
@@ -763,7 +958,9 @@ async def chat(req: ChatRequest):
         msg_parts.append(assembled)
     if reasoning_hint:
         msg_parts.append(reasoning_hint.strip())
-    msg_parts.append("<message_utilisateur>\n" + raw_user_content + "\n</message_utilisateur>")
+    msg_parts.append(
+        "<message_utilisateur>\n" + raw_user_content + "\n</message_utilisateur>"
+    )
     user_content = "\n\n".join(msg_parts)
 
     # Window: last 8 messages (4 exchanges).
@@ -790,91 +987,26 @@ async def chat(req: ChatRequest):
     # STEP 7 — LLM CALL — streaming SSE or blocking JSON
     # ════════════════════════════════════════════════════════════════════════
     if req.stream:
-
-        async def sse():
-            full_parts: list[str] = []
-            try:
-                # With Qwen3 local + enable_thinking=True, apply_chat_template appends
-                # <think>\n to the prompt (not to the output).  The model's first output
-                # tokens are already INSIDE the think block — no opening <think> tag ever
-                # arrives in the stream.  Starting in_think=True ensures filter_think_chunk
-                # correctly routes those tokens as {"think":…} SSE events to the iOS banner.
-                # For no_think=True or remote models, in_think stays False (normal path).
-                in_think = LLM_LOCAL and is_qwen3(use_model) and not chat_no_think
-                first_chunk = True
-
-                async for chunk in stream_openai(
-                    messages,
-                    use_model,
-                    _use_api_url,
-                    _use_api_key,
-                    _use_timeout,
-                    no_think=chat_no_think,
-                    session_id=req.session_id,
-                    max_tokens=4000 if not chat_no_think else 1500,
-                ):
-                    full_parts.append(chunk)
-
-                    # ── Think filtering ─────────────────────────────────────
-                    # filter_think_chunk splits each chunk into visible text and
-                    # think-block content. Think fragments are forwarded as a
-                    # separate SSE event so the iOS client can display them as a
-                    # live ticker without mixing them into the chat bubble.
-                    clean, think_frag, in_think = filter_think_chunk(chunk, in_think)
-
-                    if think_frag:
-                        yield f"data: {json.dumps({'think': think_frag})}\n\n"
-
-                    if first_chunk:
-                        clean = clean.lstrip("\n")
-                        if clean:
-                            logger.debug(
-                                "[TTFT] first visible token yielded — %.3fs since request",
-                                time.time() - _t0,
-                            )
-                            first_chunk = False
-
-                    if clean:
-                        yield f"data: {json.dumps({'content': clean})}\n\n"
-
-                # Strip complete think blocks, then any truncated open <think>
-                # (e.g. model hit token budget mid-reasoning — no closing </think>).
-                full_clean = re.sub(r"<think>.*?</think>", "", "".join(full_parts), flags=re.DOTALL)
-                full_clean = re.sub(
-                    r"<think>.*$", "", full_clean, flags=re.DOTALL
-                ).strip()
-                if full_clean:
-                    append_conversation_message(
-                        user_code, req.session_id, "user", raw_user_content
-                    )
-                    append_conversation_message(
-                        user_code, req.session_id, "assistant", full_clean
-                    )
-                ms = int((time.time() - start) * 1000)
-                yield f"data: {json.dumps({'done': True, 'model': use_model, 'duration_ms': ms, 'rag_sources': [{'source': c['source'], 'score': c['score']} for c in rag_chunks], 'web_sources': [{'title': w['title'], 'url': w['url']} for w in _safe_web]})}\n\n"
-                asyncio.create_task(
-                    post_analysis(req.session_id, user_code, req.message, full_clean)
-                )
-            except asyncio.CancelledError:
-                logger.info("Client disconnected")
-                if full_parts:
-                    try:
-                        full_clean = re.sub(r"<think>.*?</think>", "", "".join(full_parts), flags=re.DOTALL)
-                        full_clean = re.sub(r"<think>.*$", "", full_clean, flags=re.DOTALL).strip()
-                        if full_clean:
-                            append_conversation_message(user_code, req.session_id, "user", raw_user_content)
-                            append_conversation_message(user_code, req.session_id, "assistant", full_clean)
-                            asyncio.create_task(
-                                post_analysis(req.session_id, user_code, req.message, full_clean)
-                            )
-                            logger.info(
-                                "Saved response to Redis after disconnect (%d chars)", len(full_clean)
-                            )
-                    except Exception as _save_err:
-                        logger.warning("Failed to save on disconnect: %s", _save_err)
-
+        ctx = _SseCtx(
+            messages=messages,
+            use_model=use_model,
+            api_url=_use_api_url,
+            api_key=_use_api_key,
+            timeout=_use_timeout,
+            no_think=chat_no_think,
+            session_id=req.session_id,
+            t0=_t0,
+            start=start,
+            rag_chunks=rag_chunks,
+            safe_web=_safe_web,
+            user_code=user_code,
+            raw_user_content=raw_user_content,
+            original_message=req.message,
+        )
         return StreamingResponse(
-            sse(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
+            _sse_stream(ctx),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
         )
 
     # ── JSON response (non-streaming) ───────────────────────────────────────
@@ -901,9 +1033,7 @@ async def chat(req: ChatRequest):
         "rag_sources": [
             {"source": c["source"], "score": c["score"]} for c in rag_chunks
         ],
-        "web_sources": [
-            {"title": w["title"], "url": w["url"]} for w in _safe_web
-        ],
+        "web_sources": [{"title": w["title"], "url": w["url"]} for w in _safe_web],
     }
 
 

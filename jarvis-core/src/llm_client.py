@@ -32,10 +32,9 @@ from config import (
 )
 from deps import get_stream_client
 from helpers import get_logger
+from llm_local import stream_local
 
 _LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL, REASONING_MODEL} if LLM_LOCAL else set()
-if LLM_LOCAL:
-    from llm_local import stream_local
 
 logger = get_logger("jarvis-llm")
 

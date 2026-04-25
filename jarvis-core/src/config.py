@@ -27,14 +27,12 @@ ROUTER_TIMEOUT = float(os.getenv("ROUTER_TIMEOUT") or "6")
 
 # ── Tier 2 — Primary model (standard chat, trading, briefing, self-reflection) ──
 # Now:    GPT-4o-mini              → set nothing, uses OPENAI credentials
-# Future: Qwen3-30B-A3B via mlx-lm → set PRIMARY_API_URL + PRIMARY_API_KEY + PRIMARY_MODEL
 PRIMARY_MODEL = os.getenv("PRIMARY_MODEL", "gpt-4o-mini")
 PRIMARY_API_URL = os.getenv("PRIMARY_API_URL") or OPENAI_API_URL
 PRIMARY_API_KEY = os.getenv("PRIMARY_API_KEY") or OPENAI_API_KEY
 PRIMARY_TIMEOUT = float(os.getenv("PRIMARY_TIMEOUT") or "120")
 
 # ── Tier 3 — Reasoning model (complex queries only, cloud-gated) ─────────
-# Now:    GPT-5.1 (cloud)   → set REASONING_MODEL + optionally REASONING_API_*
 # Only reached when the router sets use_reasoning=True.
 REASONING_MODEL = os.getenv("REASONING_MODEL") or PRIMARY_MODEL
 REASONING_API_URL = os.getenv("REASONING_API_URL") or OPENAI_API_URL
@@ -49,6 +47,17 @@ VISION_API_URL = os.getenv("VISION_API_URL") or OPENAI_API_URL
 VISION_API_KEY = os.getenv("VISION_API_KEY") or OPENAI_API_KEY
 VISION_TIMEOUT = float(os.getenv("VISION_TIMEOUT") or "60")
 
+# ── Ninja-patch chat template (Qwen3.6 only) ─────────────────────────────
+# Chemin local du fichier chat_template.optional.jinja téléchargé depuis HF.
+# Téléchargement : voir scripts/download_models.py (section TEMPLATES).
+# Remplace le chat_template par défaut du tokenizer Qwen3.6 :
+#   enable_thinking=False → aucun tag <think> (vs standard : <think>\n\n</think>\n\n)
+# Configurable via env QWEN36_NINJA_TEMPLATE pour pointer vers un autre chemin.
+QWEN36_NINJA_TEMPLATE = os.getenv(
+    "QWEN36_NINJA_TEMPLATE",
+    "/opt/jarvis/models/templates/qwen36_ninja.jinja",
+)
+
 # ── Local LLM mode — Apple Silicon / mlx-lm (M4 Pro) ─────────────────────
 # Activé par LLM_LOCAL=yes dans .env.
 # Écrase Router et Primary pour pointer vers les serveurs mlx-lm locaux.
@@ -59,14 +68,11 @@ if LLM_LOCAL:
     # helpers.py route vers call_llm_local / call_llm_local_async directement.
     # Les API_URL / API_KEY ne sont pas utilisées pour l'inférence en mode local.
     ROUTER_MODEL = os.getenv(
-        "ROUTER_MODEL_LOCAL", "/opt/jarvis/models/hub/Hermes-3-Llama-3.2-3B-q4-affine"
+        "ROUTER_MODEL_LOCAL", "/opt/jarvis/models/hub/Hermes-3-Llama-3.2-3B-q6-affine"
     )
     PRIMARY_MODEL = os.getenv("PRIMARY_MODEL_LOCAL", "Qwen/Qwen3-30B-A3B-MLX-6bit")
-
     REASONING_MODEL = os.getenv("REASONING_MODEL_LOCAL") or PRIMARY_MODEL
-
     # VISION_MODEL = os.getenv("VISION_MODEL_LOCAL", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
-
     # donc déjà configurés pour OpenAI — ne pas écraser ici.
     logger.info(
         "Mode LLM local activé (import direct MLX) — router: %s  primary: %s  vision: %s (cloud)",
@@ -87,6 +93,18 @@ def is_qwen3(model: str) -> bool:
     llm_local._build_prompt catches TypeError if a kwarg isn't available (e.g. old tokenizer version
     or Qwen3.5 open-source where thinking_budget is Alibaba Cloud API only)."""
     return "qwen3" in (model or "").lower()
+
+
+def is_qwen36(model: str) -> bool:
+    """True specifically for Qwen3.6.x models (e.g. spicyneuron/Qwen3.6-35B-A3B-MLX-*).
+    Subset of is_qwen3() — always check is_qwen36() BEFORE is_qwen3() to avoid shadowing.
+
+    Differences vs base Qwen3:
+      - Distinct sampling profile (temp_think=0.7 vs 0.6).
+      - Ships chat_template.optional.jinja (ninja patch): enable_thinking=False produces
+        no <think> tag at all (vs standard Qwen3 which inserts <think>\\n\\n</think>\\n\\n).
+    """
+    return "qwen3.6" in (model or "").lower()
 
 
 def is_hermes(model: str) -> bool:

@@ -32,9 +32,6 @@ from datetime import datetime, timezone
 
 import httpx
 from config import (
-    PRIMARY_API_KEY,
-    PRIMARY_API_URL,
-    PRIMARY_MODEL,
     ROUTER_API_KEY,
     ROUTER_API_URL,
     ROUTER_DATA_DIR,
@@ -59,12 +56,27 @@ class RouterResult:
     use_briefing: bool
     use_self: bool
     use_portfolio: bool
-    use_reasoning: bool
     gmail_query: str
     calendar_days: int
     weather_location: str = field(default="")
     rag_query: str = field(default="")
+    use_small_talk: bool = field(
+        default=False
+    )  # skip profile/memory injection entirely
+    use_reasoning: bool = field(default=False)
 
+
+_ALLOWED_INTENTS = {
+    "memory",
+    "rag",
+    "web",
+    "weather",
+    "gmail",
+    "calendar",
+    "briefing",
+    "portfolio",
+    "self",
+}
 
 # ── Training data collector ───────────────────────────────────────────────
 
@@ -116,6 +128,10 @@ def _log_routing_sample(
     }
     path = os.path.join(ROUTER_DATA_DIR, "routing_samples.jsonl")
     try:
+        if os.path.exists(path) and os.path.getsize(path) > 10 * 1024 * 1024:
+            import shutil
+
+            shutil.move(path, path + ".bak")  # rotation simple
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(sample, ensure_ascii=False) + "\n")
     except OSError as exc:
@@ -131,13 +147,9 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
     Returns RouterResult on success, None on any failure → caller falls back
     to the embedding router automatically.
     """
-    api_url = ROUTER_API_URL if ROUTER_MODEL else PRIMARY_API_URL
-    api_key = ROUTER_API_KEY if ROUTER_MODEL else PRIMARY_API_KEY
-    model = ROUTER_MODEL if ROUTER_MODEL else PRIMARY_MODEL
-
-    # Truncate to 400 chars — Qwen2.5-3B starts answering instead of routing on long inputs.
-    # The first 400 chars are enough to classify intent; the rest is noise for the router.
-    routing_message = message[:400]
+    # Truncate to 100 chars — Qwen2.5-3B starts answering instead of routing on long inputs.
+    # The first 100 chars are enough to classify intent; the rest is noise for the router.
+    routing_message = message[:200]
     prompt = get_prompt("ROUTER_USER").format(message=routing_message)
 
     try:
@@ -148,9 +160,9 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
                 {"role": "system", "content": get_prompt("ROUTER_SYSTEM")},
                 {"role": "user", "content": prompt},
             ],
-            model=model,
-            api_url=api_url,
-            api_key=api_key,
+            model=ROUTER_MODEL,
+            api_url=ROUTER_API_URL,
+            api_key=ROUTER_API_KEY,
             temperature=0.0,  # Hermes is designed for deterministic structured output
             max_tokens=300,  # routing JSON is ~60 tok — cap to avoid runaway output
             json_response=True,
@@ -189,11 +201,20 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
         intents: list[str] = parsed.get("intents", [])
         if not isinstance(intents, list):
             intents = []
+        intents = [i for i in intents if i in _ALLOWED_INTENTS]
         if not intents:
             intents = ["memory"]
 
         gmail_query: str = parsed.get("gmail_query") or ""
-        calendar_days: int = int(parsed.get("calendar_days") or 7)
+        _cal_raw = parsed.get("calendar_days")
+        if _cal_raw is None:
+            calendar_days = 7
+        else:
+            try:
+                calendar_days = int(_cal_raw)
+            except (ValueError, TypeError):
+                calendar_days = 7
+
         weather_location: str = parsed.get("weather_location") or ""
         rag_query: str = parsed.get("rag_query") or ""
         use_reasoning: bool = bool(parsed.get("use_reasoning", False))
@@ -207,16 +228,17 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
         return None
 
     # ── Guardrail: prevent over-triggering reasoning on simple queries ──
-    _simple_query = (
-        len(message) < 80
-        and "?" not in message
-        and not any(
-            k in message.lower() for k in ["analyse", "explique", "compare", "pourquoi"]
-        )
-    )
+    # SUPPRESSION on fait confiance aux deux etages de routage embed + 3B
+    # _simple_query = (
+    #    len(message) < 80
+    #    and "?" not in message
+    #    and not any(
+    #        k in message.lower() for k in ["analyse", "explique", "compare", "pourquoi"]
+    #    )
+    # )
 
-    if _simple_query:
-        use_reasoning = False
+    # if _simple_query:
+    #    use_reasoning = False
 
     calendar_days = max(1, min(calendar_days, 90))
 
@@ -239,10 +261,10 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
 
     logger.info(
         "LLM router [%s]: intents=%s | reasoning=%s → final=%s",
-        model,
+        ROUTER_MODEL,
         intents,
         parsed.get("use_reasoning"),
         result.use_reasoning,
     )
-    _log_routing_sample(message, result, model)
+    _log_routing_sample(message, result, ROUTER_MODEL)
     return result

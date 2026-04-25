@@ -37,22 +37,21 @@ tail -f /opt/jarvis/logs/jarvis-service.log
 │  │  Hermes-3-Llama-3.2-3B   │  │  Qwen3-30B-A3B       │  │
 │  │  MLX · ~2 GB · KV-cached │  │  MLX-6bit · ~18 GB   │  │
 │  └──────────────────────────┘  └──────────────────────┘  │
-│  ┌──────────────┐  ┌───────────┐  ┌──────────────────┐  │
-│  │  Memory Sys  │  │  Briefing │  │  Proto-Self /    │  │
-│  │  5 layers    │  │ Scheduler │  │  Reflection Loop │  │
-│  └──────────────┘  └───────────┘  └──────────────────┘  │
-│  ┌──────────────┐  ┌───────────┐  ┌──────────────────┐  │
-│  │  RAG Engine  │  │ Embed     │  │ Google Services  │  │
-│  │  (Qdrant)    │  │ Router    │  │ (Gmail/Calendar) │  │
-│  └──────────────┘  └───────────┘  └──────────────────┘  │
+│  ┌──────────────┐  ┌───────────┐  ┌──────────────────┐   │
+│  │  Memory Sys  │  │  Briefing │  │  Proto-Self /    │   │
+│  │  5 layers    │  │ Scheduler │  │  Reflection Loop │   │
+│  └──────────────┘  └───────────┘  └──────────────────┘   │
+│  ┌──────────────┐  ┌───────────┐  ┌──────────────────┐   │
+│  │  RAG Engine  │  │ Embed     │  │ Google Services  │   │
+│  │  (Qdrant)    │  │ Router    │  │ (Gmail/Calendar) │   │
+│  └──────────────┘  └───────────┘  └──────────────────┘   │
 │  ┌──────────────────────────────────────────────────┐    │
 │  │  Trading Surveillance  yfinance + Redis · alerts │    │
 │  └──────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────┘
             │ HTTPS (cloud fallback)
 ┌───────────▼──────────────────────────────────────────────┐
-│  Cloud Reasoning  (Tier 3 — use_reasoning=True only)     │
-│  Claude Sonnet  ·  GPT-4.x                               │
+│  Cloud Reasoning GPT-4								   │
 └──────────────────────────────────────────────────────────┘
 ```
 ## MEMORY STRUCTURE
@@ -102,10 +101,10 @@ tail -f /opt/jarvis/logs/jarvis-service.log
   │ Hermes-3-Llama-3.2-3B      │ routing, dédup profil, judge web                               │ True                      │
   │ (router — local MLX ~2 GB) │                                                                │                           │
   ├────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────────────────┤
-  │ Qwen3-30B-A3B-MLX-6bit     │ briefing, analyse conv, refine prompt, réflexion, nightly      │ False pour RAG/web/reason │
+  │ Qwen3-30B-A3B-MLX-6bit     │ briefing, analyse conv, refine prompt, réflexion, nightly      │ False pour reason         │
   │ (primary — local MLX ~18G) │ review, trading, calendrier, extraction, chat standard         │ True pour chat simple     │
   ├────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────────────────┤
-  │ Claude Sonnet / GPT-4.x    │ mode expert uniquement (use_reasoning=True via router)         │ —                         │
+  │ Claude Sonnet / GPT-4.x    │ Fallback si problème	 (non activé par defaut)	            │ —                         │
   │ (reasoning — cloud)        │                                                                │                           │
   └────────────────────────────┴────────────────────────────────────────────────────────────────┴───────────────────────────┘
 
@@ -143,15 +142,12 @@ Tier 0 — EMBED ROUTER  Zero-LLM fast path — cosine similarity against pre-em
 Tier 1 — ROUTER        Full LLM intent classifier, JSON only
                         Target: Hermes-3-Llama-3.2-3B-Q4-affine (local MLX, ~2 GB)
                         System prompt KV-cached (~666 tok prefilled once, deepcopied per call)
-                        Cloud fallback: gpt-4.1-nano
 
 Tier 2 — PRIMARY       All standard responses: chat, questions, summaries
                         Target: Qwen3-30B-A3B-MLX-6bit (local MLX, ~18 GB, MoE)
                         System prompt KV-cached (~262 tok prefilled once, deepcopied per call)
-                        Cloud fallback: gpt-4o-mini
 
-Tier 3 — REASONING     Complex queries only — use_reasoning=True
-                        Cloud: Claude Sonnet / GPT-4.x (stays cloud, rare ~10% of requests)
+Tier 3 — REASONING      use_reasoning=True Use Qwen3 in thinking mode
 ```
 
 **Routing logic:**
@@ -647,8 +643,8 @@ All variables go in `/opt/jarvis/.env`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ROUTER_MODEL` | `gpt-4.1-nano` | Intent classifier. Set to empty to disable and use embedding router. |
-| `ROUTER_API_URL` | *(OPENAI_API_URL)* | Override to point at a local Qwen3-7B via mlx-lm |
+| `ROUTER_MODEL` | `Hermes-3B-Instruct` | Intent classifier. Set to empty to disable and use embedding router. |
+| `ROUTER_API_URL` | *(OPENAI_API_URL)* | Override to point at a local  |
 | `ROUTER_API_KEY` | *(OPENAI_API_KEY)* | API key for the router (mlx-lm ignores auth but requires a value) |
 | `ROUTER_TIMEOUT` | `6` | Timeout in seconds (short — fast model only) |
 
@@ -656,8 +652,8 @@ All variables go in `/opt/jarvis/.env`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PRIMARY_MODEL` | `gpt-4o-mini` | Handles all standard responses: chat, trading, briefing, self-reflection |
-| `PRIMARY_API_URL` | *(OPENAI_API_URL)* | Override to point at a local Qwen3-30B-A3B |
+| `PRIMARY_MODEL` | `Qwen3-30B-A3B` | Handles all standard responses: chat, trading, briefing, self-reflection |
+| `PRIMARY_API_URL` | *(OPENAI_API_URL)* | Override to point at a local |
 | `PRIMARY_API_KEY` | *(OPENAI_API_KEY)* | API key for the primary model |
 | `PRIMARY_TIMEOUT` | `60` | Timeout in seconds |
 
