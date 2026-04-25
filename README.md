@@ -34,8 +34,8 @@ tail -f /opt/jarvis/logs/jarvis-service.log
 │                                                          │
 │  ┌──────────────────────────┐  ┌──────────────────────┐  │
 │  │  LLM Router (Tier 1)     │  │  Primary LLM (T2)    │  │
-│  │  Hermes-3-Llama-3.2-3B   │  │  Qwen3-30B-A3B       │  │
-│  │  MLX · ~2 GB · KV-cached │  │  MLX-6bit · ~18 GB   │  │
+│  │  Hermes-3-Llama-3.2-3B   │  │  Qwen3.6-35B-A3B     │  │
+│  │  MLX · ~2 GB · KV-cached │  │  MLX-5.4bit · ~20 GB │  │
 │  └──────────────────────────┘  └──────────────────────┘  │
 │  ┌──────────────┐  ┌───────────┐  ┌──────────────────┐   │
 │  │  Memory Sys  │  │  Briefing │  │  Proto-Self /    │   │
@@ -101,8 +101,8 @@ tail -f /opt/jarvis/logs/jarvis-service.log
   │ Hermes-3-Llama-3.2-3B      │ routing, dédup profil, judge web                               │ True                      │
   │ (router — local MLX ~2 GB) │                                                                │                           │
   ├────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────────────────┤
-  │ Qwen3-30B-A3B-MLX-6bit     │ briefing, analyse conv, refine prompt, réflexion, nightly      │ False pour reason         │
-  │ (primary — local MLX ~18G) │ review, trading, calendrier, extraction, chat standard         │ True pour chat simple     │
+  │ Qwen3.6-35B-A3B-MLX-5.4bit │ briefing, analyse conv, refine prompt, réflexion, nightly      │ False pour reason         │
+  │ (primary — local MLX ~20G) │ review, trading, calendrier, extraction, chat standard         │ True pour chat simple     │
   ├────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────────────────┤
   │ Claude Sonnet / GPT-4.x    │ Fallback si problème	 (non activé par defaut)	            │ —                         │
   │ (reasoning — cloud)        │                                                                │                           │
@@ -144,7 +144,7 @@ Tier 1 — ROUTER        Full LLM intent classifier, JSON only
                         System prompt KV-cached (~666 tok prefilled once, deepcopied per call)
 
 Tier 2 — PRIMARY       All standard responses: chat, questions, summaries
-                        Target: Qwen3-30B-A3B-MLX-6bit (local MLX, ~18 GB, MoE)
+                        Target: Qwen3.6-35B-A3B-MLX-5.4bit (local MLX, ~20 GB, MoE ~3B active)
                         System prompt KV-cached (~262 tok prefilled once, deepcopied per call)
 
 Tier 3 — REASONING      use_reasoning=True Use Qwen3 in thinking mode
@@ -172,7 +172,7 @@ When `LLM_LOCAL=yes`, Jarvis uses `mlx_lm` directly (no HTTP server) — models 
 - `_get_system_cache()` in `llm_local.py` pre-fills the fixed system prompt into a KV cache once per model, then `deepcopy()`s it for every call.
 - Applied to **all inference paths**: `stream_local` (streaming chat), `_generate_sync` (router, analyzer, self-reflection, web judge).
 - Hermes router: ~666 tokens prefilled → only the 5-token `"Message: {message}"` part is computed per call.
-- Qwen3-30B primary: ~262 tokens prefilled → saves ~0.3–0.5 s prefill per turn.
+- Qwen3.6-35B primary: ~262 tokens prefilled → saves ~0.3–0.5 s prefill per turn.
 - The system message must remain **token-identical** every turn (no dynamic content) — enforced by the `build_dynamic_prefix` / `build_context` split.
 
 **KV cache quantization (`QUANT_KV=yes`):**
@@ -188,6 +188,7 @@ When `LLM_LOCAL=yes`, Jarvis uses `mlx_lm` directly (no HTTP server) — models 
 - `THINKING_BUDGET_TOKENS` (default 1024) — limits `<think>` block length via `thinking_budget` kwarg in the chat template. Applied per-call without modifying message content (KV-cache safe).
 - Router/analyzer calls always disable thinking (`thinking_budget=0`) — prevents `<think>` blocks from breaking JSON parsing.
 - Chat calls: `no_think=True` for simple conversation (saves ~4 s TTFT), `no_think=False` for RAG/web/reasoning.
+- **Qwen3.6 ninja patch** (`QWEN36_NINJA_TEMPLATE`): optional Jinja2 template that controls think/no_think more precisely. When `no_think=True`, an empty `<think>\n\n</think>\n\n` block is injected post-template to prevent spontaneous thinking. When `no_think=False`, the prompt ends with `<think>\n` to seed the block.
 
 #### Router Output Fields
 
@@ -652,7 +653,7 @@ All variables go in `/opt/jarvis/.env`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PRIMARY_MODEL` | `Qwen3-30B-A3B` | Handles all standard responses: chat, trading, briefing, self-reflection |
+| `PRIMARY_MODEL` | `Qwen3.6-35B-A3B` | Handles all standard responses: chat, trading, briefing, self-reflection |
 | `PRIMARY_API_URL` | *(OPENAI_API_URL)* | Override to point at a local |
 | `PRIMARY_API_KEY` | *(OPENAI_API_KEY)* | API key for the primary model |
 | `PRIMARY_TIMEOUT` | `60` | Timeout in seconds |
@@ -688,11 +689,12 @@ All variables go in `/opt/jarvis/.env`.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LLM_LOCAL` | `no` | Set to `yes` to use mlx_lm directly instead of HTTP OpenAI endpoints |
-| `PRIMARY_MODEL_LOCAL` | `inferencerlabs/Qwen3.5-35B-A3B-MLX-5.5bit` | Primary model HF repo ID or local path |
-| `ROUTER_MODEL_LOCAL` | `mlx-community/Qwen2.5-3B-Instruct-8bit` | Router model HF repo ID or local path |
+| `PRIMARY_MODEL_LOCAL` | `spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit` | Primary model HF repo ID or local path |
+| `ROUTER_MODEL_LOCAL` | `Hermes-3-Llama-3.2-3B-q6-affine` | Router model HF repo ID or local path |
 | `VISION_MODEL_LOCAL` | `mlx-community/Qwen2.5-VL-7B-Instruct-4bit` | Vision model HF repo ID or local path |
 | `HF_HOME` | `/opt/jarvis/models` | Root directory for HuggingFace model cache |
 | `THINKING_BUDGET_TOKENS` | `1024` | Max tokens for `<think>` block. `0` = disabled. Applied via chat template kwarg (KV-cache safe). |
+| `QWEN36_NINJA_TEMPLATE` | `/opt/jarvis/models/templates/qwen36_ninja.jinja` | Path to the Qwen3.6 ninja-patch Jinja2 template. Controls think/no_think without relying on the standard chat template. Download with `scripts/download_models.py`. |
 
 ### Infrastructure
 

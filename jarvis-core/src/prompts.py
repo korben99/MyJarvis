@@ -28,7 +28,7 @@ SYSTEM_BASE_FR = (
     "Intègre tes souvenirs naturellement — ce que l'utilisateur dit maintenant prime sur tout souvenir antérieur. "
     "Si <mes_avis> est présent : intègre ces avis en prose, ne reproduis jamais la balise. "
     "Cite la source lors d'une recherche web. "
-    "Réponds toujours en français, en prose, sauf si JSON ou code est explicitement demandé."
+    "Réponds toujours en français, sans markdown — sauf si JSON ou code est explicitement demandé."
 )
 # XML tags used to delimit injected context blocks (replacing ## Markdown headers).
 # XML tags are more watertight: the closing tag prevents the model from confusing
@@ -225,10 +225,11 @@ Jarvis : {assistant_message}
 # ══════════════════════════════════════════════════════════════════════════
 
 WEB_RELEVANCE_JUDGE = """\
-Question : {question}
+<question>{question}</question>
 
-Résultats :
+<resultats>
 {snippets}
+</resultats>
 
 Les résultats permettent-ils de formuler une réponse utile à la question ?
 
@@ -342,17 +343,21 @@ ACTIVITÉ UTILISATEURS (24h) : {activity}
 LACUNES CONNAISSANCE : {gaps}
 PROPOSITIONS EN ATTENTE : {pending_proposals}
 DERNIÈRE RÉFLEXION : {last_reflection}
-PATTERNS COMPORTEMENTAUX (20 derniers cycles) :
+<patterns_comportementaux>
 {behavioral_patterns}
+</patterns_comportementaux>
 ÉTAT ÉMOTIONNEL : {emotional_state}
-NOTES PERSONNELLES (5 dernières) :
+<notes_personnelles>
 {self_notes}
-OPINIONS (5 dernières) :
+</notes_personnelles>
+<opinions>
 {opinions}
+</opinions>
 RELATIONS UTILISATEURS : {user_relations}
 
-ÉTAPES DÉJÀ EXÉCUTÉES CE CYCLE :
+<etapes_precedentes>
 {previous_steps}
+</etapes_precedentes>
 
 Décide :
 1. Ton focus actuel (une phrase)
@@ -431,16 +436,19 @@ UTILISATEUR : {user_name} (user_code={user_code})
 HEURE LOCALE : {local_time}
 PUSH iOS : {push_status}
 
-ACTIVITÉ RÉCENTE (24h) :
+<activite_recente>
 {user_activity}
+</activite_recente>
 
-RELATION : {user_relation}
+<relation>{user_relation}</relation>
 
-PROFIL (clés Redis actuelles) :
+<profil>
 {user_profile}
+</profil>
 
-ÉTAPES DÉJÀ EXÉCUTÉES POUR CET UTILISATEUR :
+<etapes_precedentes>
 {previous_steps}
+</etapes_precedentes>
 
 Décide la prochaine action pour {user_name} :
 
@@ -574,11 +582,13 @@ JSON valide uniquement, en français."""
 NIGHTLY_FACTS_PROMPT = """\
 Utilisateur : {user_name} ({user_code}) — {review_date}
 
-CONVERSATIONS ({count} échanges) :
+<conversations count="{count}">
 {conv_text}
+</conversations>
 
-RELATION ACTUELLE AVEC CET UTILISATEUR :
+<relation_actuelle>
 {current_relation}
+</relation_actuelle>
 
 Réponds avec ce JSON :
 {{
@@ -620,14 +630,17 @@ JSON valide uniquement, en français."""
 NIGHTLY_SELF_PROMPT = """\
 Utilisateur : {user_name} ({user_code}) — {review_date}
 
-CONVERSATIONS ({count} échanges) :
+<conversations count="{count}">
 {conv_text}
+</conversations>
 
-Dernières auto-réflexions déjà enregistrées (évite les doublons) :
+<auto_reflexions_recentes>
 {recent_self_reflections}
+</auto_reflexions_recentes>
 
-Opinions déjà formées (mets à jour si pertinent, évite les doublons) :
+<opinions_recentes>
 {recent_opinions}
+</opinions_recentes>
 
 Réponds avec ce JSON :
 {{
@@ -655,11 +668,13 @@ JSON valide uniquement, en français."""
 NIGHTLY_CLEANING_PROMPT = """\
 Utilisateur : {user_name} — {review_date}
 
-SOUVENIRS AUTOBIOGRAPHIQUES EXISTANTS ({facts_count} faits, du plus ancien au plus récent) :
+<souvenirs_existants count="{facts_count}">
 {autobio_facts}
+</souvenirs_existants>
 
-NOUVEAUX FAITS EXTRAITS CE SOIR :
+<nouveaux_faits>
 {new_user_insights}
+</nouveaux_faits>
 
 Identifie ce qui doit être nettoyé. Sois très conservateur — en cas de doute, ne rien faire.
 
@@ -676,9 +691,9 @@ Réponds avec ce JSON :
 # ══════════════════════════════════════════════════════════════════════════
 
 CONSOLIDATION_PROMPT = """\
-Voici des souvenirs de conversations avec un utilisateur :
-
+<souvenirs>
 {combined}
+</souvenirs>
 
 Identifie les faits durables et distincts sur cet utilisateur (habitudes, préférences, projets, traits de caractère…).
 Retourne uniquement du JSON : {{"facts": ["fait 1", "fait 2"]}}
