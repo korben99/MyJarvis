@@ -486,7 +486,16 @@ def extract_llm_json(text: str) -> dict:
             if depth == 0:
                 candidate = text[start : i + 1]
                 try:
-                    return json.loads(candidate)
+                    # object_pairs_hook keeps the FIRST value when a model emits
+                    # duplicate keys (e.g. Hermes router repeating its JSON 3× inside
+                    # one {…}).  reversed() + dict-comp: later duplicates overwrite
+                    # earlier ones, so after reversal the first occurrence wins.
+                    return json.loads(
+                        candidate,
+                        object_pairs_hook=lambda pairs: {
+                            k: v for k, v in reversed(list(pairs))
+                        },
+                    )
                 except json.JSONDecodeError:
                     break  # fallback
 

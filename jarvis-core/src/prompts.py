@@ -76,9 +76,11 @@ rag_query        : si intent rag → 3-5 mots-clés sémantiques, SANS verbes de
                    sinon null
 use_reasoning : true SI l'une de ces conditions :
   - compare, arbitre, évalue des options ("compare X et Y", "vaut-il mieux…", "risques de…")
-  - diagnostique un problème spécifique (légal, fiscal, médical, technique)
+  - diagnostique un bug/problème à cause inconnue ("pourquoi ça plante", "comportement inattendu")
+  - conseil juridique, fiscal, médical avec implications complexes
   - nécessite calcul ou chaîne de déduction multi-étapes
-  false pour : explication d'un concept stable, résumé, traduction, conversation, recall factuel
+  false pour : how-to/commandes techniques ("quelle commande pour…", "comment configurer…"),
+               explication d'un concept stable, résumé, traduction, conversation, recall factuel
 
 RÈGLE URL : URL http(s) dans le message → ["memory"] uniquement, jamais "web"
 RÈGLE web : infos éphémères (cours, news, résultats en direct) → web. Explications durables → memory.
@@ -105,6 +107,9 @@ EXEMPLES :
 
 "mes docs sur le trading algorithmique et les dernières news du secteur"
 {"intents":["rag","web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"trading algorithmique","use_reasoning":false}
+
+"quelle commande pour donner accès à un dossier à un autre utilisateur sur macOS ?"
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
 
 "arbitre entre garder ou vendre mes actions TotalEnergies"
 {"intents":["portfolio","web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":true}

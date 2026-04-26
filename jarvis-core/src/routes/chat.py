@@ -236,7 +236,7 @@ async def _sse_stream(ctx: _SseCtx):
             ctx.timeout,
             no_think=ctx.no_think,
             session_id=ctx.session_id,
-            max_tokens=4000 if not ctx.no_think else 1500,
+            max_tokens=2500 if not ctx.no_think else 1500,
         ):
             full_parts.append(chunk)
 

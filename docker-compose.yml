@@ -41,6 +41,7 @@ services:
       - DEFAULT_MODELS=${PRIMARY_MODEL:-mlx-community/Qwen3-30B-A3B-4bit}
       - MAX_UPLOAD_SIZE=${MAX_UPLOAD_SIZE:-5242880}
       - ENABLE_FORWARD_USER_INFO_HEADERS=true
+      - AIOHTTP_CLIENT_TIMEOUT=300
     depends_on:
       - qdrant
       - redis
