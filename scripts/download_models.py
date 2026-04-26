@@ -17,7 +17,7 @@ MODELS = [
     # "spicyneuron/Qwen3.6-35B-A3B-MLX-4.8bit"
     "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit",
     # "NousResearch/Hermes-3-Llama-3.2-3B",
-    # "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+    "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
 ]
 
 # Fichiers de template à télécharger séparément (indépendants du cache HF).

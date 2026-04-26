@@ -64,14 +64,20 @@ _HTTP = httpx.AsyncClient(
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
     },
 )
 
 # ── Deep search tuning ─────────────────────────────────────────────────────
 _PAGE_FETCH_TIMEOUT = 8.0    # per-page HTTP timeout (seconds)
-_PAGE_MAX_CHARS     = 3000   # max extracted chars kept per fetched page
+_PAGE_MAX_CHARS     = 6000   # max extracted chars kept per fetched page
 _MAX_FETCH_PAGES    = 3      # pages fetched in parallel per deep round
 
 
@@ -337,6 +343,38 @@ def _ddg_text_sync(query: str, max_results: int) -> list[dict]:
     return results
 
 
+async def _fetch_via_jina(url: str) -> str:
+    """Fallback fetch via Jina reader (r.jina.ai).
+
+    Handles Cloudflare-protected pages, JS-rendered content, and most 403s.
+    Returns plain text (Jina returns clean Markdown), empty string on failure.
+    """
+    jina_url = f"https://r.jina.ai/{url}"
+    try:
+        resp = await _HTTP.get(
+            jina_url,
+            timeout=25.0,
+            headers={
+                "Accept": "text/plain, text/markdown",
+                # Only remove structural chrome — avoid class selectors that may
+                # accidentally match product/article content containers.
+                "X-Remove-Selector": "header, nav, footer, aside, .cookie-banner, #cookie-banner, #cookieBanner",
+                "X-With-Images-Summary": "false",
+                # X-Timeout tells Jina's headless browser how long to wait for JS
+                # rendering before returning — important for SPAs (Qwen, etc.)
+                "X-Timeout": "20",
+            },
+        )
+        if resp.status_code == 200:
+            text = resp.text.strip()
+            logger.debug("Jina fetch %s → %d chars", url, len(text))
+            if len(text) > 100:  # Jina sometimes returns tiny error pages
+                return text[:_PAGE_MAX_CHARS]
+    except Exception as exc:
+        logger.debug("Jina fetch failed for %s: %s", url, exc)
+    return ""
+
+
 def _extract_text_from_html(html: str, max_chars: int = _PAGE_MAX_CHARS) -> str:
     """Strip HTML noise and return readable plain text."""
     for tag in ("script", "style", "nav", "footer", "header", "aside", "form"):
@@ -354,11 +392,16 @@ def _extract_text_from_html(html: str, max_chars: int = _PAGE_MAX_CHARS) -> str:
 
 
 async def _fetch_page_text(url: str) -> str:
-    """Fetch a URL and return extracted plain text. Returns '' on any error."""
+    """Fetch a URL and return extracted plain text. Returns '' on any error.
+
+    Falls back to Jina reader on 403 or empty content (JS-rendered pages).
+    """
     if not url or not url.startswith("http"):
         return ""
     try:
         resp = await _HTTP.get(url, timeout=_PAGE_FETCH_TIMEOUT)
+        if resp.status_code == 403:
+            return await _fetch_via_jina(url)
         if resp.status_code != 200:
             logger.debug("fetch_page_text: HTTP %d for %s", resp.status_code, url)
             return ""
@@ -366,7 +409,10 @@ async def _fetch_page_text(url: str) -> str:
         if not any(x in ct for x in ("html", "text/plain")):
             logger.debug("fetch_page_text: unsupported content-type %r for %s", ct, url)
             return ""
-        return _extract_text_from_html(resp.text)
+        text = _extract_text_from_html(resp.text)
+        if not text:
+            return await _fetch_via_jina(url)
+        return text
     except Exception as exc:
         logger.debug("fetch_page_text: error fetching %s — %s: %s", url, type(exc).__name__, exc)
         return ""
@@ -394,7 +440,10 @@ async def fetch_user_urls(urls: list[str], max_urls: int = 3) -> list[dict]:
         try:
             resp = await _HTTP.get(url, timeout=_PAGE_FETCH_TIMEOUT)
             if resp.status_code == 403:
-                return "", f"accès refusé (HTTP 403) — le site bloque les requêtes automatiques"
+                text = await _fetch_via_jina(url)
+                if text:
+                    return text, ""
+                return "", "accès refusé (HTTP 403) — le site bloque les requêtes automatiques"
             if resp.status_code != 200:
                 return "", f"HTTP {resp.status_code}"
             ct = resp.headers.get("content-type", "").lower()
@@ -402,6 +451,9 @@ async def fetch_user_urls(urls: list[str], max_urls: int = 3) -> list[dict]:
                 return "", f"type de contenu non supporté ({ct})"
             text = _extract_text_from_html(resp.text)
             if not text:
+                text = await _fetch_via_jina(url)
+                if text:
+                    return text, ""
                 return "", "page vide ou contenu non extractible (JavaScript requis ?)"
             return text, ""
         except Exception as exc:

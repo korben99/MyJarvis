@@ -72,15 +72,17 @@ if LLM_LOCAL:
     )
     PRIMARY_MODEL = os.getenv("PRIMARY_MODEL_LOCAL", "Qwen/Qwen3-30B-A3B-MLX-6bit")
     REASONING_MODEL = os.getenv("REASONING_MODEL_LOCAL") or PRIMARY_MODEL
-    # VISION_MODEL = os.getenv("VISION_MODEL_LOCAL", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
-    # donc déjà configurés pour OpenAI — ne pas écraser ici.
+    VISION_MODEL = os.getenv("VISION_MODEL_LOCAL", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
     logger.info(
-        "Mode LLM local activé (import direct MLX) — router: %s  primary: %s  vision: %s (cloud)",
+        "Mode LLM local activé (import direct MLX) — router: %s  primary: %s  vision: %s (local)",
         ROUTER_MODEL,
         PRIMARY_MODEL,
         VISION_MODEL,
     )
 
+
+# True when mlx_vlm local inference is active for image description.
+VISION_LOCAL = LLM_LOCAL and bool(VISION_MODEL)
 
 # ── Model compatibility helpers ───────────────────────────────────────────
 def is_qwen(model: str) -> bool:

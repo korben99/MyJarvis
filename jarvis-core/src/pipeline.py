@@ -90,7 +90,7 @@ def build_dynamic_prefix(
     parts: list[str] = [f"Date : {fmt_now_fr(tz)}."]
 
     if user_name:
-        parts.append(f"Tu parles avec {user_name}.")
+        parts.append(f"Tu parles avec {user_name}. Tutoie-le toujours, quelle que soit la langue du contexte injecté.")
 
     self_mem = get_self_memory()
 
@@ -160,7 +160,7 @@ def build_context(
         )
         logger.warning("web: internet unavailable — injecting error context")
     elif web_results:
-        web_selected = trim_chunks(web_results, WEB_CHAR_BUDGET, text_key="body")
+        web_selected = trim_chunks(web_results, WEB_CHAR_BUDGET, text_key="body", max_item_chars=3000)
         if web_selected:
             web_lines = []
             for i, body in enumerate(web_selected):

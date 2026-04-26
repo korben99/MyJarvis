@@ -215,8 +215,7 @@ Clés profil existantes : [{existing_profile_keys}]
 Projets connus : {existing_projects}
 </knowledge_base>
 <echange>
-Utilisateur : {user_message}
-Jarvis : {assistant_message}
+{conversation}
 </echange>"""
 
 

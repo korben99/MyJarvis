@@ -24,6 +24,14 @@ struct ThinkingBanner: View {
             .trimmingCharacters(in: .whitespaces)
     }
 
+    // Show only the most recent characters so the ticker always reflects
+    // current thinking rather than text that arrived many seconds ago.
+    // At 100 tok/sec the full accumulation would scroll off-screen instantly.
+    private var displayText: String {
+        let window = 120
+        return clean.count > window ? String(clean.suffix(window)) : clean
+    }
+
     var body: some View {
         HStack(spacing: 0) {
 
@@ -49,20 +57,21 @@ struct ThinkingBanner: View {
             //   • text updates (new think chunks) never restart the animation
             //   • the scroll speed is constant regardless of text length
             GeometryReader { geo in
-                TimelineView(.animation(minimumInterval: 1.0 / 30, paused: clean.isEmpty)) { tl in
+                TimelineView(.animation(minimumInterval: 1.0 / 30, paused: displayText.isEmpty)) { tl in
                     let elapsed = tl.date.timeIntervalSince(startTime)
                     // Approximate glyph width for SF Mono / system monospaced at 11 pt.
                     let charW  = 6.8
-                    let textW  = Double(clean.count) * charW
+                    let textW  = Double(displayText.count) * charW
                     let contW  = Double(geo.size.width)
                     // One full cycle = text travels from right edge to left edge.
-                    // min() prevents instant loops when text is very short.
+                    // Window is capped at 120 chars so cycle stays short enough
+                    // that recent tokens are always visible.
                     let cycle  = max(textW + contW, contW * 1.5)
-                    let speed  = 55.0   // pts / s — comfortable reading pace
+                    let speed  = 80.0   // pts / s — faster to keep up with live thinking
                     let phase  = (elapsed * speed).truncatingRemainder(dividingBy: cycle)
                     let xOff   = contW - phase  // starts at right, scrolls left
 
-                    Text(clean)
+                    Text(displayText)
                         .font(.system(size: 11, weight: .light, design: .monospaced))
                         .foregroundColor(.white.opacity(0.45))
                         .lineLimit(1)

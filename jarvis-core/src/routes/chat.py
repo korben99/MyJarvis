@@ -322,61 +322,6 @@ async def _sse_stream(ctx: _SseCtx):
 
 # ── Pipeline helpers ───────────────────────────────────────────────────────────
 
-_OPENWEBUI_KEYWORDS = (
-    "### task:",
-    "generate a title",
-    "suggest 3",
-    "suggest 4",
-    "suggest 5",
-    "relevant follow",
-    "follow-up question",
-    "followup question",
-    "questions de suivi",
-)
-
-
-async def _owui_passthrough_stream(
-    message: str, model: str, api_url: str, api_key: str
-):
-    """Générateur SSE pour les requêtes système Open WebUI (titres, suggestions…).
-
-    Extrait de la closure _passthrough() qui était définie inline dans
-    _openwebui_passthrough(). Toutes les dépendances sont passées explicitement.
-    """
-    async for chunk in stream_openai(
-        [{"role": "user", "content": message}],
-        model,
-        api_url,
-        api_key,
-        no_think=True,
-    ):
-        yield f"data: {json.dumps({'content': chunk})}\n\n"
-    yield f"data: {json.dumps({'done': True})}\n\n"
-
-
-def _openwebui_passthrough(req: ChatRequest) -> "StreamingResponse | dict | None":
-    """
-    Détecte les requêtes système d'Open WebUI (suggestions, titres, follow-ups)
-    et les renvoie directement au modèle léger, sans passer par le pipeline Jarvis.
-    Retourne None si le message n'est pas une requête Open WebUI.
-    """
-    if not any(kw in req.message.lower() for kw in _OPENWEBUI_KEYWORDS):
-        return None
-
-    logger.debug("Open WebUI system message detected — bypassing Jarvis pipeline")
-    _owui_model = ROUTER_MODEL or PRIMARY_MODEL
-    _owui_api_url = ROUTER_API_URL if ROUTER_MODEL else PRIMARY_API_URL
-    _owui_api_key = ROUTER_API_KEY if ROUTER_MODEL else PRIMARY_API_KEY
-
-    if req.stream:
-        return StreamingResponse(
-            _owui_passthrough_stream(
-                req.message, _owui_model, _owui_api_url, _owui_api_key
-            ),
-            media_type="text/event-stream",
-        )
-    return {"response": req.message, "session_id": req.session_id}
-
 
 async def _instant_stream(text: str, model: str):
     """Générateur SSE minimal pour les réponses immédiates sans appel LLM.
@@ -582,12 +527,6 @@ async def chat(req: ChatRequest):
 
     # Compute once — reused in embed router, LLM router, calendar write, context gather.
     _google_available = is_google_available(user_code)
-
-    # ── Early-exit: Open WebUI internal system requests ─────────────────────
-    # Open WebUI envoie ses propres appels LLM (suggestions, titres…).
-    # Ces messages doivent être renvoyés directement au modèle léger.
-    if (result := _openwebui_passthrough(req)) is not None:
-        return result
 
     # ════════════════════════════════════════════════════════════════════════
     # STEP 1 — KEYWORD DISPATCH — fast paths, no LLM router cost
@@ -945,8 +884,7 @@ async def chat(req: ChatRequest):
     if image_description:
         raw_user_content = (
             f"{req.message}\n\n"
-            f"--- Image jointe, décrite ci-dessous ---\n"
-            f"{image_description}"
+            f"<image>\n{image_description}\n</image>"
         )
 
     # Build the user message: [dynamic_prefix] → [context] → <message_utilisateur>

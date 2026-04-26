@@ -8,6 +8,7 @@ Session: derived from user_code + first user message (stable per thread).
 
 import hashlib
 import json
+import re
 import time
 import uuid
 from typing import Optional
@@ -16,8 +17,18 @@ from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from config import EMAIL_TO_CODE, USER_CODES
+from config import (
+    EMAIL_TO_CODE,
+    PRIMARY_API_KEY,
+    PRIMARY_API_URL,
+    PRIMARY_MODEL,
+    ROUTER_API_KEY,
+    ROUTER_API_URL,
+    ROUTER_MODEL,
+    USER_CODES,
+)
 from helpers import get_logger
+from llm_client import stream_openai
 from routes.chat import ChatRequest, chat
 
 logger = get_logger("jarvis-proxy")
@@ -51,6 +62,111 @@ def _extract_content_parts(content: str | list) -> tuple[str, list]:
     ).strip()
     images = [p for p in content if isinstance(p, dict) and p.get("type") == "image_url"]
     return text, images
+
+
+# ── OpenWebUI system-request detection ────────────────────────────────────────
+# OpenWebUI fires its own LLM calls for UI tasks (title generation, follow-up
+# suggestions…).  These never go through the Jarvis pipeline — handled here at
+# the proxy layer so chat.py stays OpenWebUI-agnostic.
+_OWUI_SYSTEM_KEYWORDS = (
+    "### task:",
+    "generate a title",
+    "suggest 3",
+    "suggest 4",
+    "suggest 5",
+    "relevant follow",
+    "follow-up question",
+    "followup question",
+    "questions de suivi",
+)
+
+
+async def _owui_system_stream(message: str, req_id: str, created: int):
+    """
+    Respond to an OpenWebUI system request (title, suggestions…) using the
+    router model, emitting OpenAI SSE directly — no Jarvis-SSE intermediate.
+    """
+    model = ROUTER_MODEL or PRIMARY_MODEL
+    api_url = ROUTER_API_URL if ROUTER_MODEL else PRIMARY_API_URL
+    api_key = ROUTER_API_KEY if ROUTER_MODEL else PRIMARY_API_KEY
+
+    async for chunk in stream_openai(
+        [{"role": "user", "content": message}],
+        model,
+        api_url,
+        api_key,
+        no_think=True,
+    ):
+        yield "data: " + json.dumps({
+            "id": req_id, "object": "chat.completion.chunk",
+            "created": created, "model": "jarvis",
+            "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
+        }) + "\n\n"
+    yield "data: " + json.dumps({
+        "id": req_id, "object": "chat.completion.chunk",
+        "created": created, "model": "jarvis",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }) + "\n\n"
+    yield "data: [DONE]\n\n"
+
+
+# ── OpenWebUI RAG-template stripping ──────────────────────────────────────────
+_OWUI_RAG_MARKER = "respond to the user query"
+
+
+def _strip_owui_rag(message: str) -> str:
+    """
+    Detect OpenWebUI document-injection templates and convert them to a clean
+    Jarvis message:  user question  +  inline document context.
+
+    OpenWebUI injects documents via the `/v1/chat/completions` endpoint with
+    this template:
+        ### Task:
+        Respond to the user query using the provided context...
+
+        ### Context:
+        <context>
+        <source id="1">...</source>
+        </context>
+
+        ### Query:
+        [actual user question]
+
+    Without this cleaning the message matches _OPENWEBUI_KEYWORDS ("### task:")
+    and gets routed to Hermes without a system prompt — causing vouvoiement and
+    poor quality.
+
+    Returns the original message unchanged for all non-matching inputs.
+    """
+    if _OWUI_RAG_MARKER not in message.lower():
+        return message
+
+    # Extract the real user question from ### Query: section
+    query_match = re.search(
+        r"### Query:\s*\n(.+?)(?:\n###|\Z)", message, re.DOTALL | re.IGNORECASE
+    )
+    if not query_match:
+        # Template detected but malformed — pass through as-is (safe fallback)
+        logger.warning("_strip_owui_rag: ### Query: section not found, passing through")
+        return message
+
+    query = query_match.group(1).strip()
+
+    # Extract <source>…</source> blocks (OpenWebUI may inject multiple)
+    sources = re.findall(r"<source[^>]*>(.*?)</source>", message, re.DOTALL)
+    if sources:
+        doc_body = "\n\n---\n".join(s.strip() for s in sources)
+        clean = f"{query}\n\n[Document injecté par l'utilisateur]\n{doc_body}"
+        logger.debug(
+            "_strip_owui_rag: stripped template → query=%r, sources=%d",
+            query[:80],
+            len(sources),
+        )
+        return clean
+
+    # No <source> blocks found — return just the query
+    logger.debug("_strip_owui_rag: no sources found, returning query only")
+    return query
 
 
 def _proxy_session_id(user_code: str, messages: list[_OAIMessage]) -> str:
@@ -136,6 +252,32 @@ async def proxy_chat(
     if not message and not image_parts:
         raise HTTPException(400, "No usable message found")
 
+    req_id  = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    created = int(time.time())
+
+    # ── Strip OpenWebUI RAG template (document injection via '+' button) ──
+    # Converts "### Task: Respond to the user query…" templates into a clean
+    # question + inline document context that goes through the full Jarvis pipeline.
+    if message:
+        message = _strip_owui_rag(message)
+
+    # ── OpenWebUI system requests (title, suggestions…) — handled at proxy level ──
+    # These never reach the Jarvis pipeline; chat.py stays OpenWebUI-agnostic.
+    if message and any(kw in message.lower() for kw in _OWUI_SYSTEM_KEYWORDS):
+        logger.debug("OpenWebUI system request — handled at proxy, bypassing Jarvis pipeline")
+        if req.stream:
+            return StreamingResponse(
+                _owui_system_stream(message, req_id, created),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache"},
+            )
+        return {
+            "id": req_id, "object": "chat.completion", "created": created,
+            "model": "jarvis",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": message}, "finish_reason": "stop"}],
+            "usage": {},
+        }
+
     # ── Delegate to /chat ──
     jarvis_req = ChatRequest(
         message=message or "Que contient cette image ?",
@@ -145,9 +287,6 @@ async def proxy_chat(
         image_parts=image_parts,
     )
     response = await chat(jarvis_req)
-
-    req_id  = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    created = int(time.time())
 
     if isinstance(response, StreamingResponse):
         return StreamingResponse(

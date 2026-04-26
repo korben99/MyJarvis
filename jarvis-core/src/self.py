@@ -680,7 +680,7 @@ async def _call_global_reflection_llm(
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=0.2,
-            max_tokens=500,  # action JSON ~150 tok; early-stop kicks in before ceiling
+            max_tokens=1000,  # action JSON can reach 500+ tok with verbose reason/params
             json_response=True,
             no_think=True,  # structured JSON action selection — thinking adds latency/failure risk
             timeout=120.0,
@@ -1794,7 +1794,7 @@ def _action_refine_prompt(params: dict) -> str:
             api_key=REASONING_API_KEY,
             temperature=0.4,
             max_tokens=THINKING_BUDGET_TOKENS
-            + 4000,  # think block + proposed prompt text + rationale
+            + 6000,  # think block (can be long) + proposed prompt text + rationale
             json_response=True,
             no_think=False,
             timeout=REASONING_TIMEOUT,
@@ -1859,7 +1859,7 @@ def _action_refine_prompt(params: dict) -> str:
                 api_key=REASONING_API_KEY,
                 temperature=0.3,
                 max_tokens=THINKING_BUDGET_TOKENS
-                + 4000,  # retry — same budget as initial call
+                + 6000,  # retry — same budget as initial call
                 json_response=True,
                 no_think=False,
                 timeout=REASONING_TIMEOUT,

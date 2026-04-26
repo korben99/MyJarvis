@@ -26,6 +26,7 @@ Exports publics :
   call_llm_local(...)         → str   (sync — utiliser via asyncio.to_thread)
   call_llm_local_async(...)   → str   (async non-streaming)
   stream_local(...)           → AsyncGenerator[str, None]  (streaming chat)
+  describe_images_local(...)  → str   (async, mlx_vlm — image description)
 """
 
 import asyncio
@@ -136,15 +137,15 @@ def _model_profile(model_path: str) -> _ModelProfile:
         # top_p / top_k identical to Qwen3. Slightly reduced repetition_penalty (1.05 vs 1.1)
         # — Qwen3.6 has better native diversity from larger expert pool (256 vs 64).
         return _ModelProfile(
-            temp_think=0.7,
+            temp_think=1.0,
             temp_nothink=0.7,
             top_p_think=0.95,
             top_p_nothink=0.80,
             top_k=20,
             min_p=0.0,
-            repetition_penalty=1.05,
+            repetition_penalty=1.0,
             repetition_context_size=64,
-            frequency_penalty=0.05,
+            frequency_penalty=0.0,
             use_quant_kv=QUANT_KV,
             stop_tokens=(),
         )
@@ -565,7 +566,9 @@ def _build_prompt(
                 prompt = prompt.rstrip("\n") + "\n<think>\n\n</think>\n\n"
             # else: standard template already closed the block → no-op
         else:
-            if not (prompt.endswith("<think>\n") or prompt.rstrip().endswith("<think>")):
+            if not (
+                prompt.endswith("<think>\n") or prompt.rstrip().endswith("<think>")
+            ):
                 prompt = prompt.rstrip("\n") + "\n<think>\n"
 
         return prompt
@@ -1087,3 +1090,95 @@ async def stream_local(
         # GPU busy and make a second concurrent inference possible.
         stop_flag.set()
         _infer_lock.release()
+
+
+# ── Vision model (mlx_vlm) ────────────────────────────────────────────────────
+# Lazy-loaded on first image request.
+# Uses its own _vlm_lock — NOT _infer_lock — because:
+#   1. VLM and text inference are sequential in the pipeline (describe_images
+#      runs before Qwen3.6), so they never compete for the GPU.
+#   2. Holding _infer_lock during VLM load + Metal kernel compilation (can take
+#      several minutes on first run) blocks background tasks indefinitely.
+#   3. _vlm_lock still serialises concurrent image requests correctly.
+
+_vlm_model = None
+_vlm_processor = None
+_vlm_config = None
+_vlm_lock = threading.Lock()
+
+
+def _load_vlm() -> None:
+    """Load the VLM model once (must be called while _infer_lock is held)."""
+    global _vlm_model, _vlm_processor, _vlm_config
+    if _vlm_model is not None:
+        return
+    from config import VISION_MODEL
+    from mlx_vlm import load as vlm_load
+    from mlx_vlm.utils import load_config as vlm_load_config
+
+    logger.info("VLM: loading %s…", VISION_MODEL)
+    t0 = time.time()
+    _vlm_model, _vlm_processor = vlm_load(VISION_MODEL)
+    _vlm_config = vlm_load_config(VISION_MODEL)
+    logger.info("VLM: loaded in %.1fs", time.time() - t0)
+
+
+def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
+    """
+    Synchronous VLM inference — run via asyncio.to_thread() only.
+    image_parts: list of resolved OpenAI image_url dicts
+      {"type": "image_url", "image_url": {"url": "data:…;base64,…" | "https://…"}}
+    """
+    import base64 as _b64
+    import io
+
+    from mlx_vlm import generate as vlm_generate
+    from mlx_vlm.prompt_utils import apply_chat_template as vlm_apply_chat_template
+    from mlx_vlm.utils import load_image as vlm_load_image
+
+    _load_vlm()
+
+    images = []
+    for part in image_parts:
+        url = (part.get("image_url") or {}).get("url", "")
+        if url.startswith("data:"):
+            _, b64data = url.split(",", 1)
+            images.append(vlm_load_image(io.BytesIO(_b64.b64decode(b64data))))
+        elif url.startswith("http"):
+            images.append(url)
+
+    if not images:
+        return ""
+
+    prompt_text = (
+        "Décris cette image en prose concise (3-5 phrases maximum, sans markdown). "
+        "Couvre dans cet ordre : sujet principal et contexte, tout texte/chiffre visible "
+        "recopié mot pour mot, personnes présentes, objets et couleurs clés. "
+        f"Mets l'accent sur les éléments utiles pour répondre à : "
+        f"{text_prompt or 'Que contient cette image ?'}"
+    )
+    formatted = vlm_apply_chat_template(
+        _vlm_processor, _vlm_config, prompt_text, num_images=len(images)
+    )
+    result = vlm_generate(
+        _vlm_model,
+        _vlm_processor,
+        formatted,
+        image=images[0] if len(images) == 1 else images,
+        max_tokens=400,
+        verbose=False,
+    )
+    return result.text if hasattr(result, "text") else str(result)
+
+
+async def describe_images_local(image_parts: list, text_prompt: str) -> str:
+    """
+    Async entry point for local VLM inference.
+    Uses _vlm_lock (not _infer_lock) so VLM load/compilation never blocks
+    background text inference tasks.
+    """
+    await asyncio.to_thread(_vlm_lock.acquire)
+    try:
+        return await asyncio.to_thread(_describe_images_sync, image_parts, text_prompt)
+    finally:
+        _vlm_lock.release()

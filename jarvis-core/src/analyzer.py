@@ -52,8 +52,7 @@ logger = get_logger("jarvis-analyzer")
 
 
 async def analyze_exchange(
-    user_msg: str,
-    assistant_msg: str,
+    conversation: str,
     existing_projects: list = None,
     existing_profile_keys: list = None,
 ) -> dict:
@@ -98,8 +97,7 @@ async def analyze_exchange(
         )
         prompt = get_prompt("ANALYSIS_PROMPT").format(
             current_date=date.today().isoformat(),
-            user_message=user_msg[:1500],
-            assistant_message=assistant_msg[:1500],
+            conversation=conversation[:3000],
             existing_projects=projects_context,
             existing_profile_keys=profile_keys_str,
         )
@@ -158,7 +156,7 @@ async def analyze_exchange(
             importance += 0.10
 
         # Message depth (minor signal — long messages often carry more info)
-        if len(user_msg) > 200:
+        if len(conversation) > 200:
             importance += 0.05
 
         # Clamp score
@@ -309,12 +307,17 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
             most_recent_analysis: dict | None = None
 
             for sd in sorted(sessions_data, key=lambda x: x["max_ts"]):
-                acc_user = "\nUtilisateur : ".join(sd["user_parts"])[:3000]
-                acc_asst = "\nJarvis : ".join(sd["asst_parts"])[:3000]
+                turns = []
+                for m in sorted(sd["msgs"], key=lambda x: x.get("ts", 0)):
+                    role = "Utilisateur" if m.get("role") == "user" else "Jarvis"
+                    content = m.get("content", "").strip()[:800]
+                    if content:
+                        turns.append(f"{role} : {content}")
+                conversation = "\n".join(turns)[:4000]
 
                 try:
                     analysis = await analyze_exchange(
-                        acc_user, acc_asst, existing_projects, existing_profile_keys
+                        conversation, existing_projects, existing_profile_keys
                     )
                 except Exception as exc:
                     logger.error(
@@ -405,8 +408,7 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                     entry = {
                         "session_id": sd["session_id"],
                         "timestamp": sd["max_ts"],
-                        "user": acc_user[:500],
-                        "assistant": acc_asst[:500],
+                        "conversation": conversation[:500],
                         "mood": _mood_s,
                         "topics": analysis.get("topics", []),
                         "importance": _imp_s,
