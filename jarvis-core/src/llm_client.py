@@ -34,6 +34,7 @@ from config import (
 from deps import get_stream_client
 from helpers import get_logger
 from llm_local import stream_local
+from prompts import VISION_USER_PROMPT
 
 _LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL, REASONING_MODEL} if LLM_LOCAL else set()
 
@@ -69,6 +70,7 @@ async def stream_openai(
     no_think: bool = False,
     session_id: str = "",
     max_tokens: int = 10000,
+    thinking_budget: int = 0,
 ) -> AsyncGenerator[str, None]:
 
     # ── Local path (MLX) ───────────────────────────────────────────
@@ -79,6 +81,7 @@ async def stream_openai(
             no_think=no_think,
             session_id=session_id,
             max_tokens=max_tokens,
+            thinking_budget=thinking_budget,
         ):
             yield chunk
         return
@@ -220,12 +223,8 @@ async def describe_images(image_parts: list, text_prompt: str) -> str:
                 "content": [
                     {
                         "type": "text",
-                        "text": (
-                            "Décris cette image en prose concise (3-5 phrases maximum, sans markdown). "
-                            "Couvre dans cet ordre : sujet principal et contexte, tout texte/chiffre "
-                            "visible recopié mot pour mot, personnes présentes, objets et couleurs clés. "
-                            "Mets l'accent sur les éléments utiles pour répondre à : "
-                            f"{text_prompt or 'Que contient cette image ?'}"
+                        "text": VISION_USER_PROMPT.format(
+                            text_prompt=text_prompt or "Décris cette image dans son ensemble."
                         ),
                     },
                     *resolved,

@@ -37,37 +37,40 @@ import glob
 import json
 import os
 from datetime import datetime, timezone
-from typing import Optional
 
-import httpx
 import pytz
 import redis as redis_lib
 import yfinance as yf
-
 from config import (
     BRIEFING_TIMEZONE,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
-    REDIS_URL,
 )
-from trade_keys import idx_key, pos_key, import_ts_key, price_cache_key, alert_queue_key
 from helpers import call_llm_async, extract_llm_json, get_logger, get_redis
+from trade_keys import alert_queue_key, idx_key, import_ts_key, pos_key, price_cache_key
 
 logger = get_logger("jarvis-trading")
 
-TRADE_DATA_DIR = os.getenv("TRADE_DATA_DIR", "/app/trade_data")
+TRADE_DATA_DIR = os.getenv("TRADE_DATA_DIR", "/opt/jarvis/RAGData/Trade")
 PRICE_CACHE_TTL = 55 * 60  # 55 minutes
 _ALERT_MIN_INTERVAL_HOURS = 8  # Don't re-alert same position within 4 h
-_ALERT_QUEUE_TTL = 86400       # Pending alerts expire after 24 h
-
+_ALERT_QUEUE_TTL = 86400  # Pending alerts expire after 24 h
 
 
 # ── CSV parsing ────────────────────────────────────────────────────────────
 
+
 def _parse_french_float(val: str) -> float:
     """Convert French-format number to float.  '7 944,56' → 7944.56"""
-    return float(val.strip().strip('"').replace("\u202f", "").replace("\xa0", "").replace(" ", "").replace(",", "."))
+    return float(
+        val.strip()
+        .strip('"')
+        .replace("\u202f", "")
+        .replace("\xa0", "")
+        .replace(" ", "")
+        .replace(",", ".")
+    )
 
 
 def _find_latest_csv() -> str | None:
@@ -94,15 +97,23 @@ def parse_boursorama_csv(path: str) -> list[dict]:
             if not isin or not name:
                 continue
             try:
-                positions.append({
-                    "name": name,
-                    "isin": isin,
-                    "quantity":            _parse_french_float(row.get("quantity", "0")),
-                    "buying_price":        _parse_french_float(row.get("buyingPrice", "0")),
-                    "last_price_csv":      _parse_french_float(row.get("lastPrice", "0")),
-                    "total_var_pct_csv":   _parse_french_float(row.get("variation", "0")),
-                    "last_movement_date":  row.get("lastMovementDate", "").strip(),
-                })
+                positions.append(
+                    {
+                        "name": name,
+                        "isin": isin,
+                        "quantity": _parse_french_float(row.get("quantity", "0")),
+                        "buying_price": _parse_french_float(
+                            row.get("buyingPrice", "0")
+                        ),
+                        "last_price_csv": _parse_french_float(
+                            row.get("lastPrice", "0")
+                        ),
+                        "total_var_pct_csv": _parse_french_float(
+                            row.get("variation", "0")
+                        ),
+                        "last_movement_date": row.get("lastMovementDate", "").strip(),
+                    }
+                )
             except (ValueError, KeyError) as exc:
                 logger.warning("Skipping CSV row %s: %s", isin, exc)
     return positions
@@ -133,10 +144,17 @@ def import_csv_to_redis(user_code: str) -> int:
 
     # Jarvis-managed fields that must never be overwritten by a CSV import
     _JARVIS_FIELDS = (
-        "yahoo_ticker", "dividend_eur", "dividend_date",
-        "threshold_high", "threshold_low",
-        "last_alert_at", "last_alert_reason", "notes",
-        "last_price", "intraday_var_pct", "price_updated_at",
+        "yahoo_ticker",
+        "dividend_eur",
+        "dividend_date",
+        "threshold_high",
+        "threshold_low",
+        "last_alert_at",
+        "last_alert_reason",
+        "notes",
+        "last_price",
+        "intraday_var_pct",
+        "price_updated_at",
     )
 
     for pos in positions:
@@ -147,29 +165,40 @@ def import_csv_to_redis(user_code: str) -> int:
         existing = r.hgetall(key)
         jarvis_values = {k: existing[k] for k in _JARVIS_FIELDS if k in existing}
 
-        r.hset(key, mapping={
-            "name":                pos["name"],
-            "isin":                isin,
-            "quantity":            pos["quantity"],
-            "buying_price":        pos["buying_price"],
-            "last_price_csv":      pos["last_price_csv"],
-            "total_var_pct_csv":   pos["total_var_pct_csv"],
-            "last_movement_date":  pos["last_movement_date"],
-            "imported_at":         datetime.now(timezone.utc).isoformat(),
-        })
+        r.hset(
+            key,
+            mapping={
+                "name": pos["name"],
+                "isin": isin,
+                "quantity": pos["quantity"],
+                "buying_price": pos["buying_price"],
+                "last_price_csv": pos["last_price_csv"],
+                "total_var_pct_csv": pos["total_var_pct_csv"],
+                "last_movement_date": pos["last_movement_date"],
+                "imported_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
         if jarvis_values:
             r.hset(key, mapping=jarvis_values)
 
         r.sadd(idx_key_cur, isin)
 
     r.set(import_ts_key(user_code), os.path.getmtime(path))
-    logger.info("Imported %d positions for %s from %s", len(positions), user_code, os.path.basename(path))
+    logger.info(
+        "Imported %d positions for %s from %s",
+        len(positions),
+        user_code,
+        os.path.basename(path),
+    )
     return len(positions)
 
 
 # ── Yahoo Finance price fetch ──────────────────────────────────────────────
 
-def _resolve_ticker(isin: str, r: redis_lib.Redis, pos_key: str, name: str = "") -> str | None:
+
+def _resolve_ticker(
+    isin: str, r: redis_lib.Redis, pos_key: str, name: str = ""
+) -> str | None:
     """
     Resolve ISIN → Yahoo Finance ticker.
     Priority:
@@ -202,7 +231,9 @@ def _resolve_ticker(isin: str, r: redis_lib.Redis, pos_key: str, name: str = "")
             quotes = results.quotes
             if quotes:
                 ticker = quotes[0].get("symbol")
-                logger.info("Resolved ticker %s → %s (via name search '%s')", isin, ticker, name)
+                logger.info(
+                    "Resolved ticker %s → %s (via name search '%s')", isin, ticker, name
+                )
         except Exception as exc:
             logger.warning("yfinance name lookup failed for '%s': %s", name, exc)
 
@@ -210,7 +241,8 @@ def _resolve_ticker(isin: str, r: redis_lib.Redis, pos_key: str, name: str = "")
     if not ticker:
         logger.warning(
             "TICKER NOT FOUND via yfinance for ISIN=%s name='%s' — trying LLM fallback",
-            isin, name,
+            isin,
+            name,
         )
         ticker = _resolve_ticker_llm(isin, name)
         if ticker:
@@ -218,7 +250,8 @@ def _resolve_ticker(isin: str, r: redis_lib.Redis, pos_key: str, name: str = "")
         else:
             logger.error(
                 "TICKER UNRESOLVABLE: ISIN=%s name='%s' — position will be skipped until manually set via PUT /portfolio/position",
-                isin, name,
+                isin,
+                name,
             )
 
     if ticker:
@@ -231,17 +264,19 @@ def _resolve_ticker(isin: str, r: redis_lib.Redis, pos_key: str, name: str = "")
 
 async def _ticker_llm_call_async(prompt: str) -> str:
     """Async LLM call for ticker resolution — run via asyncio.run()."""
-    return (await call_llm_async(
-        [{"role": "user", "content": prompt}],
-        model=PRIMARY_MODEL,
-        api_url=PRIMARY_API_URL,
-        api_key=PRIMARY_API_KEY,
-        temperature=0,
-        max_tokens=20,
-        json_response=False,
-        no_think=True,
-        timeout=15.0,
-    )).strip()
+    return (
+        await call_llm_async(
+            [{"role": "user", "content": prompt}],
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
+            temperature=0,
+            max_tokens=20,
+            json_response=False,
+            no_think=True,
+            timeout=15.0,
+        )
+    ).strip()
 
 
 def _resolve_ticker_llm(isin: str, name: str) -> str | None:
@@ -265,7 +300,9 @@ def _resolve_ticker_llm(isin: str, name: str) -> str | None:
             raw = asyncio.run(_ticker_llm_call_async(prompt))
         if raw and raw.upper() != "UNKNOWN" and " " not in raw and len(raw) <= 12:
             return raw
-        logger.warning("LLM ticker resolution returned unusable value '%s' for %s", raw, isin)
+        logger.warning(
+            "LLM ticker resolution returned unusable value '%s' for %s", raw, isin
+        )
     except Exception as exc:
         logger.warning("LLM ticker fallback failed for %s: %s", isin, exc)
     return None
@@ -304,7 +341,9 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
             obj = yf.Ticker(ticker)
             fi = obj.fast_info
             price = fi.last_price or fi.previous_close or 0.0
-            change_pct = round(float(getattr(fi, "regular_market_change_percent", 0.0) or 0.0), 2)
+            change_pct = round(
+                float(getattr(fi, "regular_market_change_percent", 0.0) or 0.0), 2
+            )
 
             # Sanity check: compare against last Boursorama CSV price.
             # A deviation > 15% vs the last CSV import is suspicious (likely wrong ticker).
@@ -318,7 +357,11 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
                         logger.error(
                             "TICKER MISMATCH: %s (%s) yfinance=%.2f vs CSV=%.2f (%.1f%% deviation) "
                             "— ticker likely maps to wrong security, clearing cache",
-                            ticker, isin, price, csv_price, deviation_pct,
+                            ticker,
+                            isin,
+                            price,
+                            csv_price,
+                            deviation_pct,
                         )
                         r.hdel(pos_key_check, "yahoo_ticker")
                         continue  # skip this price, will re-resolve next run
@@ -326,7 +369,11 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
                         logger.warning(
                             "PRICE DRIFT: %s (%s) yfinance=%.2f vs CSV=%.2f (%.1f%% deviation) "
                             "— verify ticker is still correct",
-                            ticker, isin, price, csv_price, deviation_pct,
+                            ticker,
+                            isin,
+                            price,
+                            csv_price,
+                            deviation_pct,
                         )
             except (TypeError, ValueError):
                 pass  # no CSV price yet — skip validation
@@ -350,14 +397,18 @@ def update_prices_in_redis(user_code: str, prices: dict[str, dict]) -> None:
     for isin, data in prices.items():
         key = pos_key(user_code, isin)
         if r.exists(key):
-            r.hset(key, mapping={
-                "last_price":       data["price"],
-                "intraday_var_pct": data["intraday_var_pct"],
-                "price_updated_at": now,
-            })
+            r.hset(
+                key,
+                mapping={
+                    "last_price": data["price"],
+                    "intraday_var_pct": data["intraday_var_pct"],
+                    "price_updated_at": now,
+                },
+            )
 
 
 # ── Portfolio read ─────────────────────────────────────────────────────────
+
 
 def get_portfolio(user_code: str) -> list[dict]:
     """Return all positions enriched with live P&L calculations."""
@@ -369,21 +420,25 @@ def get_portfolio(user_code: str) -> list[dict]:
         if not raw:
             continue
         try:
-            qty  = float(raw.get("quantity", 0))
-            buy  = float(raw.get("buying_price", 0))
+            qty = float(raw.get("quantity", 0))
+            buy = float(raw.get("buying_price", 0))
             live = float(raw.get("last_price") or raw.get("last_price_csv") or 0)
-            cost  = round(qty * buy,  2)
+            cost = round(qty * buy, 2)
             value = round(qty * live, 2)
-            portfolio.append({
-                **raw,
-                "quantity":            qty,
-                "buying_price":        buy,
-                "last_price":          live,
-                "cost_basis_eur":      cost,
-                "current_value_eur":   value,
-                "unrealized_pnl_eur":  round(value - cost, 2),
-                "unrealized_pnl_pct":  round((live - buy) / buy * 100, 2) if buy else 0.0,
-            })
+            portfolio.append(
+                {
+                    **raw,
+                    "quantity": qty,
+                    "buying_price": buy,
+                    "last_price": live,
+                    "cost_basis_eur": cost,
+                    "current_value_eur": value,
+                    "unrealized_pnl_eur": round(value - cost, 2),
+                    "unrealized_pnl_pct": round((live - buy) / buy * 100, 2)
+                    if buy
+                    else 0.0,
+                }
+            )
         except (ValueError, TypeError):
             portfolio.append(raw)
     return portfolio
@@ -403,11 +458,11 @@ def get_portfolio_summary_text(user_code: str) -> str:
 
     for p in positions:
         try:
-            cost  = float(p.get("cost_basis_eur", 0))
+            cost = float(p.get("cost_basis_eur", 0))
             value = float(p.get("current_value_eur", 0))
             pnl_pct = float(p.get("unrealized_pnl_pct", 0))
-            intra   = float(p.get("intraday_var_pct", 0))
-            total_cost  += cost
+            intra = float(p.get("intraday_var_pct", 0))
+            total_cost += cost
             total_value += value
 
             extras = ""
@@ -430,7 +485,7 @@ def get_portfolio_summary_text(user_code: str) -> str:
             lines.append(f"• {p.get('name', p.get('isin', '?'))}")
 
     if total_cost > 0:
-        total_pnl     = round(total_value - total_cost, 2)
+        total_pnl = round(total_value - total_cost, 2)
         total_pnl_pct = round((total_value - total_cost) / total_cost * 100, 2)
         lines.append(
             f"\nTotal: investi {total_cost:.0f}€ | valeur {total_value:.0f}€ | "
@@ -480,7 +535,9 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
         last_alert = p.get("last_alert_at", "")
         if last_alert:
             try:
-                if (now - datetime.fromisoformat(last_alert)).total_seconds() < _ALERT_MIN_INTERVAL_HOURS * 3600:
+                if (
+                    now - datetime.fromisoformat(last_alert)
+                ).total_seconds() < _ALERT_MIN_INTERVAL_HOURS * 3600:
                     continue
             except ValueError:
                 pass
@@ -490,19 +547,23 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
         return False, ""
 
     # Compute total portfolio daily P&L explicitly so the LLM has a clear figure
-    total_value   = sum(float(p.get("current_value_eur", 0) or 0) for p in eligible)
+    total_value = sum(float(p.get("current_value_eur", 0) or 0) for p in eligible)
     daily_pnl_eur = sum(
-        float(p.get("current_value_eur", 0) or 0) * float(p.get("intraday_var_pct", 0) or 0) / 100
+        float(p.get("current_value_eur", 0) or 0)
+        * float(p.get("intraday_var_pct", 0) or 0)
+        / 100
         for p in eligible
     )
-    daily_pnl_pct = round(daily_pnl_eur / total_value * 100, 2) if total_value > 0 else 0.0
+    daily_pnl_pct = (
+        round(daily_pnl_eur / total_value * 100, 2) if total_value > 0 else 0.0
+    )
 
     lines = []
     for p in eligible:
         try:
-            intra   = float(p.get("intraday_var_pct", 0) or 0)
+            intra = float(p.get("intraday_var_pct", 0) or 0)
             pnl_pct = float(p.get("unrealized_pnl_pct", 0) or 0)
-            live    = float(p.get("last_price", 0) or 0)
+            live = float(p.get("last_price", 0) or 0)
             # Label clearly: J = intraday (daily), PV_total = since purchase
             line = f"{p['name']}: cours={live}€ (J={intra:+.2f}%, PV_total={pnl_pct:+.2f}%)"
             if p.get("threshold_high"):
@@ -519,10 +580,13 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
         content = await call_llm_async(
             [
                 {"role": "system", "content": _ALERT_SYSTEM},
-                {"role": "user",   "content": _ALERT_USER.format(
-                    portfolio="\n".join(lines),
-                    daily_pnl_pct=daily_pnl_pct,
-                )},
+                {
+                    "role": "user",
+                    "content": _ALERT_USER.format(
+                        portfolio="\n".join(lines),
+                        daily_pnl_pct=daily_pnl_pct,
+                    ),
+                },
             ],
             model=PRIMARY_MODEL,
             api_url=PRIMARY_API_URL,
@@ -538,7 +602,7 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
             return
         result = extract_llm_json(content)
         should_alert = bool(result.get("alert", False))
-        message      = result.get("message", "")
+        message = result.get("message", "")
 
         if should_alert and message:
             now_iso = now.isoformat()
@@ -547,10 +611,13 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
             # name, so the old name-match logic never set last_alert_at, causing the
             # same alert to refire every hour until the cooldown actually engaged.
             for p in eligible:
-                r.hset(pos_key(user_code, p["isin"]), mapping={
-                    "last_alert_at":     now_iso,
-                    "last_alert_reason": message[:200],
-                })
+                r.hset(
+                    pos_key(user_code, p["isin"]),
+                    mapping={
+                        "last_alert_at": now_iso,
+                        "last_alert_reason": message[:200],
+                    },
+                )
 
         return should_alert, message
 
@@ -560,6 +627,7 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
 
 
 # ── Pending alert queue ─────────────────────────────────────────────────────
+
 
 def push_pending_alert(user_code: str, message: str) -> None:
     r = get_redis()
@@ -585,18 +653,20 @@ def pop_pending_alerts(user_code: str) -> list[dict]:
 
 # ── Market hours helper ────────────────────────────────────────────────────
 
+
 def _is_market_hours() -> bool:
     """True if current Paris time is Mon–Fri 09:00–17:35."""
-    tz  = pytz.timezone(BRIEFING_TIMEZONE or "Europe/Paris")
+    tz = pytz.timezone(BRIEFING_TIMEZONE or "Europe/Paris")
     now = datetime.now(tz)
     if now.weekday() >= 5:  # Saturday / Sunday
         return False
-    open_  = now.replace(hour=9,  minute=0,  second=0, microsecond=0)
+    open_ = now.replace(hour=9, minute=0, second=0, microsecond=0)
     close_ = now.replace(hour=17, minute=35, second=0, microsecond=0)
     return open_ <= now <= close_
 
 
 # ── Threshold auto-population ──────────────────────────────────────────────
+
 
 def auto_set_thresholds(user_code: str) -> int:
     """
@@ -626,26 +696,35 @@ def auto_set_thresholds(user_code: str) -> int:
         try:
             info = yf.Ticker(ticker_sym).info
             high_52w = info.get("fiftyTwoWeekHigh")
-            low_52w  = info.get("fiftyTwoWeekLow")
+            low_52w = info.get("fiftyTwoWeekLow")
 
             if not high_52w or not low_52w:
-                logger.warning("No 52-week data for %s (%s), skipping", ticker_sym, isin)
+                logger.warning(
+                    "No 52-week data for %s (%s), skipping", ticker_sym, isin
+                )
                 continue
 
             buying_price = float(pos.get("buying_price") or 0)
-            stop_loss    = round(buying_price * 0.90, 2) if buying_price else 0.0
-            tl           = round(max(stop_loss, low_52w), 2)
-            th           = round(high_52w, 2)
+            stop_loss = round(buying_price * 0.90, 2) if buying_price else 0.0
+            tl = round(max(stop_loss, low_52w), 2)
+            th = round(high_52w, 2)
 
             r.hset(key, mapping={"threshold_high": str(th), "threshold_low": str(tl)})
             logger.info(
                 "Auto-thresholds %s (%s): high=%.2f low=%.2f (52w: %.2f/%.2f)",
-                pos.get("name", isin), isin, th, tl, high_52w, low_52w,
+                pos.get("name", isin),
+                isin,
+                th,
+                tl,
+                high_52w,
+                low_52w,
             )
             updated += 1
 
         except Exception as exc:
-            logger.warning("Auto-threshold failed for %s (%s): %s", ticker_sym, isin, exc)
+            logger.warning(
+                "Auto-threshold failed for %s (%s): %s", ticker_sym, isin, exc
+            )
 
     return updated
 
@@ -664,8 +743,8 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
     for p in positions:
         try:
             live = float(p.get("last_price") or 0)
-            buy  = float(p.get("buying_price") or 0)
-            pnl  = float(p.get("unrealized_pnl_pct") or 0)
+            buy = float(p.get("buying_price") or 0)
+            pnl = float(p.get("unrealized_pnl_pct") or 0)
             line = (
                 f"- {p['name']} (ISIN: {p['isin']}): "
                 f"achat={buy}€  cours={live}€  PV={pnl:+.1f}%"
@@ -697,7 +776,10 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
     try:
         content = await call_llm_async(
             [
-                {"role": "system", "content": "Tu es un assistant de gestion de portefeuille boursier."},
+                {
+                    "role": "system",
+                    "content": "Tu es un assistant de gestion de portefeuille boursier.",
+                },
                 {"role": "user", "content": prompt},
             ],
             model=PRIMARY_MODEL,
@@ -719,8 +801,8 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
 
     for item in result.get("positions", []):
         isin = item.get("isin", "").strip()
-        th   = item.get("threshold_high")
-        tl   = item.get("threshold_low")
+        th = item.get("threshold_high")
+        tl = item.get("threshold_low")
         if not isin or th is None or tl is None:
             continue
         key = pos_key(user_code, isin)
@@ -731,8 +813,8 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
         r.hset(key, mapping={"threshold_high": str(th), "threshold_low": str(tl)})
         suggestions[isin] = {
             "threshold_high": th,
-            "threshold_low":  tl,
-            "rationale":      item.get("rationale", ""),
+            "threshold_low": tl,
+            "rationale": item.get("rationale", ""),
         }
         logger.info("LLM threshold set for %s: high=%.2f low=%.2f", isin, th, tl)
 
@@ -740,6 +822,7 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
 
 
 # ── Scheduled job ──────────────────────────────────────────────────────────
+
 
 async def run_trade_check(user_codes: list[str]) -> None:
     """
@@ -755,7 +838,11 @@ async def run_trade_check(user_codes: list[str]) -> None:
                 # Auto-populate thresholds for any new positions that have none
                 filled = await asyncio.to_thread(auto_set_thresholds, user_code)
                 if filled:
-                    logger.info("Trade: auto-set thresholds for %d positions (%s)", filled, user_code)
+                    logger.info(
+                        "Trade: auto-set thresholds for %d positions (%s)",
+                        filled,
+                        user_code,
+                    )
 
             if not get_redis().smembers(idx_key(user_code)):
                 continue  # No positions yet — nothing to do
@@ -764,13 +851,19 @@ async def run_trade_check(user_codes: list[str]) -> None:
                 prices = await asyncio.to_thread(fetch_live_prices, user_code)
                 if prices:
                     update_prices_in_redis(user_code, prices)
-                    logger.info("Trade: updated %d prices for %s", len(prices), user_code)
+                    logger.info(
+                        "Trade: updated %d prices for %s", len(prices), user_code
+                    )
                     should_alert, msg = await evaluate_alerts(user_code)
                     if should_alert and msg:
                         push_pending_alert(user_code, msg)
-                        logger.info("Trade alert queued for %s: %s", user_code, msg[:80])
+                        logger.info(
+                            "Trade alert queued for %s: %s", user_code, msg[:80]
+                        )
             else:
-                logger.debug("Trade: market closed, skipping price fetch for %s", user_code)
+                logger.debug(
+                    "Trade: market closed, skipping price fetch for %s", user_code
+                )
 
         except Exception as exc:
             logger.error("Trade check error for %s: %s", user_code, exc)

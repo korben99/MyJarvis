@@ -11,55 +11,73 @@ Usage:
   python3 upload-to-openwebui.py --api-key YOUR_API_KEY --file-number 20
 """
 
-import os, sys, json, argparse, mimetypes, signal, time, tempfile
+import argparse
+import json
+import mimetypes
+import os
+import signal
+import sys
+import tempfile
+import time
 from pathlib import Path
+
 import requests
+from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from dotenv import load_dotenv
+
 load_dotenv("/opt/jarvis/.env")
 
 # Optional extraction libraries — used as fallback when OpenWebUI returns "empty content"
 try:
-    import pypdf
     import logging as _logging
-    _logging.getLogger("pypdf").setLevel(_logging.ERROR)   # silence "Ignoring wrong pointing object" warnings
+
+    import pypdf
+
+    _logging.getLogger("pypdf").setLevel(
+        _logging.ERROR
+    )  # silence "Ignoring wrong pointing object" warnings
     HAS_PYPDF = True
 except ImportError:
     HAS_PYPDF = False
 
 try:
     from docx import Document as DocxDocument
+
     HAS_DOCX = True
 except ImportError:
     HAS_DOCX = False
 
 try:
     from html.parser import HTMLParser
+
     HAS_HTML = True  # stdlib, always available
 except ImportError:
     HAS_HTML = False
 
 
 OPENWEBUI_URL = os.getenv("OPENWEBUI_URL", "http://localhost:3000")
-DATA_DIR      = os.getenv("DATA_DIR",      "/opt/jarvis/RAGData")
+DATA_DIR = os.getenv("DATA_DIR", "/opt/jarvis/RAGData")
 TRACKING_FILE = "/opt/jarvis/logs/uploaded-files.json"
 OPENWEBUI_API_KEY = os.getenv("OPENWEBUI_API_KEY", "")
-       
-#no pdf at the begining no .py, .html, .yml...
-EXTS = {".xls",".txt",".md",".csv",".docx", ".pdf"}
-MAX_FILE_SIZE_MB = 1          # skip files larger than this
-UPLOAD_TIMEOUT   = 180         # seconds per upload
-ADD_TIMEOUT      = 300         # seconds for knowledge add call (embedding pipeline can be slow)
-MAX_RETRIES      = 3           # retries per API call
-SAVE_EVERY       = 1           # save tracking file every N successful uploads
+
+# no pdf at the begining no .py, .html, .yml...
+EXTS = {".xls", ".txt", ".md", ".csv", ".docx", ".pdf"}
+MAX_FILE_SIZE_MB = 1  # skip files larger than this
+UPLOAD_TIMEOUT = 180  # seconds per upload
+ADD_TIMEOUT = 300  # seconds for knowledge add call (embedding pipeline can be slow)
+MAX_RETRIES = 3  # retries per API call
+SAVE_EVERY = 1  # save tracking file every N successful uploads
+
 
 class _HTMLTextExtractor(HTMLParser if HAS_HTML else object):
     def __init__(self):
         super().__init__()
         self._parts = []
+
     def handle_data(self, data):
         self._parts.append(data)
+
     def get_text(self):
         return " ".join(self._parts)
 
@@ -107,8 +125,18 @@ def extract_text_locally(path: Path) -> str | None:
             return None
 
     # For plain-text formats, just read the file
-    if ext in (".txt", ".md", ".rst", ".csv", ".py", ".js", ".sh",
-               ".yaml", ".yml", ".json"):
+    if ext in (
+        ".txt",
+        ".md",
+        ".rst",
+        ".csv",
+        ".py",
+        ".js",
+        ".sh",
+        ".yaml",
+        ".yml",
+        ".json",
+    ):
         try:
             text = path.read_text(encoding="utf-8", errors="replace").strip()
             return text if text else None
@@ -121,10 +149,14 @@ def extract_text_locally(path: Path) -> str | None:
 
 # Graceful shutdown on Ctrl+C
 _shutdown = False
+
+
 def _sigint(sig, frame):
     global _shutdown
     print("\n[Interrupted — will stop after current file]")
     _shutdown = True
+
+
 signal.signal(signal.SIGINT, _sigint)
 
 
@@ -146,6 +178,7 @@ def make_session():
 
 class APIError(Exception):
     """Raised for permanent HTTP client errors (4xx) that should not be retried."""
+
     def __init__(self, status_code, body):
         self.status_code = status_code
         self.body = body
@@ -165,7 +198,9 @@ def api(session, method, path, headers, timeout=60, **kwargs):
             if r.status_code in (400, 401, 403, 404, 422):
                 raise APIError(r.status_code, r.text)
             # Server-side — retry
-            print(f"  HTTP {r.status_code} (attempt {attempt}/{MAX_RETRIES}): {r.text[:100]}")
+            print(
+                f"  HTTP {r.status_code} (attempt {attempt}/{MAX_RETRIES}): {r.text[:100]}"
+            )
         except APIError:
             raise  # don't swallow permanent errors
         except (requests.exceptions.Timeout, requests.exceptions.ReadTimeout):
@@ -179,7 +214,7 @@ def api(session, method, path, headers, timeout=60, **kwargs):
         except Exception as e:
             print(f"  Request error (attempt {attempt}/{MAX_RETRIES}): {e}")
         if attempt < MAX_RETRIES:
-            time.sleep(2 ** attempt)  # 2s, 4s backoff
+            time.sleep(2**attempt)  # 2s, 4s backoff
     return None
 
 
@@ -204,8 +239,13 @@ def get_or_create_knowledge(session, headers, name, uploaded):
             return kb["id"]
 
     # Create new
-    kb = api(session, "POST", "/api/v1/knowledge/create", headers=headers,
-             json={"name": name, "description": f"Auto-indexed from {DATA_DIR}"})
+    kb = api(
+        session,
+        "POST",
+        "/api/v1/knowledge/create",
+        headers=headers,
+        json={"name": name, "description": f"Auto-indexed from {DATA_DIR}"},
+    )
     if kb:
         print(f"Created knowledge base: '{name}' (id: {kb['id']})")
         uploaded["_kb_id"] = kb["id"]
@@ -220,10 +260,14 @@ def collect_files(data_dir, uploaded):
     data_path = Path(data_dir)
     max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
 
+    _excluded = {data_path / "Trade"}
+
     for path in sorted(data_path.rglob("*")):
         if not path.is_file():
             continue
-        if path.name.startswith("._"):   # macOS resource fork — not a real file
+        if any(path.is_relative_to(exc) for exc in _excluded):
+            continue
+        if path.name.startswith("._"):  # macOS resource fork — not a real file
             continue
         if path.suffix.lower() not in EXTS:
             continue
@@ -237,20 +281,39 @@ def collect_files(data_dir, uploaded):
             files.append((path, key))
 
     if skipped_size:
-        print(f"Skipped {len(skipped_size)} files exceeding {MAX_FILE_SIZE_MB}MB size limit")
+        print(
+            f"Skipped {len(skipped_size)} files exceeding {MAX_FILE_SIZE_MB}MB size limit"
+        )
 
     return files
 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--api-key",        default=OPENWEBUI_API_KEY ,  help="OpenWebUI API KEY")
-    p.add_argument("--knowledge-name", default="Jarvis Knowledge",  help="Knowledge base name")
-    p.add_argument("--dry-run",        action="store_true",         help="List files without uploading")
-    p.add_argument("--reset-tracking", action="store_true",         help="Clear tracking file and re-upload all")
-    p.add_argument("--data-dir",       default=DATA_DIR,            help="Directory to index")
-    p.add_argument("--file-number",    type=int, default=0,         help="Max files to process per run (0 = unlimited)")
-    p.add_argument("--retry-errors",   action="store_true",         help="Retry files previously marked as errors")
+    p.add_argument("--api-key", default=OPENWEBUI_API_KEY, help="OpenWebUI API KEY")
+    p.add_argument(
+        "--knowledge-name", default="Jarvis Knowledge", help="Knowledge base name"
+    )
+    p.add_argument(
+        "--dry-run", action="store_true", help="List files without uploading"
+    )
+    p.add_argument(
+        "--reset-tracking",
+        action="store_true",
+        help="Clear tracking file and re-upload all",
+    )
+    p.add_argument("--data-dir", default=DATA_DIR, help="Directory to index")
+    p.add_argument(
+        "--file-number",
+        type=int,
+        default=0,
+        help="Max files to process per run (0 = unlimited)",
+    )
+    p.add_argument(
+        "--retry-errors",
+        action="store_true",
+        help="Retry files previously marked as errors",
+    )
     return p.parse_args()
 
 
@@ -280,7 +343,9 @@ def main():
     # Verify connectivity
     me = api(session, "GET", "/api/v1/auths/", headers=headers)
     if me is None:
-        print("Cannot reach OpenWebUI or invalid API key. Check --api-key and OPENWEBUI_URL.")
+        print(
+            "Cannot reach OpenWebUI or invalid API key. Check --api-key and OPENWEBUI_URL."
+        )
         sys.exit(1)
 
     # Tracking
@@ -288,7 +353,11 @@ def main():
     if args.reset_tracking:
         print("Tracking reset — will re-upload all files.")
     elif args.retry_errors:
-        errors_cleared = {k: v for k, v in uploaded.items() if isinstance(v, str) and v.startswith("ERROR:")}
+        errors_cleared = {
+            k: v
+            for k, v in uploaded.items()
+            if isinstance(v, str) and v.startswith("ERROR:")
+        }
         for k in errors_cleared:
             del uploaded[k]
         print(f"Cleared {len(errors_cleared)} error entries — will retry them.")
@@ -297,9 +366,11 @@ def main():
     files = collect_files(args.data_dir, uploaded)
     total_pending = len(files)
     if args.file_number > 0:
-        files = files[:args.file_number]
+        files = files[: args.file_number]
     done_count = sum(1 for k in uploaded if not k.startswith("_"))
-    print(f"Files to upload: {len(files)} (of {total_pending} pending, {done_count} already done)")
+    print(
+        f"Files to upload: {len(files)} (of {total_pending} pending, {done_count} already done)"
+    )
 
     if args.dry_run:
         for p, _ in files[:50]:
@@ -327,15 +398,20 @@ def main():
 
         label = str(path.relative_to(args.data_dir))
         label_short = (label[:67] + "...") if len(label) > 70 else label
-        print(f"[{i+1}/{len(files)}] {label_short}", end=" ", flush=True)
+        print(f"[{i + 1}/{len(files)}] {label_short}", end=" ", flush=True)
 
         try:
             mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
 
             with open(path, "rb") as fh:
-                upload = api(session, "POST", "/api/v1/files/", headers=headers,
-                             timeout=UPLOAD_TIMEOUT,
-                             files={"file": (path.name, fh, mime)})
+                upload = api(
+                    session,
+                    "POST",
+                    "/api/v1/files/",
+                    headers=headers,
+                    timeout=UPLOAD_TIMEOUT,
+                    files={"file": (path.name, fh, mime)},
+                )
 
             if not upload:
                 print("UPLOAD FAILED")
@@ -351,9 +427,14 @@ def main():
                 continue
 
             try:
-                result = api(session, "POST", f"/api/v1/knowledge/{kb_id}/file/add",
-                             headers=headers, timeout=ADD_TIMEOUT,
-                             json={"file_id": file_id})
+                result = api(
+                    session,
+                    "POST",
+                    f"/api/v1/knowledge/{kb_id}/file/add",
+                    headers=headers,
+                    timeout=ADD_TIMEOUT,
+                    json={"file_id": file_id},
+                )
             except APIError as e:
                 if e.status_code == 400 and "duplicate" in e.body.lower():
                     # Already in the knowledge base — treat as success, stop retrying
@@ -363,7 +444,11 @@ def main():
                     continue
                 if e.status_code == 400 and "empty" in e.body.lower():
                     # OpenWebUI couldn't extract text — try locally and re-upload as .txt
-                    print(f"(OpenWebUI parse failed, trying local extraction...)", end=" ", flush=True)
+                    print(
+                        f"(OpenWebUI parse failed, trying local extraction...)",
+                        end=" ",
+                        flush=True,
+                    )
                     text = extract_text_locally(path)
                     if text and text.strip():
                         tmp_path = None
@@ -374,24 +459,45 @@ def main():
                                 tmp.write(text)
                                 tmp_path = tmp.name
                             with open(tmp_path, "rb") as fh:
-                                upload2 = api(session, "POST", "/api/v1/files/",
-                                              headers=headers, timeout=UPLOAD_TIMEOUT,
-                                              files={"file": (path.stem + ".txt", fh, "text/plain")})
+                                upload2 = api(
+                                    session,
+                                    "POST",
+                                    "/api/v1/files/",
+                                    headers=headers,
+                                    timeout=UPLOAD_TIMEOUT,
+                                    files={
+                                        "file": (path.stem + ".txt", fh, "text/plain")
+                                    },
+                                )
                             if upload2 and upload2.get("id"):
                                 file_id2 = upload2["id"]
                                 try:
-                                    result2 = api(session, "POST", f"/api/v1/knowledge/{kb_id}/file/add",
-                                                  headers=headers, timeout=ADD_TIMEOUT,
-                                                  json={"file_id": file_id2})
+                                    result2 = api(
+                                        session,
+                                        "POST",
+                                        f"/api/v1/knowledge/{kb_id}/file/add",
+                                        headers=headers,
+                                        timeout=ADD_TIMEOUT,
+                                        json={"file_id": file_id2},
+                                    )
                                 except APIError as e2:
-                                    if e2.status_code == 400 and "empty" in e2.body.lower():
-                                        print(f"SKIPPED (OpenWebUI still sees empty after local extraction)")
+                                    if (
+                                        e2.status_code == 400
+                                        and "empty" in e2.body.lower()
+                                    ):
+                                        print(
+                                            f"SKIPPED (OpenWebUI still sees empty after local extraction)"
+                                        )
                                         uploaded[key] = "SKIPPED:empty_content"
                                         skipped_empty += 1
                                     else:
-                                        print(f"FAILED (fallback knowledge add HTTP {e2.status_code})")
+                                        print(
+                                            f"FAILED (fallback knowledge add HTTP {e2.status_code})"
+                                        )
                                         errors += 1
-                                        uploaded[key] = f"ERROR:fallback_knowledge_add_{e2.status_code}"
+                                        uploaded[key] = (
+                                            f"ERROR:fallback_knowledge_add_{e2.status_code}"
+                                        )
                                     result2 = None
                                 if result2 is not None:
                                     print(f"OK via local extraction (id={file_id2})")
@@ -450,8 +556,12 @@ def main():
     save_tracking(uploaded)
 
     status = "Interrupted" if _shutdown else "Done"
-    print(f"\n{status}. Uploaded: {ok}, Skipped (no text): {skipped_empty}, Errors: {errors}, Total tracked: {len(uploaded)}")
-    print(f"Open OpenWebUI → Workspace → Knowledge → '{args.knowledge_name}' to use it.")
+    print(
+        f"\n{status}. Uploaded: {ok}, Skipped (no text): {skipped_empty}, Errors: {errors}, Total tracked: {len(uploaded)}"
+    )
+    print(
+        f"Open OpenWebUI → Workspace → Knowledge → '{args.knowledge_name}' to use it."
+    )
 
 
 if __name__ == "__main__":

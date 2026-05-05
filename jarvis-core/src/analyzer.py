@@ -38,7 +38,6 @@ import time
 from datetime import date
 
 from config import (
-    AUTOBIO_IMPORTANCE_THRESHOLD,
     CHAT_LOG_TTL,
     IMPORTANCE_THRESHOLD,
     PRIMARY_MODEL,
@@ -97,19 +96,24 @@ async def analyze_exchange(
         )
         prompt = get_prompt("ANALYSIS_PROMPT").format(
             current_date=date.today().isoformat(),
-            conversation=conversation[:3000],
+            conversation=conversation[:5000],
             existing_projects=projects_context,
             existing_profile_keys=profile_keys_str,
         )
 
         # Appel LLM : priorité basse (bg) pour ne pas bloquer le chat.
+        # thinking_budget=600 : cap de raisonnement — assez pour extraire faits/projets
+        # proprement, sans risquer que le thinking consume tout le budget comme avant
+        # (sans budget, on obtenait {"key":"...","value":"..."} ou [] faute de tokens).
+        # max_tokens = thinking_budget(600) + marge réponse(900) = 1500.
         content = await call_llm_local_async_bg(
             [{"role": "user", "content": prompt}],
             model=PRIMARY_MODEL,
-            temperature=0.1,
-            max_tokens=3000,
+            temperature=0.0,  # use model profile default (Qwen3.6: 1.0 thinking)
+            max_tokens=1500,
             json_response=True,
             no_think=False,
+            thinking_budget=600,
         )
 
         logger.debug(f"[ANALYZER RAW] {content[:300]}")
@@ -119,54 +123,48 @@ async def analyze_exchange(
             logger.error("Analyzer JSON parse error: %s", exc.doc[:200])
             raise
 
-        # Episodic Salience Score (ESS) — signals combined into [0, 1]
-        # IMPORTANCE_THRESHOLD = 0.35 → stored as episodic vector
-        # AUTOBIO_IMPORTANCE_THRESHOLD = 0.60 → stored as autobiographical
-        importance = 0.0
-
-        # LLM's own judgment is the primary signal: 0.4 alone clears
-        # IMPORTANCE_THRESHOLD so any exchange the LLM deems worth
-        # remembering is captured, even with no other signals.
-        # The field is "memory_summary" (renamed from "should_remember" in prompt v2).
         memory_summary_text = result.get("memory_summary")
         _has_summary = isinstance(memory_summary_text, str) and bool(
             memory_summary_text.strip()
         )
 
-        if _has_summary:
-            importance += 0.40
+        # ── Importance : jugement LLM direct (Option C) ───────────────────
+        # Le LLM évalue 0.0–1.0 en fonction du ton, de l'émotion et de la durabilité.
+        # memory_summary null → importance 0.0 (invariant : pas de stockage sans résumé).
+        importance = (
+            round(min(max(float(result.get("importance") or 0.0), 0.0), 1.0), 3)
+            if _has_summary
+            else 0.0
+        )
+        result["importance"] = importance
 
-        # Personal facts revealed by the user
+        # ── ESS rule-based — conservé pour comparaison diagnostique ───────
+        # Ne pilote plus le stockage. Les deux scores sont loggés pour évaluer
+        # la cohérence LLM vs règles sur plusieurs semaines avant de retirer l'ESS.
+        _ess = 0.40 if _has_summary else 0.0
         _durable_facts = [
             f
             for f in result.get("user_facts", [])
             if isinstance(f.get("value"), str) and len(f["value"]) > 10
         ]
-        importance += min(len(_durable_facts), 3) * 0.10
-
-        # Projects / goal context
-        importance += min(len(result.get("projects", [])), 2) * 0.15
-
-        # Emotional intensity (mild boost — avoid over-storing rants)
-        # Both positive and negative emotions weighted equally: high intensity = more memorable,
-        # regardless of valence. Previous asymmetry (0.15 negative vs 0.10 positive) created
-        # a bias toward storing frustration over joy in long-term memory.
+        _ess += min(len(_durable_facts), 3) * 0.10
+        _ess += min(len(result.get("projects", [])), 2) * 0.15
         mood = result.get("mood", "neutral")
         if mood in ["happy", "curious", "focused", "stressed", "frustrated"]:
-            importance += 0.10
-
-        # Message depth (minor signal — long messages often carry more info)
+            _ess += 0.10
         if len(conversation) > 200:
-            importance += 0.05
+            _ess += 0.05
+        _ess = round(min(_ess, 1.0), 3)
 
-        # Clamp score
-        importance = min(importance, 1.0)
-        result["importance"] = round(importance, 3)
-
-        # should_remember: ESS cleared threshold AND LLM provided a concrete summary
-        result["should_remember"] = (
-            result["importance"] > IMPORTANCE_THRESHOLD and _has_summary
+        logger.debug(
+            "[IMPORTANCE] llm=%.3f ess=%.3f summary=%s",
+            importance,
+            _ess,
+            _has_summary,
         )
+
+        # should_remember: LLM importance cleared threshold AND summary present
+        result["should_remember"] = importance > IMPORTANCE_THRESHOLD and _has_summary
         # Normalise memory_summary: None if missing/empty (LLM may omit field or send null)
         if not _has_summary:
             result["memory_summary"] = None
@@ -211,7 +209,6 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
         get_user_profile,
         get_user_projects,
         set_interest_weight,
-        store_autobiographical_event,
         store_memory_vector,
         update_emotional_state,
         update_user_profile_batch,
@@ -313,7 +310,7 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                     content = m.get("content", "").strip()[:800]
                     if content:
                         turns.append(f"{role} : {content}")
-                conversation = "\n".join(turns)[:4000]
+                conversation = "\n".join(turns)[:6000]
 
                 try:
                     analysis = await analyze_exchange(
@@ -416,10 +413,8 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                     }
                     await asyncio.to_thread(store_memory_vector, uc, entry)
 
-                if _imp_s > AUTOBIO_IMPORTANCE_THRESHOLD and _mem_s:
-                    await asyncio.to_thread(
-                        store_autobiographical_event, uc, _mem_s, _imp_s
-                    )
+                # Autobio writes are handled exclusively by the nightly review,
+                # which has full-day context and is the sole authoritative writer.
 
             if most_recent_analysis is None:
                 logger.warning("[SCHEDULER] all sessions failed for %s", uc)

@@ -23,6 +23,7 @@ from config import (
     ROUTER_API_KEY,
     ROUTER_API_URL,
     ROUTER_MODEL,
+    THINKING_BUDGET_TOKENS,
     USER_CITIES,
     USER_CODES,
     USER_TIMEZONES,
@@ -47,6 +48,7 @@ from helpers import (
     filter_think_chunk,
     fmt_now_fr,
     get_logger,
+    rel_time_fr,
 )
 from llm_client import describe_images, stream_openai
 from llm_router import llm_route
@@ -237,6 +239,7 @@ async def _sse_stream(ctx: _SseCtx):
             no_think=ctx.no_think,
             session_id=ctx.session_id,
             max_tokens=2500 if not ctx.no_think else 1500,
+            thinking_budget=THINKING_BUDGET_TOKENS if not ctx.no_think else 0,
         ):
             full_parts.append(chunk)
 
@@ -768,10 +771,11 @@ async def chat(req: ChatRequest):
     _inline_urls = _URL_RE.findall(req.message)
 
     logger.debug(
-        "[TTFT] gather2 start (rag=%s memory=%s web=%s gmail=%s cal=%s urls=%d) — %.3fs",
+        "[TTFT] gather2 start (rag=%s memory=%s web_auto=%s web_req=%s gmail=%s cal=%s urls=%d) — %.3fs",
         use_rag,
         use_memory,
-        use_web_auto or req.use_web,
+        use_web_auto,
+        req.use_web,
         use_gmail,
         use_calendar,
         len(_inline_urls),
@@ -842,6 +846,17 @@ async def chat(req: ChatRequest):
         )
         chat_no_think = False  # research query → enable thinking
 
+    # Inject session-gap: timestamps are stripped when building the messages
+    # list, so the model has no way to infer temporal distance from history
+    # entries alone. This phrase prevents greeting again mid-conversation.
+    if hist:
+        _last_ts = hist[-1].get("ts")
+        if _last_ts:
+            _gap = time.time() - _last_ts
+            _gap_txt = "moins d'une minute" if _gap < 60 else rel_time_fr(_last_ts)
+            _gap_line = f"Dernier message : {_gap_txt}."
+            dynamic_prefix = (dynamic_prefix + f"\n\n{_gap_line}") if dynamic_prefix else _gap_line
+
     # ════════════════════════════════════════════════════════════════════════
     # STEP 6 — MESSAGE ASSEMBLY — context + prefix + history → final prompt
     # ════════════════════════════════════════════════════════════════════════
@@ -884,7 +899,12 @@ async def chat(req: ChatRequest):
     if image_description:
         raw_user_content = (
             f"{req.message}\n\n"
-            f"<image>\n{image_description}\n</image>"
+            f"<image_analysee>\n"
+            f"L'utilisateur a joint une image. Voici son analyse détaillée par le modèle vision "
+            f"— traite ces informations comme si tu avais vu l'image toi-même et réponds directement "
+            f"à la question sans demander de photo :\n\n"
+            f"{image_description}\n"
+            f"</image_analysee>"
         )
 
     # Build the user message: [dynamic_prefix] → [context] → <message_utilisateur>

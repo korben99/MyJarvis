@@ -73,8 +73,8 @@ tail -f /opt/jarvis/logs/jarvis-service.log
   ┌────────────────────────────────────────────────┬──────────────────────────────────────┬─────────────────────────────────────────────────────────┐
   │                      Data                      │             Destination              │                           Key                           │
   ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
-  │ Facts about the user (user_insights)           │ store_autobiographical_event() →     │ memory_type: autobiographical, status: current          │
-  │                                                │ Qdrant                               │                                                         │
+  │ Durable user facts (insights_durables)         │ store_autobiographical_event() →     │ memory_type: autobiographical, status: current          │
+  │ written exclusively by nightly review          │ Qdrant                               │ importance = LLM score (0.0–1.0)                        │
   ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
   │ Insights from store_insight action             │ store_autobiographical_event() →     │ same                                                    │
   │                                                │ Qdrant                               │                                                         │
@@ -185,10 +185,47 @@ When `LLM_LOCAL=yes`, Jarvis uses `mlx_lm` directly (no HTTP server) — models 
 - Prevents the MLX allocator from retaining unused Metal buffers indefinitely between inferences, keeping headroom available for KV caches during long conversations.
 
 **Thinking control:**
-- `THINKING_BUDGET_TOKENS` (default 1024) — limits `<think>` block length via `thinking_budget` kwarg in the chat template. Applied per-call without modifying message content (KV-cache safe).
-- Router/analyzer calls always disable thinking (`thinking_budget=0`) — prevents `<think>` blocks from breaking JSON parsing.
-- Chat calls: `no_think=True` for simple conversation (saves ~4 s TTFT), `no_think=False` for RAG/web/reasoning.
-- **Qwen3.6 ninja patch** (`QWEN36_NINJA_TEMPLATE`): optional Jinja2 template that controls think/no_think more precisely. When `no_think=True`, an empty `<think>\n\n</think>\n\n` block is injected post-template to prevent spontaneous thinking. When `no_think=False`, the prompt ends with `<think>\n` to seed the block.
+- `THINKING_BUDGET_TOKENS` (env, default 1024) — injects `<budget_remaining>N</budget_remaining>` in the `<think>` block via the ninja template patch. Acts as a **binary "think briefly" signal** on Qwen3.6 (see note below).
+- `no_think=True` — disables thinking entirely (`enable_thinking=False` + `thinking_budget=0`). Saves ~4 s TTFT on simple chat.
+- `no_think=False, thinking_budget=0` — full unconstrained thinking. On Qwen3.6, complex tasks can use ~1900 tokens of reasoning.
+- `no_think=False, thinking_budget>0` — reduced thinking mode (~400 tok on Qwen3.6, regardless of N).
+- **Qwen3.6 ninja patch** (`QWEN36_NINJA_TEMPLATE`): Jinja2 template override. When `no_think=True`, outputs no `<think>` tag (better KV caching). When `no_think=False` with `thinking_budget>0`, injects `<think>\n<budget_remaining>N</budget_remaining>\n`.
+
+**Note on Qwen3.6 thinking budget (measured, `scripts/test_thinking_budget.py`):** Unlike Qwen3 base models which were trained with precise budget-forcing, Qwen3.6 treats `<budget_remaining>N</budget_remaining>` as a binary signal. Any positive value N produces ~400 tokens of thinking (~79% reduction vs ~1900 unconstrained). The exact value of N has no measurable effect. `THINKING_BUDGET_TOKENS` therefore acts as a boolean flag: `0` = think freely, `>0` = think concisely.
+
+#### LLM Call Inventory
+
+Every LLM call in the codebase — model tier, thinking mode, and token budgets.
+
+`THINKING_BUDGET_TOKENS` (env) = 2048 in prod. Nightly calls with `no_think=False` use `THINKING_BUDGET_TOKENS + N` as `max_tokens`: ~400 tok thinking (brief mode) + N tok response headroom.
+
+| Call site | File | Model | no_think | max_tokens | thinking_budget | Purpose |
+|-----------|------|-------|----------|-----------|----------------|---------|
+| Router | `llm_router.py` | Tier 1 — Hermes-3B | `True` | 300 | — | Intent + use_reasoning decision |
+| Main chat (simple) | `routes/chat.py` | Tier 2 — PRIMARY | `True` | 1 500 | — | Chat without RAG/web |
+| Main chat (reasoning) | `routes/chat.py` | Tier 2/3 — PRIMARY or REASONING | `False` | 2 500 | `THINKING_BUDGET_TOKENS` | Chat with RAG/web/reasoning (~400 tok think) |
+| Conversation analyzer | `analyzer.py` | Tier 2 — PRIMARY | `False` | 1 500 | **600** | Post-exchange fact/mood/ESS extraction |
+| Daily briefing | `briefing.py` | Tier 2 — PRIMARY | `True` | 3 000 | — | Morning briefing generation |
+| Calendar date extraction | `google_services.py` | Tier 2 — PRIMARY | `True` | 150 | — | Parse event datetime from text |
+| Web relevance judge | `web_search.py` | Tier 1 — ROUTER | `True` | 150 | — | Filter irrelevant search results |
+| Web query refinement | `web_search.py` | Tier 1 — ROUTER | `True` | 120 | — | Reformulate search query |
+| Global reflection (P1) | `self.py` | Tier 3 — REASONING | `False` | 3 500 | 400 | Jarvis self-state: gaps, notes, prompts |
+| User reflection (P2) | `self.py` | Tier 3 — REASONING | `False` | 3 500 | 600 | Per-user: profile, push, insights |
+| Nightly facts | `self.py` | Tier 3 — REASONING | `False` | `THINKING_BUDGET_TOKENS + 2000` | `THINKING_BUDGET_TOKENS` | User insight + relation update |
+| Nightly self analysis | `self.py` | Tier 3 — REASONING | `False` | `THINKING_BUDGET_TOKENS + 1500` | **0 (free)** | Jarvis learnings, growth log, opinions |
+| Nightly cleaning | `self.py` | Tier 3 — REASONING | `False` | `THINKING_BUDGET_TOKENS + 1000` | `THINKING_BUDGET_TOKENS` | Autobio fact archive/delete |
+| refine_prompt (initial) | `self.py` | Tier 3 — REASONING | `False` | `THINKING_BUDGET_TOKENS + 6000` | **0 (free)** | Propose prompt improvement |
+| refine_prompt (retry) | `self.py` | Tier 3 — REASONING | `False` | `THINKING_BUDGET_TOKENS + 6000` | **0 (free)** | Retry with critique feedback |
+| prune_self_memory | `self.py` | Tier 3 — REASONING | `False` | 1 800 | `THINKING_BUDGET_TOKENS` | Prune stale self-notes / opinions |
+| Proactive push | `self.py` | Tier 3 — REASONING | `True` | 600 | — | Generate iOS push message |
+| Action self-review | `self.py` | Tier 3 — REASONING | `False` | `THINKING_BUDGET_TOKENS + 300` | `THINKING_BUDGET_TOKENS` | LLM gate before risky reflection action |
+| Profile key dedup | `memory.py` | Tier 1 — ROUTER | `True` | ~300 | — | Namespace-scoped key dedup (1 call/group) |
+
+**`no_think=True`** (router, briefing, calendar, web judge, push, prune): structured/short output, latency-sensitive — no thinking needed.
+
+**`no_think=False` + `thinking_budget>0`** (~500 tok brief thinking): analyzer, chat with context, reflection, nightly cleaning, action review — tasks that benefit from reasoning but where latency or tight `max_tokens` budgets make free thinking costly.
+
+**`no_think=False` + `thinking_budget=0`** (~1900 tok free thinking): `refine_prompt`, `nightly_self` — deep creative/reflective tasks where quality > speed. Requires higher `max_tokens` headroom and longer timeouts (180–300s).
 
 #### Router Output Fields
 
@@ -216,32 +253,41 @@ If the LLM router is unavailable or fails (timeout / parse error), all `use_*` f
 | Autobiographical Memory | Qdrant | High-importance milestones consolidated from episodic memory |
 | Self Memory | JSON file | Jarvis identity, goals, focus, reflection log, per-user relations |
 
-#### Episodic Salience Score (ESS)
+#### Importance Scoring
 
-After each exchange, `analyzer.py` computes an importance score in `[0, 1]` that gates what gets written to long-term memory:
+After each exchange, `analyzer.py` asks the LLM to evaluate an importance score in `[0, 1]` that gates what gets written to episodic memory. The LLM weighs:
 
-| Signal | Weight | Notes |
-|--------|--------|-------|
-| LLM flags `memory_summary` (non-null) | +0.40 | Primary signal — alone clears the storage threshold |
-| User fact revealed (max 3) | +0.20 each | Profile facts, preferences, life events |
-| Project / goal mentioned (max 2) | +0.15 each | Active work context |
-| Strong emotional mood | +0.10 | Symmetric — positive and negative emotions weighted equally |
-| Long message (> 200 chars) | +0.05 | Minor depth signal |
+- What the exchange reveals about the user's life, projects, and values
+- Emotional intensity — tone, engagement, frustration, enthusiasm
+- Durability — will this still matter in 3 months?
 
-Storage thresholds (set in `config.py`):
+`memory_summary` is the prerequisite gate: if null, importance is forced to 0.0 regardless of the LLM score. No summary → nothing stored.
+
+Storage threshold (set in `config.py`):
 - **`IMPORTANCE_THRESHOLD` (0.35)** — stored as episodic vector in Qdrant
-- **`AUTOBIO_IMPORTANCE_THRESHOLD` (0.60)** — additionally stored as autobiographical event
+
+**Diagnostic: ESS (rule-based, legacy)**
+
+The old rule-based Episodic Salience Score is still computed in `analyzer.py` but no longer drives storage decisions. Both scores are logged at DEBUG level (`[IMPORTANCE] llm=X.XXX ess=X.XXX`) to allow comparison over time before the ESS is fully removed.
+
+| Signal | ESS Weight | Notes |
+|--------|-----------|-------|
+| `memory_summary` non-null | +0.40 | Was the primary signal |
+| User fact revealed (max 3) | +0.10 each | Profile facts, preferences |
+| Project / goal mentioned (max 2) | +0.15 each | Active work context |
+| Strong emotional mood | +0.10 | happy, curious, focused, stressed, frustrated |
+| Long message (> 200 chars) | +0.05 | Minor depth signal |
 
 #### Importance Score Reference
 
-Every autobiographical point stored in Qdrant carries an `importance` field. This value determines both retrieval ranking and long-term decay behaviour. Here is the complete list of values assigned across the codebase:
+Every point stored in Qdrant carries an `importance` field used for retrieval ranking and decay. Complete list of assigned values:
 
 | Score | Source | Decay behaviour |
 |-------|--------|-----------------|
-| `1.0` (`MEMORY_CONSOLIDATION_IMPORTANCE`) | Monthly consolidation (`_consolidate_user_memories`) — LLM summary of a batch of episodic memories | **Permanent — exempt from decay** (`== MEMORY_DECAY_DURABLE_MIN`) |
-| `0.60–1.0` (clamped) | Analyzer ESS score, via `complete_memory_to_qdrant()` — only stored if score `> AUTOBIO_IMPORTANCE_THRESHOLD` | Decays monthly; exempt only if score reaches `1.0` (requires LLM remember + 3 facts + emotion + depth simultaneously) |
+| `1.0` (`MEMORY_CONSOLIDATION_IMPORTANCE`) | Monthly consolidation (`_consolidate_user_memories`) — LLM summary of episodic batch | **Permanent — exempt from decay** (`== MEMORY_DECAY_DURABLE_MIN`) |
+| `0.0–1.0` (LLM score) | Analyzer episodic write — LLM-evaluated, only stored if score `> IMPORTANCE_THRESHOLD` and summary present | Decays monthly |
 | `0.80` | Jarvis self-reflection insight (`run_self_reflection`) | Decays monthly |
-| `0.70` | Nightly review user insight (`run_nightly_interaction_review`) | Decays monthly |
+| `0.70` | Nightly review durable fact (`run_nightly_interaction_review`, `insights_durables` only) | Decays monthly |
 
 **Key invariant:** `MEMORY_CONSOLIDATION_IMPORTANCE` must equal `MEMORY_DECAY_DURABLE_MIN`. If you change one, change the other. Breaking this invariant would either make consolidation milestones decay (if `CONSOLIDATION_IMPORTANCE < DURABLE_MIN`) or promote ordinary memories to permanent status (if `DURABLE_MIN` is lowered).
 
@@ -346,14 +392,14 @@ REAL-TIME — per chat message
 
 EVERY 30 MIN — analyzer.py → analyse_recent_conversations()
   ├── analyze_exchange()  [LLM: ANALYSIS_PROMPT]
-  │     extracts: user_facts, projects, mood, topics, memory_summary, importance (ESS score)
+  │     extracts: user_facts, projects, mood, topics, memory_summary, importance (LLM 0–1)
+  │     logs: [IMPORTANCE] llm=X.XXX ess=X.XXX  (ESS kept for diagnostic comparison)
   ├── update_user_profile_batch()       → Redis user:{code}:profile (hash)
   │     └── _normalize_profile_keys_batch()  [LLM: 1 call/namespace group, only when needed]
   ├── apply_project_updates()           → Redis user:{code}:projects
   ├── update_emotional_state()          → Redis jarvis:emotional_state
   ├── set_interest_weight()             → Redis user:{code}:interests
-  ├── store_memory_vector()             → Qdrant episodic     [if importance > 0.35]
-  └── store_autobiographical_event()   → Qdrant autobio      [if importance > 0.60]
+  └── store_memory_vector()             → Qdrant episodic     [if importance > 0.35 and summary present]
 
 EVERY 2H — self.py → run_self_reflection()
   ├── search_memory()                  [read Qdrant — memory context assembled for LLM]
@@ -367,7 +413,8 @@ EVERY 2H — self.py → run_self_reflection()
 
 23:00 NIGHTLY — self.py → run_nightly_interaction_review()  [4 sequential calls/user]
   ├── Call 1 — NIGHTLY_FACTS  (user insight + relation update)
-  │     ├── store_autobiographical_event()   → Qdrant autobio  (importance=0.70)
+  │     ├── store_autobiographical_event()   → Qdrant autobio  (importance=0.70, insights_durables only)
+  │     │     insights_evenements passed to cleaning context but NOT stored in autobio
   │     ├── Redis jarvis:{code}:tomorrow_suggestions  (TTL 24h)
   │     └── jarvis-self.json → user_relations{}
   ├── Call 2 — NIGHTLY_SELF  (Jarvis self-reflection)
@@ -402,13 +449,13 @@ EVERY 2H — self.py → run_self_reflection()
 | `_normalize_profile_keys_batch()` | memory.py | Inside batch update | — | groups by NS prefix; 1 LLM call/group |
 | `apply_project_updates()` | memory.py | Every 30 min | Redis projects | fuzzy name match ≥ 60% |
 | `update_emotional_state()` | memory.py | Every 30 min | Redis emotional state | mood → preset state dict |
-| `store_memory_vector()` | memory.py | Every 30 min (ESS > 0.35) | Qdrant episodic | — |
-| `store_autobiographical_event()` | memory.py | 30 min / nightly / reflect / monthly | Qdrant autobio | dedup + reinforce check before write |
+| `store_memory_vector()` | memory.py | Every 30 min (LLM importance > 0.35 + summary) | Qdrant episodic | — |
+| `store_autobiographical_event()` | memory.py | Nightly (durables) / reflect / monthly | Qdrant autobio | dedup + reinforce check before write |
 | `archive_autobiographical_event()` | memory.py | Nightly cleaning | Qdrant autobio payload | status="past"; invalidates timeline cache |
 | `retract_autobiographical_event()` | memory.py | Nightly cleaning (errors/dupes) | Qdrant delete | threshold 0.88; invalidates timeline cache |
 | `search_memory()` | memory.py | Every chat (memory intent) | read Qdrant | past facts ×0.4; +0.05 reconsolidation |
 | `get_user_timeline()` | memory.py | Every chat (build_memory_context) | read Qdrant autobio | must_not status=past |
-| `get_autobiographical_facts()` | memory.py | Nightly cleaning | read Qdrant autobio | status≠past, chronological for LLM |
+| `get_autobiographical_facts()` | memory.py | Nightly facts + cleaning | read Qdrant autobio | newest-first for facts context; chronological for cleaning |
 | `curative_profile_cleanup()` | memory.py | Nightly (Call 4) | Redis profile hash | LLM dedup: merge-before-delete; skipped if < 5 keys |
 | `consolidate_memories()` | memory.py | 1st of month / on-demand | Qdrant | episodic compress + autobio decay only |
 

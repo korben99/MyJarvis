@@ -114,7 +114,7 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(
             analyse_recent_conversations,
             trigger="interval",
-            minutes=30,
+            minutes=60,
             id="conversation_analysis",
             next_run_time=datetime.now(tz) + timedelta(minutes=10),
         )

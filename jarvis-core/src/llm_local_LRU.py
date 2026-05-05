@@ -373,6 +373,7 @@ def _build_prompt(
     tokenizer,
     model_path: str,
     no_think: bool,
+    thinking_budget: int = 0,
 ) -> str:
     """
     Construit le prompt final via apply_chat_template.
@@ -399,16 +400,9 @@ def _build_prompt(
                 "enable_thinking": False,
                 "thinking_budget": 0,
             }
+        elif thinking_budget > 0:
+            think_kwargs = {"enable_thinking": True, "thinking_budget": thinking_budget}
         else:
-            # thinking_budget intentionally NOT passed.
-            # Root cause (Qwen3-30B-A3B-4bit-DWQ-0508): the DWQ checkpoint bundles a
-            # patched tokenizer whose jinja2 template interprets thinking_budget=N as
-            # "budget already consumed" and immediately closes the <think> block before
-            # generation starts → prompt ends with <think>\n</think>\n\n → model sees
-            # an empty think block and generates ~2 tokens then EOS (nothing visible).
-            # The official HF tokenizer injects a <budget_remaining>N</budget_remaining>
-            # marker inside the open block instead — behaviour differs per checkpoint.
-            # Token budget is enforced via max_tokens at the call site instead.
             think_kwargs = {"enable_thinking": True}
 
         # Try full kwargs; fall back if tokenizer version is too old
@@ -440,6 +434,7 @@ def _generate_sync(
     no_think: bool,
     session_id: str = "",
     json_response: bool = False,
+    thinking_budget: int = 0,
 ) -> str:
     """Génération complète (non-streaming). Bloquant — wrapper pour asyncio.to_thread.
 
@@ -448,7 +443,7 @@ def _generate_sync(
     de tokens superflus après la } finale (explications, markdown, …).
     """
     model, tokenizer = _load_model(model_path)
-    prompt = _build_prompt(messages, tokenizer, model_path, no_think)
+    prompt = _build_prompt(messages, tokenizer, model_path, no_think, thinking_budget)
     profile = _model_profile(model_path)
     effective_max = min(max_tokens, 10000)
     model_short = model_path.split("/")[-1]

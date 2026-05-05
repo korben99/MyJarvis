@@ -37,7 +37,6 @@ from threading import Lock
 
 from config import (
     AUTOBIO_DEDUP_THRESHOLD,
-    AUTOBIO_IMPORTANCE_THRESHOLD,
     AUTOBIO_RECENCY_WINDOW_DAYS,
     CHAT_LOG_TTL,
     CHAT_MAX_MESSAGES,
@@ -633,6 +632,9 @@ def update_user_profile(user_code: str, key: str, value: str | None):
         )
 
 
+_BLOCKED_PROFILE_NAMESPACES = frozenset({"projet", "project"})
+
+
 def update_user_profile_batch(user_code: str, facts: list[dict]) -> None:
     """
     Apply a list of profile facts in one batch:
@@ -642,6 +644,22 @@ def update_user_profile_batch(user_code: str, facts: list[dict]) -> None:
     """
     if not facts:
         return
+
+    # Guard: reject keys with namespaces that conflict with dedicated Redis structures.
+    # projet:* belongs in user:{code}:projects, not in the profile hash.
+    filtered = []
+    for f in facts:
+        k = f.get("key", "")
+        ns = k.split(":")[0] if ":" in k else ""
+        if ns in _BLOCKED_PROFILE_NAMESPACES:
+            logger.warning(
+                "update_user_profile_batch: rejected blocked namespace key '%s' for %s",
+                k,
+                user_code,
+            )
+            continue
+        filtered.append(f)
+    facts = filtered
 
     r = get_redis()
     profile_redis_key = f"user:{user_code}:profile"
@@ -1177,10 +1195,17 @@ def archive_autobiographical_event(
     return _autobio_op(user_code, query, threshold, "archive")
 
 
-def get_autobiographical_facts(user_code: str, limit: int = 40) -> list[str]:
-    """Return current (non-archived) autobiographical memory summaries sorted
-    chronologically (oldest first) — intended for the nightly cleaning prompt
-    so the LLM can spot temporal evolution and outdated facts."""
+def get_autobiographical_facts(
+    user_code: str, limit: int = 40, newest_first: bool = False
+) -> list[str]:
+    """Return current (non-archived) autobiographical memory summaries.
+
+    Default: sorted oldest-first (temporal progression visible for cleaning).
+    newest_first=True: most recent facts first (used to seed NIGHTLY_FACTS context).
+
+    All facts fetched up to max(limit*2, 100) are returned without truncation
+    so the nightly cleaning LLM sees recently-added duplicates, not just old facts.
+    """
     try:
         qdrant = get_qdrant()
         results = qdrant.scroll(
@@ -1196,9 +1221,10 @@ def get_autobiographical_facts(user_code: str, limit: int = 40) -> list[str]:
             with_payload=True,
         )[0]
 
-        # Sort oldest first so temporal progression is visible to the LLM
-        results.sort(key=lambda r: r.payload.get("timestamp", 0))
-        return [r.payload["text"] for r in results[:limit]]
+        results.sort(
+            key=lambda r: r.payload.get("timestamp", 0), reverse=newest_first
+        )
+        return [r.payload["text"] for r in results]
     except Exception as e:
         logger.error("get_autobiographical_facts failed: %s", e)
         return []
@@ -1648,12 +1674,21 @@ def build_memory_context(
             except (ValueError, TypeError):
                 pass
     # Injection etat emotionnel
+    _MOOD_FR = {
+        "happy": "joyeux",
+        "attentive": "attentif",
+        "supportive": "bienveillant",
+        "engaged": "curieux",
+        "gentle": "calme",
+        "focused": "concentré",
+        "neutral": "neutre",
+    }
     _mood = emotion.get("mood", "neutral")
     _concern = emotion.get("concern", 0.0)
     _energy = emotion.get("energy", 0.7)
     _emotion_lines = []
     if _mood != "neutral":
-        _emotion_lines.append(f"Humeur : {_mood}")
+        _emotion_lines.append(f"Humeur : {_MOOD_FR.get(_mood, _mood)}")
     if _concern > 0.3:
         _emotion_lines.append(f"Préoccupation : {_concern:.1f}")
     if abs(_energy - 0.7) > 0.15:
@@ -1666,14 +1701,14 @@ def build_memory_context(
             + "\n</etat_emotionnel>"
         )
 
-    # Self identity
+    # Self identity — apprentissages de Jarvis (guide interne, pas des faits sur l'utilisateur)
     if self_mem.get("learnings"):
         recent_learnings = self_mem["learnings"][-3:]
         plines = [f"- {ln['text']}" for ln in recent_learnings]
         parts.append(
-            "<apprentissages_recents>\n"
+            "<apprentissages_jarvis>\n"
             + "\n".join(plines)
-            + "\n</apprentissages_recents>"
+            + "\n</apprentissages_jarvis>"
         )
 
     if self_mem.get("self_notes"):
@@ -1732,11 +1767,11 @@ def build_memory_context(
         else "faible"
     )
     parts.append(
-        f"<relation>\n"
+        f"<relation_avec_utilisateur>\n"
         f"- Affinité : {_aff_label}\n"
         f"- Style de communication préféré : {rel['interaction_style']}\n"
         f"- Humeur moyenne des échanges : {rel['average_interaction_mood']}\n"
-        f"</relation>"
+        f"</relation_avec_utilisateur>"
     )
 
     return "\n\n".join(parts) if parts else ""
@@ -1794,7 +1829,7 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
                 model=PRIMARY_MODEL,
                 api_url=PRIMARY_API_URL,
                 api_key=PRIMARY_API_KEY,
-                temperature=0.1,
+                temperature=0.0,  # use model profile default (Qwen3.6: 0.7 no-think)
                 max_tokens=400,
                 json_response=True,
                 no_think=True,
@@ -1897,7 +1932,7 @@ def curative_profile_cleanup(user_code: str):
                 model=PRIMARY_MODEL,
                 api_url=PRIMARY_API_URL,
                 api_key=PRIMARY_API_KEY,
-                temperature=0.1,
+                temperature=0.0,  # use model profile default (Qwen3.6: 0.7 no-think)
                 max_tokens=600,  # profil ~20 clés → output JSON potentiellement >200 tok
                 json_response=True,
                 no_think=True,

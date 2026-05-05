@@ -413,8 +413,9 @@ def _get_knowledge_gaps(n: int = 5) -> list[str]:
     does not waste a cycle trying to re-propose.
     """
     r = get_redis()
-    raw = r.zrevrange(_KNOWLEDGE_GAPS_KEY, 0, n - 1)
+    raw = r.zrevrange(_KNOWLEDGE_GAPS_KEY, 0, n * 3 - 1)  # fetch extra to survive dedup
     counts = r.hgetall(_GAP_COUNTS_KEY)
+    seen_slugs: set[str] = set()
     results = []
     for item in raw:
         try:
@@ -423,11 +424,14 @@ def _get_knowledge_gaps(n: int = 5) -> list[str]:
         except Exception:
             topic = item
         slug = re.sub(r"\s+", "_", topic.lower())[:40]
-        # Use actual Redis count (default 0 like _action_refine_prompt, not 1)
-        # so the LLM sees the real progress toward REFINE_PROMPT_THRESHOLD.
+        if slug in seen_slugs:
+            continue
+        seen_slugs.add(slug)
         count = int(counts.get(slug, 0))
         label = f"{topic} (flaggé ×{count})"
         results.append(label)
+        if len(results) >= n:
+            break
     return results
 
 
@@ -679,10 +683,15 @@ async def _call_global_reflection_llm(
             model=REASONING_MODEL,
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
-            temperature=0.2,
-            max_tokens=1000,  # action JSON can reach 500+ tok with verbose reason/params
+            temperature=0.6,  # Qwen3.6 "précis" — fiable pour JSON, évite les boucles déterministes
+            max_tokens=3500,  # observed worst-case: ~2500 tok thinking + ~400 JSON
             json_response=True,
-            no_think=True,  # structured JSON action selection — thinking adds latency/failure risk
+            # Workaround DWQ (Qwen3-30B-A3B-4bit-DWQ-0508) : ce checkpoint sortait du bloc
+            # think prématurément (EOS mid-reasoning, pas de </think>), retournant une
+            # réponse vide. Désactivé depuis la migration vers Qwen3.6 (non-DWQ).
+            # no_think=True,
+            no_think=False,
+            thinking_budget=400,
             timeout=120.0,
         )
         return extract_llm_json(content)
@@ -744,21 +753,21 @@ async def _call_user_reflection_llm(
     ]
     for attempt in range(2):
         try:
-            # no_think=True: the Qwen3-30B-DWQ checkpoint consistently exits
-            # the think block prematurely (EOS mid-reasoning, no </think> generated)
-            # when thinking is enabled for this structured JSON task, returning an
-            # empty response.  The global reflection uses no_think=True for the same
-            # reason.  Direct JSON output is reliable and sufficient here.
+            # Workaround DWQ (Qwen3-30B-A3B-4bit-DWQ-0508) : ce checkpoint sortait du bloc
+            # think prématurément (EOS mid-reasoning, pas de </think>), retournant une
+            # réponse vide. Désactivé depuis la migration vers Qwen3.6 (non-DWQ).
+            # no_think=True,
             content = await call_llm_async(
                 messages,
                 model=REASONING_MODEL,
                 api_url=REASONING_API_URL,
                 api_key=REASONING_API_KEY,
-                temperature=0.2,
-                max_tokens=1500,
+                temperature=0.6,  # Qwen3.6 "précis" — fiable pour JSON, évite les boucles déterministes
+                max_tokens=3500,  # observed worst-case: ~2500 tok thinking + ~400 JSON
                 json_response=True,
-                no_think=True,
-                timeout=90.0,
+                no_think=False,
+                thinking_budget=600,
+                timeout=120.0,  # 3500 tok @ 52 tok/s ≈ 67s — marge confortable
             )
             return extract_llm_json(content)
         except ValueError as exc:
@@ -1128,7 +1137,9 @@ def _build_conv_text(conversations: list[dict]) -> str:
     )
     conv_text = ""
     for c in sorted_convs:
+        imp = c.get("importance", 0.0)
         conv_text += (
+            f"[importance:{imp:.2f}] "
             f"User: {c.get('user', '')[:400]}\n"
             f"Jarvis: {c.get('assistant', '')[:400]}\n"
             f"Mood: {c.get('mood', '?')}\n\n"
@@ -1141,6 +1152,12 @@ async def _nightly_facts_user(
 ) -> dict | None:
     """Call 1 — extract durable user facts, relation update, tomorrow suggestions."""
     current_relation = get_user_relation(user_code)
+    existing_autobio = await asyncio.to_thread(
+        get_autobiographical_facts, user_code, 8, True  # newest first
+    )
+    existing_autobio_str = (
+        "\n".join(f"- {f}" for f in existing_autobio) if existing_autobio else "aucun"
+    )
     prompt = get_prompt("NIGHTLY_FACTS_PROMPT").format(
         user_name=user_name,
         user_code=user_code,
@@ -1148,6 +1165,7 @@ async def _nightly_facts_user(
         count=len(conversations),
         conv_text=_build_conv_text(conversations),
         current_relation=json.dumps(current_relation, ensure_ascii=False),
+        existing_autobio=existing_autobio_str,
     )
     try:
         content = await call_llm_async(
@@ -1158,10 +1176,11 @@ async def _nightly_facts_user(
             model=REASONING_MODEL,
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
-            temperature=0.3,
+            temperature=0.6,  # Qwen3.6 "précis" — fiable pour JSON, évite les boucles déterministes
             max_tokens=THINKING_BUDGET_TOKENS + 2000,
             json_response=True,
             no_think=False,
+            thinking_budget=THINKING_BUDGET_TOKENS,
             timeout=90.0,
         )
         return extract_llm_json(content)
@@ -1204,11 +1223,12 @@ async def _nightly_self_user(
             model=REASONING_MODEL,
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
-            temperature=0.3,
+            temperature=0.6,  # Qwen3.6 "précis" — fiable pour JSON, évite les boucles déterministes
             max_tokens=THINKING_BUDGET_TOKENS + 1500,
             json_response=True,
             no_think=False,
-            timeout=90.0,
+            thinking_budget=0,  # free thinking — réflexion identitaire de fond, qualité > vitesse
+            timeout=180.0,  # free think (~1900 tok) + 1500 réponse ≈ 148s @ 23 tok/s
         )
         return extract_llm_json(content)
     except Exception as exc:
@@ -1252,10 +1272,11 @@ async def _nightly_cleaning_user(
             model=REASONING_MODEL,
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
-            temperature=0.2,
+            temperature=0.6,  # Qwen3.6 "précis" — fiable pour JSON, évite les boucles déterministes
             max_tokens=THINKING_BUDGET_TOKENS + 1000,
             json_response=True,
             no_think=False,
+            thinking_budget=THINKING_BUDGET_TOKENS,
             timeout=90.0,
         )
         return extract_llm_json(content)
@@ -1329,10 +1350,12 @@ async def run_nightly_interaction_review() -> None:
         user_insights: list[str] = []
 
         if facts:
-            user_insights = [i for i in facts.get("user_insights", []) if i]
+            durables = [i for i in facts.get("insights_durables", []) if i]
+            evenements = [i for i in facts.get("insights_evenements", []) if i]
+            user_insights = durables + evenements  # full context for cleaning
 
-            # Store durable user insights → autobiographical Qdrant
-            for insight in user_insights:
+            # Only durable states go to autobio — nightly is the sole autobio writer
+            for insight in durables:
                 store_autobiographical_event(user_code, insight, importance=0.7)
 
             # Store tomorrow's suggestions in Redis (24h)
@@ -1792,12 +1815,13 @@ def _action_refine_prompt(params: dict) -> str:
             model=REASONING_MODEL,
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
-            temperature=0.4,
+            temperature=0.6,  # Qwen3.6 "précis" — fiable pour JSON, évite les boucles déterministes
             max_tokens=THINKING_BUDGET_TOKENS
             + 6000,  # think block (can be long) + proposed prompt text + rationale
             json_response=True,
             no_think=False,
-            timeout=REASONING_TIMEOUT,
+            thinking_budget=0,  # free thinking — tâche créative profonde, qualité > vitesse
+            timeout=300.0,  # free think (~1900 tok) + 6000 réponse ≈ 343s @ 23 tok/s
         )
         result = extract_llm_json(content)
     except Exception as exc:
@@ -1857,12 +1881,13 @@ def _action_refine_prompt(params: dict) -> str:
                 model=REASONING_MODEL,
                 api_url=REASONING_API_URL,
                 api_key=REASONING_API_KEY,
-                temperature=0.3,
+                temperature=0.6,  # Qwen3.6 "précis" — fiable pour JSON, évite les boucles déterministes
                 max_tokens=THINKING_BUDGET_TOKENS
                 + 6000,  # retry — same budget as initial call
                 json_response=True,
                 no_think=False,
-                timeout=REASONING_TIMEOUT,
+                thinking_budget=0,  # free thinking — tâche créative profonde, qualité > vitesse
+                timeout=300.0,  # free think (~1900 tok) + 6000 réponse ≈ 343s @ 23 tok/s
             )
             result = extract_llm_json(content)
             proposed_text = result.get("proposed_text", "").strip()
@@ -2078,11 +2103,12 @@ def _action_prune_self_memory(params: dict) -> str:
             model=REASONING_MODEL,
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
-            temperature=0.2,
-            max_tokens=800,
+            temperature=0.6,
+            max_tokens=1800,  # ~500 tok brief thinking + ~300 tok JSON
             json_response=True,
-            no_think=True,
-            timeout=30.0,
+            no_think=False,
+            thinking_budget=THINKING_BUDGET_TOKENS,
+            timeout=60.0,
         )
     except Exception as exc:
         logger.error(
@@ -2104,7 +2130,7 @@ def _action_prune_self_memory(params: dict) -> str:
             if not raw_indices:
                 continue
             lst = data.get(field, [])
-            cap = max(0, len(lst) // 2)  # never delete more than 50 %
+            cap = max(0, int(len(lst) * 0.30))  # never delete more than 30 %
             indices = sorted(
                 set(int(i) for i in raw_indices if 0 <= int(i) < len(lst))
             )[:cap]
@@ -2427,12 +2453,13 @@ async def _llm_review_before_action(
             model=REASONING_MODEL,
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
-            temperature=0.1,
+            temperature=0.0,  # use model profile default (Qwen3.6: 1.0 thinking)
             max_tokens=THINKING_BUDGET_TOKENS
             + 300,  # think block + JSON court (execute + reason)
             json_response=True,
             no_think=False,  # jugement contextuel — thinking améliore la qualité
-            timeout=30.0,
+            thinking_budget=THINKING_BUDGET_TOKENS,  # brief (~500 tok) — décision binaire, pas besoin de plus
+            timeout=60.0,  # brief think ~500 tok + 300 réponse ≈ 35s @ 23 tok/s, marge x2
         )
         result = extract_llm_json(content)
         execute = bool(result.get("execute", True))

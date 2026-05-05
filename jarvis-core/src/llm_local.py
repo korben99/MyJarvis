@@ -47,10 +47,12 @@ from config import (
     REASONING_MODEL,
     ROUTER_MODEL,
     THINKING_BUDGET_TOKENS,
+    VISION_MODEL,
     is_hermes,
     is_qwen3,
     is_qwen36,
 )
+from prompts import VISION_USER_PROMPT
 from mlx_lm import generate, load, stream_generate
 from mlx_lm.models.cache import make_prompt_cache
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
@@ -116,6 +118,7 @@ class _ModelProfile:
     repetition_penalty: float  # > 1.0 penalises repeated tokens
     repetition_context_size: int  # how many past tokens to look at
     frequency_penalty: float  # additive penalty proportional to frequency
+    presence_penalty: float  # fixed additive penalty if token has appeared at all (OpenAI-style)
     use_quant_kv: bool  # whether to enable KV cache quantisation
     stop_tokens: tuple[str, ...]  # extra stop strings beyond the tokenizer's EOS
 
@@ -144,8 +147,9 @@ def _model_profile(model_path: str) -> _ModelProfile:
             top_k=20,
             min_p=0.0,
             repetition_penalty=1.0,
-            repetition_context_size=64,
-            frequency_penalty=0.0,
+            repetition_context_size=256,  # fenêtre élargie — couvre les copies depuis le prompt injecté
+            frequency_penalty=0.15,  # accumulative — brise les boucles que presence_penalty seul ne stoppe pas
+            presence_penalty=1.5,  # official Qwen3.6 recommendation — pénalité fixe dès la 1ère occurrence
             use_quant_kv=QUANT_KV,
             stop_tokens=(),
         )
@@ -162,6 +166,7 @@ def _model_profile(model_path: str) -> _ModelProfile:
             repetition_penalty=1.1,
             repetition_context_size=64,
             frequency_penalty=0.05,
+            presence_penalty=1.5,
             use_quant_kv=QUANT_KV,
             stop_tokens=(),
         )
@@ -180,6 +185,7 @@ def _model_profile(model_path: str) -> _ModelProfile:
             repetition_penalty=1.0,  # already-quantised Q4; penalties degrade JSON quality
             repetition_context_size=64,
             frequency_penalty=0.0,
+            presence_penalty=0.0,  # structured JSON output — penalties degrade quality
             use_quant_kv=False,  # already Q4 affine quantised
             stop_tokens=("<|im_end|>",),
         )
@@ -194,6 +200,7 @@ def _model_profile(model_path: str) -> _ModelProfile:
         repetition_penalty=1.3,
         repetition_context_size=64,
         frequency_penalty=0.10,
+        presence_penalty=0.0,
         use_quant_kv=False,
         stop_tokens=(),
     )
@@ -450,6 +457,13 @@ def preload_models() -> None:
         _load_model(path)
     logger.info("MLX : %d modèle(s) préchargé(s)", len(model_paths))
 
+    if VISION_MODEL:
+        try:
+            _load_vlm()
+            logger.info("MLX VLM préchargé : %s", VISION_MODEL)
+        except Exception as exc:
+            logger.warning("MLX VLM preload failed (non-fatal): %s", exc)
+
     # Warmup JIT : déclenche la compilation MLX au démarrage, pas au 1er appel utilisateur.
     # Sans ça, le 1er generate() peut prendre 3-5s supplémentaires (JIT + graph build).
     warmup_msgs = [
@@ -478,6 +492,7 @@ def _build_prompt(
     tokenizer,
     model_path: str,
     no_think: bool,
+    thinking_budget: int = 0,
 ) -> str:
     """
     Construit le prompt final via apply_chat_template.
@@ -486,6 +501,7 @@ def _build_prompt(
       Qwen3 standard   enable_thinking=False → <think>\\n\\n</think>\\n\\n (no-think)
       Qwen3.6 + ninja  enable_thinking=False → préfixe nu (pas de tag <think>)
       Tout Qwen3.x     enable_thinking=True  → <think>\\n (thinking libre)
+                       + thinking_budget=N   → <think>\\n<budget_remaining>N</budget_remaining>\\n
 
     La ninja patch guard (en fin de fonction) normalise le suffixe brut :
       - préfixe nu (ninja patch no_think) → injecte <think>\\n\\n</think>\\n\\n
@@ -494,6 +510,9 @@ def _build_prompt(
       - no_think=False sans <think>       → force-open <think>\\n
 
     Fallback : si enable_thinking n'est pas accepté (TypeError), réessaie sans.
+    thinking_budget > 0 : cap de tokens de thinking (format <budget_remaining>N</budget_remaining>).
+      Ignoré si no_think=True.
+      Ignoré si le tokenizer ne supporte pas le paramètre (TypeError → fallback sans budget).
     """
     qwen3 = is_qwen3(model_path)
     base_kwargs: dict[str, Any] = {"tokenize": False, "add_generation_prompt": True}
@@ -503,24 +522,25 @@ def _build_prompt(
         # - no_think=True  → enable_thinking=False + thinking_budget=0 (belt+suspenders:
         #   mlx-lm issue #1625 — enable_thinking=False alone may not suppress thinking in
         #   some library versions; thinking_budget=0 enforces the budget at template level)
-        # - no_think=False → enable_thinking=True + THINKING_BUDGET_TOKENS cap
-        #   (thinking + output share the same max_tokens budget in mlx-lm; Qwen3 open-source
-        #   correctly honours thinking_budget in apply_chat_template)
+        # - no_think=False, thinking_budget=0  → enable_thinking=True, thinking libre
+        #   Sur une tâche complexe, Qwen3.6 peut penser ~1900 tokens naturellement.
+        # - no_think=False, thinking_budget>0  → enable_thinking=True + tag <budget_remaining>N>
+        #   Injecté par le ninja template (qwen36_ninja.jinja).
+        #
+        #   COMPORTEMENT MESURÉ sur Qwen3.6-35B-A3B (test scripts/test_thinking_budget.py) :
+        #   Le tag <budget_remaining> n'agit PAS comme un cap précis sur Qwen3.6 —
+        #   le modèle n'a pas été entraîné avec le mécanisme budget-forcing de Qwen3.
+        #   En revanche, sa PRÉSENCE réduit le thinking d'~79% (1900→~415 tok) quelle
+        #   que soit la valeur N. C'est un interrupteur "pense brièvement" plutôt qu'un
+        #   cap token-précis. La valeur N n'a aucun effet mesurable.
         if no_think:
             think_kwargs: dict[str, Any] = {
                 "enable_thinking": False,
                 "thinking_budget": 0,
             }
+        elif thinking_budget > 0:
+            think_kwargs = {"enable_thinking": True, "thinking_budget": thinking_budget}
         else:
-            # thinking_budget intentionally NOT passed.
-            # Root cause (Qwen3-30B-A3B-4bit-DWQ-0508): the DWQ checkpoint bundles a
-            # patched tokenizer whose jinja2 template interprets thinking_budget=N as
-            # "budget already consumed" and immediately closes the <think> block before
-            # generation starts → prompt ends with <think>\n</think>\n\n → model sees
-            # an empty think block and generates ~2 tokens then EOS (nothing visible).
-            # The official HF tokenizer injects a <budget_remaining>N</budget_remaining>
-            # marker inside the open block instead — behaviour differs per checkpoint.
-            # Token budget is enforced via max_tokens at the call site instead.
             think_kwargs = {"enable_thinking": True}
 
         # Try full kwargs; fall back if tokenizer version is too old
@@ -556,7 +576,10 @@ def _build_prompt(
         #
         # no_think=False:
         #   standard/ninja  → ends with <think>\n               → no-op (already open)
-        #   broken fallback → ends without <think>              → force-open
+        #   thinking_budget → ends with <budget_remaining>N</budget_remaining>\n → no-op
+        #   broken fallback → ends without open <think>         → force-open
+        #   DWQ + budget    → ends with <think>\n</think>\n\n   → force-open (budget lost
+        #                     but generation proceeds; ninja patch re-opens the block)
         if no_think:
             if prompt.endswith("<think>\n") or prompt.rstrip().endswith("<think>"):
                 # Template opened think block but didn't close it → force-close
@@ -566,11 +589,30 @@ def _build_prompt(
                 prompt = prompt.rstrip("\n") + "\n<think>\n\n</think>\n\n"
             # else: standard template already closed the block → no-op
         else:
-            if not (
-                prompt.endswith("<think>\n") or prompt.rstrip().endswith("<think>")
-            ):
+            # Check for an unclosed <think> block in the last 100 chars.
+            # Handles both the plain "<think>\n" case and the thinking_budget
+            # "<think>\n<budget_remaining>N</budget_remaining>\n" case.
+            _tail = prompt[-100:]
+            _think_open = "<think>" in _tail and "</think>" not in _tail[_tail.rfind("<think>"):]
+            if not _think_open:
                 prompt = prompt.rstrip("\n") + "\n<think>\n"
 
+        # Diagnostic — vérifier que thinking_budget est bien injecté par le tokenizer
+        if thinking_budget > 0 and not no_think:
+            tail = prompt[-120:]
+            if "<budget_remaining>" in tail:
+                logger.info(
+                    "_build_prompt thinking_budget=%d → <budget_remaining> injected (tokenizer OK)",
+                    thinking_budget,
+                )
+            else:
+                logger.warning(
+                    "_build_prompt thinking_budget=%d → <budget_remaining> NOT injected "
+                    "(ninja-patch template or DWQ checkpoint); budget hint lost, "
+                    "ninja guard keeps <think> open. prompt tail: %r",
+                    thinking_budget,
+                    tail,
+                )
         return prompt
 
     return tokenizer.apply_chat_template(messages, **base_kwargs)
@@ -585,6 +627,7 @@ def _generate_sync(
     no_think: bool,
     session_id: str = "",
     json_response: bool = False,
+    thinking_budget: int = 0,
 ) -> str:
     """Génération complète (non-streaming). Bloquant — wrapper pour asyncio.to_thread.
 
@@ -593,7 +636,7 @@ def _generate_sync(
     de tokens superflus après la } finale (explications, markdown, …).
     """
     model, tokenizer = _load_model(model_path)
-    prompt = _build_prompt(messages, tokenizer, model_path, no_think)
+    prompt = _build_prompt(messages, tokenizer, model_path, no_think, thinking_budget)
 
     prompt_tokens = len(tokenizer.encode(prompt))
     profile = _model_profile(model_path)
@@ -612,8 +655,16 @@ def _generate_sync(
     kv_cache = _get_system_cache(model_path, model, tokenizer, _sys_content)
     _cache_kwarg = {"prompt_cache": kv_cache} if kv_cache is not None else {}
 
+    # Use call-site temperature if explicitly set (> 0); otherwise fall back to
+    # the model profile's recommended value (Qwen3.6: 1.0 think / 0.7 no-think).
+    # Passing temperature=0.0 or temperature≤0 means "use profile default".
+    effective_temp = (
+        temperature
+        if temperature > 0
+        else (profile.temp_nothink if no_think else profile.temp_think)
+    )
     sampler = make_sampler(
-        temp=temperature,
+        temp=effective_temp,
         top_p=profile.top_p_nothink if no_think else profile.top_p_think,
         top_k=profile.top_k,
         min_p=profile.min_p,
@@ -622,6 +673,9 @@ def _generate_sync(
         repetition_penalty=profile.repetition_penalty,
         repetition_context_size=profile.repetition_context_size,
         frequency_penalty=profile.frequency_penalty,
+        frequency_context_size=profile.repetition_context_size,
+        presence_penalty=profile.presence_penalty,
+        presence_context_size=profile.repetition_context_size,
     )
 
     early_stopped = False
@@ -789,6 +843,7 @@ def call_llm_local(
     no_think: bool = False,
     session_id: str = "",
     json_response: bool = False,
+    thinking_budget: int = 0,
     **_kwargs,  # absorbe api_url, api_key, timeout (non utilisés)
 ) -> str:
     """
@@ -806,6 +861,7 @@ def call_llm_local(
             no_think,
             session_id,
             json_response,
+            thinking_budget,
         )
 
 
@@ -818,6 +874,7 @@ async def call_llm_local_async(
     no_think: bool = False,
     session_id: str = "",
     json_response: bool = False,
+    thinking_budget: int = 0,
     **_kwargs,
 ) -> str:
     """
@@ -852,6 +909,7 @@ async def call_llm_local_async(
             no_think,
             session_id,
             json_response,
+            thinking_budget,
         )
         logger.debug(
             "[TTFT] call_llm_local_async: done — total %.3fs", time.time() - _t0
@@ -870,6 +928,7 @@ async def call_llm_local_async_bg(
     no_think: bool = False,
     session_id: str = "",
     json_response: bool = False,
+    thinking_budget: int = 0,
     **_kwargs,
 ) -> str:
     """
@@ -908,6 +967,7 @@ async def call_llm_local_async_bg(
             no_think,
             session_id,
             json_response,
+            thinking_budget,
         )
     finally:
         _infer_lock.release()
@@ -920,6 +980,7 @@ async def stream_local(
     max_tokens: int = 10000,
     no_think: bool = False,
     session_id: str = "",
+    thinking_budget: int = 0,
     **_kwargs,
 ) -> AsyncGenerator[str, None]:
     """
@@ -949,7 +1010,7 @@ async def stream_local(
             _t_infer - _t_lock_wait,
         )
         mlx_model, tokenizer = _load_model(model)
-        prompt = _build_prompt(messages, tokenizer, model, no_think)
+        prompt = _build_prompt(messages, tokenizer, model, no_think, thinking_budget)
 
         # ── Encode prompt une seule fois (réutilisé pour cache validation ET stats) ─
         prompt_tokens = len(tokenizer.encode(prompt))
@@ -998,6 +1059,9 @@ async def stream_local(
                     repetition_penalty=profile.repetition_penalty,
                     repetition_context_size=profile.repetition_context_size,
                     frequency_penalty=profile.frequency_penalty,
+                    frequency_context_size=profile.repetition_context_size,
+                    presence_penalty=profile.presence_penalty,
+                    presence_context_size=profile.repetition_context_size,
                 ),
                 **({"prompt_cache": kv_cache} if kv_cache is not None else {}),
                 **quant_kwargs,
@@ -1150,12 +1214,8 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
     if not images:
         return ""
 
-    prompt_text = (
-        "Décris cette image en prose concise (3-5 phrases maximum, sans markdown). "
-        "Couvre dans cet ordre : sujet principal et contexte, tout texte/chiffre visible "
-        "recopié mot pour mot, personnes présentes, objets et couleurs clés. "
-        f"Mets l'accent sur les éléments utiles pour répondre à : "
-        f"{text_prompt or 'Que contient cette image ?'}"
+    prompt_text = VISION_USER_PROMPT.format(
+        text_prompt=text_prompt or "Décris cette image dans son ensemble."
     )
     formatted = vlm_apply_chat_template(
         _vlm_processor, _vlm_config, prompt_text, num_images=len(images)
@@ -1165,7 +1225,10 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
         _vlm_processor,
         formatted,
         image=images[0] if len(images) == 1 else images,
-        max_tokens=400,
+        max_tokens=1200,
+        temperature=0.7,
+        repetition_penalty=1.3,
+        repetition_context_size=64,
         verbose=False,
     )
     return result.text if hasattr(result, "text") else str(result)

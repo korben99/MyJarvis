@@ -603,6 +603,7 @@ def call_llm(
     json_response: bool = True,
     no_think: bool = False,
     timeout: float = 30.0,
+    thinking_budget: int = 0,
 ) -> str:
     """
     Synchronous LLM call — HTTP (cloud/mlx-lm server) ou MLX direct (LLM_LOCAL=yes).
@@ -610,6 +611,7 @@ def call_llm(
     Returns the model's raw text content.
     API key is never logged.
     max_tokens=None → no explicit limit (model stops at EOS / closing JSON brace).
+    thinking_budget > 0 : cap de tokens de thinking (local uniquement, ignoré pour HTTP).
     """
     if LLM_LOCAL and model in _LOCAL_MODELS:
         return call_llm_local(
@@ -619,6 +621,7 @@ def call_llm(
             max_tokens=max_tokens or _LOCAL_DEFAULT_MAX_TOKENS,
             no_think=no_think,
             json_response=json_response,
+            thinking_budget=thinking_budget,
         )
     resp = _get_llm_sync_client().post(
         f"{api_url}/chat/completions",
@@ -641,6 +644,7 @@ async def call_llm_async(
     json_response: bool = True,
     no_think: bool = False,
     timeout: float = 30.0,
+    thinking_budget: int = 0,
 ) -> str:
     """
     Async LLM call — HTTP (cloud/mlx-lm server) ou MLX direct (LLM_LOCAL=yes).
@@ -648,6 +652,7 @@ async def call_llm_async(
     Returns the model's raw text content.
     API key is never logged.
     max_tokens=None → no explicit limit (model stops at EOS / closing JSON brace).
+    thinking_budget > 0 : cap de tokens de thinking (local uniquement, ignoré pour HTTP).
     """
     if LLM_LOCAL and model in _LOCAL_MODELS:
         return await call_llm_local_async(
@@ -657,6 +662,7 @@ async def call_llm_async(
             max_tokens=max_tokens or _LOCAL_DEFAULT_MAX_TOKENS,
             no_think=no_think,
             json_response=json_response,
+            thinking_budget=thinking_budget,
         )
     resp = await _get_llm_async_client().post(
         f"{api_url}/chat/completions",

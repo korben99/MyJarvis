@@ -109,7 +109,7 @@ def build_dynamic_prefix(
             ops_lines = "\n".join(
                 f"- {o['topic']} : {o['opinion']}" for o in opinions[-5:]
             )
-            parts.append(f"<mes_avis>\n{ops_lines}\n</mes_avis>")
+            parts.append(f"<avis_jarvis>\n{ops_lines}\n</avis_jarvis>")
 
     if voice_mode:
         parts.append(get_prompt("VOICE_SUFFIX_FR").strip())
@@ -222,7 +222,7 @@ def build_context(
         selected_memories = trim_chunks(stamped, MEMORY_CHAR_BUDGET)
         if selected_memories:
             context_parts.append(
-                "<souvenirs_pertinents>\n" + "\n".join(selected_memories) + "\n</souvenirs_pertinents>"
+                "<souvenirs_utilisateur>\n" + "\n".join(selected_memories) + "\n</souvenirs_utilisateur>"
             )
         logger.info(
             "memory recall %d/%d (budget=%d)",
