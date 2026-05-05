@@ -1703,7 +1703,7 @@ def build_memory_context(
 
     # Self identity — apprentissages de Jarvis (guide interne, pas des faits sur l'utilisateur)
     if self_mem.get("learnings"):
-        recent_learnings = self_mem["learnings"][-3:]
+        recent_learnings = self_mem["learnings"][-5:]
         plines = [f"- {ln['text']}" for ln in recent_learnings]
         parts.append(
             "<apprentissages_jarvis>\n"
@@ -1712,7 +1712,7 @@ def build_memory_context(
         )
 
     if self_mem.get("self_notes"):
-        recent_notes = self_mem["self_notes"][-3:]
+        recent_notes = self_mem["self_notes"][-5:]
         _notes_lines = [f"- {n['text']}" for n in recent_notes if n.get("text")]
         if _notes_lines:
             parts.append(
@@ -1722,9 +1722,9 @@ def build_memory_context(
     # User Timeline — served from pipeline cache hit [5]; fallback to Qdrant on miss
     if _timeline_cached:
         try:
-            timeline = json.loads(_timeline_cached)[:5]
+            timeline = json.loads(_timeline_cached)[:7]
         except Exception:
-            timeline = get_user_timeline(user_code, limit=5)
+            timeline = get_user_timeline(user_code, limit=7)
     else:
         timeline = get_user_timeline(user_code, limit=5)
     if timeline:
