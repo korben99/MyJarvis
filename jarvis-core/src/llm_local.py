@@ -530,15 +530,15 @@ def _build_prompt(
         #   COMPORTEMENT MESURÉ sur Qwen3.6-35B-A3B (test scripts/test_thinking_budget.py) :
         #   Le tag <budget_remaining> n'agit PAS comme un cap précis sur Qwen3.6 —
         #   le modèle n'a pas été entraîné avec le mécanisme budget-forcing de Qwen3.
-        #   En revanche, sa PRÉSENCE réduit le thinking d'~79% (1900→~415 tok) quelle
-        #   que soit la valeur N. C'est un interrupteur "pense brièvement" plutôt qu'un
-        #   cap token-précis. La valeur N n'a aucun effet mesurable.
+        #   Sur certains prompts, le modèle émet '<budget>N</budget>' comme réponse
+        #   visible (garbled echo du tag) au lieu de générer du contenu — comportement
+        #   non-déterministe et lié à la sensibilité au prompt. Désactivé pour Qwen3.6.
         if no_think:
             think_kwargs: dict[str, Any] = {
                 "enable_thinking": False,
                 "thinking_budget": 0,
             }
-        elif thinking_budget > 0:
+        elif thinking_budget > 0 and not is_qwen36(model_path):
             think_kwargs = {"enable_thinking": True, "thinking_budget": thinking_budget}
         else:
             think_kwargs = {"enable_thinking": True}

@@ -124,6 +124,12 @@ def is_hermes(model: str) -> bool:
 # Default 1024 = ~1-2s of thinking on Qwen3-30B-A3B, enough for structured tasks.
 THINKING_BUDGET_TOKENS = int(os.getenv("THINKING_BUDGET_TOKENS", "1024"))
 
+# max_tokens budgets for streaming chat (thinking + response share the same budget).
+# Qwen3.6 @ 5.4bit ≈ 80 tok/s → 1500 tok ≈ 19s, 3000 tok ≈ 37s, 4000 tok ≈ 50s.
+MAX_TOKENS_NO_THINK  = int(os.getenv("MAX_TOKENS_NO_THINK",  "1500"))
+MAX_TOKENS_SYNTHESIS = int(os.getenv("MAX_TOKENS_SYNTHESIS", "3000"))  # web/RAG
+MAX_TOKENS_REASONING = int(os.getenv("MAX_TOKENS_REASONING", "4000"))  # use_reasoning
+
 
 def tokens_param(model: str) -> str:
     """

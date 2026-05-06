@@ -16,6 +16,9 @@ from config import (
     BRIEFING_TIMEZONE,
     IOS_MAX_MESSAGES,
     LLM_LOCAL,
+    MAX_TOKENS_NO_THINK,
+    MAX_TOKENS_REASONING,
+    MAX_TOKENS_SYNTHESIS,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
@@ -194,6 +197,7 @@ class _SseCtx:
     api_key: str
     timeout: float
     no_think: bool
+    max_tokens: int
     session_id: str
     t0: float  # timer global requête (pour les logs TTFT)
     start: float  # timer démarrage appel LLM (pour duration_ms)
@@ -238,7 +242,7 @@ async def _sse_stream(ctx: _SseCtx):
             ctx.timeout,
             no_think=ctx.no_think,
             session_id=ctx.session_id,
-            max_tokens=2500 if not ctx.no_think else 1500,
+            max_tokens=ctx.max_tokens,
             thinking_budget=THINKING_BUDGET_TOKENS if not ctx.no_think else 0,
         ):
             full_parts.append(chunk)
@@ -890,10 +894,12 @@ async def chat(req: ChatRequest):
     # to keep the static system prefix token-identical → KV cache valid.
     reasoning_hint = ""
     if llm_result and llm_result.use_reasoning:
-        reasoning_hint = (
-            "\n\nCette question nécessite une réflexion approfondie. "
-            "Analyse-la étape par étape avant de répondre."
-        )
+        # Short hint — "étape par étape" triggers verbose formal checklists in the think block.
+        reasoning_hint = "\n\nRéfléchis avant de répondre."
+    elif not chat_no_think:
+        # Web/RAG synthesis — encourage brief thinking to organise context.
+        # No budget tag available for Qwen3.6 (causes garbled output); text hint instead.
+        reasoning_hint = "\n\nSynthétise brièvement le contexte ci-dessus avant de répondre."
 
     raw_user_content = req.message
     if image_description:
@@ -941,6 +947,14 @@ async def chat(req: ChatRequest):
     # Pre-compute safe web sources (used in both streaming and JSON paths).
     _safe_web = [] if web_results == INTERNET_ERROR else web_results
 
+    # max_tokens budget: no-think / web-rag synthesis / deep reasoning (see config.py)
+    _use_reasoning = bool(llm_result and llm_result.use_reasoning)
+    _max_tokens = (
+        MAX_TOKENS_NO_THINK  if chat_no_think
+        else MAX_TOKENS_REASONING if _use_reasoning
+        else MAX_TOKENS_SYNTHESIS
+    )
+
     # ════════════════════════════════════════════════════════════════════════
     # STEP 7 — LLM CALL — streaming SSE or blocking JSON
     # ════════════════════════════════════════════════════════════════════════
@@ -952,6 +966,7 @@ async def chat(req: ChatRequest):
             api_key=_use_api_key,
             timeout=_use_timeout,
             no_think=chat_no_think,
+            max_tokens=_max_tokens,
             session_id=req.session_id,
             t0=_t0,
             start=start,
