@@ -290,8 +290,6 @@ def _extract_behavioral_patterns(n: int = 20) -> list[str]:
       2. Time-of-day clustering for "nothing" choices.
       3. Recurring keywords in focus fields (word seen ≥ 3 times).
     """
-    from collections import Counter
-
     logs = get_reflection_log(n)
     if not logs:
         return []
@@ -637,7 +635,7 @@ def _fmt_previous_steps(steps: list[dict] | None) -> str:
     if not steps:
         return "  aucune (première itération)"
     return "\n".join(
-        f"  [{s['iteration']}] {s['action']} → {s['outcome']}" for s in steps
+        f"  {s['iteration']}. {s['action']} → {s['outcome']}" for s in steps
     )
 
 
@@ -1011,27 +1009,6 @@ def _action_correct_profile(params: dict) -> str:
                 user_code,
             )
             return f"correct_profile: key '{key}' does not exist — use the analyzer to create new profile facts from conversation"
-
-    if value is None:
-        old_val = get_redis().hget(f"user:{user_code}:profile", key)
-        if old_val is None:
-            # Key does not exist for this user — likely a user-confusion error in the LLM.
-            logger.warning(
-                "Self correct_profile: key '%s' does not exist for %s — "
-                "possible user confusion in reflection LLM (check _fmt_user_profiles context)",
-                key,
-                user_code,
-            )
-            return (
-                f"correct_profile: key '{key}' does not exist for {user_code}. "
-                f"Verify you have the correct user_code — this key may belong to another user."
-            )
-        logger.warning(
-            "Self correct_profile: DELETE '%s' for %s (current value: %s)",
-            key,
-            user_code,
-            old_val if old_val else "(empty)",
-        )
 
     # ── Namespace protection: block cross-domain value contamination ────────
     # Prevents reflection from writing hobby/travel/unrelated values into
@@ -1681,7 +1658,7 @@ def _notify_proposal(user_code: str, proposal: dict) -> None:
     import html as _html
 
     to = USER_EMAILS.get(user_code, "")
-    if not to or not is_google_available():
+    if not to or not is_google_available(user_code):
         return
 
     pid = proposal["id"]
@@ -1974,7 +1951,7 @@ def handle_proposal_command(message: str, user_code: str) -> str | None:
     if m:
         if user_code not in USER_ADMINS:
             return "⛔ Seul un administrateur peut approuver une proposition de prompt."
-        return approve_proposal(m.group(3))
+        return approve_proposal(m.group(2))
 
     # ── Approve sans ID ──
     if re.search(r"\b(accepte?|approu?ve?)\b", msg) and "proposition" in msg:
@@ -1991,15 +1968,12 @@ def handle_proposal_command(message: str, user_code: str) -> str | None:
 
     # ── Reject ──
     m = re.search(
-        r"(rejette?|refu?se?|reject)\s+(la\s+proposition\s+)?([a-f0-9]{6,8})\b", msg
-    )
-    m = re.search(
         r"(rejette?|refu?se?|reject)\s+la\s+proposition\s+([a-f0-9]{6,8})\b", msg
     )
     if m:
         if user_code not in USER_ADMINS:
             return "⛔ Seul un administrateur peut rejeter une proposition de prompt."
-        return reject_proposal(m.group(3))
+        return reject_proposal(m.group(2))
 
     # ── Reject sans ID ──
     if re.search(r"\b(rejette?|refu?se?|reject)\b", msg) and "proposition" in msg:
@@ -2104,11 +2078,11 @@ def _action_prune_self_memory(params: dict) -> str:
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=0.6,
-            max_tokens=1800,  # ~500 tok brief thinking + ~300 tok JSON
+            max_tokens=THINKING_BUDGET_TOKENS + 2000,  # free think ~1900 tok + JSON ~300 tok
             json_response=True,
             no_think=False,
             thinking_budget=THINKING_BUDGET_TOKENS,
-            timeout=60.0,
+            timeout=120.0,  # (THINKING_BUDGET_TOKENS+2000) tok @ ~80 tok/s ≈ 50s, marge x2
         )
     except Exception as exc:
         logger.error(
@@ -2533,7 +2507,7 @@ async def run_self_reflection() -> dict:
         MAX_CHAIN_ITERATIONS,
     )
 
-    global_ctx = gather_global_context()
+    global_ctx = await asyncio.to_thread(gather_global_context)
     global_steps: list[dict] = []
     focus = ""
 
@@ -2639,6 +2613,7 @@ async def run_self_reflection() -> dict:
 
             # Don't retry an action that already hit a system-level constraint this cycle
             if action in _failed_actions:
+                _prev_action = action
                 logger.info(
                     "P2 %s step %d/%d: action=%s previously failed — skipping to nothing",
                     user_code,
@@ -2648,7 +2623,7 @@ async def run_self_reflection() -> dict:
                 )
                 action = "nothing"
                 params = {
-                    "reason": f"previous {action} hit a system constraint — not retrying"
+                    "reason": f"previous {_prev_action} hit a system constraint — not retrying"
                 }
 
             if action in _REVIEW_REQUIRED_ACTIONS:

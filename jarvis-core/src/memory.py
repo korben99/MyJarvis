@@ -452,10 +452,12 @@ def _normalize_profile_keys_batch(
                 for item in matches:
                     nk = item.get("new")
                     match = item.get("match")
-                    # Skip if already resolved (model may return duplicate `new` entries)
+                    # Skip if already resolved (model may return duplicate `new` entries).
+                    # result[nk] is None for unresolved keys; non-None means fast path or
+                    # a prior item in this loop already set it — don't overwrite.
                     if (
                         nk in group_keys
-                        and nk not in result
+                        and result.get(nk) is None
                         and match
                         and match in existing_keys
                     ):
@@ -1275,6 +1277,8 @@ def search_memory(
         memories = []
         # memorie recall with filter of similarity
         now = time.time()
+        # Fetch once — avoids one Redis round-trip per result
+        interest_weights = get_interest_weights(user_code)
 
         for r in results:
             # Clamp to [0, 1]: the collection uses Distance.DOT so scores can exceed 1.0
@@ -1304,6 +1308,18 @@ def search_memory(
             final_score = (
                 sim * 0.65 + payload.get("importance", 0) * 0.25 + recency_bonus * 0.1
             ) * status_factor
+
+            # Interest-weight boost: user-declared topics nudge ranking gently.
+            # Cap at 0.08 so a strong semantic match (Δ≥0.08) is never overridden.
+            # weight 1.0 = neutral (no boost); weight 3.0 → +0.08 (max).
+            if interest_weights:
+                text_lower = payload.get("text", "").lower()
+                best_weight = max(
+                    (w for term, w in interest_weights.items() if term.lower() in text_lower),
+                    default=1.0,
+                )
+                interest_boost = min(0.08, max(0.0, (best_weight - 1.0) * 0.04))
+                final_score = min(1.0, final_score + interest_boost)
 
             memories.append(
                 {
@@ -1726,7 +1742,7 @@ def build_memory_context(
         except Exception:
             timeline = get_user_timeline(user_code, limit=7)
     else:
-        timeline = get_user_timeline(user_code, limit=5)
+        timeline = get_user_timeline(user_code, limit=7)
     if timeline:
         plines = [
             f"({rel_time_fr(event['timestamp'])}) {event['text']}" for event in timeline

@@ -101,7 +101,7 @@ _AUTO_WEB_RE = re.compile(
     r"|\bdernier\b|\bdernière\b|\bnouveau\b|\bnouvelle\b"
     r"|\bspecs?\b|\bcaractéristique\b"
     r"|\bqui est\b|\bc\'est qui\b"
-    r"|\bcompar[e-]\b|\bregarde\b",
+    r"|\bcompar[e-]\b",
     re.IGNORECASE,
 )
 
@@ -579,8 +579,13 @@ async def chat(req: ChatRequest):
     # (~2–3 s on CPU) was previously sequential with routing, adding 2–3 s to TTFT.
     # If routing decides use_memory=False the result is discarded (cost: one
     # embedding call, ~2–3 s CPU, no GPU impact).
+    # Guard: skip for very short messages (< 15 chars) — almost always small-talk
+    # ("ok", "merci", "oui"). asyncio cancel() doesn't stop the underlying thread,
+    # so avoiding the launch entirely is the only way to prevent wasted CPU.
     _spec_mem_task: asyncio.Task = asyncio.ensure_future(
         async_search_memory(user_code, req.message, 5)
+        if len(req.message.strip()) >= 15
+        else _empty()
     )
 
     if _embed_result is not None:
@@ -990,6 +995,8 @@ async def chat(req: ChatRequest):
         api_key=_use_api_key,
         timeout=_use_timeout,
         no_think=chat_no_think,
+        max_tokens=_max_tokens,
+        thinking_budget=THINKING_BUDGET_TOKENS if not chat_no_think else 0,
     )
 
     append_conversation_message(user_code, req.session_id, "user", raw_user_content)

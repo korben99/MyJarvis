@@ -456,6 +456,14 @@ def extract_llm_json(text: str) -> dict:
 
     start = text.find("{")
     if start == -1:
+        # Detect wrong-type JSON (array, scalar) vs total garbage
+        try:
+            parsed = json.loads(text)
+            raise ValueError(
+                f"LLM returned {type(parsed).__name__} instead of JSON object: {text[:200]}"
+            )
+        except json.JSONDecodeError:
+            pass
         raise ValueError(f"No JSON found in LLM response: {text[:200]}")
 
     depth = 0

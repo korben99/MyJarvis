@@ -597,8 +597,10 @@ def _build_prompt(
             if not _think_open:
                 prompt = prompt.rstrip("\n") + "\n<think>\n"
 
-        # Diagnostic — vérifier que thinking_budget est bien injecté par le tokenizer
-        if thinking_budget > 0 and not no_think:
+        # Diagnostic — vérifier que thinking_budget est bien injecté par le tokenizer.
+        # Ignoré pour Qwen3.6 : l'absence de <budget_remaining> est intentionnelle
+        # (le modèle n'a pas été entraîné avec ce mécanisme — voir commentaire ci-dessus).
+        if thinking_budget > 0 and not no_think and not is_qwen36(model_path):
             tail = prompt[-120:]
             if "<budget_remaining>" in tail:
                 logger.info(
@@ -680,6 +682,7 @@ def _generate_sync(
 
     early_stopped = False
     _think_already_stripped = False
+    _max_stop_len = max((len(t) for t in profile.stop_tokens), default=0)
 
     if json_response:
         # Stream token-by-token and stop as soon as a complete JSON object is found.
@@ -715,8 +718,10 @@ def _generate_sync(
 
                 # Manual stop-token check (mlx_lm.generate/stream_generate do not
                 # accept a `stop` kwarg — handle it in the loop instead).
-                if profile.stop_tokens and any(
-                    t in raw_so_far for t in profile.stop_tokens
+                # Check only the tail (2× max stop-token length) — O(1) per token
+                # instead of O(n) on the full accumulated string.
+                if _max_stop_len and any(
+                    t in raw_so_far[-(_max_stop_len * 2):] for t in profile.stop_tokens
                 ):
                     early_stopped = True
                     break
@@ -1027,7 +1032,7 @@ async def stream_local(
 
         first = True
         raw_chunks: list[str] = []  # accumule la réponse brute pour stats
-        # Budget vient du pipeline : 1500 (no_think) ou 4000 (reasoning).
+        # Budget vient du pipeline : 1500 (no_think) / 3000 (synthesis) / 4000 (reasoning).
         # Hard cap à 10000 pour éviter les runaway en cas de mauvais passage.
         budget = min(max_tokens, 10000)
         profile = _model_profile(model)

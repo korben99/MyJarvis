@@ -180,10 +180,20 @@ def _proxy_session_id(user_code: str, messages: list[_OAIMessage]) -> str:
 async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
     """
     Translate Jarvis SSE stream to OpenAI SSE format.
-    Jarvis: data: {"content": "..."}  /  data: {"done": true, ...}
+    Jarvis: data: {"content": "..."}  /  {"think": "..."}  /  {"done": true, ...}
     OpenAI: data: {"choices": [{"delta": {"content": "..."}}]}  /  data: [DONE]
+
+    Think events are wrapped in <think>…</think> so OpenWebUI 0.4+ renders them
+    as a collapsible "Thinking" panel (same mechanism as DeepSeek-R1 / QwQ).
+    State machine: open <think> on first think event, close </think> on transition
+    to visible content or done.
     """
     buffer = ""
+    in_think = False
+
+    def _delta(text: str) -> str:
+        return f"data: {json.dumps({'id': req_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'jarvis', 'choices': [{'index': 0, 'delta': {'content': text}, 'finish_reason': None}]})}\n\n"
+
     async for raw in body_iterator:
         if isinstance(raw, bytes):
             raw = raw.decode()
@@ -197,11 +207,23 @@ async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
                     data = json.loads(line[6:])
                 except json.JSONDecodeError:
                     continue
-                if "content" in data:
-                    yield (
-                        f"data: {json.dumps({'id': req_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'jarvis', 'choices': [{'index': 0, 'delta': {'content': data['content']}, 'finish_reason': None}]})}\n\n"
-                    )
+
+                if "think" in data:
+                    if not in_think:
+                        yield _delta("<think>\n")
+                        in_think = True
+                    yield _delta(data["think"])
+
+                elif "content" in data:
+                    if in_think:
+                        yield _delta("\n</think>\n\n")
+                        in_think = False
+                    yield _delta(data["content"])
+
                 elif data.get("done"):
+                    if in_think:
+                        yield _delta("\n</think>\n\n")
+                        in_think = False
                     yield (
                         f"data: {json.dumps({'id': req_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'jarvis', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
                     )

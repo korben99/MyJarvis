@@ -147,6 +147,11 @@ def tokens_param(model: str) -> str:
     )
 
 
+# ── External search APIs ──────────────────────────────────────────────────
+# Tavily: primary web search backend (designed for LLM agents).
+# Leave empty to disable — DDG deep pipeline is used as fallback.
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+
 # ── Infrastructure ────────────────────────────────────────────────────────
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")

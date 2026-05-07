@@ -34,6 +34,7 @@ from config import (
     ROUTER_API_KEY,
     ROUTER_API_URL,
     ROUTER_MODEL,
+    TAVILY_API_KEY,
 )
 from helpers import WEATHER_CODES, call_llm_async, extract_llm_json, get_logger
 from prompts import get_prompt
@@ -391,31 +392,68 @@ def _extract_text_from_html(html: str, max_chars: int = _PAGE_MAX_CHARS) -> str:
     return re.sub(r"\s+", " ", text).strip()[:max_chars]
 
 
-async def _fetch_page_text(url: str) -> str:
-    """Fetch a URL and return extracted plain text. Returns '' on any error.
+_DATE_META_PROPS = re.compile(
+    r"article:published_time|publishedDate|datePublished|publish[-_]?date|"
+    r"article:modified_time|og:updated_time",
+    re.IGNORECASE,
+)
+_DATE_YYYY_MM_DD = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
-    Falls back to Jina reader on 403 or empty content (JS-rendered pages).
+
+def _extract_pub_date(html: str) -> str | None:
+    """Extract article publication date from raw HTML. Returns 'YYYY-MM-DD' or None.
+
+    Checks (in order): Open Graph / schema.org meta tags, <time datetime>, JSON-LD.
+    Attribute order in <meta> tags varies by CMS — this handles both orderings.
+    """
+    for tag in re.findall(r"<meta[^>]+>", html, re.IGNORECASE):
+        if _DATE_META_PROPS.search(tag):
+            m = _DATE_YYYY_MM_DD.search(tag)
+            if m:
+                return m.group(1)
+    m = re.search(r'<time[^>]+datetime=["\'](\d{4}-\d{2}-\d{2})', html, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r'"datePublished"\s*:\s*"(\d{4}-\d{2}-\d{2})', html)
+    if m:
+        return m.group(1)
+    return None
+
+
+async def _fetch_page(url: str) -> tuple[str, str | None]:
+    """Fetch a URL and return (extracted text, publication date | None).
+
+    Falls back to Jina reader on 403 or empty content.
+    Publication date is extracted from raw HTML before tag stripping.
     """
     if not url or not url.startswith("http"):
-        return ""
+        return "", None
     try:
         resp = await _HTTP.get(url, timeout=_PAGE_FETCH_TIMEOUT)
         if resp.status_code == 403:
-            return await _fetch_via_jina(url)
+            return await _fetch_via_jina(url), None
         if resp.status_code != 200:
-            logger.debug("fetch_page_text: HTTP %d for %s", resp.status_code, url)
-            return ""
+            logger.debug("_fetch_page: HTTP %d for %s", resp.status_code, url)
+            return "", None
         ct = resp.headers.get("content-type", "").lower()
         if not any(x in ct for x in ("html", "text/plain")):
-            logger.debug("fetch_page_text: unsupported content-type %r for %s", ct, url)
-            return ""
-        text = _extract_text_from_html(resp.text)
+            logger.debug("_fetch_page: unsupported content-type %r for %s", ct, url)
+            return "", None
+        raw = resp.text
+        pub_date = _extract_pub_date(raw)
+        text = _extract_text_from_html(raw)
         if not text:
-            return await _fetch_via_jina(url)
-        return text
+            return await _fetch_via_jina(url), pub_date
+        return text, pub_date
     except Exception as exc:
-        logger.debug("fetch_page_text: error fetching %s — %s: %s", url, type(exc).__name__, exc)
-        return ""
+        logger.debug("_fetch_page: error fetching %s — %s: %s", url, type(exc).__name__, exc)
+        return "", None
+
+
+async def _fetch_page_text(url: str) -> str:
+    """Compatibility wrapper — returns only the text part of _fetch_page()."""
+    text, _ = await _fetch_page(url)
+    return text
 
 
 async def fetch_user_urls(urls: list[str], max_urls: int = 3) -> list[dict]:
@@ -521,34 +559,85 @@ async def _llm_judge_relevance(question: str, results: list[dict]) -> bool:
         return True  # fail-open
 
 
-async def _refine_web_query(question: str, current_query: str, results: list[dict]) -> str:
-    """Generate a better search query when the judge deems results insufficient."""
-    snippets = "\n".join(f"- {r['title']}: {r['body'][:120]}" for r in results[:3])
+def _background_discard(task: asyncio.Task) -> None:
+    """Done-callback that suppresses 'Task exception was never retrieved' for cancelled tasks."""
+    if not task.cancelled():
+        try:
+            task.exception()
+        except Exception:
+            pass
+
+
+async def _generate_optimized_query(question: str, current_query: str) -> str:
+    """LLM-generated search query — runs concurrently with Stage-0 DDG (zero extra latency).
+
+    Returns an improved query string, or '' if the LLM produces nothing new.
+    """
     try:
-        refined = await call_llm_async(
+        result = await call_llm_async(
             [{"role": "user", "content": (
                 f"User question: {question}\n"
-                f"Search query tried: {current_query}\n"
-                f"Insufficient results:\n{snippets}\n\n"
-                f"Write ONE better search query (5 to 8 words max). "
-                f"Same language as the question. "
-                f"Output only the query, nothing else."
+                f"Current search query: {current_query}\n\n"
+                f"Write ONE optimized search engine query (4-8 words max). "
+                f"Remove filler words. Keep proper nouns, technical terms, dates. "
+                f"Same language as the question. Output only the query."
             )}],
             **_router_llm_params(),
             temperature=0,
-            max_tokens=120,
+            max_tokens=50,
             json_response=False,
             no_think=True,
-            timeout=8.0,
+            timeout=6.0,
         )
-        refined = refined.strip().strip("\"'")
-        return refined if refined and refined != current_query else ""
+        result = result.strip().strip("\"'")
+        return result if result and result.lower() != current_query.lower() else ""
     except Exception:
         return ""
 
 
+async def _refine_web_queries(
+    question: str, current_query: str, results: list[dict]
+) -> tuple[str, str]:
+    """Generate TWO alternative search queries when results are still insufficient.
+
+    One LLM call returns both queries (Q1/Q2 format) — run DDG on each in parallel.
+    """
+    snippets = "\n".join(f"- {r['title']}: {r['body'][:120]}" for r in results[:3])
+    try:
+        raw = await call_llm_async(
+            [{"role": "user", "content": (
+                f"User question: {question}\n"
+                f"Search query tried: {current_query}\n"
+                f"Insufficient results:\n{snippets}\n\n"
+                f"Write TWO different search queries (5-8 words each) to find better results. "
+                f"Try different angles, synonyms, or more specific terms. "
+                f"Same language as the question.\n"
+                f"Output exactly:\nQ1: <first query>\nQ2: <second query>"
+            )}],
+            **_router_llm_params(),
+            temperature=0,
+            max_tokens=80,
+            json_response=False,
+            no_think=True,
+            timeout=8.0,
+        )
+        q1, q2 = "", ""
+        for line in raw.strip().splitlines():
+            line = line.strip()
+            if line.upper().startswith("Q1:"):
+                q1 = line[3:].strip().strip("\"'")
+            elif line.upper().startswith("Q2:"):
+                q2 = line[3:].strip().strip("\"'")
+        return (
+            q1 if q1 and q1 != current_query else "",
+            q2 if q2 and q2 != current_query and q2 != q1 else "",
+        )
+    except Exception:
+        return "", ""
+
+
 _DDG_EXECUTOR_TIMEOUT = 12.0   # max time for a single DDG executor call
-_PIPELINE_TIMEOUT     = 20.0   # hard cap for the entire deep pipeline
+_PIPELINE_TIMEOUT     = 25.0   # hard cap for the entire deep pipeline (raised for parallel stages)
 
 
 async def _ddg_text_deep(
@@ -557,22 +646,28 @@ async def _ddg_text_deep(
     max_results: int = 5,
 ) -> list[dict]:
     """
-    3-stage deep DDG text search:
+    Parallel 4-stage deep DDG text search:
 
-      Stage 1 — DDG snippets
-                LLM judge → sufficient? yes → return / no → Stage 2
+      Stage 0 — DDG(original_query)  +  LLM generates optimized query  [concurrent]
 
-      Stage 2 — Fetch actual pages (parallel, _MAX_FETCH_PAGES at once)
-                LLM judge → sufficient? yes → return / no → Stage 3
+      Stage 1 — Judge DDG snippets
+                Speculatively launch: page fetch tasks + LLM-query DDG task
+                Sufficient → cancel speculative tasks, return snippets
+                Insufficient → Stage 2
 
-      Stage 3 — LLM refines the query → fresh DDG search → return
+      Stage 2 — Await speculative tasks (already ~2 s into execution)
+                Enrich results with page content + publication dates (extracted from HTML)
+                Merge LLM-query DDG results (new URLs only)
+                Judge enriched+merged results
+                Sufficient → return
+                Insufficient → Stage 3
 
-    Weather and news bypass this function entirely.
+      Stage 3 — LLM generates 2 refined queries in one call  [concurrent DDG on both]
+                Merge new URLs → return
 
-    Hard cap: _PIPELINE_TIMEOUT seconds total.  On timeout the best results
-    collected so far are returned immediately instead of an empty list.
+    Hard cap: _PIPELINE_TIMEOUT seconds.  On timeout, best_so_far is returned.
     """
-    question  = original_message or query
+    question = original_message or query
     seen_urls: set[str] = set()
     best_so_far: list[dict] = []
 
@@ -584,7 +679,7 @@ async def _ddg_text_deep(
                 timeout=_DDG_EXECUTOR_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            logger.warning("DDG executor timed out after %.0fs for query: %s", _DDG_EXECUTOR_TIMEOUT, q[:60])
+            logger.warning("DDG executor timed out after %.0fs for: %s", _DDG_EXECUTOR_TIMEOUT, q[:60])
             return []
         unique = []
         for r in raw:
@@ -596,49 +691,103 @@ async def _ddg_text_deep(
     async def _pipeline() -> list[dict]:
         nonlocal best_so_far
 
-        # ── Stage 1: DDG snippets ─────────────────────────────────────────
-        results = await _run_ddg(query)
+        # ── Stage 0: DDG + LLM query optimization (concurrent) ───────────
+        # _generate_optimized_query overlaps with the DDG executor call → zero extra latency.
+        results, llm_query = await asyncio.gather(
+            _run_ddg(query),
+            _generate_optimized_query(question, query),
+        )
         if not results:
             return []
         best_so_far = results
+        if llm_query:
+            logger.debug("Web deep[0]: LLM query = '%s'", llm_query[:60])
+
+        # ── Stage 1: Judge snippets — speculatively launch page fetch + LLM-query DDG ──
+        to_fetch = [r for r in results if r["url"]][:_MAX_FETCH_PAGES]
+        page_tasks = [asyncio.create_task(_fetch_page(r["url"])) for r in to_fetch]
+        llm_ddg_task: asyncio.Task | None = None
+        if llm_query:
+            llm_ddg_task = asyncio.create_task(_run_ddg(llm_query))
 
         if await _llm_judge_relevance(question, results):
-            logger.info("Web deep[1]: %d results — sufficient", len(results))
+            logger.info("Web deep[1]: %d snippets — sufficient (cancelling speculative tasks)", len(results))
+            spec_tasks = page_tasks + ([llm_ddg_task] if llm_ddg_task else [])
+            for t in spec_tasks:
+                t.add_done_callback(_background_discard)
+                t.cancel()
             return results
 
-        logger.info("Web deep[1]: insufficient — fetching pages")
+        logger.info("Web deep[1]: insufficient — awaiting page fetch + LLM-query DDG")
 
-        # ── Stage 2: Fetch page content (parallel) ────────────────────────
-        to_fetch   = [r for r in results if r["url"]][:_MAX_FETCH_PAGES]
-        page_texts = await asyncio.gather(*[_fetch_page_text(r["url"]) for r in to_fetch])
+        # ── Stage 2: Enrich with pages + dates + LLM-query results ────────
+        # page_tasks and llm_ddg_task have been running for the ~2 s judge took.
+        spec_tasks = page_tasks + ([llm_ddg_task] if llm_ddg_task else [])
+        gathered = await asyncio.gather(*spec_tasks, return_exceptions=True)
+        page_raw = gathered[: len(page_tasks)]
+        llm_ddg_results: list[dict] = []
+        if llm_ddg_task:
+            lr = gathered[len(page_tasks)]
+            if isinstance(lr, list):
+                llm_ddg_results = lr
 
-        enriched = [
-            {**r, "body": page_texts[i] if i < len(page_texts) and len(page_texts[i]) > len(r["body"]) else r["body"]}
-            for i, r in enumerate(results)
-        ]
+        # Build enriched list: Stage-0 snippets → replace body with full page + add date
+        url_to_page: dict[str, tuple[str, str | None]] = {}
+        for i, res in enumerate(page_raw):
+            if isinstance(res, tuple):
+                text, pub_date = res
+                if text:
+                    url_to_page[to_fetch[i]["url"]] = (text, pub_date)
+
+        enriched: list[dict] = []
+        for r in results:
+            url = r.get("url", "")
+            if url in url_to_page:
+                text, pub_date = url_to_page[url]
+                entry: dict = {**r, "body": text if len(text) > len(r["body"]) else r["body"]}
+                if pub_date:
+                    entry["date"] = pub_date
+            else:
+                entry = dict(r)
+            enriched.append(entry)
+
+        # Append LLM-query DDG results (new URLs only, no page fetch for them yet)
+        if llm_ddg_results:
+            for r in llm_ddg_results:
+                if r["url"] not in seen_urls:
+                    seen_urls.add(r["url"])
+                    enriched.append(r)
+            logger.info(
+                "Web deep[2]: +%d results from LLM query '%s'",
+                len(llm_ddg_results), llm_query[:50],
+            )
+
         best_so_far = enriched
 
         if await _llm_judge_relevance(question, enriched):
-            logger.info("Web deep[2]: enriched pages — sufficient")
-            return enriched
+            logger.info("Web deep[2]: enriched+merged — sufficient")
+            return enriched[:max_results]
 
-        logger.info("Web deep[2]: still insufficient — refining query")
+        logger.info("Web deep[2]: still insufficient — dual refined queries")
 
-        # ── Stage 3: Query refinement ─────────────────────────────────────
-        refined_query = await _refine_web_query(question, query, enriched)
-        if not refined_query:
-            logger.info("Web deep[3]: no refined query generated — returning best effort")
-            return enriched
+        # ── Stage 3: 2 refined queries → DDG in parallel ─────────────────
+        q1, q2 = await _refine_web_queries(question, query, enriched)
+        ddg_coros = [_run_ddg(q) for q in (q1, q2) if q]
+        if not ddg_coros:
+            logger.info("Web deep[3]: no refined queries generated — returning best effort")
+            return enriched[:max_results]
 
-        refined_results = await _run_ddg(refined_query)
-        if refined_results:
-            logger.info("Web deep[3]: '%s' → %d new results", refined_query[:50], len(refined_results))
-            refined_urls = {r["url"] for r in refined_results}
-            merged = refined_results + [r for r in enriched if r["url"] not in refined_urls]
-            return merged[:max_results]
+        refined_batches = await asyncio.gather(*ddg_coros)
+        new_results: list[dict] = []
+        for batch in refined_batches:
+            new_results.extend(batch)  # _run_ddg already deduplicates via seen_urls
 
-        logger.info("Web deep[3]: refined search empty — returning enriched")
-        return enriched
+        if new_results:
+            logger.info("Web deep[3]: +%d new results from dual refinement", len(new_results))
+            return (new_results + enriched)[:max_results]
+
+        logger.info("Web deep[3]: refined searches empty — returning enriched")
+        return enriched[:max_results]
 
     try:
         return await asyncio.wait_for(_pipeline(), timeout=_PIPELINE_TIMEOUT)
@@ -651,10 +800,98 @@ async def _ddg_text_deep(
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  TAVILY  (primary backend — designed for LLM agents)
+# ══════════════════════════════════════════════════════════════════════════
+
+_TAVILY_URL = "https://api.tavily.com/search"
+
+
+async def search_tavily(
+    query: str,
+    original_message: str = "",
+    max_results: int = 5,
+) -> list[dict]:
+    """Search via Tavily API. Returns results in the same {title, body, url, date?} format.
+
+    Routing:
+      - News queries  → topic="news", search_depth="basic", days=7
+      - General       → topic="general", search_depth="advanced" (Tavily crawls full pages)
+
+    include_answer=True: if Tavily generates a synthesised answer it is prepended
+    as a "Synthèse" entry so the LLM sees the direct answer first.
+
+    Returns [] on quota/API errors (caller falls back to DDG).
+    Raises the exception on network errors so the caller can return INTERNET_ERROR.
+    """
+    is_news = _is_news_query(query)
+    # Tavily understands natural language — send the full user question when available.
+    # Truncate at 400 chars: beyond that, conversational preamble hurts precision.
+    tavily_query = (original_message or query)[:400].strip()
+    payload: dict = {
+        "api_key": TAVILY_API_KEY,
+        "query": tavily_query,
+        "search_depth": "basic" if is_news else "advanced",
+        "topic": "news" if is_news else "general",
+        "max_results": max_results,
+        "include_answer": True,
+    }
+    if is_news:
+        payload["days"] = 7
+
+    resp = await _HTTP.post(_TAVILY_URL, json=payload, timeout=25.0)
+
+    if resp.status_code == 429:
+        logger.warning("Tavily: quota exceeded (429) — falling back to DDG")
+        return []
+    if resp.status_code != 200:
+        logger.warning("Tavily: HTTP %d — falling back to DDG", resp.status_code)
+        return []
+
+    data = resp.json()
+    raw = data.get("results", [])
+    answer = (data.get("answer") or "").strip()
+
+    results: list[dict] = []
+
+    # Synthesised answer — prepend only when substantial (avoids trivial "I don't know" entries)
+    if len(answer) > 40:
+        results.append({
+            "title": "Synthèse",
+            "body": answer,
+            "url": raw[0]["url"] if raw else "",
+            "date": None,
+        })
+
+    for r in raw:
+        content = (r.get("content") or "")[:_PAGE_MAX_CHARS]
+        if not content:
+            continue
+        entry: dict = {
+            "title": r.get("title", ""),
+            "body": content,
+            "url": r.get("url", ""),
+        }
+        pub = r.get("published_date") or ""
+        if pub:
+            entry["date"] = pub[:10]  # normalise to YYYY-MM-DD
+        results.append(entry)
+
+    logger.info(
+        "Tavily: %d results (synth=%s, depth=%s, topic=%s) for: %s",
+        len(results),
+        bool(answer),
+        payload["search_depth"],
+        payload["topic"],
+        query[:50],
+    )
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  PUBLIC ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════
 
-_SEARCH_WEB_TIMEOUT = 25.0   # hard cap for the entire search_web call
+_SEARCH_WEB_TIMEOUT = 30.0   # hard cap for the entire search_web call (> _PIPELINE_TIMEOUT)
 
 
 async def search_web(
@@ -665,24 +902,47 @@ async def search_web(
     """
     Main search entry point.
 
-    Routes:
-      - Weather keywords  → Open-Meteo
-      - News keywords     → DDG news
-      - Everything else   → 3-stage deep DDG text
+    Routing priority:
+      1. Weather keywords → Open-Meteo (structured data, no search engine needed)
+      2. Tavily           → primary backend (TAVILY_API_KEY set)
+                           handles both news and general queries natively
+      3. DDG              → fallback when Tavily is unconfigured or fails
+                           news → DDG news | general → 4-stage deep pipeline
 
-    original_message is the raw user question, used by the LLM judge and
-    query refiner to understand intent beyond the optimised query string.
+    original_message is the raw user question passed to Tavily / DDG pipeline
+    for intent-aware query refinement.
 
     Hard cap: _SEARCH_WEB_TIMEOUT seconds — returns INTERNET_ERROR on timeout.
     """
     async def _inner() -> list[dict]:
+        # ── 1. Weather — always Open-Meteo ───────────────────────────────
         if _is_weather_query(query):
             results = await search_weather(query)
             if results:
                 return results
 
+        # ── 2. Tavily (primary) ───────────────────────────────────────────
+        if TAVILY_API_KEY:
+            try:
+                results = await search_tavily(query, original_message, max(max_results, 5))
+                if results:
+                    return results
+                logger.info("Tavily returned no results — falling back to DDG")
+            except Exception as exc:
+                if _is_network_error(exc):
+                    logger.warning("Tavily: network unavailable (%s)", type(exc).__name__)
+                    return INTERNET_ERROR
+                logger.warning("Tavily error (%s) — falling back to DDG: %s", type(exc).__name__, exc)
+
+        # ── 3. DDG fallback ───────────────────────────────────────────────
         if _is_news_query(query):
-            results = await search_news(query, max_results=max_results)
+            try:
+                results = await search_news(query, max_results=max_results)
+            except Exception as exc:
+                if _is_network_error(exc):
+                    logger.warning("Internet unavailable (DDG news): %s", type(exc).__name__)
+                    return INTERNET_ERROR
+                results = []
             if results:
                 return results
 
@@ -694,8 +954,6 @@ async def search_web(
                 wiki = await search_wikipedia(query)
                 if wiki:
                     return wiki
-                # All backends exhausted — signal the LLM rather than returning []
-                # (empty list → LLM ignores web, answers with date only)
                 logger.warning("All web backends returned empty — returning INTERNET_ERROR")
                 return INTERNET_ERROR
             return results

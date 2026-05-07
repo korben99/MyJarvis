@@ -27,22 +27,27 @@ async def search_documents(query: str, top_k: int = RAG_TOP_K) -> list[dict]:
         results = await loop.run_in_executor(
             None,
             lambda: deps.QDRANT_CLIENT.query_points(
-                collection_name=QDRANT_COLLECTION, query=vector, limit=top_k
+                collection_name=QDRANT_COLLECTION,
+                query=vector,
+                limit=top_k,
+                score_threshold=RAG_SCORE_THRESHOLD,
             ).points,
         )
 
         chunks = []
         for hit in results:
-            if hit.score < RAG_SCORE_THRESHOLD:
-                continue
             payload = hit.payload
             text = ""
             if "_node_content" in payload:
-                try:
-                    node = json.loads(payload["_node_content"])
-                    text = node.get("text", "")
-                except Exception:
-                    text = str(payload.get("_node_content", ""))
+                nc = payload["_node_content"]
+                if isinstance(nc, dict):
+                    text = nc.get("text", "")
+                else:
+                    try:
+                        node = json.loads(nc)
+                        text = node.get("text", "")
+                    except Exception:
+                        text = str(nc)
             else:
                 text = payload.get("text", payload.get("content", ""))
 

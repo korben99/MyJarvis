@@ -148,6 +148,10 @@ def build_context(
     7. Self              (internal state — only on self-intent)
     """
     context_parts = []
+    # Web section built separately — appended LAST so it has highest budget priority
+    # (dropped last on overflow) and highest LLM salience (read closest to the question).
+    # Internet error is still prepended (positional doesn't matter for error messaging).
+    _web_section: str = ""
 
     # 1. WEB
     if web_results == INTERNET_ERROR:
@@ -165,10 +169,9 @@ def build_context(
             web_lines = []
             for i, body in enumerate(web_selected):
                 r = web_results[i]
-                web_lines.append(f"[{r['title']}]\n{body}\nSource: {r['url']}")
-            context_parts.append(
-                "<resultats_web>\n" + "\n\n".join(web_lines) + "\n</resultats_web>"
-            )
+                date_tag = f"[{r['date']}] " if r.get("date") else ""
+                web_lines.append(f"[{date_tag}{r['title']}]\n{body}\nSource: {r['url']}")
+            _web_section = "<resultats_web>\n" + "\n\n".join(web_lines) + "\n</resultats_web>"
         logger.info(
             "web recall %d/%d (budget=%d)",
             len(web_selected),
@@ -326,16 +329,27 @@ def build_context(
         context_parts.append(self_ctx)
         logger.info("self context injected for %s", user_code)
 
+    # Append web section last — highest priority: survives budget overflow and is
+    # read closest to the user question (maximises LLM salience for web queries).
+    if _web_section:
+        context_parts.append(_web_section)
+
     if not context_parts:
         return ""
 
     assembled = "\n\n".join(context_parts)
     if len(assembled) > TOTAL_CONTEXT_BUDGET:
-        cut = assembled.rfind("\n", 0, TOTAL_CONTEXT_BUDGET)
-        assembled = assembled[: cut if cut != -1 else TOTAL_CONTEXT_BUDGET]
+        # Drop complete sections from the front (lowest priority first: memory →
+        # RAG → calendar → … → web) instead of slicing at a char boundary — a raw
+        # cut leaves unclosed XML tags that confuse Qwen3.6's context parsing.
+        _original_count = len(context_parts)
+        while len(context_parts) > 1 and len("\n\n".join(context_parts)) > TOTAL_CONTEXT_BUDGET:
+            context_parts.pop(0)
+        assembled = "\n\n".join(context_parts)
         logger.warning(
-            "Context truncated to global budget (%d chars) — consider raising TOTAL_CONTEXT_BUDGET",
+            "Context over global budget (%d chars): dropped %d section(s) — consider raising TOTAL_CONTEXT_BUDGET",
             TOTAL_CONTEXT_BUDGET,
+            _original_count - len(context_parts),
         )
     return assembled
 
