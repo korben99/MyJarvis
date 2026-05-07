@@ -127,7 +127,7 @@ tail -f /opt/jarvis/logs/jarvis-service.log
 | **`routes/chat.py`** | Python module | Main chat pipeline: routing → context gather → auto-web fallback → LLM → SSE stream |
 | **`routes/proxy.py`** | Python module | OpenAI-compatible proxy `/v1/*` for Open WebUI and iOS |
 | **`prompts.py`** | Python module | Single source of truth for all LLM prompts — supports live overrides via `get_prompt()` |
-| **`web_search.py`** | Python module | All external search backends: Open-Meteo weather, DDG news, 3-stage deep text pipeline |
+| **`web_search.py`** | Python module | Web search: Tavily API (primary), Open-Meteo weather, DDG 4-stage parallel pipeline (fallback). Parallel speculative page fetch, LLM query optimization, dual query refinement, HTML publication date extraction. |
 | **`helpers.py`** | Python module | Shared utilities: LLM HTTP clients, logging setup, Redis/Qdrant factory, JSON parsing |
 
 ### Four-Tier LLM Architecture
@@ -207,8 +207,9 @@ Every LLM call in the codebase — model tier, thinking mode, and token budgets.
 | Conversation analyzer | `analyzer.py` | Tier 2 — PRIMARY | `False` | 1 500 | **600** | Post-exchange fact/mood/ESS extraction |
 | Daily briefing | `briefing.py` | Tier 2 — PRIMARY | `True` | 3 000 | — | Morning briefing generation |
 | Calendar date extraction | `google_services.py` | Tier 2 — PRIMARY | `True` | 150 | — | Parse event datetime from text |
-| Web relevance judge | `web_search.py` | Tier 1 — ROUTER | `True` | 150 | — | Filter irrelevant search results |
-| Web query refinement | `web_search.py` | Tier 1 — ROUTER | `True` | 120 | — | Reformulate search query |
+| Web relevance judge | `web_search.py` | Tier 1 — ROUTER | `True` | 150 | — | Judge DDG snippets / enriched results sufficiency (Stage 1 & 2) |
+| Web query optimizer | `web_search.py` | Tier 1 — ROUTER | `True` | 50 | — | LLM-optimised query run concurrently with Stage-0 DDG (zero extra latency) |
+| Web dual refinement | `web_search.py` | Tier 1 — ROUTER | `True` | 80 | — | Generate 2 refined queries in one call when Stage 2 still insufficient (Stage 3) |
 | Global reflection (P1) | `self.py` | Tier 3 — REASONING | `False` | 3 500 | 400 | Jarvis self-state: gaps, notes, prompts |
 | User reflection (P2) | `self.py` | Tier 3 — REASONING | `False` | 3 500 | 600 | Per-user: profile, push, insights |
 | Nightly facts | `self.py` | Tier 3 — REASONING | `False` | `THINKING_BUDGET_TOKENS + 2000` | `THINKING_BUDGET_TOKENS` | User insight + relation update |
@@ -322,10 +323,14 @@ Projects are stored as JSON objects with `name`, `status` (`in_progress` / `done
 `search_memory()` re-ranks Qdrant results using a weighted blend before returning:
 
 ```
-final_score = (semantic_similarity × 0.65 + importance × 0.25 + recency_bonus × 0.10) × status_factor
+base_score    = (semantic_similarity × 0.65 + importance × 0.25 + recency_bonus × 0.10) × status_factor
+interest_boost = min(0.08, max(0, (best_matching_weight − 1.0) × 0.04))
+final_score   = min(1.0, base_score + interest_boost)
 ```
 
 `status_factor = 0.4` for autobiographical facts with `status="past"` (archived), `1.0` otherwise. The function fetches `limit × 3` candidates from Qdrant (no pre-filter on status), re-ranks with the penalty applied, and returns the top `limit` — so archived facts naturally fall to positions 4–5 when current facts score higher, but are still recalled if semantically close enough.
+
+**Interest-weight boost:** user-declared topics (Redis `user:{code}:interest_weights`, set by the analyser) nudge ranking by up to +0.08. The cap ensures a strong semantic match (gap ≥ 0.08) is never overridden — weight 1.0 = no boost, weight 3.0 = max +0.08.
 
 The recency window is **type-aware**: episodic memories use a 30-day window, autobiographical memories use a 365-day window (`AUTOBIO_RECENCY_WINDOW_DAYS`). Without this distinction, a stable milestone from 6 months ago (e.g. "Sébastien gave a talk at Insomnihack") would always score `recency_bonus = 0` and be outranked by trivial recent events.
 
@@ -533,9 +538,42 @@ The final user message = `dynamic_prefix + assembled_context + ## MESSAGE UTILIS
 |-------|--------|-------------|
 | Mémoire vectorielle (`search_memory`) | 2 500 chars | — |
 | RAG documents | 4 000 chars | 800 chars/chunk |
-| Recherche web | 2 000 chars | — |
+| Recherche web | 6 000 chars | 3 000 chars/result |
 | Gmail + Calendar | 3 000 chars combined | — |
-| **Total** | **10 000 chars hard ceiling** | — |
+| **Total** | **14 000 chars hard ceiling** | — |
+
+Web results are injected **last** in `build_context()` (highest LLM salience — read closest to the question) and are **dropped last** on budget overflow. All budgets are tunable via env: `MEMORY_CHAR_BUDGET`, `RAG_CHAR_BUDGET`, `WEB_CHAR_BUDGET`, `GOOGLE_CHAR_BUDGET`, `TOTAL_CONTEXT_BUDGET`.
+
+### Web Search Pipeline
+
+```
+search_web(query, original_message)
+    │
+    ├── Weather keywords? → Open-Meteo (geocoding + 3-day forecast, no API key)
+    │
+    ├── TAVILY_API_KEY set? → search_tavily()
+    │       topic="news"    (days=7, depth="basic") for news queries
+    │       topic="general" (depth="advanced")      for all others
+    │       include_answer=True → synthesised answer prepended as "Synthèse" entry
+    │       Returns []? or error? → fall through to DDG
+    │
+    └── DDG 4-stage parallel pipeline  (fallback or primary if no Tavily key)
+            Stage 0 — DDG(query) + LLM query optimizer  [concurrent — zero latency cost]
+            Stage 1 — Judge snippets
+                       Speculatively launch: page_tasks + LLM-query DDG task
+                       Sufficient → cancel speculative tasks, return
+            Stage 2 — Await page_tasks + LLM-query DDG (running since Stage-1 judge start)
+                       Enrich with full page content + HTML publication dates (_extract_pub_date)
+                       Merge LLM-query DDG results (new URLs only)
+                       Sufficient → return
+            Stage 3 — _refine_web_queries(): 2 refined queries in 1 LLM call
+                       DDG on both in parallel → merge new URLs → return
+            Timeout → return best_so_far (never empty)
+            Empty   → Wikipedia fallback → INTERNET_ERROR sentinel
+
+Publication dates (YYYY-MM-DD) extracted from: <meta property="article:published_time">,
+<time datetime>, JSON-LD datePublished. Shown in context as [date] Title.
+```
 
 ### Request Flow
 
@@ -753,12 +791,18 @@ All variables go in `/opt/jarvis/.env`.
 | `QDRANT_MEMORY_COLLECTION` | `jarvis_memory` | Collection for episodic memory |
 | `HF_TOKEN` | — | HuggingFace token (required for gated models and the multilingual embedding model) |
 
+### Web Search
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TAVILY_API_KEY` | — | Tavily API key. When set, Tavily is used as primary web search backend (1 000 req/month free). Leave empty to use DDG pipeline only. |
+
 ### RAG
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RAG_TOP_K` | `5` | Number of documents to retrieve |
-| `RAG_SCORE_THRESHOLD` | `0.4` | Minimum similarity score (0–1) |
+| `RAG_SCORE_THRESHOLD` | `0.4` | Minimum similarity score — applied server-side in Qdrant (`score_threshold` param) |
 
 ### Google Services
 
