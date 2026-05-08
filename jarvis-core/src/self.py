@@ -2048,25 +2048,44 @@ def _action_prune_self_memory(params: dict) -> str:
     if max(len(self_notes), len(opinions), len(learnings)) < 2:
         return "prune_self_memory: nothing to prune (all lists have < 2 entries)"
 
-    def _fmt(items: list) -> str:
+    def _fmt(items: list, text_key: str = "text") -> str:
+        """Format a memory list for the LLM prompt.
+
+        Uses the explicit text_key (e.g. 'note', 'opinion', 'text') so the model
+        sees clean prose rather than Python dict repr.  Falls back to the first
+        non-empty string value it can find before resorting to str(item).
+        """
         if not items:
             return "  (vide)"
         lines = []
         for i, item in enumerate(items):
-            text = item.get("text", str(item)) if isinstance(item, dict) else str(item)
-            date = (
-                f" ({item['date']})"
-                if isinstance(item, dict) and "date" in item
-                else ""
-            )
-            lines.append(f"  [{i}] {text}{date}")
+            if isinstance(item, dict):
+                text = (
+                    item.get(text_key)
+                    or item.get("text")
+                    or item.get("note")
+                    or item.get("opinion")
+                    or str(item)
+                )
+                date = item.get("date") or item.get("created") or ""
+                date_str = f" ({date[:10]})" if date else ""  # YYYY-MM-DD only
+            else:
+                text = str(item)
+                date_str = ""
+            lines.append(f"  [{i}] {text}{date_str}")
         return "\n".join(lines)
 
     user_prompt = get_prompt("PRUNE_SELF_MEMORY_USER").format(
-        self_notes=_fmt(self_notes),
-        opinions=_fmt(opinions),
-        learnings=_fmt(learnings),
+        self_notes=_fmt(self_notes, "note"),
+        opinions=_fmt(opinions, "opinion"),
+        learnings=_fmt(learnings, "text"),
     )
+
+    # Budget dynamique : ~120 tok de thinking par entrée + 400 tok pour la réponse JSON.
+    # Plancher à THINKING_BUDGET_TOKENS + 2000 pour les petites listes.
+    entry_count = len(self_notes) + len(opinions) + len(learnings)
+    _prune_max_tokens = max(THINKING_BUDGET_TOKENS + 2000, entry_count * 120 + 400)
+    _prune_timeout = max(120.0, _prune_max_tokens / 60)  # ~60 tok/s conservateur
 
     try:
         content = call_llm(
@@ -2078,11 +2097,11 @@ def _action_prune_self_memory(params: dict) -> str:
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=0.6,
-            max_tokens=THINKING_BUDGET_TOKENS + 2000,  # free think ~1900 tok + JSON ~300 tok
+            max_tokens=_prune_max_tokens,
             json_response=True,
             no_think=False,
             thinking_budget=THINKING_BUDGET_TOKENS,
-            timeout=120.0,  # (THINKING_BUDGET_TOKENS+2000) tok @ ~80 tok/s ≈ 50s, marge x2
+            timeout=_prune_timeout,
         )
     except Exception as exc:
         logger.error(
@@ -2090,7 +2109,11 @@ def _action_prune_self_memory(params: dict) -> str:
         )
         return f"prune_self_memory: LLM call failed ({type(exc).__name__})"
 
-    result = extract_llm_json(content)
+    try:
+        result = extract_llm_json(content)
+    except (ValueError, Exception) as exc:
+        logger.warning("prune_self_memory: extract_llm_json failed (%s) — raw=%r…", exc, content[:80])
+        return "prune_self_memory: invalid LLM response"
     if not result or "to_delete" not in result:
         return "prune_self_memory: invalid LLM response"
 

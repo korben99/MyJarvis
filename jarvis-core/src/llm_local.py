@@ -237,7 +237,10 @@ _sys_kv_lock = threading.Lock()  # protects lazy build of the base cache
 
 def _first_complete_json(text: str) -> Optional[str]:
     """
-    Return the first valid complete top-level JSON object or array found in *text*, or None.
+    Return the first valid complete top-level JSON object found in *text*, or None.
+    Only matches {…} objects — not bare arrays — because all json_response callers
+    in Jarvis expect a dict. This prevents a model that outputs "[0]" inside a
+    thinking block from being mistakenly returned as the structured response.
     """
 
     start = -1
@@ -262,7 +265,7 @@ def _first_complete_json(text: str) -> Optional[str]:
             continue
 
         if start == -1:
-            if c in "{[":
+            if c == "{":  # only start on objects; arrays inside objects handled below
                 start = i
                 stack.append(c)
             continue
@@ -743,12 +746,22 @@ def _generate_sync(
             for st in profile.stop_tokens:
                 if st in raw:
                     raw = raw.split(st, 1)[0]
-        # For thinking mode: extract the JSON portion after </think>
+        # For thinking mode: extract the JSON portion after </think>.
+        # Only attempt extraction if we have seen </think> (or no_think=True).
+        # If the model never generated </think>, the output is inside the think block
+        # (degenerate / truncated) — do not extract from it.
         if "</think>" in raw:
             json_portion = raw.split("</think>", 1)[-1]
-        else:
+        elif seen_end_think:  # no_think=True: entire output is the response
             json_portion = raw
-        extracted = _first_complete_json(json_portion)
+        else:
+            json_portion = None  # thinking never closed — content is thinking noise
+            logger.warning(
+                "_generate_sync: json_response but </think> never generated "
+                "(raw=%r…) — skipping JSON extraction",
+                raw[:80],
+            )
+        extracted = _first_complete_json(json_portion) if json_portion is not None else None
         if extracted is not None:
             # Complete JSON found — result is already clean, skip the stripping section.
             result = extracted

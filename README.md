@@ -9,7 +9,15 @@ alias jarvis-reload='launchctl kickstart -k gui/$(id -u)/com.jarvis.api'
 launchctl unload ~/Library/LaunchAgents/com.jarvis.api.plist
 # Logs en live
 tail -f /opt/jarvis/logs/jarvis-service.log
-
+┌───────────────┬──────────────────────────────────────────────────────             
+│     Alias     │                       Commande                       │
+├───────────────┼──────────────────────────────────────────────────────┤             
+│ jarvis-start  │ kickstart — démarre le service                       │             
+├───────────────┼──────────────────────────────────────────────────────┤            
+│ jarvis-stop   │ kill SIGTERM — arrêt propre (launchd ne relance pas) │         
+├───────────────┼──────────────────────────────────────────────────────┤  
+│ jarvis-reload │ kickstart -k — stop + redémarre immédiatement        │
+└───────────────┴──────────────────────────────────────────────────────┘
 ---
 
 ## Architecture
