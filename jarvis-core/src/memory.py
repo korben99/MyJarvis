@@ -166,6 +166,26 @@ _ENERGY_DECAY_PER_HOUR = 0.02  # energy drifts back to 0.7 baseline at 0.02/h
 _emotional_state_lock = Lock()  # guards the read-modify-write decay cycle
 
 
+def _apply_decay_unlocked(state: dict, elapsed_h: float) -> bool:
+    """Apply concern/energy time-decay to *state* in-place. Returns True if anything changed."""
+    changed = False
+    concern = state.get("concern", 0.0)
+    if concern > 0:
+        new_concern = max(0.0, concern - elapsed_h * _CONCERN_DECAY_PER_HOUR)
+        if abs(new_concern - concern) > 0.001:
+            state["concern"] = round(new_concern, 3)
+            changed = True
+    energy = state.get("energy", 0.7)
+    if abs(energy - 0.7) > 0.001:
+        direction = 1 if energy < 0.7 else -1
+        new_energy = energy + direction * elapsed_h * _ENERGY_DECAY_PER_HOUR
+        new_energy = min(0.7, new_energy) if direction == 1 else max(0.7, new_energy)
+        if abs(new_energy - energy) > 0.001:
+            state["energy"] = round(new_energy, 3)
+            changed = True
+    return changed
+
+
 def get_emotional_state() -> dict:
     """Get Jarvis's current emotional state, with time-based decay applied.
 
@@ -197,33 +217,7 @@ def get_emotional_state() -> dict:
                     ).total_seconds()
                     / 3600,
                 )
-                changed = False
-
-                # concern → decay toward 0.0
-                concern = state.get("concern", 0.0)
-                if concern > 0:
-                    new_concern = max(
-                        0.0, concern - elapsed_h * _CONCERN_DECAY_PER_HOUR
-                    )
-                    if abs(new_concern - concern) > 0.001:
-                        state["concern"] = round(new_concern, 3)
-                        changed = True
-
-                # energy → drift toward 0.7 baseline
-                energy = state.get("energy", 0.7)
-                if abs(energy - 0.7) > 0.001:
-                    direction = 1 if energy < 0.7 else -1
-                    new_energy = energy + direction * elapsed_h * _ENERGY_DECAY_PER_HOUR
-                    # Don't overshoot baseline
-                    if direction == 1:
-                        new_energy = min(0.7, new_energy)
-                    else:
-                        new_energy = max(0.7, new_energy)
-                    if abs(new_energy - energy) > 0.001:
-                        state["energy"] = round(new_energy, 3)
-                        changed = True
-
-                if changed:
+                if _apply_decay_unlocked(state, elapsed_h):
                     state["last_updated"] = datetime.now(timezone.utc).isoformat()
                     redis_set_json("jarvis:emotional_state", state)
 
@@ -234,15 +228,32 @@ def get_emotional_state() -> dict:
 
 
 def update_emotional_state(updates: dict):
-    """Update emotional state with new values."""
-    state = get_emotional_state()
-    state.update(updates)
-    state["last_updated"] = datetime.now(timezone.utc).isoformat()
-    # Clamp values to 0-1
-    for key in ["energy", "confidence", "curiosity", "concern"]:
-        if key in state and isinstance(state[key], (int, float)):
-            state[key] = max(0.0, min(1.0, state[key]))
-    redis_set_json("jarvis:emotional_state", state)
+    """Update emotional state atomically — decay applied then updates merged, all under lock."""
+    with _emotional_state_lock:
+        state = redis_get_json("jarvis:emotional_state") or {
+            "mood": "neutral",
+            "energy": 0.7,
+            "confidence": 0.8,
+            "curiosity": 0.6,
+            "concern": 0.0,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+        }
+        last_updated = state.get("last_updated")
+        if last_updated:
+            try:
+                elapsed_h = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - datetime.fromisoformat(last_updated)).total_seconds() / 3600,
+                )
+                _apply_decay_unlocked(state, elapsed_h)
+            except (ValueError, TypeError):
+                pass
+        state.update(updates)
+        state["last_updated"] = datetime.now(timezone.utc).isoformat()
+        for key in ["energy", "confidence", "curiosity", "concern"]:
+            if key in state and isinstance(state[key], (int, float)):
+                state[key] = max(0.0, min(1.0, state[key]))
+        redis_set_json("jarvis:emotional_state", state)
 
 
 # ══════════════════════════════════════════════════
@@ -1670,23 +1681,9 @@ def build_memory_context(
             try:
                 _eh = max(
                     0.0,
-                    (
-                        datetime.now(timezone.utc) - datetime.fromisoformat(_last)
-                    ).total_seconds()
-                    / 3600,
+                    (datetime.now(timezone.utc) - datetime.fromisoformat(_last)).total_seconds() / 3600,
                 )
-                _c = emotion.get("concern", 0.0)
-                if _c > 0:
-                    emotion["concern"] = max(
-                        0.0, round(_c - _eh * _CONCERN_DECAY_PER_HOUR, 3)
-                    )
-                _e = emotion.get("energy", 0.7)
-                if abs(_e - 0.7) > 0.001:
-                    _d = 1 if _e < 0.7 else -1
-                    _ne = _e + _d * _eh * _ENERGY_DECAY_PER_HOUR
-                    emotion["energy"] = round(
-                        min(0.7, _ne) if _d == 1 else max(0.7, _ne), 3
-                    )
+                _apply_decay_unlocked(emotion, _eh)
             except (ValueError, TypeError):
                 pass
     # Injection etat emotionnel

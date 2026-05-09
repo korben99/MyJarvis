@@ -648,6 +648,115 @@ Le système prompt est **token-identique** à chaque tour (SYSTEM_BASE_FR pur, s
 
 ---
 
+## LLM Calls Map
+
+Cartographie de tous les appels LLM de la codebase. Chaque ligne indique si le thinking est actif, quel est le budget réel, et si le `ThinkingBudgetProcessor` s'active.
+
+### Légende
+
+| Colonne | Description |
+|---|---|
+| **Think** | `think` = mode réflexion actif (`no_think=False`) · `no_think` = mode direct |
+| **Budget** | Tokens alloués (thinking + réponse partagent ce budget — kill switch, pas un cap dur) |
+| **Processor** | `✅` = `ThinkingBudgetProcessor` actif (force `</think>` à `THINKING_BUDGET_TOKENS=2048`) · `—` = inactif |
+| **Justification** | Pourquoi ce mode pour cette tâche |
+
+### Conversations (routes/chat.py)
+
+| Contexte | Modèle | Think | Budget | Processor | Justification |
+|---|---|---|---|---|---|
+| Chat simple (intent mémoire/conv.) | PRIMARY | `no_think` | 1 500 | — | Réponse rapide, pas de raisonnement nécessaire |
+| Chat web / RAG (synthèse) | PRIMARY | `think` | 8 000 | ✅ 2048 tok | Synthèse de sources multiples — thinking améliore la cohérence |
+| Chat reasoning (`use_reasoning`) | PRIMARY | `think` | 10 000 | ✅ 2048 tok | Requête complexe explicitement routée en thinking |
+
+> Le `ThinkingBudgetProcessor` est actif dès que `thinking_budget=THINKING_BUDGET_TOKENS` est passé (conversations think mode). Il force `</think>` après 2048 tok de réflexion, évitant la troncature de la réponse.
+
+### Background — Analyzer (analyzer.py)
+
+| Fonction | Modèle | Think | Budget | Processor | Justification |
+|---|---|---|---|---|---|
+| `analyze_exchange` | PRIMARY | `no_think` | 900 | — | Extraction structurée (topics, mood, facts, projects). Task de classification pure — thinking génère ~1500 tok d'anglais verbeux sans clore `</think>`, prouvé par test. no_think produit le même résultat en <5 s. |
+
+### Background — Mémoire (memory.py)
+
+| Fonction | Modèle | Think | Budget | Processor | Justification |
+|---|---|---|---|---|---|
+| `_normalize_profile_keys_batch` | ROUTER | `no_think` | 250 | — | Normalisation de clés — tâche déterministe, réponse courte |
+| `_normalize_profile_key` | ROUTER | `no_think` | 150 | — | Idem, appel unitaire |
+| `_consolidate_user_memories` | PRIMARY | `no_think` | 400 | — | Déduplication / fusion de faits — classification, pas de créativité |
+| `curative_profile_cleanup` | PRIMARY | `no_think` | 600 | — | Nettoyage curatif du profil — similaire à prune_self_memory : thinking cause variance élevée (testé) |
+
+### Background — Self-reflection (self.py)
+
+| Fonction | Modèle | Think | Budget | Processor | Justification |
+|---|---|---|---|---|---|
+| `_call_global_reflection_llm` | REASONING | `no_think` | 800 | — | Classification mood/satisfaction sur l'échange global — extraction pure |
+| `_call_user_reflection_llm` | REASONING | `no_think` | 800 | — | Idem, par utilisateur |
+| `generate_proactive_push` | REASONING | `no_think` | 600 | — | Décision binaire + phrase courte — thinking superflu |
+| `_action_prune_self_memory` | REASONING | `no_think` | 1 200 | — | **Classification** : sélection d'indices à supprimer. Testé en thinking : décisions aléatoires et agressives à budget <4096 tok, 120 s. no_think = cohérent + 15 s. |
+| `_action_refine_self` | REASONING | `think` | 4 000 | ✅ 2 048 tok | Décision execute/skip avec contexte riche — thinking améliore la qualité du jugement contextuel. `THINKING_BUDGET_TOKENS` → ~2 000 tok libres pour le JSON. |
+
+### Background — Nightly review (self.py)
+
+| Fonction | Modèle | Think | Budget | Processor | Justification |
+|---|---|---|---|---|---|
+| `_nightly_self_facts` | REASONING | `no_think` | 1 500 | — | Extraction de faits depuis les conversations — tâche de parsing structuré, thinking n'apporte pas de valeur mesurable |
+| `_nightly_self_user` | REASONING | `no_think` | 1 500 | — | Extraction mise à jour profil utilisateur — idem |
+| `_nightly_cleaning` | REASONING | `no_think` | 600 | — | Nettoyage/déduplication — classification pure |
+| `_action_refine_prompt` (+ retry) | REASONING | `think` | 10 000 | ✅ 2 048 tok | **Créativité** : réécriture de prompt système. Thinking essentiel pour la qualité. `THINKING_BUDGET_TOKENS` → ~8 000 tok libres pour le prompt réécrit + rationale. |
+
+### Routing & Web search (llm_router.py, web_search.py)
+
+| Fonction | Modèle | Think | Budget | Processor | Justification |
+|---|---|---|---|---|---|
+| `llm_route` | ROUTER | `no_think` | 300 | — | Classification d'intention — JSON court, déterministe |
+| `_llm_judge_relevance` | ROUTER | `no_think` | 150 | — | Score de pertinence — binaire, ultra-court |
+| `_generate_optimized_query` | ROUTER | `no_think` | 50 | — | Réécriture de requête — tâche simple |
+| `_refine_web_queries` | ROUTER | `no_think` | 80 | — | Idem, 2 requêtes raffinées |
+
+### Trading (trading.py)
+
+| Fonction | Modèle | Think | Budget | Processor | Justification |
+|---|---|---|---|---|---|
+| `_ticker_llm_call_async` | PRIMARY | `no_think` | 20 | — | Extraction symbole ticker — réponse ultra-courte |
+| `evaluate_alerts` | PRIMARY | `no_think` | 1 000 | — | Évaluation seuils d'alerte — classification technique |
+| `suggest_thresholds_llm` | PRIMARY | `think` | 5 000 | ✅ 2 048 tok | Raisonnement quantitatif sur seuils prix. `THINKING_BUDGET_TOKENS` → ~3 000 tok libres pour le JSON multi-positions. |
+
+### Briefing (briefing.py)
+
+| Fonction | Modèle | Think | Budget | Processor | Justification |
+|---|---|---|---|---|---|
+| `_assemble_with_llm` | PRIMARY | `no_think` | 3 000 | — | Assemblage du briefing quotidien — mise en forme structurée, pas de raisonnement |
+
+### Règles de décision think vs no_think
+
+```
+Tâche de classification / extraction / formatage
+  → no_think=True  (rapide, déterministe, résultat identique)
+
+Tâche de jugement contextuel / décision binaire avec nuance
+  → think=True, budget libre (thinking_budget=0 → processor inactif)
+
+Tâche conversationnelle ou créative (chat, refine_prompt)
+  → think=True, thinking_budget=THINKING_BUDGET_TOKENS → processor actif (cap 2048 tok)
+
+Jamais think pour une tâche multi-items avec JSON contraint
+  → Risque : thinking coupé en cours d'analyse → JSON agressif / incohérent (testé sur prune_self_memory)
+```
+
+### Variables de contrôle (.env)
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `THINKING_BUDGET_TOKENS` | 2048 | Budget thinking pour les conversations + trading (= cap du processor) |
+| `USE_THINKING_BUDGET_PROCESSOR` | yes | Active le `ThinkingBudgetProcessor` sur les appels avec `thinking_budget > 0` |
+| `MAX_TOKENS_HARD_CAP` | 16 000 | Kill switch absolu tous appels locaux (thinking + réponse) |
+| `MAX_TOKENS_NO_THINK` | 1 500 | Budget conversations no_think |
+| `MAX_TOKENS_SYNTHESIS` | 8 000 | Budget conversations web/RAG thinking |
+| `MAX_TOKENS_REASONING` | 10 000 | Budget conversations use_reasoning thinking |
+
+---
+
 ## Deploy
 
 ### Prerequisites

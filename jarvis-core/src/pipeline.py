@@ -155,7 +155,7 @@ def build_context(
 
     # 1. WEB
     if web_results == INTERNET_ERROR:
-        context_parts.append(
+        _web_section = (
             "<acces_internet>\n"
             "La connexion internet est actuellement indisponible. "
             "Informe l'utilisateur que tu ne peux pas effectuer la recherche demandée "
@@ -183,12 +183,10 @@ def build_context(
     if rag_chunks:
         rag_selected_texts = trim_chunks(rag_chunks, RAG_CHAR_BUDGET)
         if rag_selected_texts:
-            rag_lines = []
-            selected_set = set(rag_selected_texts)
-            for chunk in rag_chunks:
-                text = chunk["text"][:800]
-                if text in selected_set:
-                    rag_lines.append(f"[Doc {chunk['source']} ({chunk['score']:.2f})]\n{text}")
+            rag_lines = [
+                f"[Doc {chunk['source']} ({chunk['score']:.2f})]\n{chunk['text'][:800]}"
+                for chunk in rag_chunks[:len(rag_selected_texts)]
+            ]
             context_parts.append(
                 "<documents_personnels>\n" + "\n\n".join(rag_lines) + "\n</documents_personnels>"
             )

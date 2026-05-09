@@ -46,6 +46,7 @@ from config import (
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
+    THINKING_BUDGET_TOKENS,
 )
 from helpers import call_llm_async, extract_llm_json, get_logger, get_redis
 from trade_keys import alert_queue_key, idx_key, import_ts_key, pos_key, price_cache_key
@@ -786,9 +787,10 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.2,
-            max_tokens=3000,  # 1024 thinking + ~2000 threshold JSON per position
+            max_tokens=5000,  # thinking ~THINKING_BUDGET_TOKENS + ~3000 JSON multi-positions
             json_response=True,
             no_think=False,
+            thinking_budget=THINKING_BUDGET_TOKENS,
             timeout=90.0,
         )
         result = extract_llm_json(content)

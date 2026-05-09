@@ -18,6 +18,8 @@ router = APIRouter(tags=["memory"])
 
 @router.get("/memory/profile/{user_code}")
 async def memory_profile(user_code: str):
+    if user_code not in USER_CODES:
+        raise HTTPException(403)
     return {
         "profile":     get_user_profile(user_code),
         "projects":    get_user_projects(user_code),
@@ -49,7 +51,7 @@ async def memory_reset():
         r.delete(key)
     for key in r.scan_iter("user:*"):
         r.delete(key)
-    for key in r.scan_iter("episodic:*"):
+    for key in r.scan_iter("convlog:*"):
         r.delete(key)
     r.delete("jarvis:emotional_state")
     return {"status": "memory reset"}

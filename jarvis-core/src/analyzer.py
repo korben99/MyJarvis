@@ -35,7 +35,7 @@ message long / détaillé
 import asyncio
 import json
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 
 from config import (
     CHAT_LOG_TTL,
@@ -79,11 +79,9 @@ async def analyze_exchange(
                         p.get("last_update")
                         and (
                             _now_ts
-                            - time.mktime(
-                                time.strptime(
-                                    p["last_update"][:19], "%Y-%m-%dT%H:%M:%S"
-                                )
-                            )
+                            - datetime.strptime(
+                                p["last_update"][:19], "%Y-%m-%dT%H:%M:%S"
+                            ).replace(tzinfo=timezone.utc).timestamp()
                         )
                         < _90d
                     )
@@ -102,21 +100,20 @@ async def analyze_exchange(
         )
 
         # Appel LLM : priorité basse (bg) pour ne pas bloquer le chat.
-        # thinking_budget=600 : cap de raisonnement — assez pour extraire faits/projets
-        # proprement, sans risquer que le thinking consume tout le budget comme avant
-        # (sans budget, on obtenait {"key":"...","value":"..."} ou [] faute de tokens).
-        # max_tokens = thinking_budget(600) + marge réponse(900) = 1500.
+        # no_think=True : tâche d'extraction structurée — le modèle n'a pas besoin de
+        # raisonner, il doit classifier et reformater. En mode think, Qwen3.6 génère
+        # systématiquement ~1500 tok de thinking anglais sans fermer </think>, épuisant
+        # tout le budget sans jamais produire le JSON. no_think donne la réponse en <5s.
         content = await call_llm_local_async_bg(
             [{"role": "user", "content": prompt}],
             model=PRIMARY_MODEL,
-            temperature=0.0,  # use model profile default (Qwen3.6: 1.0 thinking)
-            max_tokens=1500,
+            temperature=0.0,  # use model profile default (Qwen3.6: 0.7 no-think)
+            max_tokens=900,
             json_response=True,
-            no_think=False,
-            thinking_budget=600,
+            no_think=True,
         )
 
-        logger.debug(f"[ANALYZER RAW] {content[:300]}")
+        logger.debug("[ANALYZER RAW] %s", content[:300])
         try:
             result = extract_llm_json(content)
         except json.JSONDecodeError as exc:

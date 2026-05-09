@@ -1,247 +1,322 @@
 """
-test_thinking_budget.py — Vérifie que <budget_remaining> contraint réellement le thinking.
+test_thinking_budget.py — Valide ThinkingBudgetProcessor sur Qwen3.6 en isolation.
 
-Usage :
-  cd /opt/jarvis
-  source venv/bin/activate
-  python scripts/test_thinking_budget.py [--budget N] [--rounds N]
+Deux modes de test (--scenario) :
+  conversational  Prompt complexe sans contrainte JSON (défaut)
+  prune           Prompt exact de _action_prune_self_memory avec jarvis-self.json réel
+                  → cas critique : JSON requis, thinking verbeux, anciennement bugué
 
 Ce que mesure le script :
-  - Tokens réels dans le bloc <think>…</think>
-  - Tokens de réponse visible
-  - Total généré
-  - Respect du budget : thinking_tokens <= budget + marge_10%
+  - Tokens de thinking générés avant </think>
+  - Que le processor force bien </think> au bon budget
+  - JSON valide ou non (mode prune)
+  - Comparaison baseline vs budgets configurables
 
-Deux rounds consécutifs par défaut : budget=600 puis budget=0 (libre).
-Permet de voir si la contrainte est réellement respectée.
+Usage :
+  cd /opt/jarvis && source venv/bin/activate
+  python scripts/test_thinking_budget.py [--scenario prune] [--budgets 1024,2048] [--no-baseline]
+
+Jarvis DOIT être arrêté avant de lancer :
+  jarvis-stop
 """
 
 import argparse
-import asyncio
+import json
 import os
+import subprocess
 import sys
 import time
 
-# ── path bootstrap ─────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "jarvis-core", "src"))
-
-# ── force LLM_LOCAL before any jarvis import ───────────────────────────────
 os.environ.setdefault("LLM_LOCAL", "yes")
+os.environ.setdefault("LLM_DEBUG_PROMPTS", "no")
 
-from config import PRIMARY_MODEL, THINKING_BUDGET_TOKENS  # noqa: E402
-from llm_local import _build_prompt, _load_model  # noqa: E402
+
+# ── Garde GPU ─────────────────────────────────────────────────────────────
+def _check_jarvis_not_running() -> None:
+    try:
+        out = subprocess.check_output(["pgrep", "-f", "jarvis"], text=True)
+        pids = [p for p in out.strip().splitlines() if p != str(os.getpid())]
+        if pids:
+            print(f"ERREUR : Jarvis tourne déjà (pids {pids}).")
+            print("Arrête jarvis-core avant de lancer ce test.")
+            print("  jarvis-stop")
+            sys.exit(1)
+    except subprocess.CalledProcessError:
+        pass
+
+
+_check_jarvis_not_running()
+
+from config import REASONING_MODEL, THINKING_BUDGET_TOKENS  # noqa: E402
+from helpers import extract_llm_json  # noqa: E402
+from llm_local import (  # noqa: E402
+    ThinkingBudgetProcessor,
+    _build_prompt,
+    _load_model,
+    _model_profile,
+)
+from prompts import get_prompt  # noqa: E402
 
 try:
-    from mlx_lm import generate as mlx_generate
+    from mlx_lm import stream_generate
+    from mlx_lm.sample_utils import make_logits_processors, make_sampler
 except ImportError:
-    print("ERROR: mlx_lm not found — run inside the Jarvis venv")
+    print("ERROR: mlx_lm not found — run inside le venv Jarvis")
     sys.exit(1)
 
-
-PROMPT_SIMPLE = [
-    {
-        "role": "system",
-        "content": "Tu es Jarvis, un assistant IA. Réponds en JSON uniquement.",
-    },
-    {
-        "role": "user",
-        "content": (
-            "Analyse cette phrase et retourne un JSON avec les clés : "
-            '"sujet", "verbe", "objet", "sentiment" (positif/neutre/négatif).\n\n'
-            'Phrase : "J\'adore programmer en Python, c\'est vraiment élégant."'
-        ),
-    },
-]
-
-# Prompt complexe : analyse multi-sessions similaire à l'analyzer Jarvis
-PROMPT_COMPLEX = [
-    {
-        "role": "system",
-        "content": "Tu es un assistant d'analyse. Réponds en JSON uniquement, sans markdown.",
-    },
-    {
-        "role": "user",
-        "content": """\
-Analyse la conversation suivante et extrait les informations clés.
-
-Utilisateur : J'ai finalement décidé de quitter mon poste chez Accenture après 7 ans. \
-Je rejoins une startup FinTech à Lyon comme CTO. Le salaire est moins bon mais c'est \
-exactement ce que je voulais faire. Ma femme est inquiète pour la stabilité financière \
-mais elle me soutient. On a un crédit immobilier qui court encore 18 ans.
-Jarvis : C'est un grand changement ! Qu'est-ce qui a motivé cette décision maintenant ?
-Utilisateur : Le rachat par Capgemini a tout changé. La culture s'est dégradée, \
-les projets sont moins intéressants. Et cette startup développe une plateforme de \
-trading algorithmique pour les PME, exactement dans mes cordes.
-Jarvis : Passionnant. Tu as négocié des stock-options ?
-Utilisateur : Oui, 0.8% du capital avec un vesting sur 4 ans. Si ça marche, \
-ça compense largement la baisse de salaire.
-
-Retourne ce JSON :
-{
-  "topics": ["liste", "de", "sujets"],
-  "mood": "happy|neutral|stressed|curious|focused|frustrated|tired",
-  "user_facts": [{"key": "clé_profil", "value": "valeur"}],
-  "projects": ["liste de projets mentionnés"],
-  "memory_summary": "résumé en 1-2 phrases de ce qui mérite d'être retenu",
-  "should_remember": true
-}""",
-    },
-]
-
-PROMPT_MESSAGES = PROMPT_SIMPLE  # défaut
+SELF_MEMORY_PATH = "/opt/jarvis/jarvis-core/JarvisData/jarvis-self.json"
 
 
-def count_think_tokens(raw: str, tokenizer) -> tuple[int, int]:
-    """
-    Retourne (think_tokens, response_tokens) depuis le raw output.
+# ── Construction des messages selon le scénario ────────────────────────────
 
-    Le prompt se termine déjà par '<think>\\n' (ou '...<budget_remaining>N</budget_remaining>\\n'),
-    donc la génération commence DANS le bloc think. Le raw output ne contient PAS de '<think>'
-    ouvrant — il commence directement par le contenu du raisonnement.
-
-    Formats possibles :
-      "raisonnement...\\n</think>\\n\\nréponse"   → normal
-      "</think>\\n\\nréponse"                      → think immédiatement fermé (budget=0 ou skip)
-      "raisonnement..."                             → budget épuisé avant </think>
-    """
-    if "</think>" in raw:
-        think_part = raw.split("</think>", 1)[0]
-        response_part = raw.split("</think>", 1)[1].lstrip("\n")
-    else:
-        # Pas de </think> → tout est du thinking (budget épuisé avant fermeture)
-        think_part = raw
-        response_part = ""
-
-    think_tokens = len(tokenizer.encode(think_part))
-    resp_tokens  = len(tokenizer.encode(response_part))
-    return think_tokens, resp_tokens
+def _build_conversational_messages() -> list[dict]:
+    """Prompt complexe conversationnel — pas de JSON requis."""
+    return [
+        {
+            "role": "system",
+            "content": "Tu es Jarvis, assistant IA. Réponds en français, de façon directe et concise.",
+        },
+        {
+            "role": "user",
+            "content": (
+                "Explique-moi en détail les différences architecturales entre un modèle de langage "
+                "dense et un modèle MoE (Mixture of Experts), leurs avantages et inconvénients "
+                "respectifs pour l'inférence locale sur Apple Silicon, et donne une recommandation "
+                "concrète pour un usage comme assistant personnel."
+            ),
+        },
+    ]
 
 
-def run_one(budget: int, max_tokens: int, model_path: str) -> dict:
-    """Lance une inférence complète et retourne les métriques."""
-    model, tokenizer = _load_model(model_path)
-    prompt = _build_prompt(PROMPT_MESSAGES, tokenizer, model_path, no_think=False, thinking_budget=budget)
+def _fmt(items: list, text_key: str = "text") -> str:
+    """Reproduction exacte du _fmt de _action_prune_self_memory."""
+    if not items:
+        return "  (vide)"
+    lines = []
+    for i, item in enumerate(items):
+        if isinstance(item, dict):
+            text = (
+                item.get(text_key)
+                or item.get("text")
+                or item.get("note")
+                or item.get("opinion")
+                or str(item)
+            )
+            date = item.get("date") or item.get("created") or ""
+            date_str = f" ({date[:10]})" if date else ""
+        else:
+            text = str(item)
+            date_str = ""
+        lines.append(f"  [{i}] {text}{date_str}")
+    return "\n".join(lines)
 
-    # Show what was injected at the end of the prompt
-    tail = prompt[-150:]
-    budget_tag_present = "<budget_remaining>" in tail
 
-    print(f"\n{'─'*60}")
-    print(f"  thinking_budget = {budget}  |  max_tokens = {max_tokens}")
-    print(f"  <budget_remaining> in prompt tail : {budget_tag_present}")
-    if budget_tag_present:
-        # Extract the tag to show the injected value
-        import re
-        m = re.search(r"<budget_remaining>(\d+)</budget_remaining>", tail)
-        if m:
-            print(f"  injected value : {m.group(1)}")
-    print(f"{'─'*60}")
+def _build_prune_messages() -> tuple[list[dict], int, int, int]:
+    """Prompt exact de _action_prune_self_memory avec les données réelles."""
+    with open(SELF_MEMORY_PATH) as f:
+        data = json.load(f)
+
+    self_notes = data.get("self_notes", [])
+    opinions = data.get("opinions", [])
+    learnings = data.get("learnings", [])
+
+    user_prompt = get_prompt("PRUNE_SELF_MEMORY_USER").format(
+        self_notes=_fmt(self_notes, "note"),
+        opinions=_fmt(opinions, "opinion"),
+        learnings=_fmt(learnings, "text"),
+    )
+
+    messages = [
+        {"role": "system", "content": get_prompt("PRUNE_SELF_MEMORY_SYSTEM")},
+        {"role": "user", "content": user_prompt},
+    ]
+    return messages, len(self_notes), len(opinions), len(learnings)
+
+
+# ── Runner générique ───────────────────────────────────────────────────────
+
+def run_once(
+    model,
+    tokenizer,
+    profile,
+    messages: list[dict],
+    budget_proc,
+    max_tokens: int,
+    label: str,
+    expect_json: bool = False,
+) -> dict:
+    prompt = _build_prompt(
+        messages, tokenizer, REASONING_MODEL, no_think=False, thinking_budget=0
+    )
+    prompt_tokens = len(tokenizer.encode(prompt))
+
+    base_procs = make_logits_processors(
+        repetition_penalty=profile.repetition_penalty,
+        repetition_context_size=profile.repetition_context_size,
+        frequency_penalty=profile.frequency_penalty,
+        frequency_context_size=profile.repetition_context_size,
+        presence_penalty=profile.presence_penalty,
+        presence_context_size=profile.repetition_context_size,
+    )
+    procs = ([budget_proc] + list(base_procs)) if budget_proc is not None else base_procs
+
+    sampler = make_sampler(
+        temp=profile.temp_think,
+        top_p=profile.top_p_think,
+        top_k=profile.top_k,
+        min_p=profile.min_p,
+    )
+
+    print(f"\n{'─' * 70}")
+    print(f"[{label}]  max_tokens={max_tokens}  prompt_tokens={prompt_tokens}")
+    if budget_proc is not None:
+        print(f"  processor : budget={budget_proc.budget}  end_think_id={budget_proc._end_think_id}")
 
     t0 = time.time()
-    raw_output = mlx_generate(
-        model,
-        tokenizer,
-        prompt=prompt,
-        max_tokens=max_tokens,
-        verbose=False,
-    )
+    raw = ""
+    tok_count = 0
+    for chunk in stream_generate(
+        model, tokenizer, prompt=prompt, max_tokens=max_tokens,
+        sampler=sampler, logits_processors=procs,
+    ):
+        if chunk.text:
+            raw += chunk.text
+            tok_count += 1
+
     elapsed = time.time() - t0
 
-    think_tok, resp_tok = count_think_tokens(raw_output, tokenizer)
-    total_tok = think_tok + resp_tok
-    budget_respected = think_tok <= budget * 1.10 if budget > 0 else True  # 10% marge
+    has_end_think = "</think>" in raw
+    think_part = ""
+    answer_part = raw
 
-    print(f"  Elapsed          : {elapsed:.1f}s")
-    print(f"  Think tokens     : {think_tok}")
-    print(f"  Response tokens  : {resp_tok}")
-    print(f"  Total generated  : {total_tok}")
-    if budget > 0:
-        ratio = think_tok / budget if budget else 0
-        status = "✓ RESPECTÉ" if budget_respected else "✗ DÉPASSÉ"
-        print(f"  Budget ratio     : {think_tok}/{budget} = {ratio:.1%}  →  {status}")
+    if has_end_think:
+        think_part = raw.split("</think>", 1)[0]
+        if "<think>" in think_part:
+            think_part = think_part.split("<think>", 1)[1]
+        answer_part = raw.split("</think>", 1)[1].strip()
+
+    think_tokens = len(tokenizer.encode(think_part)) if think_part else 0
+    answer_tokens = len(tokenizer.encode(answer_part)) if answer_part else 0
+
+    print(f"  elapsed: {elapsed:.1f}s | total_tokens: {tok_count}")
+    print(f"  has_</think>: {has_end_think} | think_tokens: {think_tokens} | answer_tokens: {answer_tokens}")
+
+    json_ok = None
+    if budget_proc is not None and has_end_think:
+        ok = think_tokens <= budget_proc.budget + 10
+        status = (
+            f"✅ DANS LE BUDGET ({think_tokens} ≤ {budget_proc.budget})"
+            if ok
+            else f"❌ DÉPASSEMENT ({think_tokens} > {budget_proc.budget})"
+        )
+        print(f"  budget check: {status}")
+
+    if expect_json:
+        try:
+            parsed = extract_llm_json(answer_part)
+            json_ok = isinstance(parsed, dict) and "to_delete" in parsed
+            if json_ok:
+                td = parsed["to_delete"]
+                print(
+                    f"  JSON ✅  to_delete: notes={td.get('self_notes',[])} "
+                    f"opinions={td.get('opinions',[])} learnings={td.get('learnings',[])}"
+                )
+            else:
+                print(f"  JSON ❌  clé 'to_delete' absente — parsed={str(parsed)[:100]}")
+        except Exception as exc:
+            json_ok = False
+            print(f"  JSON ❌  parse error: {exc}")
+            print(f"  answer_part: {repr(answer_part[:200])}")
     else:
-        print(f"  Budget ratio     : libre (budget=0)")
+        if answer_part:
+            preview = answer_part[:200].replace("\n", " ")
+            print(f"  réponse: {preview}{'...' if len(answer_part) > 200 else ''}")
 
-    # Dump raw (first 500 chars) pour vérification
-    print(f"\n  --- Raw output (500 chars) ---")
-    print(f"  {repr(raw_output[:500])}")
-
-    print(f"\n  --- Réponse visible ---")
-    if "</think>" in raw_output:
-        visible = raw_output.split("</think>", 1)[1].strip()
-    else:
-        visible = raw_output.strip()
-    print(f"  {visible[:300]}")
+    if not has_end_think:
+        print("  ⚠️  </think> jamais généré — thinking a épuisé tout le budget")
+        print(f"  raw tail: {repr(raw[-120:])}")
 
     return {
-        "budget": budget,
-        "max_tokens": max_tokens,
-        "think_tokens": think_tok,
-        "resp_tokens": resp_tok,
-        "total_tokens": total_tok,
-        "budget_respected": budget_respected,
+        "label": label,
+        "has_end_think": has_end_think,
+        "think_tokens": think_tokens,
+        "answer_tokens": answer_tokens,
+        "total_tokens": tok_count,
         "elapsed": elapsed,
-        "budget_tag_injected": budget_tag_present,
+        "budget": budget_proc.budget if budget_proc is not None else None,
+        "json_ok": json_ok,
     }
 
 
+# ── Main ───────────────────────────────────────────────────────────────────
+
 def main():
-    parser = argparse.ArgumentParser(description="Test thinking budget on Qwen3.6")
-    parser.add_argument("--budgets", type=int, nargs="+", default=[600],
-                        help="Budget values to test (default: 600). Ex: --budgets 100 300 600 0")
-    parser.add_argument("--max-tokens", type=int, default=2000,
-                        help="max_tokens for all runs (default: 2000)")
-    parser.add_argument("--model", type=str, default=PRIMARY_MODEL,
-                        help=f"Model path (default: {PRIMARY_MODEL})")
-    parser.add_argument("--complex", action="store_true",
-                        help="Use complex analyzer-like prompt instead of simple JSON")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--scenario",
+        choices=["conversational", "prune"],
+        default="conversational",
+        help="conversational (défaut) | prune (prompt exact _action_prune_self_memory)",
+    )
+    parser.add_argument(
+        "--budgets",
+        default=str(THINKING_BUDGET_TOKENS),
+        help=f"Budgets à tester, séparés par virgule (défaut: {THINKING_BUDGET_TOKENS})",
+    )
+    parser.add_argument("--no-baseline", action="store_true")
+    parser.add_argument("--max-tokens", type=int, default=10000)
     args = parser.parse_args()
 
-    global PROMPT_MESSAGES
-    if args.complex:
-        PROMPT_MESSAGES = PROMPT_COMPLEX
-        prompt_label = "COMPLEXE (analyzer-like)"
-    else:
-        PROMPT_MESSAGES = PROMPT_SIMPLE
-        prompt_label = "SIMPLE (JSON extraction)"
+    budgets = [int(b.strip()) for b in args.budgets.split(",")]
+    expect_json = args.scenario == "prune"
 
-    print(f"\n{'='*60}")
-    print(f"  Thinking Budget Test — {args.model.split('/')[-1]}")
-    print(f"  THINKING_BUDGET_TOKENS (env) = {THINKING_BUDGET_TOKENS}")
-    print(f"  Prompt type  = {prompt_label}")
-    print(f"  max_tokens   = {args.max_tokens}")
-    print(f"  Budgets testés : {args.budgets}")
-    print(f"{'='*60}")
+    print(f"Modèle    : {REASONING_MODEL}")
+    print(f"Scénario  : {args.scenario}  |  budgets : {budgets}  |  kill switch : {args.max_tokens}")
+
+    if args.scenario == "prune":
+        messages, n_notes, n_opinions, n_learnings = _build_prune_messages()
+        print(f"Mémoire   : {n_notes} self_notes  {n_opinions} opinions  {n_learnings} learnings")
+    else:
+        messages = _build_conversational_messages()
+
+    model, tokenizer = _load_model(REASONING_MODEL)
+    profile = _model_profile(REASONING_MODEL)
+
+    vocab = tokenizer.get_vocab()
+    print(
+        f"Token IDs : <think>={vocab.get('<think>', 'NOT FOUND')}  "
+        f"</think>={vocab.get('</think>', 'NOT FOUND')}"
+    )
 
     results = []
-    for b in args.budgets:
-        r = run_one(b, args.max_tokens, args.model)
+
+    if not args.no_baseline:
+        r = run_once(
+            model, tokenizer, profile, messages, None,
+            args.max_tokens, "BASELINE (sans processor)", expect_json,
+        )
         results.append(r)
 
-    # Summary
-    print(f"\n{'='*60}")
-    print("  RÉSUMÉ COMPARATIF")
-    print(f"{'='*60}")
-    print(f"  {'Budget':>10}  {'Think tok':>10}  {'Resp tok':>10}  {'Total':>7}  {'Respecté':>10}")
-    print(f"  {'─'*10}  {'─'*10}  {'─'*10}  {'─'*7}  {'─'*10}")
+    for budget in budgets:
+        proc = ThinkingBudgetProcessor(tokenizer, budget)
+        r = run_once(
+            model, tokenizer, profile, messages, proc,
+            args.max_tokens, f"budget={budget} tok", expect_json,
+        )
+        results.append(r)
+
+    print(f"\n{'=' * 70}")
+    print("RÉSUMÉ")
     for r in results:
-        label = str(r["budget"]) if r["budget"] > 0 else "libre"
-        respected = "✓" if r["budget_respected"] else "✗" if r["budget"] > 0 else "—"
-        print(f"  {label:>10}  {r['think_tokens']:>10}  {r['resp_tokens']:>10}  {r['total_tokens']:>7}  {respected:>10}")
-
-    # Comparaison vs run libre (budget=0) si présent
-    free_runs = [r for r in results if r["budget"] == 0]
-    constrained_runs = [r for r in results if r["budget"] > 0]
-    if free_runs and constrained_runs:
-        free_think = free_runs[0]["think_tokens"]
-        print(f"\n  Référence libre  : {free_think} tokens de thinking")
-        for r in constrained_runs:
-            delta = free_think - r["think_tokens"]
-            pct = delta / max(free_think, 1) * 100
-            status = "✓ réduit" if delta > 0 else ("= identique" if delta == 0 else "✗ augmenté")
-            print(f"  budget={r['budget']:>5} : {r['think_tokens']:>4} tok thinking  →  {status} de {delta:+d} tok ({pct:.0f}%)")
-
-    print()
+        think_ok = "✅" if r["has_end_think"] else "❌"
+        think_str = f"think={r['think_tokens']}tok" if r["has_end_think"] else "NO_</think>"
+        budget_str = f"budget={r['budget']}" if r["budget"] else "no_proc"
+        json_str = f"  json={'✅' if r['json_ok'] else '❌'}" if r["json_ok"] is not None else ""
+        print(
+            f"  {think_ok} {r['label']:<32s} | {think_str:<20s} | "
+            f"answer={r['answer_tokens']}tok | {r['elapsed']:.0f}s | {budget_str}{json_str}"
+        )
 
 
 if __name__ == "__main__":

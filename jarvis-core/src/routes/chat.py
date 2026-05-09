@@ -827,10 +827,12 @@ async def chat(req: ChatRequest):
     ]
 
     # Inline URL results take priority — prepend so the LLM sees them first.
+    # Guard: don't iterate INTERNET_ERROR sentinel (it's a list with a magic dict).
     if inline_url_results:
         _seen_urls = {r.get("url") for r in inline_url_results}
+        _web_to_merge = [] if web_results == INTERNET_ERROR else web_results
         web_results = inline_url_results + [
-            r for r in web_results if r.get("url") not in _seen_urls
+            r for r in _web_to_merge if r.get("url") not in _seen_urls
         ]
 
     logger.debug(

@@ -130,6 +130,15 @@ MAX_TOKENS_NO_THINK  = int(os.getenv("MAX_TOKENS_NO_THINK",  "1500"))
 MAX_TOKENS_SYNTHESIS = int(os.getenv("MAX_TOKENS_SYNTHESIS", "3000"))  # web/RAG
 MAX_TOKENS_REASONING = int(os.getenv("MAX_TOKENS_REASONING", "4000"))  # use_reasoning
 
+# Hard cap appliqué à tous les appels LLM locaux (kill switch, pas un budget).
+# Le modèle s'arrête naturellement à l'EOS — cette valeur n'est atteinte qu'en cas de runaway.
+# Qwen3.6 @ 60 tok/s → 16000 tok ≈ 267s max absolu.
+MAX_TOKENS_HARD_CAP = int(os.getenv("MAX_TOKENS_HARD_CAP", "16000"))
+
+# ThinkingBudgetProcessor : force </think> après THINKING_BUDGET_TOKENS tokens de réflexion.
+# Désactivé par défaut — valider avec scripts/test_thinking_budget.py avant d'activer.
+USE_THINKING_BUDGET_PROCESSOR = os.getenv("USE_THINKING_BUDGET_PROCESSOR", "no").lower() == "yes"
+
 
 def tokens_param(model: str) -> str:
     """

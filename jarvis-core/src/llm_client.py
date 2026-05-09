@@ -16,6 +16,7 @@ from typing import AsyncGenerator
 import httpx
 from config import (
     LLM_LOCAL,
+    MAX_TOKENS_HARD_CAP,
     OPENAI_API_KEY,
     OPENAI_API_URL,
     PRIMARY_API_KEY,
@@ -69,7 +70,7 @@ async def stream_openai(
     timeout: float = 30.0,
     no_think: bool = False,
     session_id: str = "",
-    max_tokens: int = 10000,
+    max_tokens: int = MAX_TOKENS_HARD_CAP,
     thinking_budget: int = 0,
 ) -> AsyncGenerator[str, None]:
 
@@ -99,7 +100,7 @@ async def stream_openai(
 
         # ── Token param (mlx / compat providers) ──────────────────
         try:
-            payload[tokens_param(model)] = 1024
+            payload[tokens_param(model)] = max_tokens
         except Exception:
             pass
 
@@ -140,7 +141,7 @@ async def stream_openai(
                 try:
                     data = json.loads(payload_str)
 
-                    choice = data.get("choices", [{}])[0]
+                    choice = (data.get("choices") or [{}])[0]
 
                     delta = choice.get("delta") or {}
                     message = choice.get("message") or {}
