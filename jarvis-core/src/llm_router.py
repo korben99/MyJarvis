@@ -64,6 +64,7 @@ class RouterResult:
         default=False
     )  # skip profile/memory injection entirely
     use_reasoning: bool = field(default=False)
+    project_name: str = field(default="")
 
 
 _ALLOWED_INTENTS = {
@@ -217,6 +218,7 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
 
         weather_location: str = parsed.get("weather_location") or ""
         rag_query: str = parsed.get("rag_query") or ""
+        project_name: str = parsed.get("project_name") or ""
         use_reasoning: bool = bool(parsed.get("use_reasoning", False))
     except Exception as exc:
         logger.warning(
@@ -257,6 +259,7 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
         calendar_days=calendar_days,
         weather_location=weather_location,
         rag_query=rag_query,
+        project_name=project_name,
     )
 
     logger.info(

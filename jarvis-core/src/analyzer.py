@@ -37,6 +37,8 @@ import json
 import time
 from datetime import date, datetime, timezone
 
+from pydantic import BaseModel, Field, ValidationError
+
 from config import (
     CHAT_LOG_TTL,
     IMPORTANCE_THRESHOLD,
@@ -48,6 +50,38 @@ from llm_local import call_llm_local_async_bg
 from prompts import get_prompt
 
 logger = get_logger("jarvis-analyzer")
+
+
+class UserFact(BaseModel):
+    model_config = {"extra": "ignore"}
+    key: str
+    value: str
+
+
+class InterestWeight(BaseModel):
+    model_config = {"extra": "ignore"}
+    term: str
+    weight: float
+
+
+class ProjectEvent(BaseModel):
+    model_config = {"extra": "ignore"}
+    name: str
+    action: str  # create | update | done | rename
+    summary: str = ""
+    rename_to: str = ""
+
+
+class AnalysisResult(BaseModel):
+    model_config = {"extra": "ignore"}
+    topics: list[str] = Field(default_factory=list)
+    mood: str = "neutral"
+    satisfaction: str = "unknown"
+    user_facts: list[UserFact] = Field(default_factory=list)
+    project_updates: list[ProjectEvent] = Field(default_factory=list)
+    interest_weights: list[InterestWeight] = Field(default_factory=list)
+    memory_summary: str | None = None
+    importance: float | None = None
 
 
 async def analyze_exchange(
@@ -62,13 +96,31 @@ async def analyze_exchange(
         _now_ts = time.time()
         _90d = 90 * 86400
 
-        def _proj_label(p):
+        def _proj_label(p: dict) -> str:
+            name = p["name"]
+            updates = p.get("updates") or []
+            last_summary = updates[-1]["summary"] if updates else p.get("description", "")
+            lu = p.get("last_update", "")
+            age_label = ""
+            if lu:
+                try:
+                    age_days = (
+                        _now_ts
+                        - datetime.strptime(lu[:19], "%Y-%m-%dT%H:%M:%S")
+                        .replace(tzinfo=timezone.utc)
+                        .timestamp()
+                    ) / 86400
+                    age_label = f" [màj il y a {int(age_days)}j]"
+                except (ValueError, TypeError):
+                    pass
+            short_summary = last_summary[:60] + "…" if len(last_summary) > 60 else last_summary
+            detail = f" — {short_summary}" if short_summary else ""
             if p.get("status") == "done":
-                return f"{p['name']} (terminé)"
-            return p["name"]
+                return f"{name} (terminé{age_label}{detail})"
+            return f"{name}{age_label}{detail}"
 
         projects_context = (
-            ", ".join(
+            "\n".join(
                 _proj_label(p)
                 for p in existing_projects
                 if isinstance(p, dict)
@@ -115,9 +167,13 @@ async def analyze_exchange(
 
         logger.debug("[ANALYZER RAW] %s", content[:300])
         try:
-            result = extract_llm_json(content)
+            raw = extract_llm_json(content)
+            result = AnalysisResult.model_validate(raw).model_dump()
         except json.JSONDecodeError as exc:
             logger.error("Analyzer JSON parse error: %s", exc.doc[:200])
+            raise
+        except ValidationError as exc:
+            logger.error("Analyzer schema validation error: %s", exc)
             raise
 
         memory_summary_text = result.get("memory_summary")
@@ -145,7 +201,7 @@ async def analyze_exchange(
             if isinstance(f.get("value"), str) and len(f["value"]) > 10
         ]
         _ess += min(len(_durable_facts), 3) * 0.10
-        _ess += min(len(result.get("projects", [])), 2) * 0.15
+        _ess += min(len(result.get("project_updates", [])), 2) * 0.15
         mood = result.get("mood", "neutral")
         if mood in ["happy", "curious", "focused", "stressed", "frustrated"]:
             _ess += 0.10
@@ -170,16 +226,10 @@ async def analyze_exchange(
 
     except Exception as e:
         logger.error("Analysis error: %s", e)
-        return {
-            "topics": [],
-            "mood": "neutral",
-            "satisfaction": "unknown",
-            "user_facts": [],
-            "projects": [],
-            "importance": 0.0,
-            "memory_summary": None,
-            "should_remember": False,
-        }
+        result = AnalysisResult().model_dump()
+        result["importance"] = 0.0
+        result["should_remember"] = False
+        return result
 
 
 # ── Scheduled batch analysis ──────────────────────────────────────────────
@@ -332,7 +382,7 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                     if "key" in f and "value" in f:
                         merged_facts[f["key"]] = f  # session plus récente écrase
 
-                all_projects.extend(analysis.get("projects", []))
+                all_projects.extend(analysis.get("project_updates", []))
 
                 for iw in analysis.get("interest_weights") or []:
                     if "term" in iw and "weight" in iw:
@@ -378,7 +428,7 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                                     if _imp > 0 and _e.get("importance", 0.0) == 0.0:
                                         _e["importance"] = _imp
                                         _changed = True
-                                    if _mood_s != "neutral" and not _e.get("mood"):
+                                    if _mood_s != "neutral" and _e.get("mood") in (None, "", "neutral"):
                                         _e["mood"] = _mood_s
                                         _changed = True
                                     if _changed:

@@ -16,6 +16,7 @@ describe_images_local(...)   → str   (async, mlx_vlm)
 import asyncio
 import copy
 import datetime
+import gc
 import json
 import logging
 import os
@@ -241,7 +242,7 @@ def _make_system_kv(model_path: str, model, tokenizer, system_content: str) -> A
         )
     sys_token_count = len(tokenizer.encode(sys_prompt_text))
     profile = _model_profile(model_path)
-    quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if profile.use_quant_kv else {}
+    quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64, "quantized_kv_start": 256} if profile.use_quant_kv else {}
     cache = make_prompt_cache(model)
     try:
         for _ in stream_generate(
@@ -281,6 +282,7 @@ def _get_system_cache(model_path: str, model, tokenizer, system_content: str) ->
 
 
 # ── Model loading ─────────────────────────────────────────────────────────
+
 
 def _load_model(model_path: str) -> tuple:
     """Load and cache a model (double-checked locking)."""
@@ -515,7 +517,7 @@ def _setup_gen(
 ) -> tuple:
     """Build (sampler, logits_procs, quant_kwargs, effective_max)."""
     effective_max = min(max_tokens, MAX_TOKENS_HARD_CAP)
-    quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64} if profile.use_quant_kv else {}
+    quant_kwargs = {"kv_bits": QUANT_KV_BITS, "kv_group_size": 64, "quantized_kv_start": 256} if profile.use_quant_kv else {}
     effective_temp = (
         temperature if (temperature is not None and temperature > 0)
         else (profile.temp_nothink if no_think else profile.temp_think)
@@ -564,10 +566,11 @@ def _stream_to_json(
     early_stopped = False
     max_stop_len = max((len(t) for t in stop_tokens), default=0)
 
+    _spec_kwargs: dict = {}
     for chunk in stream_generate(
         model, tokenizer, prompt=prompt, max_tokens=effective_max,
         sampler=sampler, logits_processors=logits_procs,
-        **quant_kwargs, **cache_kwarg,
+        **quant_kwargs, **cache_kwarg, **_spec_kwargs,
     ):
         if not chunk.text:
             continue
@@ -622,6 +625,7 @@ def _generate_sync(
     )
 
     early_stopped = False
+    gc.collect()  # flush accumulated Python objects before entering the generation loop
 
     if json_response:
         result, seen_end_think, early_stopped = _stream_to_json(

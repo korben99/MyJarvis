@@ -65,6 +65,8 @@ from config import (
     USER_TIMEZONES,
     USERS,
 )
+import numpy as np
+
 from google_services import is_google_available, send_gmail_message
 from helpers import (
     call_llm,
@@ -79,10 +81,13 @@ from memory import (
     append_conversation_message,
     archive_autobiographical_event,
     atomic_json_write,
+    consolidate_memories,
     curative_profile_cleanup,
     get_autobiographical_facts,
+    get_embed_model,
     get_emotional_state,
     get_self_memory,
+    get_user_projects,
     retract_autobiographical_event,
     save_self_memory,
     self_memory_lock,
@@ -370,6 +375,116 @@ def _check_service_health() -> dict:
     return health
 
 
+def _check_memory_health() -> dict:
+    """
+    Inspect episodic memory health for all users.
+
+    Returns per-user stats:
+      - episodic_count   : total episodic points in Qdrant
+      - last_episodic    : ISO date of most recent episodic point (or None)
+      - days_since       : days since last episodic storage (or None)
+      - null_summary_7d  : conversations with no memory_summary in last 7 days
+      - total_7d         : total conversations logged in last 7 days
+      - null_rate_7d     : null_summary_7d / total_7d (0.0–1.0)
+      - norm_anomalies   : number of non-unit vectors in sample of 30 most recent
+    """
+    from config import QDRANT_MEMORY_COLLECTION
+
+    qdrant = get_qdrant()
+    r = get_redis()
+    now = time.time()
+    cutoff_7d = now - 7 * 86400
+    result: dict[str, dict] = {}
+
+    for user_code in USER_CODES:
+        stats: dict = {}
+
+        # ── Qdrant episodic count + last timestamp ────────────────────────
+        try:
+            points, _ = qdrant.scroll(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                scroll_filter={
+                    "must": [
+                        {"key": "user_code", "match": {"value": user_code}},
+                        {"key": "memory_type", "match": {"value": "episodic"}},
+                    ]
+                },
+                limit=500,
+                with_payload=True,
+                with_vectors=True,
+            )
+            stats["episodic_count"] = len(points)
+
+            if points:
+                last_ts = max(p.payload.get("timestamp", 0) for p in points)
+                stats["last_episodic"] = datetime.fromtimestamp(
+                    last_ts, tz=timezone.utc
+                ).date().isoformat()
+                stats["days_since"] = round((now - last_ts) / 86400, 1)
+            else:
+                stats["last_episodic"] = None
+                stats["days_since"] = None
+
+            # ── Sample norm check (30 most recent) ───────────────────────
+            sorted_pts = sorted(
+                points, key=lambda p: p.payload.get("timestamp", 0), reverse=True
+            )[:30]
+            anomalies = 0
+            for pt in sorted_pts:
+                if pt.vector:
+                    norm = float(np.linalg.norm(pt.vector))
+                    if abs(norm - 1.0) > 0.01:
+                        anomalies += 1
+            stats["norm_anomalies"] = anomalies
+
+        except Exception as exc:
+            logger.warning("memory_health Qdrant check failed for %s: %s", user_code, exc)
+            stats["episodic_count"] = -1
+            stats["last_episodic"] = None
+            stats["days_since"] = None
+            stats["norm_anomalies"] = -1
+
+        # ── Redis convlog: null_summary rate over last 7 days ────────────
+        try:
+            raw_entries = r.zrangebyscore(f"convlog:{user_code}", cutoff_7d, "+inf")
+            total = len(raw_entries)
+            null_count = 0
+            for raw in raw_entries:
+                try:
+                    e = json.loads(raw)
+                    if not e.get("memory_summary"):
+                        null_count += 1
+                except Exception:
+                    pass
+            stats["null_summary_7d"] = null_count
+            stats["total_7d"] = total
+            stats["null_rate_7d"] = round(null_count / total, 2) if total else 0.0
+        except Exception as exc:
+            logger.warning("memory_health Redis check failed for %s: %s", user_code, exc)
+            stats["null_summary_7d"] = -1
+            stats["total_7d"] = -1
+            stats["null_rate_7d"] = -1
+
+        result[user_code] = stats
+
+    return result
+
+
+def _fmt_memory_health(health: dict) -> str:
+    lines = []
+    for user_code, s in health.items():
+        days = f"{s['days_since']}j" if s.get("days_since") is not None else "jamais"
+        norm_warn = f" ⚠ {s['norm_anomalies']} vecteurs non-normalisés" if s.get("norm_anomalies", 0) > 0 else ""
+        null_pct = f"{int(s.get('null_rate_7d', 0) * 100)}%"
+        lines.append(
+            f"  {user_code}: épisodique={s.get('episodic_count','?')} pts"
+            f", dernier={s.get('last_episodic') or 'jamais'} ({days})"
+            f", null_summary_7j={s.get('null_summary_7d','?')}/{s.get('total_7d','?')} ({null_pct})"
+            f"{norm_warn}"
+        )
+    return "\n".join(lines) if lines else "  (aucun utilisateur)"
+
+
 def _get_user_activity(hours: int = 24) -> dict:
     """
     Count recent conversations per user by scanning their episodic Redis log.
@@ -436,9 +551,9 @@ def _get_knowledge_gaps(n: int = 5) -> list[str]:
 def _fmt_pending_proposals() -> str:
     proposals = list_pending_proposals()
     if not proposals:
-        return "none"
+        return "aucune"
     return "; ".join(
-        f"{p['id']} — {p['prompt_name']} (topic: {p['topic']})" for p in proposals
+        f"{p['id']} — {p['prompt_name']} (sujet: {p['topic']})" for p in proposals
     )
 
 
@@ -456,6 +571,7 @@ def gather_global_context() -> dict:
         "goals": self_data.get("goals", []),
         "current_focus": self_data.get("current_focus", ""),
         "health": health,
+        "memory_health": _check_memory_health(),
         "user_activity": activity,
         "knowledge_gaps": gaps,
         "pending_proposals": _fmt_pending_proposals(),
@@ -528,7 +644,7 @@ def _fmt_goals(goals: list[dict]) -> str:
 def _fmt_activity(activity: dict) -> str:
     lines = []
     for code, info in activity.items():
-        topics = ", ".join(info["topics"]) or "none"
+        topics = ", ".join(info["topics"]) or "aucun"
         sat = info.get("satisfaction", {})
         sat_parts = []
         if sat.get("positive"):
@@ -537,7 +653,7 @@ def _fmt_activity(activity: dict) -> str:
             sat_parts.append(f"-{sat['negative']}")
         sat_str = f" | satisfaction: {' '.join(sat_parts)}" if sat_parts else ""
         lines.append(
-            f"  {info['name']} ({code}): {info['conversations']} conversations | topics: {topics}{sat_str}"
+            f"  {info['name']} ({code}): {info['conversations']} conversations | sujets: {topics}{sat_str}"
         )
     return "\n".join(lines) or "  No activity."
 
@@ -627,6 +743,7 @@ _USER_ACTIONS = frozenset(
         "ask_user",
         "consolidate_memory",
         "update_trade_threshold",
+        "flag_project_stall",
     }
 )
 
@@ -653,15 +770,16 @@ async def _call_global_reflection_llm(
         identity=json.dumps(context["identity"], ensure_ascii=False),
         goals=_fmt_goals(context["goals"]),
         health=json.dumps(context["health"]),
+        memory_health=_fmt_memory_health(context.get("memory_health", {})),
         activity=_fmt_activity(context["user_activity"]),
-        gaps=", ".join(context["knowledge_gaps"]) or "none flagged",
+        gaps=", ".join(context["knowledge_gaps"]) or "aucune",
         pending_proposals=context["pending_proposals"],
         last_reflection=json.dumps(
             {k: v for k, v in context["last_reflection"].items() if k != "steps"},
             ensure_ascii=False,
         )
         if context["last_reflection"]
-        else "none yet",
+        else "aucune",
         behavioral_patterns=behavioral_patterns,
         emotional_state=json.dumps(
             context.get("emotional_state", {}), ensure_ascii=False
@@ -802,9 +920,15 @@ def _action_store_insight(params: dict) -> str:
     if not user_code or not insight or user_code not in USER_CODES:
         return "store_insight: invalid params"
 
-    store_autobiographical_event(user_code, insight, importance=0.8)
-    logger.info("Self action: stored insight for %s", user_code)
-    return f"stored insight for {user_code}"
+    try:
+        importance = float(params.get("importance", 0.7))
+        importance = round(max(0.0, min(1.0, importance)), 2)
+    except (TypeError, ValueError):
+        importance = 0.7
+
+    store_autobiographical_event(user_code, insight, importance=importance)
+    logger.info("Self action: stored insight for %s (importance=%.2f)", user_code, importance)
+    return f"stored insight for {user_code} (importance={importance})"
 
 
 _GAP_GENERIC_PHRASES = {
@@ -1068,26 +1192,57 @@ def _action_update_self_note(params: dict) -> str:
 
     with self_memory_lock:
         data = get_self_memory()
-        data.setdefault("self_notes", []).append(
-            {
-                "note": note,
-                "date": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-        data["self_notes"] = data["self_notes"][-50:]
+        existing = data.get("self_notes", [])
+
+        # Dédup sémantique : si une note existante est très similaire, la remplacer
+        merged = False
+        if existing:
+            try:
+                model = get_embed_model()
+                new_vec = model.encode(note, normalize_embeddings=True)
+                texts = [n.get("note", "") for n in existing[-20:]]
+                existing_vecs = model.encode(texts, normalize_embeddings=True)
+                sims = existing_vecs @ new_vec  # dot product sur vecteurs normalisés = cosine
+                max_idx = int(np.argmax(sims))
+                if sims[max_idx] > 0.85:
+                    idx_in_full = len(existing) - len(texts) + max_idx
+                    existing[idx_in_full] = {
+                        "note": note,
+                        "date": datetime.now(timezone.utc).isoformat(),
+                    }
+                    merged = True
+                    logger.info(
+                        "Self note merged (sim=%.3f) with: %s",
+                        sims[max_idx], texts[max_idx][:60],
+                    )
+            except Exception as exc:
+                logger.warning("Self note dedup failed (non-blocking): %s", exc)
+
+        if not merged:
+            existing.append({"note": note, "date": datetime.now(timezone.utc).isoformat()})
+
+        data["self_notes"] = existing[-50:]
         save_self_memory(data)
-    logger.info("Self action: self note written")
-    return f"self note written: {note[:60]}"
+
+    action = "merged" if merged else "written"
+    logger.info("Self action: self note %s", action)
+    return f"self note {action}: {note[:60]}"
 
 
 def _action_consolidate_memory(params: dict) -> str:
     user_code = params.get("user_code", "")
     if not user_code or user_code not in USER_CODES:
         return "consolidate_memory: invalid user_code"
-    try:
-        from memory import consolidate_memories
 
+    r = get_redis()
+    cooldown_key = f"{_CONSOLIDATE_COOLDOWN_PREFIX}:{user_code}"
+    if r.exists(cooldown_key):
+        ttl = r.ttl(cooldown_key)
+        return f"consolidate_memory: cooldown actif ({ttl // 3600}h restantes)"
+
+    try:
         consolidate_memories(user_code)
+        r.setex(cooldown_key, _CONSOLIDATE_COOLDOWN_TTL, "1")
         logger.info("Self action: memory consolidation triggered for %s", user_code)
         return f"memory consolidation triggered for {user_code}"
     except Exception as exc:
@@ -1465,10 +1620,35 @@ def _action_check_health(params: dict) -> str:
     health = _check_service_health()
     issues = [svc for svc, status in health.items() if status != "ok"]
     if issues:
-        logger.warning("Self health check: issues detected — %s", issues)
-        return f"health check: issues — {issues}"
-    logger.info("Self health check: all services OK")
-    return "health check: all services OK"
+        logger.warning("Self health check: services KO — %s", issues)
+
+    mem_health = _check_memory_health()
+    mem_lines = _fmt_memory_health(mem_health)
+    logger.info("Self memory health:\n%s", mem_lines)
+
+    # Alertes critiques → email admin (cooldown 4h pour éviter le spam)
+    norm_issues = [
+        f"{uc}: {s['norm_anomalies']} vecteurs non-normalisés"
+        for uc, s in mem_health.items()
+        if s.get("norm_anomalies", 0) > 0
+    ]
+    critical = [f"service KO: {svc}" for svc in issues] + norm_issues
+    if critical:
+        r = get_redis()
+        if not r.exists(_HEALTH_ALERT_KEY):
+            r.setex(_HEALTH_ALERT_KEY, _HEALTH_ALERT_TTL, "1")
+            alert_body = "Anomalies détectées :\n" + "\n".join(f"• {c}" for c in critical)
+            for admin_code in USER_ADMINS:
+                _action_send_notification({
+                    "user_code": admin_code,
+                    "subject": "Alerte santé système",
+                    "message": alert_body,
+                })
+        else:
+            logger.info("Self health alert suppressed (cooldown actif)")
+
+    svc_summary = f"services KO={issues}" if issues else "services OK"
+    return f"{svc_summary}\nmémoire:\n{mem_lines}"
 
 
 def _action_update_trade_threshold(params: dict) -> str:
@@ -2014,7 +2194,13 @@ def handle_proposal_command(message: str, user_code: str) -> str | None:
 
 
 _PRUNE_COOLDOWN_KEY = "jarvis:self:last_prune"
-_PRUNE_COOLDOWN_TTL = 86400  # 24h — one prune pass per day max
+_PRUNE_COOLDOWN_TTL = 86400  # 24h
+_CONSOLIDATE_COOLDOWN_PREFIX = "jarvis:self:last_consolidate"
+_CONSOLIDATE_COOLDOWN_TTL = 48 * 3600  # 48h
+_STALL_COOLDOWN_PREFIX = "jarvis:self:stall"
+_STALL_COOLDOWN_TTL = 7 * 86400  # 7j par projet
+_HEALTH_ALERT_KEY = "jarvis:self:health_alert"
+_HEALTH_ALERT_TTL = 4 * 3600  # 4h — évite le spam en cas de service instable
 
 
 def _action_prune_self_memory(params: dict) -> str:
@@ -2130,6 +2316,73 @@ def _action_prune_self_memory(params: dict) -> str:
     return f"prune_self_memory: deleted {total_deleted} entries total"
 
 
+def _get_active_projects(user_code: str) -> list[dict]:
+    """Return in_progress / active projects for a user from Redis."""
+    try:
+        return [
+            p
+            for p in get_user_projects(user_code)
+            if p.get("status") in ("in_progress", "active")
+        ]
+    except Exception:
+        return []
+
+
+def _action_flag_project_stall(params: dict) -> str:
+    """
+    Détecte les projets actifs sans mise à jour depuis > 14j et envoie un
+    push de rappel. Cooldown 7j par projet pour éviter le harcèlement.
+    """
+    user_code = params.get("user_code", "")
+    if not user_code or user_code not in USER_CODES:
+        return "flag_project_stall: invalid user_code"
+
+    projects = _get_active_projects(user_code)
+    if not projects:
+        return "flag_project_stall: aucun projet actif"
+
+    now = time.time()
+    r = get_redis()
+    sent, skipped = [], []
+
+    for p in projects:
+        name = p.get("name", "")
+        lu = p.get("last_update", "")
+        if not lu:
+            continue
+        try:
+            ts = (
+                datetime.strptime(lu[:19], "%Y-%m-%dT%H:%M:%S")
+                .replace(tzinfo=timezone.utc)
+                .timestamp()
+            )
+        except (ValueError, TypeError):
+            continue
+
+        days = int((now - ts) / 86400)
+        if days <= 14:
+            continue
+
+        cooldown_key = f"{_STALL_COOLDOWN_PREFIX}:{user_code}:{name.lower()[:30]}"
+        if r.exists(cooldown_key):
+            skipped.append(name)
+            continue
+
+        msg = f"Où en est « {name} » ? Ça fait {days} jours sans mise à jour."
+        result = _action_queue_push({"user_code": user_code, "message": msg})
+        if "push queued" in result:
+            r.setex(cooldown_key, _STALL_COOLDOWN_TTL, "1")
+            sent.append(f"{name} ({days}j)")
+        else:
+            return f"flag_project_stall: push indisponible — {result}"
+
+    if not sent and not skipped:
+        return "flag_project_stall: aucun projet en retard (> 14j)"
+    if not sent:
+        return f"flag_project_stall: {len(skipped)} projet(s) en retard mais tous en cooldown"
+    return f"flag_project_stall: rappel envoyé pour {', '.join(sent)}"
+
+
 _ACTION_CATALOG = {
     "nothing": _action_nothing,
     "store_insight": _action_store_insight,
@@ -2144,6 +2397,7 @@ _ACTION_CATALOG = {
     "update_trade_threshold": _action_update_trade_threshold,
     "refine_prompt": _action_refine_prompt,
     "prune_self_memory": _action_prune_self_memory,
+    "flag_project_stall": _action_flag_project_stall,
     # nightly_review is scheduled automatically — not in LLM action catalog
 }
 
@@ -2161,20 +2415,6 @@ def _execute_action(action: str, params: dict) -> str:
 # ══════════════════════════════════════════════════
 #  PROACTIVE PUSH GENERATION
 # ══════════════════════════════════════════════════
-
-
-def _get_active_projects(user_code: str) -> list[dict]:
-    """Return in_progress / active projects for a user from Redis."""
-    try:
-        from memory import get_user_projects
-
-        return [
-            p
-            for p in get_user_projects(user_code)
-            if p.get("status") in ("in_progress", "active")
-        ]
-    except Exception:
-        return []
 
 
 def _last_conversation_ts(user_code: str) -> float:

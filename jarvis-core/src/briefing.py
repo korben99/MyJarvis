@@ -215,7 +215,7 @@ def _get_active_projects(user_code: str) -> list[str]:
     """
     projects = get_user_projects(user_code)
     return [
-        f"{p['name']}: {p.get('description', '')}"
+        p["name"] if not p.get("description") else f"{p['name']}: {p['description']}"
         for p in projects
         if p.get("status") in ("active", "in_progress")
     ][:4]

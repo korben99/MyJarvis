@@ -287,6 +287,19 @@ The old rule-based Episodic Salience Score is still computed in `analyzer.py` bu
 | Strong emotional mood | +0.10 | happy, curious, focused, stressed, frustrated |
 | Long message (> 200 chars) | +0.05 | Minor depth signal |
 
+#### Analyzer Output Validation (Pydantic)
+
+`analyzer.py` validates the LLM JSON output against four Pydantic models before any downstream processing:
+
+| Model | Fields | Role |
+|-------|--------|------|
+| `AnalysisResult` | `topics`, `mood`, `satisfaction`, `user_facts`, `project_updates`, `interest_weights`, `memory_summary`, `importance` | Top-level output schema |
+| `ProjectEvent` | `name`, `action`, `summary`, `rename_to` | One project mutation event |
+| `UserFact` | `key`, `value` | One profile fact |
+| `InterestWeight` | `term`, `weight` | One interest weight entry |
+
+All models use `extra="ignore"` — unknown fields from the LLM (e.g. `"projects"` instead of `"project_updates"`) are silently discarded rather than propagating as silent bugs. Type mismatches raise `ValidationError` immediately and fall through to the error fallback. `analyze_exchange()` returns `model_dump()` — callers receive a plain dict with guaranteed structure, no changes needed downstream.
+
 #### Importance Score Reference
 
 Every point stored in Qdrant carries an `importance` field used for retrieval ranking and decay. Complete list of assigned values:
@@ -295,7 +308,7 @@ Every point stored in Qdrant carries an `importance` field used for retrieval ra
 |-------|--------|-----------------|
 | `1.0` (`MEMORY_CONSOLIDATION_IMPORTANCE`) | Monthly consolidation (`_consolidate_user_memories`) — LLM summary of episodic batch | **Permanent — exempt from decay** (`== MEMORY_DECAY_DURABLE_MIN`) |
 | `0.0–1.0` (LLM score) | Analyzer episodic write — LLM-evaluated, only stored if score `> IMPORTANCE_THRESHOLD` and summary present | Decays monthly |
-| `0.80` | Jarvis self-reflection insight (`run_self_reflection`) | Decays monthly |
+| `0.5–0.9` (LLM-set, défaut `0.7`) | `store_insight` self-action — LLM chooses importance: `0.5` fact utile · `0.7` significatif · `0.9` moment clé | Decays monthly |
 | `0.70` | Nightly review durable fact (`run_nightly_interaction_review`, `insights_durables` only) | Decays monthly |
 
 **Key invariant:** `MEMORY_CONSOLIDATION_IMPORTANCE` must equal `MEMORY_DECAY_DURABLE_MIN`. If you change one, change the other. Breaking this invariant would either make consolidation milestones decay (if `CONSOLIDATION_IMPORTANCE < DURABLE_MIN`) or promote ordinary memories to permanent status (if `DURABLE_MIN` is lowered).
@@ -324,7 +337,11 @@ An empty string value (`value=""`) is treated identically to `null` (deletion) t
 
 #### Project Tracking
 
-Projects are stored as JSON objects with `name`, `status` (`in_progress` / `done`), `first_mentioned`, and `last_update`. The `apply_project_updates()` function resolves project names using word-overlap fuzzy matching (≥ 60 % threshold) before exact-string lookup, preventing name-drift duplicates (`"Jarvis"` → `"Jarvis v7"`).
+Projects are stored as JSON objects in Redis with `name`, `status` (`in_progress` / `done`), `first_mentioned`, `last_update`, and a **`updates[]` timeline** — a FIFO list (cap 20) of `{date, summary}` entries appended on each `update` or `done` action.
+
+`apply_project_updates()` accepts a structured list of events `[{name, action, summary, rename_to}]` and resolves project names using word-overlap fuzzy matching (≥ 60 % threshold) before exact-string lookup, preventing name-drift duplicates (`"Jarvis"` → `"Jarvis v7"`).
+
+When the embed router detects a "project" intent (cosine similarity ≥ 0.74 on project-related phrases), it returns `None` to force the LLM router, which extracts `project_name` from the user message. On the first mention of a project in a session, `get_project_detail()` fetches the full Redis record and `get_project_timeline_text()` formats it for injection into the prompt context — subsequent turns carry this detail in conversation history without re-fetching.
 
 #### Memory Retrieval Ranking
 
@@ -348,7 +365,11 @@ The recency window is **type-aware**: episodic memories use a 30-day window, aut
 
 Before any call to `store_autobiographical_event()`, Jarvis queries Qdrant for the most similar existing autobiographical point. If the similarity exceeds `AUTOBIO_DEDUP_THRESHOLD` (default: 0.85), the new entry is not duplicated. However, if the new submission carries a **higher importance** than the existing point, the existing point is reinforced (importance updated upward). This models the human phenomenon of a recurring important fact becoming more firmly anchored over time.
 
-**Score clamping note:** The Qdrant memory collection uses `Distance.DOT`. Raw dot product scores can exceed `1.0` when stored vectors predate the `normalize_embeddings=True` enforcement. All score comparisons in `memory.py` (`store_autobiographical_event`, `retract_autobiographical_event`, `compute_memory_novelty`, `search_memory`) clamp the score to `min(score, 1.0)` before any threshold comparison or weighted blend. Without this, a stored vector with magnitude > 1 would produce `novelty = 1 − 1.28 = −0.28`, clamped to `0`, blocking all new memory writes.
+**Score clamping note:** The Qdrant memory collection uses `Distance.DOT`. Raw dot product scores can exceed `1.0` when stored vectors predate the `normalize_embeddings=True` enforcement. All score comparisons in `memory.py` clamp the score to `min(score, 1.0)` before any threshold comparison or weighted blend. Without this, a stored vector with magnitude > 1 would produce `novelty = 1 − 1.28 = −0.28`, clamped to `0`, blocking all new memory writes.
+
+**Normalization invariant (enforced at write):** `store_memory_vector()` asserts L2 norm ≈ 1.0 (±0.01) before every Qdrant upsert. If the norm is off, the vector is re-normalized and an `[memory_invariant]` error is logged — preventing silent norm drift from reaching the collection. A one-shot migration script (`scripts/migrate_qdrant_normalize_vectors.py`) corrected 26 pre-existing un-normalized points in May 2026.
+
+**Structured decision log:** every call to `store_memory_vector()` emits a `[memory_decision]` log line with `stored=True/False`, `reason` (duplicate/no_summary), `novelty`, `importance`, and a 80-char summary preview. Greppable for monitoring: `grep "\[memory_decision\]" logs/jarvis-api.log`.
 
 The threshold is tunable: raise toward 0.95 to allow more variations, lower toward 0.75 to be stricter.
 
@@ -1089,20 +1110,24 @@ Conversations from the day are sorted by importance score descending before bein
 
 **Reflection action catalog** — actions the LLM can choose during each reflection cycle:
 
-| Action | Description |
-|--------|-------------|
-| `nothing` | Explicit no-op with reason |
-| `store_insight` | Save a durable fact about a user to Qdrant autobiographical |
-| `flag_knowledge_gap` | Log a topic Jarvis answered poorly (increments a per-topic counter). Requires a concrete observed failure as context — generic phrases are rejected. 7-day cooldown per topic. Blocked if a proposal already exists for the topic. |
-| `send_notification` | Send a Gmail to one user (rate-limited to 1/user/day) |
-| `queue_push` | Queue an iOS push notification for one user (rate-limited to 1/user/2h) |
-| `ask_user` | Send a clarification question via push; user answers in chat, memory updates |
-| `update_self_note` | Write a personal observation to `self_notes[]` in `jarvis-self.json` |
-| `correct_profile` | Delete or correct a Redis profile key (value=null to delete) |
-| `consolidate_memory` | Trigger full memory compression for a user (loops until all episodic cleared) |
-| `check_health` | Verify all services and log status |
-| `update_trade_threshold` | Update `threshold_high` / `threshold_low` for a portfolio position autonomously |
-| `refine_prompt` | Propose an improved version of a prompt (see Prompt Self-Modification below) |
+| Action | Phase | Description |
+|--------|-------|-------------|
+| `nothing` | Both | Explicit no-op with reason |
+| `flag_knowledge_gap` | Global | Log a topic Jarvis answered poorly. Requires a concrete failure as context. 7-day cooldown per topic, blocked if proposal pending. |
+| `update_self_note` | Global | Write a personal behavioural observation to `self_notes[]`. Semantic dedup: cosine > 0.85 with existing notes → merges instead of appending. |
+| `check_health` | Global | Service liveness (Redis/Qdrant/LLM) + memory health stats per user (episodic count, days since last write, null_summary rate 7d, vector norm anomalies). Sends admin email alert on critical issues (cooldown 4h). |
+| `prune_self_memory` | Global | LLM-assisted pruning of stale/redundant `self_notes`, `opinions`, `learnings`. 24h cooldown. |
+| `refine_prompt` | Global | Propose an improved version of a prompt (see Prompt Self-Modification below). |
+| `store_insight` | User | Save a durable autobiographical fact to Qdrant. `importance` param (0.5–0.9, default 0.7): `0.5` useful fact · `0.7` significant · `0.9` key milestone. |
+| `send_notification` | User | Send a Gmail to one user (rate-limited to 1/user/day). |
+| `queue_push` | User | Queue an iOS push notification (rate-limited to 1/user/2h). |
+| `ask_user` | User | Send a clarification question via push; user answers in chat. |
+| `correct_profile` | User | Modify or delete a Redis profile key (value=null to delete). Cannot create new keys. |
+| `consolidate_memory` | User | Trigger full memory compression. 48h cooldown per user. |
+| `flag_project_stall` | User | Detect active projects with no update for > 14 days and send a push reminder. 7-day cooldown per project. Only triggers if user was recently active. |
+| `update_trade_threshold` | User | Update `threshold_high` / `threshold_low` for a portfolio position autonomously. |
+
+**Memory health monitoring:** `gather_global_context()` calls `_check_memory_health()` at every reflection cycle. The result is injected into `<sante_memoire>` in `REFLECTION_PROMPT` so the LLM sees per-user stats without triggering `check_health` first. The LLM uses activity data to distinguish genuine bugs (high null_rate + recent active user) from expected gaps (user on holiday). Vector norm anomalies are always flagged as critical regardless of activity.
 
 **Memory consolidation** — `consolidate_memories()` is the single entry point. It runs on the 1st of each month (nightly review scheduler) and on demand via the `consolidate_memory` self-action. It executes two steps in order for each user:
 1. `_consolidate_user_memories()` — processes episodic points in batches of 50 (oldest first), summarises each batch into one autobiographical milestone via LLM (stored at `importance = MEMORY_CONSOLIDATION_IMPORTANCE = 1.0`), deletes the processed points, loops until fewer than 5 remain.
@@ -1570,3 +1595,19 @@ The app probes `localServerURL` first (2 s timeout), then falls back to `vpnServ
 - Google credentials are stored in `.env` only — never commit this file.
 - Qdrant and Redis are internal Docker services and are not exposed externally.
 - Memory is isolated per user code.
+
+---
+
+## Roadmap
+
+### Speculative decoding (MLX)
+
+`mlx-lm` supporte le speculative decoding natif via `stream_generate(draft_model=..., num_draft_tokens=N)`,
+mais cette feature est **incompatible avec Qwen3.6** (modèle hybride Transformer + GatedDeltaNet).
+
+Les couches GatedDeltaNet utilisent un état récurrent (`ArraysCache`) qui ne peut pas être rollbacké
+lorsqu'un token draft est rejeté — mlx-lm le refuse explicitement (`cache non-trimmable`).
+Testé et confirmé : l'output part en bruit dès les premières rejections.
+
+**En attente** : support du rollback d'état récurrent dans mlx-lm, ou migration vers un modèle primaire
+purement attention (Qwen3-30B dense, etc.).

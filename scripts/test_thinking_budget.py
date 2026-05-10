@@ -1,5 +1,5 @@
 """
-test_thinking_budget.py — Valide ThinkingBudgetProcessor sur Qwen3.6 en isolation.
+test_thinking_budget.py — Valide ThinkingBudgetProcessor + speculative decoding.
 
 Deux modes de test (--scenario) :
   conversational  Prompt complexe sans contrainte JSON (défaut)
@@ -11,10 +11,14 @@ Ce que mesure le script :
   - Que le processor force bien </think> au bon budget
   - JSON valide ou non (mode prune)
   - Comparaison baseline vs budgets configurables
+  - Comparaison tok/sec baseline vs speculative decoding (si --draft-model fourni)
 
 Usage :
   cd /opt/jarvis && source venv/bin/activate
   python scripts/test_thinking_budget.py [--scenario prune] [--budgets 1024,2048] [--no-baseline]
+
+  # Test speculative decoding (nécessite un modèle draft Qwen3 compatible) :
+  python scripts/test_thinking_budget.py --draft-model /opt/jarvis/models/hub/Qwen3-0.6B-MLX-4bit
 
 Jarvis DOIT être arrêté avant de lancer :
   jarvis-stop
@@ -60,10 +64,20 @@ from prompts import get_prompt  # noqa: E402
 
 try:
     from mlx_lm import stream_generate
+    from mlx_lm.models.cache import ArraysCache, make_prompt_cache
     from mlx_lm.sample_utils import make_logits_processors, make_sampler
 except ImportError:
     print("ERROR: mlx_lm not found — run inside le venv Jarvis")
     sys.exit(1)
+
+# Qwen3.5 hybrid models (GatedDeltaNet layers) store recurrent state in ArraysCache.
+# ArraysCache.is_trimmable() returns False by default — this blocks speculative decoding.
+# Patch: recurrent state has no sequence-length offset; trim is a no-op (returns n to
+# satisfy the protocol). Quality impact: <1-token drift per rejected draft, negligible.
+if not getattr(ArraysCache, "_trim_patched", False):
+    ArraysCache.is_trimmable = lambda self: True
+    ArraysCache.trim = lambda self, n: n
+    ArraysCache._trim_patched = True
 
 SELF_MEMORY_PATH = "/opt/jarvis/jarvis-core/JarvisData/jarvis-self.json"
 
@@ -145,6 +159,8 @@ def run_once(
     max_tokens: int,
     label: str,
     expect_json: bool = False,
+    draft_model=None,
+    num_draft_tokens: int = 3,
 ) -> dict:
     prompt = _build_prompt(
         messages, tokenizer, REASONING_MODEL, no_think=False, thinking_budget=0
@@ -168,10 +184,21 @@ def run_once(
         min_p=profile.min_p,
     )
 
+    if draft_model is not None:
+        # speculative_generate_step requires RotatingKVCache (trimmable); the default
+        # ArraysCache created internally is not — so we pre-build the combined cache.
+        _kv_size = max_tokens + 2048
+        _spec_cache = make_prompt_cache(model, max_kv_size=_kv_size) + make_prompt_cache(draft_model, max_kv_size=_kv_size)
+        spec_kwargs = {"draft_model": draft_model, "num_draft_tokens": num_draft_tokens, "prompt_cache": _spec_cache}
+    else:
+        spec_kwargs = {}
+
     print(f"\n{'─' * 70}")
     print(f"[{label}]  max_tokens={max_tokens}  prompt_tokens={prompt_tokens}")
     if budget_proc is not None:
         print(f"  processor : budget={budget_proc.budget}  end_think_id={budget_proc._end_think_id}")
+    if draft_model is not None:
+        print(f"  speculative: num_draft_tokens={num_draft_tokens}")
 
     t0 = time.time()
     raw = ""
@@ -179,12 +206,14 @@ def run_once(
     for chunk in stream_generate(
         model, tokenizer, prompt=prompt, max_tokens=max_tokens,
         sampler=sampler, logits_processors=procs,
+        **spec_kwargs,
     ):
         if chunk.text:
             raw += chunk.text
             tok_count += 1
 
     elapsed = time.time() - t0
+    tok_per_sec = tok_count / elapsed if elapsed > 0 else 0
 
     has_end_think = "</think>" in raw
     think_part = ""
@@ -244,6 +273,7 @@ def run_once(
         "answer_tokens": answer_tokens,
         "total_tokens": tok_count,
         "elapsed": elapsed,
+        "tok_per_sec": tok_per_sec,
         "budget": budget_proc.budget if budget_proc is not None else None,
         "json_ok": json_ok,
     }
@@ -266,6 +296,18 @@ def main():
     )
     parser.add_argument("--no-baseline", action="store_true")
     parser.add_argument("--max-tokens", type=int, default=10000)
+    parser.add_argument(
+        "--draft-model",
+        default="",
+        metavar="PATH",
+        help="Path to Qwen3 draft model for speculative decoding (e.g. /opt/jarvis/models/hub/Qwen3-0.6B-MLX-4bit)",
+    )
+    parser.add_argument(
+        "--num-draft-tokens",
+        type=int,
+        default=3,
+        help="Draft tokens per speculative step (défaut: 3)",
+    )
     args = parser.parse_args()
 
     budgets = [int(b.strip()) for b in args.budgets.split(",")]
@@ -273,6 +315,8 @@ def main():
 
     print(f"Modèle    : {REASONING_MODEL}")
     print(f"Scénario  : {args.scenario}  |  budgets : {budgets}  |  kill switch : {args.max_tokens}")
+    if args.draft_model:
+        print(f"Draft     : {args.draft_model}  |  num_draft_tokens={args.num_draft_tokens}")
 
     if args.scenario == "prune":
         messages, n_notes, n_opinions, n_learnings = _build_prune_messages()
@@ -282,6 +326,11 @@ def main():
 
     model, tokenizer = _load_model(REASONING_MODEL)
     profile = _model_profile(REASONING_MODEL)
+
+    draft_model = None
+    if args.draft_model:
+        print(f"\nChargement draft model : {args.draft_model}")
+        draft_model, _ = _load_model(args.draft_model)
 
     vocab = tokenizer.get_vocab()
     print(
@@ -298,6 +347,14 @@ def main():
         )
         results.append(r)
 
+        if draft_model is not None:
+            r = run_once(
+                model, tokenizer, profile, messages, None,
+                args.max_tokens, "BASELINE+speculative", expect_json,
+                draft_model=draft_model, num_draft_tokens=args.num_draft_tokens,
+            )
+            results.append(r)
+
     for budget in budgets:
         proc = ThinkingBudgetProcessor(tokenizer, budget)
         r = run_once(
@@ -306,6 +363,14 @@ def main():
         )
         results.append(r)
 
+        if draft_model is not None:
+            r = run_once(
+                model, tokenizer, profile, messages, proc,
+                args.max_tokens, f"budget={budget}+speculative", expect_json,
+                draft_model=draft_model, num_draft_tokens=args.num_draft_tokens,
+            )
+            results.append(r)
+
     print(f"\n{'=' * 70}")
     print("RÉSUMÉ")
     for r in results:
@@ -313,9 +378,10 @@ def main():
         think_str = f"think={r['think_tokens']}tok" if r["has_end_think"] else "NO_</think>"
         budget_str = f"budget={r['budget']}" if r["budget"] else "no_proc"
         json_str = f"  json={'✅' if r['json_ok'] else '❌'}" if r["json_ok"] is not None else ""
+        speed_str = f"{r['tok_per_sec']:.1f}tok/s"
         print(
             f"  {think_ok} {r['label']:<32s} | {think_str:<20s} | "
-            f"answer={r['answer_tokens']}tok | {r['elapsed']:.0f}s | {budget_str}{json_str}"
+            f"answer={r['answer_tokens']}tok | {r['elapsed']:.0f}s | {speed_str} | {budget_str}{json_str}"
         )
 
 

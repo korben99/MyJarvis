@@ -22,6 +22,7 @@ classification.  Falls back to the primary model if ROUTER_MODEL is unset.
 import asyncio
 import re
 import unicodedata
+from datetime import date as _date
 from urllib.parse import quote
 
 import httpx
@@ -36,7 +37,7 @@ from config import (
     ROUTER_MODEL,
     TAVILY_API_KEY,
 )
-from helpers import WEATHER_CODES, call_llm_async, extract_llm_json, get_logger
+from helpers import WEATHER_CODES, call_llm_async, extract_llm_json, fmt_date_fr, get_logger
 from prompts import get_prompt
 
 logger = get_logger("jarvis-web")
@@ -208,24 +209,37 @@ async def search_weather(query: str) -> list[dict]:
             daily = data.get("daily",   {})
 
             condition = WEATHER_CODES.get(cur.get("weather_code", -1), "")
-            now_body  = (
+            # Today's daily forecast (index 0) merged into the current-conditions entry
+            # so the LLM can't skip it when it sees current conditions describe the same day.
+            today_outlook = ""
+            daily_times = daily.get("time", [])
+            if daily_times:
+                today_condition = WEATHER_CODES.get(daily["weather_code"][0], "")
+                today_outlook = (
+                    f" Prévisions du jour : {today_condition} "
+                    f"{daily['temperature_2m_min'][0]}–{daily['temperature_2m_max'][0]}°C, "
+                    f"précip. {daily['precipitation_sum'][0]} mm, "
+                    f"vent max {daily['wind_speed_10m_max'][0]} km/h."
+                )
+            now_body = (
                 f"Actuellement à {name} ({country}) : {cur.get('temperature_2m')}°C "
                 f"(ressenti {cur.get('apparent_temperature')}°C), {condition}. "
                 f"Vent {cur.get('wind_speed_10m')} km/h, "
-                f"Humidité {cur.get('relative_humidity_2m')}%."
+                f"Humidité {cur.get('relative_humidity_2m')}%.{today_outlook}"
             )
+            # Days 1 and 2 only (day 0 = today is already in now_body)
             days = [
-                f"{date}: {WEATHER_CODES.get(daily['weather_code'][i], '')} "
+                f"{fmt_date_fr(_date.fromisoformat(date))}: {WEATHER_CODES.get(daily['weather_code'][i], '')} "
                 f"{daily['temperature_2m_min'][i]}–{daily['temperature_2m_max'][i]}°C, "
                 f"précip. {daily['precipitation_sum'][i]} mm, "
                 f"vent max {daily['wind_speed_10m_max'][i]} km/h"
-                for i, date in enumerate(daily.get("time", [])[:3])
+                for i, date in enumerate(daily_times[1:3], start=1)
             ]
             base_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
             logger.info("Weather: fetched forecast for %s (attempt %d)", name, attempt)
             return [
-                {"title": f"Météo actuelle — {name}",     "body": now_body,          "url": base_url},
-                {"title": f"Prévisions 3 jours — {name}", "body": " | ".join(days),  "url": base_url},
+                {"title": f"Météo actuelle — {name}",        "body": now_body,         "url": base_url},
+                {"title": f"Prévisions J+1/J+2 — {name}",   "body": " | ".join(days), "url": base_url},
             ]
 
         except Exception as exc:

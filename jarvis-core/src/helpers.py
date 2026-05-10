@@ -272,6 +272,11 @@ def fmt_now_fr(tz_name: str) -> str:
     return f"{jour} {now.day} {_MOIS_FR[now.month]} {now.year}, {now.strftime('%H:%M')} ({saison})"
 
 
+def fmt_date_fr(d: date) -> str:
+    """Return a short French date label: 'Dimanche 10 mai'."""
+    return f"{_JOURS_FR[d.weekday()].capitalize()} {d.day} {_MOIS_FR[d.month]}"
+
+
 def rel_time_fr(ts: float) -> str:
     """Return a French relative time string for a Unix timestamp.
 

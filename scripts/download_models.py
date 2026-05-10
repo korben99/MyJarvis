@@ -16,7 +16,7 @@ MODELS = [
     # "mlx-community/Qwen3-30B-A3B-4bit-DWQ-0508",
     # "spicyneuron/Qwen3.6-35B-A3B-MLX-4.8bit"
     "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit",
-    # "NousResearch/Hermes-3-Llama-3.2-3B",
+    "NousResearch/Hermes-3-Llama-3.2-3B",
     "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-5bit",
 ]
 

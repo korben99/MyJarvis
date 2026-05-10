@@ -61,6 +61,7 @@ SCHEMA:
  "gmail_query": string|null,
  "calendar_days": integer(1-90)|null,
  "rag_query": string|null,
+ "project_name": string|null,
  "use_reasoning": boolean}
 
 INTENTS (multi-intents OK, défaut ["memory"]) :
@@ -75,6 +76,8 @@ calendar_days    : entier 1-90 ou null
 rag_query        : si intent rag → 3-5 mots-clés sémantiques, SANS verbes de commande ni phrases d'intro
                    ("bail location" depuis "retrouve dans mes docs le bail de location")
                    sinon null
+project_name     : si le message mentionne un projet de l'utilisateur par nom → nom extrait tel quel, sinon null
+                   ("attelage BMW" depuis "comment avance l'attelage BMW ?", "Jarvis v9" depuis "où en est Jarvis v9")
 use_reasoning : true SI l'une de ces conditions :
   - compare, arbitre, évalue des options ("compare X et Y", "vaut-il mieux…", "risques de…")
   - diagnostique un bug/problème à cause inconnue ("pourquoi ça plante", "comportement inattendu")
@@ -90,46 +93,52 @@ RÈGLE ABSOLUE : tu produis TOUJOURS du JSON valide, ne réponds JAMAIS au messa
 EXEMPLES :
 
 "les mails importants du comptable"
-{"intents":["gmail"],"weather_location":null,"gmail_query":"from:comptable is:important","calendar_days":null,"rag_query":null,"use_reasoning":false}
+{"intents":["gmail"],"weather_location":null,"gmail_query":"from:comptable is:important","calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
 
 "mon agenda des 14 prochains jours"
-{"intents":["calendar"],"weather_location":null,"gmail_query":null,"calendar_days":14,"rag_query":null,"use_reasoning":false}
+{"intents":["calendar"],"weather_location":null,"gmail_query":null,"calendar_days":14,"rag_query":null,"project_name":null,"use_reasoning":false}
 
 "retrouve dans mes notes ce que j'avais écrit sur la régulation MiCA"
-{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"régulation MiCA","use_reasoning":false}
+{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"régulation MiCA","project_name":null,"use_reasoning":false}
 
 "mes rendez-vous de demain et les mails urgents"
-{"intents":["calendar","gmail"],"weather_location":null,"gmail_query":"is:important","calendar_days":2,"rag_query":null,"use_reasoning":false}
+{"intents":["calendar","gmail"],"weather_location":null,"gmail_query":"is:important","calendar_days":2,"rag_query":null,"project_name":null,"use_reasoning":false}
 
 "quel temps à Lyon ce week-end et mon planning samedi"
-{"intents":["weather","calendar"],"weather_location":"Lyon","gmail_query":null,"calendar_days":3,"rag_query":null,"use_reasoning":false}
+{"intents":["weather","calendar"],"weather_location":"Lyon","gmail_query":null,"calendar_days":3,"rag_query":null,"project_name":null,"use_reasoning":false}
 
 "résume mes mails de la semaine, mon planning de demain et la météo"
-{"intents":["gmail","calendar","weather"],"weather_location":null,"gmail_query":"newer_than:7d","calendar_days":2,"rag_query":null,"use_reasoning":false}
+{"intents":["gmail","calendar","weather"],"weather_location":null,"gmail_query":"newer_than:7d","calendar_days":2,"rag_query":null,"project_name":null,"use_reasoning":false}
 
 "mes docs sur le trading algorithmique et les dernières news du secteur"
-{"intents":["rag","web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"trading algorithmique","use_reasoning":false}
+{"intents":["rag","web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"trading algorithmique","project_name":null,"use_reasoning":false}
 
 "quelle commande pour donner accès à un dossier à un autre utilisateur sur macOS ?"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
 
 "arbitre entre garder ou vendre mes actions TotalEnergies"
-{"intents":["portfolio","web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":true}
+{"intents":["portfolio","web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
 
 "est-ce plus avantageux de clôturer mon PER avant 62 ans ou après ?"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":true}
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
 
 "pourquoi mon script Python se bloque aléatoirement sur macOS mais pas sur Linux ?"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":true}
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
 
 "quels risques fiscaux si je transfère mes parts de SCI à mes enfants ?"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":true}
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
 
 "cours actuel de l'or"
-{"intents":["web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"use_reasoning":false}
+{"intents":["web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
 
 "j'avais noté mon numéro d'assuré social quelque part, retrouve-le"
-{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"numéro assuré social","use_reasoning":false}
+{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"numéro assuré social","project_name":null,"use_reasoning":false}
+
+"comment avance l'attelage BMW ?"
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":"attelage BMW","use_reasoning":false}
+
+"où en est Jarvis v9 ?"
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":"Jarvis v9","use_reasoning":false}
 """
 
 ROUTER_USER = "<message>{message}</message>"
@@ -182,17 +191,22 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
     La valeur décrit le RAPPORT à l'activité, jamais une référence ou un nom de modèle.
   - Si incertain → ne rien ajouter
 
-"projects" : liste de "create:nom", "update:nom", "done:nom" ou "rename:ancien->nouveau"
-  - Un projet = initiative structurée sur plusieurs SEMAINES avec un livrable ou objectif clair. Doute → [].
-  - PAS un projet : tâche technique isolée, optimisation, debug, analyse, RDV, voyage, week-end, sujet de conversation.
-  -> Utilise le NOM EXACT d'un projet existant pour "update" et "done". Ne jamais inventer de variante.
-  -> "rename:ancien->nouveau" uniquement si l'utilisateur change explicitement le nom d'un projet existant.
-  - "create" uniquement si l'utilisateur annonce EXPLICITEMENT un tout nouveau projet absent de la liste.
-  Noms de 2 à 4 mots.
-  - Exemples :
-    "update:Jarvis v9" → modification d'un projet existant
-    "create:Jarvis v10" → nouveau projet annoncé
-    "rename:Jarvis v9->Jarvis v9.1" → projet renommé explicitement
+"project_updates" : [] ou liste de {{"name":"...","action":"...","summary":"...","rename_to":"..."}}
+  Champs :
+    name      : NOM EXACT d'un projet existant (pour update/done/rename) ou nouveau nom (pour create)
+    action    : "create" | "update" | "done" | "rename"
+    summary   : 1 phrase décrivant ce qui s'est passé (obligatoire pour create/update/done, "" pour rename)
+    rename_to : nouveau nom (uniquement pour action "rename")
+  Critère temporel : projet = engagement multi-sessions sur plusieurs jours/semaines, avec étapes et livrable clair.
+    Action ponctuelle du quotidien = PAS un create. Mais si l'activité correspond à un projet de la liste → TOUJOURS émettre "update" ou "done".
+    Ex : "j'ai posé l'attelage ce soir" seul → pas de create. Si "installation attelage BMW" est dans la liste → {{"name":"installation attelage BMW","action":"done","summary":"Pose de l'attelage terminée"}}.
+  - "create" uniquement si l'utilisateur annonce EXPLICITEMENT une nouvelle initiative absente de la liste, clairement multi-étapes.
+  - Noms de 2 à 4 mots en minuscules, séparés par des espaces (jamais de tirets).
+  Exemples :
+    {{"name":"Jarvis v9","action":"update","summary":"Refonte du routeur embeddings"}}
+    {{"name":"installation attelage BMW","action":"done","summary":"Attelage posé, tout terminé"}}
+    {{"name":"Jarvis v10","action":"create","summary":"Nouveau projet annoncé : refonte complète"}}
+    {{"name":"Jarvis v9","action":"rename","summary":"","rename_to":"Jarvis v9.1"}}
 
 "interest_weights" : liste ou []
   Format : {{"term":"mot_clé_minuscule","weight":0.0-2.0}}
@@ -200,7 +214,11 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
   Exclure : mesures physiques, tailles, produits spécifiques (ce ne sont pas des centres d'intérêt).
 
 "memory_summary"  : phrase courte en français résumant ce qui s'est passé, ou null
-  null si : météo, cours boursiers, scores, actualités éphémères, debug/technique isolé sans contexte utilisateur.
+  null UNIQUEMENT si : météo pure, cours boursiers, scores sportifs, actualités éphémères sans lien personnel,
+    ou debug/technique isolé sans aucun contexte utilisateur (pas de projet, pas de décision, pas d'apprentissage).
+  Toujours mémoriser : santé (consultation, symptôme, traitement), vie personnelle (famille, sport, loisirs),
+    décisions prises, apprentissages, préférences exprimées, contexte émotionnel significatif.
+  En cas de doute → mémoriser (le filtre de nouveauté écartera les doublons).
   Ce résumé sert de contexte de rappel lors des prochaines conversations — pense à ce qu'il serait utile de retrouver.
   Inclure une référence temporelle naturelle si pertinente (ex: "en mai 2026, ...").
   Si l'activité peut être confondue avec un autre domaine, nomme-le explicitement.
@@ -321,7 +339,7 @@ JSON uniquement.
 
 REFLECTION_SYSTEM = """\
 Tu es Jarvis en phase de réflexion globale (Phase 1).
-Tu examines ta propre situation — santé système, activité utilisateurs, lacunes de connaissance,
+Tu examines ta propre situation — santé système et mémoire, activité utilisateurs, lacunes de connaissance,
 historique — et tu choisis les actions qui améliorent tes capacités et ta mémoire.
 
 Mode chaîne : tu peux exécuter plusieurs actions par cycle (jusqu'au maximum configuré).
@@ -345,6 +363,9 @@ REFLECTION_PROMPT = """\
 {goals}
 </objectifs>
 <sante_systeme>{health}</sante_systeme>
+<sante_memoire>
+{memory_health}
+</sante_memoire>
 <activite_utilisateurs>
 {activity}
 </activite_utilisateurs>
@@ -386,8 +407,17 @@ Décide :
   • INTERDIT : nommer un utilisateur, décrire un utilisateur, résumer l'activité ou les statuts relationnels.
     Ces notes sont injectées dans toutes les sessions — elles doivent rester strictement comportementales.
 
-**check_health** — bilan de santé détaillé.
+**check_health** — bilan de santé détaillé des services et de la mémoire épisodique.
   params: {{}}
+  Interpréter <sante_systeme> : état des services techniques (redis, qdrant, llm).
+    Valeurs possibles : "ok" (nominal) ou "unreachable" (service inaccessible → alerter l'admin immédiatement).
+    Un seul service "unreachable" peut rendre Jarvis partiellement ou totalement inopérant.
+  Interpréter <sante_memoire> : chaque ligne indique pour un utilisateur le nombre de points épisodiques,
+  la date du dernier point stocké, et le taux de conversations sans memory_summary sur 7 jours.
+  • Un taux null_summary élevé combiné à une activité récente peut indiquer un bug d'analyse ou de prompt.
+  • Un "dernier" ancien sans activité récente correspondante peut juste refléter une absence de l'utilisateur — ne pas alerter.
+  • Des vecteurs non-normalisés (⚠) sont toujours anormaux → alerter l'admin.
+  • Déclencher check_health si <sante_memoire> montre un signal suspect ET que l'utilisateur a été actif récemment.
 
 **prune_self_memory** — supprimer entrées obsolètes de self_notes/opinions/learnings.
   params: {{}}
@@ -436,6 +466,7 @@ Principes :
   Interdit d'inférer un fait depuis le PROFIL existant ou depuis la RELATION.
   Si le fait provient du profil ou n'est pas cité mot pour mot dans ACTIVITÉ → utilise "nothing".
   Le texte de l'insight doit nommer le domaine précis exemple: "pratique des tours de piste en avion", pas "pratique des tours de piste".
+  importance : 0.5 = fait utile · 0.7 = fait significatif (défaut) · 0.9 = moment clé ou décision majeure.
   INTERDIT ABSOLU : stocker un fait sur le système de Jarvis lui-même (notifications, push, configuration, cooldown).
   INTERDIT ABSOLU : stocker des métadonnées d'activité (nombre de conversations, "topics: none", absence de sujet).
 - "nothing" si aucune action n'apporte de valeur réelle pour cet utilisateur.
@@ -470,8 +501,9 @@ Décide la prochaine action pour {user_name} :
   params: {{"reason":"..."}}
 
 **store_insight** — enregistrer un fait durable dans sa mémoire Qdrant.
-  params: {{"user_code":"...","insight":"..."}}
+  params: {{"user_code":"...","insight":"...","importance":0.7}}
   • Uniquement si le fait est dit EXPLICITEMENT dans ACTIVITÉ (jamais depuis PROFIL)
+  • importance : 0.5 = fait utile · 0.7 = significatif (défaut) · 0.9 = moment clé
 
 **send_notification** — envoyer un email utile.
   params: {{"user_code":"...","subject":"...","message":"..."}}
@@ -493,6 +525,12 @@ Décide la prochaine action pour {user_name} :
 
 **consolidate_memory** — comprimer la mémoire épisodique.
   params: {{"user_code":"..."}}
+
+**flag_project_stall** — rappeler à l'utilisateur un projet actif sans mise à jour depuis > 14j.
+  params: {{"user_code":"..."}}
+  • Déclencher si l'utilisateur a été actif récemment (conversations dans ACTIVITÉ) ET aucun rappel récent
+  • L'action scanne tous les projets actifs et envoie un push pour les projets en retard (cooldown 7j/projet)
+  • Ne pas déclencher si l'utilisateur est absent (pas de conversations récentes)
 
 **update_trade_threshold** — réviser un seuil d'alerte trading.
   params: {{"user_code":"...","isin":"...","threshold_high":0.0,"threshold_low":0.0}}

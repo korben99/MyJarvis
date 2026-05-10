@@ -155,6 +155,26 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "mes positions boursières",
         "comment va mon portefeuille ?",
     ],
+    # ── Questions sur l'état d'un projet ────────────────────────────────────
+    # Couvre les requêtes de STATUS ("où en est", "comment avance").
+    # Les mises à jour conversationnelles ("j'ai avancé sur X") routent vers
+    # "memory" — la mémoire épisodique fournit le contexte, l'analyzer capture
+    # l'update dans la timeline. L'injection de détail n'est pas nécessaire
+    # quand l'utilisateur donne une information (il connaît son propre projet).
+    "project": [
+        "comment avance le projet",
+        "où en est le projet",
+        "état d'avancement du projet",
+        "donne-moi l'avancement",
+        "mets à jour le projet",
+        "j'ai avancé sur le projet",
+        "j'ai terminé la partie",
+        "j'ai fini le projet",
+        "on avance sur le projet",
+        "prochaine étape du projet",
+        "il reste encore à faire",
+        "j'ai commencé un nouveau projet",
+    ],
     # ── État interne de Jarvis ───────────────────────────────────────────────
     "self": [
         "comment vas-tu Jarvis ?",
@@ -539,6 +559,14 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
                 best_score - second_score,
                 best_intent,
                 second_intent,
+            )
+            return None
+
+        # Project intent → force LLM router so it can extract project_name
+        if best_intent == "project":
+            logger.debug(
+                "Embed router: project intent (%.3f) → LLM router pour extraction du nom",
+                best_score,
             )
             return None
 

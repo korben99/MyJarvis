@@ -59,6 +59,8 @@ from memory import (
     append_conversation_message,
     async_search_memory,
     get_conversation,
+    get_project_detail,
+    get_project_timeline_text,
     update_user_profile,
 )
 from pipeline import (
@@ -920,13 +922,28 @@ async def chat(req: ChatRequest):
             f"</image_analysee>"
         )
 
-    # Build the user message: [dynamic_prefix] → [context] → <message_utilisateur>
+    # Project detail — injected once on first mention; history carries it forward.
+    _project_name = (llm_result.project_name if llm_result else "") or ""
+    _project_detail_block = ""
+    if _project_name:
+        _proj = await asyncio.to_thread(get_project_detail, user_code, _project_name)
+        if _proj:
+            _project_detail_block = (
+                "<project_detail>\n"
+                + get_project_timeline_text(_proj)
+                + "\n</project_detail>"
+            )
+            logger.info("Project detail injected: %s", _proj["name"])
+
+    # Build the user message: [dynamic_prefix] → [context] → [project_detail] → <message_utilisateur>
     # XML tag clearly delimits the actual question from all injected context above.
     msg_parts = []
     if dynamic_prefix:
         msg_parts.append(dynamic_prefix)
     if assembled:
         msg_parts.append(assembled)
+    if _project_detail_block:
+        msg_parts.append(_project_detail_block)
     if reasoning_hint:
         msg_parts.append(reasoning_hint.strip())
     msg_parts.append(

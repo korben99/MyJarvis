@@ -29,11 +29,14 @@ Compression memory added, to be runned every month.
 import asyncio
 import json
 import os
+import re
 import tempfile
 import time
 import uuid
 from datetime import date, datetime, timezone
 from threading import Lock
+
+import numpy as np
 
 from config import (
     AUTOBIO_DEDUP_THRESHOLD,
@@ -743,7 +746,8 @@ def get_user_projects(user_code: str) -> list:
 def update_user_projects(user_code: str, projects: list):
     """Persist the project list.
     Done projects older than DONE_PROJECT_TTL_DAYS are dropped.
-    Schema: {name, status, first_mentioned, last_update, description?}
+    Schema: {name, status, first_mentioned, last_update, description?, updates?}
+    updates: [{date: "YYYY-MM-DD", summary: "..."}], capped at 20 FIFO.
     """
     cutoff = datetime.now(timezone.utc).timestamp() - DONE_PROJECT_TTL_DAYS * 86400
     result = []
@@ -762,8 +766,39 @@ def update_user_projects(user_code: str, projects: list):
         }
         if p.get("description"):
             entry["description"] = p["description"]
+        if p.get("updates"):
+            entry["updates"] = p["updates"][-20:]
         result.append(entry)
     redis_set_json(f"user:{user_code}:projects", result)
+
+
+def get_project_detail(user_code: str, project_name: str) -> dict | None:
+    """Return the full project dict (with updates timeline) by fuzzy name match."""
+    projects = get_user_projects(user_code)
+    project_map = {p["name"]: p for p in projects}
+    if project_name in project_map:
+        return project_map[project_name]
+    resolved = _fuzzy_project_name(project_name, project_map, threshold=0.4)
+    return project_map.get(resolved) if resolved else None
+
+
+def get_project_timeline_text(project: dict) -> str:
+    """Format a project's timeline for prompt injection."""
+    status_fr = {"done": "terminé", "in_progress": "en cours", "active": "en cours"}.get(
+        project.get("status", ""), project.get("status", "en cours")
+    )
+    lines = [f"Projet : {project['name']} ({status_fr})"]
+    updates = project.get("updates") or []
+    if updates:
+        lines.append("Historique :")
+        for u in updates:
+            d = u.get("date", "?")
+            s = u.get("summary", "")
+            if s:
+                lines.append(f"  {d} : {s}")
+    elif project.get("description"):
+        lines.append(f"Description : {project['description']}")
+    return "\n".join(lines)
 
 
 def get_user_preferences(user_code: str) -> dict:
@@ -831,52 +866,76 @@ def get_recent_conversations(user_code: str, hours: int = 24, limit: int = 20) -
     return result
 
 
+def _normalize_project_name(name: str) -> str:
+    """Normalize a project name to a consistent space-separated form.
+
+    Replaces slug-style hyphens (between word chars) with spaces so that
+    LLM-generated kebab-case names ("installation-attelage-bmw") and natural
+    language names ("installation attelage bmw") are stored identically.
+    Em-dashes (—) used as title separators are preserved.
+    """
+    normalized = re.sub(r"(?<=\w)-(?=\w)", " ", name)
+    return re.sub(r" {2,}", " ", normalized).strip()
+
+
 def _fuzzy_project_name(
     name: str, project_map: dict, threshold: float = 0.6
 ) -> str | None:
-    """
-    Find the best matching project name by word overlap (≥threshold).
+    """Return the best-matching project name from project_map, or None.
 
-    Two scores are computed and the max is taken:
-    - General overlap : overlap / max(|A|, |B|)  — classic Jaccard-like
-    - Subset score    : overlap / min(|A|, |B|)  — catches versioned names
-      e.g. "Jarvis" (1 word) vs "Jarvis v9" (2 words):
-           general = 1/2 = 0.5 (would miss), subset = 1/1 = 1.0 (matches ✓)
+    Scoring uses word overlap with two metrics (max is taken):
+    - General: overlap / max(|A|, |B|)  — Jaccard-like
+    - Subset : overlap / min(|A|, |B|)  — catches subset names ("Jarvis" → "Jarvis v9")
 
-    threshold=0.6 is the default for standard matching.
-    Pass threshold=0.4 for a softer second-pass to catch near-typos on create.
+    Tokens are split on spaces, hyphens, and em-dashes so that slugified names
+    and natural-language names score identically.
+
+    When two projects tie, in_progress beats done — avoids re-opening a closed
+    project when an active one with similar words exists.
     """
-    words_new = set(name.lower().split())
+    tokenize = lambda s: set(re.split(r"[\s\-—]+", s.lower()))
+    words_new = tokenize(name)
     best_match: str | None = None
     best_score = 0.0
-    for existing_name in project_map:
-        words_ex = set(existing_name.lower().split())
+    for existing_name, existing_proj in project_map.items():
+        words_ex = tokenize(existing_name)
         overlap = len(words_new & words_ex)
         if overlap == 0:
             continue
         general = overlap / max(len(words_new), len(words_ex))
         subset = overlap / min(len(words_new), len(words_ex))
         score = max(general, subset)
-        if score > best_score and score >= threshold:
+        if score < threshold:
+            continue
+        is_active = existing_proj.get("status") != "done"
+        best_is_active = project_map.get(best_match, {}).get("status") != "done" if best_match else False
+        if score > best_score or (score == best_score and is_active and not best_is_active):
             best_score = score
             best_match = existing_name
     return best_match
 
 
-def apply_project_updates(user_code: str, project_events: list[str]):
+def apply_project_updates(user_code: str, project_events: list[dict]):
+    """Apply structured project events from the analyzer.
+
+    Each event is a dict: {name, action, summary, [rename_to]}
+      action  : "create" | "update" | "done" | "rename"
+      summary : 1-sentence description of what happened (appended to updates timeline)
+      rename_to : new name (rename only)
+    """
     projects = get_user_projects(user_code)
     now = datetime.now(timezone.utc).isoformat()
+    today = now[:10]  # YYYY-MM-DD
 
     project_map: dict[str, dict] = {p["name"]: p for p in projects}
 
     for event in project_events:
-        try:
-            action, name = event.split(":", 1)
-            name = name.strip()
-        except ValueError:
+        if not isinstance(event, dict):
             continue
-
-        if not name:
+        action = event.get("action", "").strip()
+        name = _normalize_project_name(event.get("name", "").strip())
+        summary = (event.get("summary") or "").strip()
+        if not name or action not in ("create", "update", "done", "rename"):
             continue
 
         # Exact match first, then fuzzy — prevents name drift duplicates
@@ -888,14 +947,12 @@ def apply_project_updates(user_code: str, project_events: list[str]):
 
         if action == "create":
             if resolved not in project_map:
-                # Second-pass fuzzy at lower threshold (0.4) before creating —
-                # catches near-typos that the 0.6 pass missed, preventing phantom projects.
                 soft_match = _fuzzy_project_name(name, project_map, threshold=0.4)
                 if soft_match:
                     resolved = soft_match
                     project_map[resolved]["last_update"] = now
                     logger.debug(
-                        "Project create: '%s' soft-matched to existing '%s' — skipping create",
+                        "Project create: '%s' soft-matched to '%s' — skipping create",
                         name,
                         soft_match,
                     )
@@ -905,33 +962,36 @@ def apply_project_updates(user_code: str, project_events: list[str]):
                         "status": "in_progress",
                         "first_mentioned": now,
                         "last_update": now,
+                        "updates": [],
                     }
             else:
-                project_map[resolved]["last_update"] = now  # already exists → update
+                project_map[resolved]["last_update"] = now
 
         elif action == "update":
-            if resolved in project_map:
-                project_map[resolved]["last_update"] = now
-            else:
+            if resolved not in project_map:
                 project_map[resolved] = {
                     "name": resolved,
                     "status": "in_progress",
                     "first_mentioned": now,
                     "last_update": now,
+                    "updates": [],
                 }
+            else:
+                project_map[resolved]["last_update"] = now
 
         elif action == "done":
             if resolved in project_map:
                 project_map[resolved]["status"] = "done"
                 project_map[resolved]["last_update"] = now
+            else:
+                logger.warning(
+                    "Project done: '%s' not found — possible LLM confabulation (raw='%s')",
+                    resolved, name,
+                )
 
         elif action == "rename":
-            # Format: "rename:ancien nom->nouveau nom"
-            if "->" not in name:
-                continue
-            old_raw, new_name = name.split("->", 1)
-            old_raw = old_raw.strip()
-            new_name = new_name.strip()
+            old_raw = _normalize_project_name(event.get("name", "").strip())
+            new_name = _normalize_project_name(event.get("rename_to", "").strip())
             if not new_name:
                 continue
             old_resolved = (
@@ -944,6 +1004,14 @@ def apply_project_updates(user_code: str, project_events: list[str]):
                 entry["name"] = new_name
                 entry["last_update"] = now
                 project_map[new_name] = entry
+            continue  # rename has no summary entry
+
+        # Append summary to updates timeline (all actions except rename)
+        if summary and resolved in project_map:
+            proj = project_map[resolved]
+            proj.setdefault("updates", [])
+            proj["updates"].append({"date": today, "summary": summary})
+            proj["description"] = summary  # compact context always shows latest
 
     update_user_projects(user_code, list(project_map.values()))
 
@@ -1019,14 +1087,40 @@ def store_memory_vector(user_code: str, entry: dict):
         qdrant = get_qdrant()
         logger.info("Vector memory candidate: %s", text[:80])
         vector = model.encode(text, normalize_embeddings=True).tolist()
+
+        # #1 — Invariant: vector must be unit-norm before storage
+        _norm = float(np.linalg.norm(vector))
+        if abs(_norm - 1.0) > 0.01:
+            logger.error(
+                "[memory_invariant] NON-NORMALIZED vector for user=%s norm=%.4f — re-normalizing",
+                user_code, _norm,
+            )
+            _arr = np.array(vector, dtype=np.float32)
+            vector = (_arr / _norm).tolist()
+
         novelty = compute_memory_novelty(user_code, text, vector=vector)
+
+        # #1 — Invariant: novelty must be in [0, 1]
+        if not (0.0 <= novelty <= 1.0):
+            logger.error(
+                "[memory_invariant] novelty out of range for user=%s novelty=%.4f — clamping",
+                user_code, novelty,
+            )
+            novelty = max(0.0, min(1.0, novelty))
+
         if novelty < NOVELTY_THRESHOLD:
+            # #5 — Structured decision log
+            logger.info(
+                "[memory_decision] user=%s stored=False type=episodic reason=duplicate novelty=%.3f summary=%r",
+                user_code, novelty, text[:80],
+            )
             return
 
         # Deterministic ID: same (user_code, text) always produces the same UUID.
         # Qdrant upsert with an existing ID silently overwrites the point,
         # preventing duplicate entries when the same memory is stored twice.
         point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{user_code}:{text}"))
+        importance = entry.get("importance", 0)
 
         qdrant.upsert(
             collection_name=QDRANT_MEMORY_COLLECTION,
@@ -1037,7 +1131,7 @@ def store_memory_vector(user_code: str, entry: dict):
                     "payload": {
                         "user_code": user_code,
                         "memory_type": "episodic",
-                        "importance": entry.get("importance", 0),
+                        "importance": importance,
                         "session_id": entry["session_id"],
                         "text": text,
                         "timestamp": entry["timestamp"],
@@ -1047,6 +1141,11 @@ def store_memory_vector(user_code: str, entry: dict):
                     },
                 }
             ],
+        )
+        # #5 — Structured decision log
+        logger.info(
+            "[memory_decision] user=%s stored=True type=episodic novelty=%.3f importance=%.2f summary=%r",
+            user_code, novelty, importance, text[:80],
         )
 
     except Exception as e:
