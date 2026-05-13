@@ -164,7 +164,7 @@ MAX_TOKENS_HARD_CAP = int(os.getenv("MAX_TOKENS_HARD_CAP", "16000"))
 
 # ── Historique conversationnel (chat.py) ─────────────────────────────────
 HIST_CONV_TOKEN_BUDGET        = int(os.getenv("HIST_CONV_TOKEN_BUDGET",        "800"))
-SESSION_SUMMARY_TOKENS        = int(os.getenv("SESSION_SUMMARY_TOKENS",        "200"))
+SESSION_SUMMARY_TOKENS        = int(os.getenv("SESSION_SUMMARY_TOKENS",        "300"))
 HIST_CONV_SUMMARIZE_THRESHOLD = int(os.getenv("HIST_CONV_SUMMARIZE_THRESHOLD", "1000"))
 
 # ThinkingBudgetProcessor : activé via USE_THINKING_BUDGET_PROCESSOR=yes

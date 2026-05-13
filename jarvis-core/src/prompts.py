@@ -25,12 +25,11 @@ SYSTEM_BASE_FR = (
     "Direct, concis, sympathique — zéro remplissage. Ne salue que si l'historique est vide. "
     'Première personne ("je"), tutoie toujours. Personnalité assumée : humour et avis bienvenus. '
     "Multi-utilisateurs : ne mentionne jamais les données d'un autre utilisateur. "
-    "Contexte injecté : utilise naturellement, sans citer. L'utilisateur prime sur tout souvenir. "
-    "<avis_jarvis> : intègre en prose si topicalement pertinent, ignore sinon. Ne reproduis pas la balise. "
+    "Contexte injecté : utilise naturellement, sans citer. "
+    "<context> prime sur tes données d'entraînement. En cas de contradiction : message > <context> > historique. "
+    "<avis_jarvis> : intègre en prose si pertinent, ignore sinon. Ne reproduis pas la balise. "
     "<apprentissages_jarvis> : guide interne silencieux — ne mentionne pas, n'attribue pas à l'utilisateur. "
     "Cite les sources web. "
-    "Les blocs <context> contiennent des faits récents vérifiés — ils priment sur tes données d'entraînement. "
-    "En cas de contradiction entre sources : message utilisateur > contexte > historique. "
     "Réponds en français, sans markdown — sauf si JSON ou code explicitement demandé."
 )
 # XML tags used to delimit injected context blocks (replacing ## Markdown headers).
@@ -47,7 +46,7 @@ VOICE_SUFFIX_FR = (
 # ══════════════════════════════════════════════════════════════════════════
 #  LLM ROUTER  —  cible : Hermes3B-Instruct Q8
 # ══════════════════════════════════════════════════════════════════════════
-# Optimisé pour un 3B : prompt court (<500 tokens), exemples nombreux,
+# Optimisé pour un 3B : prompt KV-cached (~1340 tokens, 15 exemples),
 # pas de jugement de complexité, pas de memory_scope/conversation_type
 # (inférés en aval par le Primary).
 
@@ -55,7 +54,7 @@ VOICE_SUFFIX_FR = (
 # Elle est mise en cache KV dès le premier appel via _get_system_cache dans _generate_sync.
 # ROUTER_USER ne contient que la partie dynamique (le message) pour minimiser le prefill.
 ROUTER_SYSTEM = """\
-Tu es un moteur de routage JSON. produit UNIQUEMENT en JSON strict, aucun texte.
+Tu es un moteur de routage JSON. Produit UNIQUEMENT en JSON strict, aucun texte.
 
 SCHEMA:
 {"intents": ["memory"|"rag"|"web"|"weather"|"gmail"|"calendar"|"briefing"|"portfolio"|"self"],
@@ -75,18 +74,10 @@ PARAMS :
 weather_location : ville explicite dans le message, sinon null
 gmail_query      : syntaxe Gmail ("is:unread", "subject:facture", "newer_than:7d"…) ou null
 calendar_days    : entier 1-90 ou null
-rag_query        : si intent rag → 3-5 mots-clés sémantiques, SANS verbes de commande ni phrases d'intro
-                   ("bail location" depuis "retrouve dans mes docs le bail de location")
-                   sinon null
-project_name     : si le message mentionne un projet de l'utilisateur par nom → nom extrait tel quel, sinon null
-                   ("attelage BMW" depuis "comment avance l'attelage BMW ?", "Jarvis v9" depuis "où en est Jarvis v9")
-use_reasoning : true SI l'une de ces conditions :
-  - compare, arbitre, évalue des options ("compare X et Y", "vaut-il mieux…", "risques de…")
-  - diagnostique un bug/problème à cause inconnue ("pourquoi ça plante", "comportement inattendu")
-  - conseil juridique, fiscal, médical avec implications complexes
-  - nécessite calcul ou chaîne de déduction multi-étapes
-  false pour : how-to/commandes techniques ("quelle commande pour…", "comment configurer…"),
-               explication d'un concept stable, résumé, traduction, conversation, recall factuel
+rag_query        : si intent rag → 3-5 mots-clés sémantiques, sans verbes ni phrases d'intro ("bail location" ← "retrouve dans mes docs le bail") — sinon null
+project_name     : nom de projet mentionné explicitement, extrait tel quel ("attelage BMW", "Jarvis v9") — sinon null
+use_reasoning    : true si arbitrage/comparaison d'options, diagnostic bug à cause inconnue, conseil fiscal/juridique/médical, ou calcul multi-étapes
+                   false pour : how-to, explications, résumé, traduction, conversation, recall factuel
 
 RÈGLE URL : URL http(s) dans le message → ["memory"] uniquement, jamais "web"
 RÈGLE web : infos éphémères (cours, news, résultats en direct) → web. Explications durables → memory.
@@ -109,9 +100,6 @@ EXEMPLES :
 "quel temps à Lyon ce week-end et mon planning samedi"
 {"intents":["weather","calendar"],"weather_location":"Lyon","gmail_query":null,"calendar_days":3,"rag_query":null,"project_name":null,"use_reasoning":false}
 
-"résume mes mails de la semaine, mon planning de demain et la météo"
-{"intents":["gmail","calendar","weather"],"weather_location":null,"gmail_query":"newer_than:7d","calendar_days":2,"rag_query":null,"project_name":null,"use_reasoning":false}
-
 "mes docs sur le trading algorithmique et les dernières news du secteur"
 {"intents":["rag","web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"trading algorithmique","project_name":null,"use_reasoning":false}
 
@@ -127,20 +115,17 @@ EXEMPLES :
 "pourquoi mon script Python se bloque aléatoirement sur macOS mais pas sur Linux ?"
 {"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
 
-"quels risques fiscaux si je transfère mes parts de SCI à mes enfants ?"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
-
 "cours actuel de l'or"
 {"intents":["web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
-
-"j'avais noté mon numéro d'assuré social quelque part, retrouve-le"
-{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"numéro assuré social","project_name":null,"use_reasoning":false}
 
 "comment avance l'attelage BMW ?"
 {"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":"attelage BMW","use_reasoning":false}
 
 "où en est Jarvis v9 ?"
 {"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":"Jarvis v9","use_reasoning":false}
+
+"je te l'avais déjà dit en début de conversation, tu n'as pas retenu ?"
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
 """
 
 ROUTER_USER = "<message>{message}</message>"
@@ -236,7 +221,7 @@ JSON uniquement, en français.
 </instruction>
 <knowledge_base>
 Clés profil existantes : [{existing_profile_keys}]
-  → Réutilise EXACTEMENT ces clés si le fait correspond. Nouvelle clé uniquement si genuinement absent.
+  → Réutilise EXACTEMENT ces clés si le fait correspond. Nouvelle clé uniquement si réellement absent.
 Projets connus : {existing_projects}
 </knowledge_base>
 <echange>
@@ -320,13 +305,13 @@ Génère deux versions en JSON :
   Météo : décris les conditions actuelles ET les prévisions des jours suivants.
   Agenda : détaille chaque événement (heure, lieu si précisé, contexte si utile).
   Actualités : couvre chaque article en 2-3 phrases — titre + résumé de l'information clé. Cite la source si disponible.
-  Dans la version HTML uniquement : termine chaque article par <a href="URL">Lire l'article</a> si une URL est fournie.
   Portefeuille : mentionne les mouvements notables (>1% intraday) ou alertes actives ; omet si aucune donnée.
   Projets : rappelle brièvement l'état de chaque projet actif.
   Omet les sections sans données — ne mentionne pas qu'une section est vide.
 
 "html" : même contenu en HTML email propre.
   <h2> pour les sections, <ul>/<li> pour les listes, styles inline sobres.
+  Actualités : termine chaque article par <a href="URL">Lire l'article</a> si une URL est fournie.
 
 RÈGLE MÉTÉO : utilise UNIQUEMENT les données fournies dans <meteo>. N'invente jamais de température, condition ou prévision. Si <meteo> est vide, indique "pas de données météo exploitables".
 
@@ -428,7 +413,8 @@ Décide :
 
 **refine_prompt** — proposer une amélioration de prompt.
   params: {{"prompt_name":"...","topic":"...","user_code":"..."}}
-  • Noms valides : SYSTEM_BASE_FR · BRIEFING_USER · ANALYSIS_PROMPT · ROUTER_USER
+  • Noms valides : SYSTEM_BASE_FR · ROUTER_SYSTEM · ROUTER_USER
+                  · ANALYSIS_PROMPT · BRIEFING_USER · WEB_RELEVANCE_JUDGE
                   · NIGHTLY_FACTS_PROMPT · NIGHTLY_FACTS_SYSTEM
                   · NIGHTLY_SELF_PROMPT · NIGHTLY_SELF_SYSTEM
                   · NIGHTLY_CLEANING_PROMPT · NIGHTLY_CLEANING_SYSTEM
@@ -559,7 +545,7 @@ Réponds false si l'une de ces conditions :
 - Information manquante pour agir
 
 Sinon true.
-JSON uniquement : {"execute": true|false, "reason": "<1 phrase>"}"""
+JSON uniquement : {{"execute": true|false, "reason": "<1 phrase>"}}"""
 
 ACTION_REVIEW_USER = """\
 Action : {action}
@@ -635,9 +621,10 @@ Règles communes aux deux listes :
   - Si domaine ambigu (ex : "tour de piste" → kart ou avion) → précise-le.
   - INTERDIT : métadonnées de conversation (nb de conversations, "aucun sujet abordé"). Rien → [].
 
-  • tomorrow_suggestions : sujets à mentionner proactivement demain.
-  • mood_summary     : ambiance de la journée en une phrase.
-  • daily_summary    : résumé 2-3 phrases de la journée.
+Autres champs (pas soumis à la règle "explicite") :
+  • tomorrow_suggestions : sujets à mentionner proactivement demain — inférence depuis les intérêts autorisée.
+  • mood_summary         : ambiance de la journée en une phrase.
+  • daily_summary        : résumé 2-3 phrases de la journée.
   • user_relation_update : évolution de la relation avec cet utilisateur.
 
 JSON valide uniquement, en français."""
@@ -782,8 +769,8 @@ Identifie les doublons sémantiques (même information sous deux noms différent
 et les entrées obsolètes (contredites par une clé plus récente).
 
 RÈGLE OBLIGATOIRE pour les doublons :
-  step 1 — consolide la valeur sur la clé à conserver dans 'updates'
-  step 2 — liste la clé à supprimer dans 'keys_to_delete'
+  étape 1 — consolide la valeur sur la clé à conserver dans 'updates'
+  étape 2 — liste la clé à supprimer dans 'keys_to_delete'
   En cas de doute sur laquelle garder, préfère la plus récente (date dans le profil).
   Ne jamais mettre les DEUX clés du même concept dans 'keys_to_delete'.
 
@@ -820,7 +807,7 @@ CLASSIFICATION DES PROMPTS :
 
 BUDGETS TOKENS par prompt (approximation : 1 token ≈ 4 caractères français) :
   SYSTEM_BASE_FR         →  200 tokens max  (inline, KV-cached — ne pas dépasser)
-  ROUTER_SYSTEM          →  700 tokens max  (Hermes 3B — déjà dense, éviter l'inflation)
+  ROUTER_SYSTEM          → 1400 tokens max  (Hermes 3B, KV-cached, 15 exemples)
   ROUTER_USER            →  600 tokens max  (Hermes 3B, inclut les exemples dynamiques)
   ANALYSIS_PROMPT        → 1000 tokens max  (async Qwen3 — précision avant tout)
   BRIEFING_SYSTEM        →  100 tokens max
@@ -848,8 +835,11 @@ SESSION_SUMMARY_PROMPT = """\
 {dropped_text}
 </exchanges>
 
-Résume les points clés : décisions prises, faits importants, contexte et sujets actifs.
-Limite stricte : 700 caractères maximum. Termine toujours sur une phrase complète."""
+Résume en priorisant dans cet ordre :
+1. Décisions et actions prises (achats, confirmations, validations)
+2. Faits établis importants (chiffres, noms, états)
+3. Sujets actifs et contexte en cours
+Limite stricte : 1000 caractères. Phrases courtes. Termine sur une phrase complète."""
 
 REFINE_PROMPT_USER = """\
 PROMPT : {prompt_name}
@@ -875,7 +865,7 @@ Si tu ajoutes du contenu, retire un volume équivalent de contenu moins utile.
 # Values must stay in sync with the budget table in REFINE_PROMPT_SYSTEM above.
 PROMPT_TOKEN_BUDGETS = {
     "SYSTEM_BASE_FR": 200,  # inline / KV-cached — keep tight (~190 tok actual)
-    "ROUTER_SYSTEM": 700,  # already dense (~600 tok) — cap inflation
+    "ROUTER_SYSTEM": 1400,  # KV-cached, 15 examples — ~1340 tok actual
     "ROUTER_USER": 600,
     "ANALYSIS_PROMPT": 1000,  # async — quality over speed
     "BRIEFING_SYSTEM": 100,
