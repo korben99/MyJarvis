@@ -178,7 +178,7 @@ _AUTO_WEB_RE = re.compile(
     r"|\bversion\b|\bmodèle\b"
     r"|\bsorti\b|\bdisponible\b|\blancé\b"
     r"|\bactuel\b|\bactuelle\b|\bactuellem?ent\b"
-    r"|\bdernier\b|\bdernière\b|\bnouveau\b|\bnouvelle\b"
+    r"|\bdernier\b|\bdernière\b"
     r"|\bspecs?\b|\bcaractéristique\b"
     r"|\bqui est\b|\bc\'est qui\b"
     r"|\bcompar[e-]\b",
@@ -1012,6 +1012,8 @@ async def chat(req: ChatRequest):
         reasoning_hint = "\n\nSynthétise brièvement le contexte ci-dessus avant de répondre."
 
     raw_user_content = req.message
+    if req.image_parts and not image_description:
+        raw_user_content = f"{req.message}\n\n[Image jointe reçue mais non traitée par le modèle vision — ne demande pas de photo, réponds sans l'avoir vue.]"
     if image_description:
         raw_user_content = (
             f"{req.message}\n\n"

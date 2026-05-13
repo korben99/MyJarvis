@@ -972,7 +972,7 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
         _vlm_model, _vlm_processor, formatted,
         image=images[0] if len(images) == 1 else images,
         max_tokens=1200, temperature=0.7,
-        repetition_penalty=1.3, repetition_context_size=64, verbose=False,
+        repetition_penalty=1.5, repetition_context_size=256, verbose=False,
     )
     return result.text if hasattr(result, "text") else str(result)
 
