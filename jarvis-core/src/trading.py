@@ -59,7 +59,7 @@ logger = get_logger("jarvis-trading")
 
 TRADE_DATA_DIR = os.getenv("TRADE_DATA_DIR", "/opt/jarvis/RAGData/Trade")
 PRICE_CACHE_TTL = 55 * 60  # 55 minutes
-_ALERT_MIN_INTERVAL_HOURS = 8  # Don't re-alert same position within 4 h
+_ALERT_MIN_INTERVAL_HOURS = 8  # Don't re-alert same position within 8 h
 _ALERT_QUEUE_TTL = 86400  # Pending alerts expire after 24 h
 
 
@@ -298,11 +298,7 @@ def _resolve_ticker_llm(isin: str, name: str) -> str | None:
         f"If you are not confident, reply with 'UNKNOWN'."
     )
     try:
-        try:
-            loop = asyncio.get_running_loop()
-            raw = loop.run_until_complete(_ticker_llm_call_async(prompt))
-        except RuntimeError:
-            raw = asyncio.run(_ticker_llm_call_async(prompt))
+        raw = asyncio.run(_ticker_llm_call_async(prompt))
         if raw and raw.upper() != "UNKNOWN" and " " not in raw and len(raw) <= 12:
             return raw
         logger.warning(
@@ -458,7 +454,7 @@ def get_portfolio_summary_text(user_code: str) -> str:
     if not positions:
         return ""
 
-    lines = ["<portefeuille_boursier>"]
+    lines = ["<portfolio>"]
     total_cost = total_value = 0.0
 
     for p in positions:
@@ -497,7 +493,7 @@ def get_portfolio_summary_text(user_code: str) -> str:
             f"PV {total_pnl:+.0f}€ ({total_pnl_pct:+.2f}%)"
         )
 
-    lines.append("</portefeuille_boursier>")
+    lines.append("</portfolio>")
     return "\n".join(lines)
 
 
@@ -526,7 +522,7 @@ Si alert=false, message doit être une chaîne vide."""
 async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
     """
     Ask PRIMARY_MODEL whether an alert should be fired.
-    Rate-limits per position: same position won't alert twice within 4 h.
+    Rate-limits per position: same position won't alert twice within 8 h.
     Returns (should_alert, message).
     """
     r = get_redis()
@@ -604,7 +600,7 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
         )
         if not content or not content.strip():
             logger.warning("Alert evaluation: empty LLM response, skipping")
-            return
+            return False, ""
         result = extract_llm_json(content)
         should_alert = bool(result.get("alert", False))
         message = result.get("message", "")
