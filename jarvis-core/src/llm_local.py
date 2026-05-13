@@ -326,7 +326,7 @@ def preload_models() -> None:
             max_ws = info.get("max_recommended_working_set_size", 0)
             if max_ws > 0:
                 wired = int(max_ws * 0.85)
-                _mx.metal.set_wired_limit(wired)
+                _mx.set_wired_limit(wired)
                 logger.info("MLX: cache_limit=12 GB, wired_limit=%.0f GB", wired / 1024**3)
             else:
                 logger.info("MLX: cache_limit=12 GB (wired_limit skipped — device_info unavailable)")
