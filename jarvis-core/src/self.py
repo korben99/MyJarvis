@@ -2573,7 +2573,7 @@ async def generate_proactive_push(user_code: str) -> str:
         )
         return "LLM call failed"
 
-    if not message:
+    if not message or str(message).strip().lower() == "null":
         return "no proactive message generated"
 
     outcome = _action_queue_push({"user_code": user_code, "message": message})
