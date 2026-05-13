@@ -511,7 +511,13 @@ async def fetch_user_urls(urls: list[str], max_urls: int = 3) -> list[dict]:
                 return "", "page vide ou contenu non extractible (JavaScript requis ?)"
             return text, ""
         except Exception as exc:
-            return "", f"{type(exc).__name__}: {exc}"
+            # On timeout/connection errors try Jina as fallback (bypasses bot-protection)
+            if any(t in type(exc).__name__ for t in ("Timeout", "Connect")):
+                text = await _fetch_via_jina(url)
+                if text:
+                    return text, ""
+            msg = str(exc)
+            return "", f"{type(exc).__name__}{': ' + msg if msg else ''}"
 
     fetches = await asyncio.gather(*[_fetch_with_status(u) for u in urls])
     results = []

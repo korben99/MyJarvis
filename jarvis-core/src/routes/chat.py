@@ -372,7 +372,7 @@ async def _sse_stream(ctx: _SseCtx):
             )
         if full_clean:
             append_conversation_message(
-                ctx.user_code, ctx.session_id, "user", ctx.raw_user_content
+                ctx.user_code, ctx.session_id, "user", ctx.original_message
             )
             append_conversation_message(
                 ctx.user_code, ctx.session_id, "assistant", full_clean
@@ -1006,9 +1006,8 @@ async def chat(req: ChatRequest):
     if llm_result and llm_result.use_reasoning:
         # Short hint — "étape par étape" triggers verbose formal checklists in the think block.
         reasoning_hint = "\n\nRéfléchis avant de répondre."
-    elif not chat_no_think:
-        # Web/RAG synthesis — encourage brief thinking to organise context.
-        # No budget tag available for Qwen3.6 (causes garbled output); text hint instead.
+    elif not chat_no_think and assembled:
+        # Web/RAG synthesis — only when there is actual context to synthesize.
         reasoning_hint = "\n\nSynthétise brièvement le contexte ci-dessus avant de répondre."
 
     raw_user_content = req.message
@@ -1134,7 +1133,7 @@ async def chat(req: ChatRequest):
         thinking_budget=(THINKING_BUDGET_DEEP if _use_reasoning else THINKING_BUDGET_MEDIUM) if not chat_no_think else 0,
     )
 
-    append_conversation_message(user_code, req.session_id, "user", raw_user_content)
+    append_conversation_message(user_code, req.session_id, "user", req.message)
     append_conversation_message(user_code, req.session_id, "assistant", resp)
     ms = int((time.time() - start) * 1000)
 
