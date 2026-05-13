@@ -728,6 +728,7 @@ async def chat(req: ChatRequest):
                     req.voice_mode,
                     _rich_intent,
                     _rich_intent,  # include_opinions, include_suggestions
+                    req.message,
                 ),
                 asyncio.to_thread(
                     get_conversation, user_code, req.session_id, _HIST_FETCH_N
@@ -763,6 +764,7 @@ async def chat(req: ChatRequest):
                 user_code,
                 user_name or "",
                 req.voice_mode,
+                user_message=req.message,
             ),
             llm_route(req.message, google_available=_google_available),
             asyncio.to_thread(

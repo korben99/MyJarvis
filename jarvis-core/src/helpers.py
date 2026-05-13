@@ -326,6 +326,23 @@ def normalize_key(s: str) -> str:
     return s
 
 
+_FR_STOPWORDS = {
+    "le", "la", "les", "de", "du", "des", "un", "une", "en", "et", "ou", "à",
+    "au", "aux", "je", "tu", "il", "nous", "vous", "ils", "que", "qui", "est",
+    "ce", "se", "ne", "pas", "plus", "sur", "par", "pour", "avec", "dans",
+    "mais", "si", "car", "donc", "son", "sa", "ses", "mon", "ma", "mes",
+    "ton", "ta", "tes", "leur", "leurs", "on", "me", "te", "lui",
+}
+
+
+def keyword_overlap_score(a: str, b: str) -> int:
+    """Count shared content words between two French strings (stopwords excluded)."""
+    def tokens(s: str) -> set[str]:
+        return {w for w in re.sub(r"[^\w]", " ", s.lower()).split()
+                if len(w) > 2 and w not in _FR_STOPWORDS}
+    return len(tokens(a) & tokens(b))
+
+
 # ══════════════════════════════════════════════════
 #  CONNECTIONS — Redis + Qdrant
 # ══════════════════════════════════════════════════

@@ -36,7 +36,7 @@ from deps import (
     TOTAL_CONTEXT_BUDGET,
     WEB_CHAR_BUDGET,
 )
-from helpers import fmt_event_time, fmt_now_fr, get_logger, rel_time_fr
+from helpers import fmt_event_time, fmt_now_fr, get_logger, keyword_overlap_score, rel_time_fr
 from llm_client import trim_chunks
 from memory import (
     build_memory_context,
@@ -73,6 +73,7 @@ def build_dynamic_prefix(
     voice_mode: bool = False,
     include_opinions: bool = True,
     include_suggestions: bool = True,
+    user_message: str = "",
 ) -> tuple[str, dict]:
     """
     Build the per-turn context block prepended to the current user message.
@@ -106,9 +107,15 @@ def build_dynamic_prefix(
     if include_opinions:
         opinions = self_mem.get("opinions", [])
         if opinions:
-            ops_lines = "\n".join(
-                f"- {o['topic']} : {o['opinion']}" for o in opinions[-5:]
-            )
+            if user_message:
+                opinions = sorted(
+                    opinions,
+                    key=lambda o: keyword_overlap_score(o["topic"], user_message),
+                    reverse=True,
+                )[:5]
+            else:
+                opinions = opinions[-5:]
+            ops_lines = "\n".join(f"- {o['topic']} : {o['opinion']}" for o in opinions)
             parts.append(f"<avis_jarvis>\n{ops_lines}\n</avis_jarvis>")
 
     if voice_mode:
