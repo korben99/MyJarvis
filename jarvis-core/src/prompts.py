@@ -835,10 +835,9 @@ SESSION_SUMMARY_PROMPT = """\
 {dropped_text}
 </exchanges>
 
-Résume en priorisant dans cet ordre :
-1. Décisions et actions prises (achats, confirmations, validations)
-2. Faits établis importants (chiffres, noms, états)
-3. Sujets actifs et contexte en cours
+Transcris uniquement ce que l'utilisateur a dit EXPLICITEMENT — mots, faits, chiffres, affirmations directes.
+N'interprète rien. N'infère rien. N'inclus pas les réponses de Jarvis.
+Si l'utilisateur a posé une question ou exploré une piste, note-le comme tel (ex: "cherche une GMT acier"), pas comme une décision.
 Limite stricte : 1000 caractères. Phrases courtes. Termine sur une phrase complète."""
 
 REFINE_PROMPT_USER = """\
