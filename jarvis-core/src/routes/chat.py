@@ -158,6 +158,11 @@ async def _update_session_summary(user_code: str, session_id: str) -> None:
 # Not a config variable — purely an implementation detail derived from existing constants.
 _HIST_FETCH_N = max(HIST_CONV_TOKEN_BUDGET // 50, HIST_CONV_SUMMARIZE_THRESHOLD // 50, 10)
 
+# Think banner throttle — emit one SSE event every N tokens (≈8/s at 120 tok/s).
+# iOS ThinkingBanner already shows suffix(120) so sending the last 200 chars is enough.
+_THINK_EMIT_EVERY = 15
+_THINK_PREVIEW_CHARS = 200
+
 # user_codes whose Redis profile has been initialised this process lifetime.
 # Avoids a Redis hget on every request — populated on first message per user.
 _profile_initialised: set[str] = set()
@@ -308,6 +313,11 @@ async def _sse_stream(ctx: _SseCtx):
             in_think  # snapshot avant la boucle (in_think mute dans le loop)
         )
         first_chunk = True
+        # Think throttle: accumulate fragments, emit a sliding window every
+        # _THINK_EMIT_EVERY tokens so the iOS banner updates at ~8/s instead
+        # of ~120/s — readable scroll without changing the iOS side.
+        _think_accum: list[str] = []
+        _think_since_emit: int = 0
 
         async for chunk in stream_openai(
             ctx.messages,
@@ -330,7 +340,14 @@ async def _sse_stream(ctx: _SseCtx):
             clean, think_frag, in_think = filter_think_chunk(chunk, in_think)
 
             if think_frag:
-                yield f"data: {json.dumps({'think': think_frag})}\n\n"
+                _think_accum.append(think_frag)
+                _think_since_emit += 1
+                if _think_since_emit >= _THINK_EMIT_EVERY:
+                    snapshot = "".join(_think_accum)
+                    yield f"data: {json.dumps({'think': snapshot[-_THINK_PREVIEW_CHARS:]})}\n\n"
+                    _think_since_emit = 0
+                    if len(snapshot) > _THINK_PREVIEW_CHARS * 2:
+                        _think_accum = [snapshot[-_THINK_PREVIEW_CHARS:]]
 
             if first_chunk:
                 clean = clean.lstrip("\n")
