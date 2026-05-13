@@ -271,6 +271,18 @@ async def proxy_chat(
         raise HTTPException(400, "No usable message found")
 
     message, image_parts = _extract_content_parts(last_user_msg.content)
+    logger.info(
+        "proxy: content type=%s image_parts=%d extra_keys=%s",
+        type(last_user_msg.content).__name__,
+        len(image_parts),
+        [k for k in (last_user_msg.model_fields_set or set()) if k not in ("role", "content")],
+    )
+    if isinstance(last_user_msg.content, list):
+        logger.info(
+            "proxy: content parts=%s",
+            [p.get("type") if isinstance(p, dict) else type(p).__name__
+             for p in last_user_msg.content],
+        )
     if not message and not image_parts:
         raise HTTPException(400, "No usable message found")
 

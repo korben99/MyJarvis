@@ -169,6 +169,7 @@ async def _resolve_image_part(part: dict, client: httpx.AsyncClient) -> dict:
     those internally and re-encode as base64.
     """
     url = part.get("image_url", {}).get("url", "")
+    logger.info("Vision._resolve: url=%r", url[:80] if url else "(empty)")
     if url.startswith("data:") or url.startswith("https://"):
         return part
 
@@ -177,7 +178,7 @@ async def _resolve_image_part(part: dict, client: httpx.AsyncClient) -> dict:
         r.raise_for_status()
         mime = (r.headers.get("content-type") or "image/jpeg").split(";")[0]
         b64 = base64.b64encode(r.content).decode()
-        logger.debug(
+        logger.info(
             "Vision: re-encoded internal image (%s, %d bytes)", mime, len(r.content)
         )
         return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}

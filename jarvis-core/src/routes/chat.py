@@ -836,13 +836,17 @@ async def chat(req: ChatRequest):
 
     # ── Vision: describe images (two-stage pipeline) ────────────────────────
     image_description = ""
+    logger.info("vision: image_parts=%d image_base64=%s", len(req.image_parts), bool(req.image_base64))
     if req.image_parts:
         if VISION_MODEL:
+            logger.info("vision: calling describe_images (model=%s)", VISION_MODEL)
             image_description = await describe_images(req.image_parts, req.message)
             if image_description:
                 logger.info(
                     "Vision: image described (%d chars)", len(image_description)
                 )
+            else:
+                logger.warning("Vision: describe_images returned empty — parts=%r", req.image_parts[:1])
         else:
             logger.warning(
                 "Vision: image received but VISION_MODEL not configured — ignored"
