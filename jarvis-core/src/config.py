@@ -118,25 +118,56 @@ def is_hermes(model: str) -> bool:
     return "hermes" in (model or "").lower()
 
 
-# Max tokens for the <think> block — Qwen3 open-source supports this in apply_chat_template.
-# Thinking + output tokens share the same max_tokens budget in mlx-lm.
-# Set via env THINKING_BUDGET_TOKENS. 0 = no budget (unlimited).
-# Default 1024 = ~1-2s of thinking on Qwen3-30B-A3B, enough for structured tasks.
-THINKING_BUDGET_TOKENS = int(os.getenv("THINKING_BUDGET_TOKENS", "2048"))
+# ══════════════════════════════════════════════════════════════════════════
+#  LLM BUDGETS — token budgets et timeouts
+#
+#  ThinkingBudgetProcessor (llm_local.py) force </think> via logits après exactement
+#  THINKING_BUDGET_* tokens — hard cut avec phase soft (boost progressif sur les 10%
+#  finaux). La valeur est précise : un budget trop court tronque le raisonnement.
+#
+#  Timeout formula : max_tokens / TOKEN_SPEED_TPS * TIMEOUT_MARGIN
+#  llm_timeout(n) applique cette formule avec un plancher à 10 s.
+# ══════════════════════════════════════════════════════════════════════════
 
-# max_tokens budgets for streaming chat (thinking + response share the same budget).
-# Qwen3.6 @ 5.4bit ≈ 80 tok/s → 1500 tok ≈ 19s, 3000 tok ≈ 37s, 4000 tok ≈ 50s.
-MAX_TOKENS_NO_THINK  = int(os.getenv("MAX_TOKENS_NO_THINK",  "1500"))
-MAX_TOKENS_SYNTHESIS = int(os.getenv("MAX_TOKENS_SYNTHESIS", "3000"))  # web/RAG
-MAX_TOKENS_REASONING = int(os.getenv("MAX_TOKENS_REASONING", "4000"))  # use_reasoning
+# ── Vitesse de génération (mesurée, MLX + queue lock, conservateur) ──────
+TOKEN_SPEED_TPS = float(os.getenv("TOKEN_SPEED_TPS", "50"))   # tok/s
+TIMEOUT_MARGIN  = float(os.getenv("TIMEOUT_MARGIN",  "1.3"))  # marge sécurité
 
-# Hard cap appliqué à tous les appels LLM locaux (kill switch, pas un budget).
-# Le modèle s'arrête naturellement à l'EOS — cette valeur n'est atteinte qu'en cas de runaway.
-# Qwen3.6 @ 60 tok/s → 16000 tok ≈ 267s max absolu.
+
+def llm_timeout(max_tokens: int) -> float:
+    """Timeout en secondes pour un appel LLM local, plancher à 10 s."""
+    return max(10.0, max_tokens / TOKEN_SPEED_TPS * TIMEOUT_MARGIN)
+
+
+# ── no_think — output seul, pas de bloc think ────────────────────────────
+MAX_TOKENS_TINY     = int(os.getenv("MAX_TOKENS_TINY",     "80"))    # ticker, query rewriter
+MAX_TOKENS_SHORT    = int(os.getenv("MAX_TOKENS_SHORT",    "300"))   # router, normalize, judge
+MAX_TOKENS_COMPACT  = int(os.getenv("MAX_TOKENS_COMPACT",  "600"))   # push, cleaning, consolidate
+MAX_TOKENS_MEDIUM   = int(os.getenv("MAX_TOKENS_MEDIUM",   "1000"))  # analyzer, reflection, alerts
+MAX_TOKENS_NO_THINK = int(os.getenv("MAX_TOKENS_NO_THINK", "1500"))  # chat simple, nightly self
+MAX_TOKENS_BRIEFING = int(os.getenv("MAX_TOKENS_BRIEFING", "3000"))  # briefing assembly
+
+# ── think — THINKING_BUDGET_* + headroom réponse ────────────────────────
+# Le ThinkingBudgetProcessor coupe le think exactement à THINKING_BUDGET_* tokens.
+# max_tokens doit toujours > thinking_budget + taille_réponse_attendue.
+THINKING_BUDGET_COMPACT = int(os.getenv("THINKING_BUDGET_COMPACT", "1024"))  # classification, décision binaire
+THINKING_BUDGET_MEDIUM  = int(os.getenv("THINKING_BUDGET_MEDIUM",  "2048"))  # raisonnement modéré
+THINKING_BUDGET_DEEP    = int(os.getenv("THINKING_BUDGET_DEEP",    "4000"))  # créativité, analyse longue
+
+MAX_TOKENS_THINK_COMPACT = THINKING_BUDGET_COMPACT + 1024   # prune, action_review
+MAX_TOKENS_THINK_MEDIUM  = THINKING_BUDGET_MEDIUM  + 3000   # trading thresholds
+MAX_TOKENS_SYNTHESIS     = int(os.getenv("MAX_TOKENS_SYNTHESIS", "8000"))   # chat web/RAG
+MAX_TOKENS_REASONING     = int(os.getenv("MAX_TOKENS_REASONING", "10000"))  # refine_prompt, chat reasoning
+
+# ── Hard cap (kill switch runaway — indépendant des budgets ci-dessus) ───
 MAX_TOKENS_HARD_CAP = int(os.getenv("MAX_TOKENS_HARD_CAP", "16000"))
 
-# ThinkingBudgetProcessor : force </think> après THINKING_BUDGET_TOKENS tokens de réflexion.
-# Désactivé par défaut — valider avec scripts/test_thinking_budget.py avant d'activer.
+# ── Historique conversationnel (chat.py) ─────────────────────────────────
+HIST_CONV_TOKEN_BUDGET        = int(os.getenv("HIST_CONV_TOKEN_BUDGET",        "800"))
+SESSION_SUMMARY_TOKENS        = int(os.getenv("SESSION_SUMMARY_TOKENS",        "200"))
+HIST_CONV_SUMMARIZE_THRESHOLD = int(os.getenv("HIST_CONV_SUMMARIZE_THRESHOLD", "1000"))
+
+# ThinkingBudgetProcessor : activé via USE_THINKING_BUDGET_PROCESSOR=yes
 USE_THINKING_BUDGET_PROCESSOR = os.getenv("USE_THINKING_BUDGET_PROCESSOR", "no").lower() == "yes"
 
 
