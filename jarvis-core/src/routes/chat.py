@@ -14,11 +14,16 @@ from typing import Optional
 from briefing import gather_briefing, get_stored_briefing, store_briefing
 from config import (
     BRIEFING_TIMEZONE,
+    HIST_CONV_SUMMARIZE_THRESHOLD,
+    HIST_CONV_TOKEN_BUDGET,
     IOS_MAX_MESSAGES,
     LLM_LOCAL,
     MAX_TOKENS_NO_THINK,
     MAX_TOKENS_REASONING,
     MAX_TOKENS_SYNTHESIS,
+    SESSION_SUMMARY_TOKENS,
+    THINKING_BUDGET_DEEP,
+    THINKING_BUDGET_MEDIUM,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
@@ -26,12 +31,12 @@ from config import (
     ROUTER_API_KEY,
     ROUTER_API_URL,
     ROUTER_MODEL,
-    THINKING_BUDGET_TOKENS,
     USER_CITIES,
     USER_CODES,
     USER_TIMEZONES,
     VISION_MODEL,
     is_qwen3,
+    llm_timeout,
 )
 from deps import REDIS_CLIENT
 from embed_router import embed_route
@@ -51,7 +56,9 @@ from helpers import (
     filter_think_chunk,
     fmt_now_fr,
     get_logger,
+    get_session_summary_data,
     rel_time_fr,
+    set_session_summary_data,
 )
 from llm_client import describe_images, stream_openai
 from llm_router import llm_route
@@ -69,6 +76,7 @@ from pipeline import (
     build_system_prompt,
     post_analysis,
 )
+from prompts import get_prompt
 from pydantic import BaseModel
 from rag import search_documents
 from self import handle_proposal_command
@@ -83,7 +91,72 @@ from web_search import (
 logger = get_logger("jarvis-chat")
 
 router = APIRouter()
-_HIST_WINDOW = 8  # HISTORIQUE DES MESSAGES DANS LE PROMPT INJECTE
+def _trim_history_to_budget(hist: list[dict], budget_tokens: int) -> list[dict]:
+    """Keep the most recent messages that fit within the token budget (4 chars ≈ 1 token)."""
+    budget_chars = budget_tokens * 4
+    selected: list[dict] = []
+    used = 0
+    for msg in reversed(hist):
+        cost = len(msg.get("content", ""))
+        if used + cost > budget_chars and selected:
+            break
+        selected.append(msg)
+        used += cost
+    return list(reversed(selected))
+
+
+async def _update_session_summary(user_code: str, session_id: str) -> None:
+    """Post-response background task: compress conversation history into a rolling summary.
+
+    Self-contained: fetches state from Redis, checks threshold, generates if needed.
+    Uses the ROUTER model (warm in VRAM, 3B) — runs after response is sent, no GPU conflict.
+    Trigger: uncovered messages (since last summary) exceed HIST_CONV_SUMMARIZE_THRESHOLD.
+    """
+    try:
+        summary_data = get_session_summary_data(user_code, session_id)
+        covered_count = summary_data["msg_count"] if summary_data else 0
+        existing_text = summary_data["text"] if summary_data else ""
+
+        total_count = REDIS_CLIENT.llen(f"chat:{user_code}:{session_id}")
+        uncovered_n = max(0, int(total_count) - covered_count)
+        if uncovered_n == 0:
+            return
+
+        uncovered = get_conversation(user_code, session_id, limit=uncovered_n)
+        uncovered_chars = sum(len(m.get("content", "")) for m in uncovered)
+        if uncovered_chars <= HIST_CONV_SUMMARIZE_THRESHOLD * 4:
+            return
+
+        dropped_text = "\n".join(
+            f"{m['role']}: {m.get('content', '')[:400]}" for m in uncovered
+        )
+        existing_block = f"Résumé précédent :\n{existing_text}\n\n" if existing_text else ""
+        prompt = get_prompt("SESSION_SUMMARY_PROMPT").format(
+            existing_block=existing_block,
+            dropped_text=dropped_text,
+        )
+        content = await call_llm_async(
+            [{"role": "user", "content": prompt}],
+            model=ROUTER_MODEL,
+            api_url=ROUTER_API_URL,
+            api_key=ROUTER_API_KEY,
+            temperature=0.0,
+            max_tokens=SESSION_SUMMARY_TOKENS,
+            no_think=True,
+            timeout=llm_timeout(SESSION_SUMMARY_TOKENS),
+        )
+        if content and content.strip():
+            set_session_summary_data(user_code, session_id, content.strip(), int(total_count))
+            logger.debug(
+                "session summary updated: %s/%s (covers %d msgs)", user_code, session_id, total_count
+            )
+    except Exception as exc:
+        logger.warning("session summary update failed: %s", exc)
+
+
+# Derived fetch limit: enough messages for injection + one threshold's worth of summarization.
+# Not a config variable — purely an implementation detail derived from existing constants.
+_HIST_FETCH_N = max(HIST_CONV_TOKEN_BUDGET // 50, HIST_CONV_SUMMARIZE_THRESHOLD // 50, 10)
 
 # user_codes whose Redis profile has been initialised this process lifetime.
 # Avoids a Redis hget on every request — populated on first message per user.
@@ -245,7 +318,7 @@ async def _sse_stream(ctx: _SseCtx):
             no_think=ctx.no_think,
             session_id=ctx.session_id,
             max_tokens=ctx.max_tokens,
-            thinking_budget=THINKING_BUDGET_TOKENS if not ctx.no_think else 0,
+            thinking_budget=THINKING_BUDGET_MEDIUM if not ctx.no_think else 0,
         ):
             full_parts.append(chunk)
 
@@ -301,6 +374,7 @@ async def _sse_stream(ctx: _SseCtx):
                 ctx.session_id, ctx.user_code, ctx.original_message, full_clean
             )
         )
+        asyncio.create_task(_update_session_summary(ctx.user_code, ctx.session_id))
     except asyncio.CancelledError:
         logger.info("Client disconnected")
         if full_parts:
@@ -614,7 +688,7 @@ async def chat(req: ChatRequest):
             dynamic_prefix = f"Date : {fmt_now_fr(tz)}.{_name_part}"
             _self_mem = {}
             hist = await asyncio.to_thread(
-                get_conversation, user_code, req.session_id, _HIST_WINDOW
+                get_conversation, user_code, req.session_id, _HIST_FETCH_N
             )
             _prefetched_memory = None
             logger.debug(
@@ -633,7 +707,7 @@ async def chat(req: ChatRequest):
                     _rich_intent,  # include_opinions, include_suggestions
                 ),
                 asyncio.to_thread(
-                    get_conversation, user_code, req.session_id, _HIST_WINDOW
+                    get_conversation, user_code, req.session_id, _HIST_FETCH_N
                 ),
                 _prefetched_memory_coro,
                 return_exceptions=True,
@@ -669,7 +743,7 @@ async def chat(req: ChatRequest):
             ),
             llm_route(req.message, google_available=_google_available),
             asyncio.to_thread(
-                get_conversation, user_code, req.session_id, _HIST_WINDOW
+                get_conversation, user_code, req.session_id, _HIST_FETCH_N
             ),
             _spec_mem_task,
             return_exceptions=True,
@@ -935,11 +1009,18 @@ async def chat(req: ChatRequest):
             )
             logger.info("Project detail injected: %s", _proj["name"])
 
-    # Build the user message: [dynamic_prefix] → [context] → [project_detail] → <message_utilisateur>
+    _summary_data = get_session_summary_data(user_code, req.session_id)
+    _session_summary = _summary_data["text"] if _summary_data else ""
+
+    # Build the user message: [dynamic_prefix] → [summary] → [context] → [project_detail] → <message_utilisateur>
     # XML tag clearly delimits the actual question from all injected context above.
     msg_parts = []
     if dynamic_prefix:
         msg_parts.append(dynamic_prefix)
+    if _session_summary:
+        msg_parts.append(
+            "<résumé_conversation>\n" + _session_summary + "\n</résumé_conversation>"
+        )
     if assembled:
         msg_parts.append(assembled)
     if _project_detail_block:
@@ -951,9 +1032,15 @@ async def chat(req: ChatRequest):
     )
     user_content = "\n\n".join(msg_parts)
 
-    # Window: last 8 messages (4 exchanges).
-    # Raw messages (no dynamic prefix) are stored in Redis → history stays compact.
-    hist_slice = hist[-_HIST_WINDOW:]
+    # When a session summary exists, inject only the messages NOT yet covered by it.
+    # The summary replaces everything up to msg_count; new messages are still injected raw.
+    if _session_summary:
+        _total = int(REDIS_CLIENT.llen(f"chat:{user_code}:{req.session_id}"))
+        _uncovered_n = max(0, _total - _summary_data["msg_count"])
+        _uncovered_hist = hist[-_uncovered_n:] if _uncovered_n > 0 else []
+        hist_slice = _trim_history_to_budget(_uncovered_hist, HIST_CONV_TOKEN_BUDGET)
+    else:
+        hist_slice = _trim_history_to_budget(hist, HIST_CONV_TOKEN_BUDGET)
     messages = [{"role": "system", "content": system_prompt}]
     for m in hist_slice:
         messages.append({"role": m["role"], "content": m["content"]})
@@ -1015,7 +1102,7 @@ async def chat(req: ChatRequest):
         timeout=_use_timeout,
         no_think=chat_no_think,
         max_tokens=_max_tokens,
-        thinking_budget=THINKING_BUDGET_TOKENS if not chat_no_think else 0,
+        thinking_budget=(THINKING_BUDGET_DEEP if _use_reasoning else THINKING_BUDGET_MEDIUM) if not chat_no_think else 0,
     )
 
     append_conversation_message(user_code, req.session_id, "user", raw_user_content)
@@ -1023,6 +1110,7 @@ async def chat(req: ChatRequest):
     ms = int((time.time() - start) * 1000)
 
     asyncio.create_task(post_analysis(req.session_id, user_code, req.message, resp))
+    asyncio.create_task(_update_session_summary(user_code, req.session_id))
 
     return {
         "response": resp,

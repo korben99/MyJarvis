@@ -25,10 +25,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from config import (
+    MAX_TOKENS_BRIEFING,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
     USER_CITIES,
+    llm_timeout,
     USER_CODES,
     USER_EMAILS,
     USER_TIMEZONES,
@@ -274,9 +276,12 @@ async def _fetch_news(interests: list[str]) -> list[dict]:
             logger.warning("News fetch failed for %r: %s", query, type(exc).__name__)
             return []
 
+    def _quote_multiword(term: str) -> str:
+        return f'"{term}"' if " " in term else term
+
     # One task per interest (full phrase, not just last word) + general fallback
     tasks = [_fetch_one(general_query, 4)] + [
-        _fetch_one(kw, 2) for kw in interests[:3]
+        _fetch_one(_quote_multiword(kw), 2) for kw in interests[:3]
     ]
     results_lists = await asyncio.gather(*tasks)
     gen_results = results_lists[0]
@@ -381,10 +386,10 @@ async def _assemble_with_llm(
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.6,
-            max_tokens=3000,  # briefing JSON can include multiple sections; early-stop active
+            max_tokens=MAX_TOKENS_BRIEFING,
             json_response=True,
             no_think=True,
-            timeout=30.0,
+            timeout=llm_timeout(MAX_TOKENS_BRIEFING),
         )
         result = extract_llm_json(content)
         return result.get("text", ""), result.get("html", "")

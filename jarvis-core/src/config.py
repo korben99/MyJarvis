@@ -70,7 +70,7 @@ if LLM_LOCAL:
     ROUTER_MODEL = os.getenv(
         "ROUTER_MODEL_LOCAL", "/opt/jarvis/models/hub/Hermes-3-Llama-3.2-3B-q6-affine"
     )
-    PRIMARY_MODEL = os.getenv("PRIMARY_MODEL_LOCAL", "Qwen/Qwen3-30B-A3B-MLX-6bit")
+    PRIMARY_MODEL = os.getenv("PRIMARY_MODEL_LOCAL", "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit")
     REASONING_MODEL = os.getenv("REASONING_MODEL_LOCAL") or PRIMARY_MODEL
     VISION_MODEL = os.getenv(
         "VISION_MODEL_LOCAL", "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-5bit"
@@ -122,7 +122,7 @@ def is_hermes(model: str) -> bool:
 # Thinking + output tokens share the same max_tokens budget in mlx-lm.
 # Set via env THINKING_BUDGET_TOKENS. 0 = no budget (unlimited).
 # Default 1024 = ~1-2s of thinking on Qwen3-30B-A3B, enough for structured tasks.
-THINKING_BUDGET_TOKENS = int(os.getenv("THINKING_BUDGET_TOKENS", "1024"))
+THINKING_BUDGET_TOKENS = int(os.getenv("THINKING_BUDGET_TOKENS", "2048"))
 
 # max_tokens budgets for streaming chat (thinking + response share the same budget).
 # Qwen3.6 @ 5.4bit ≈ 80 tok/s → 1500 tok ≈ 19s, 3000 tok ≈ 37s, 4000 tok ≈ 50s.
@@ -185,6 +185,7 @@ BRIEFING_TIMEZONE = os.getenv("BRIEFING_TIMEZONE", "Europe/Paris")
 
 # ── Proto-self reflection loop ─────────────────────────────────────────────
 REFLECTION_INTERVAL_HOURS = int(os.getenv("REFLECTION_INTERVAL_HOURS", "6"))
+CONV_ANALYSIS_INTERVAL_MINUTES = int(os.getenv("CONV_ANALYSIS_INTERVAL_MINUTES", "60"))
 MAX_CHAIN_ITERATIONS = int(
     os.getenv("MAX_CHAIN_ITERATIONS", "3")
 )  # max actions per reflection cycle

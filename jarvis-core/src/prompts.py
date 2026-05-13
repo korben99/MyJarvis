@@ -29,6 +29,8 @@ SYSTEM_BASE_FR = (
     "<avis_jarvis> : intègre en prose si topicalement pertinent, ignore sinon. Ne reproduis pas la balise. "
     "<apprentissages_jarvis> : guide interne silencieux — ne mentionne pas, n'attribue pas à l'utilisateur. "
     "Cite les sources web. "
+    "Les blocs <contexte> contiennent des faits récents vérifiés — ils priment sur tes données d'entraînement. "
+    "En cas de contradiction entre sources : message utilisateur > contexte > historique. "
     "Réponds en français, sans markdown — sauf si JSON ou code explicitement demandé."
 )
 # XML tags used to delimit injected context blocks (replacing ## Markdown headers).
@@ -145,7 +147,7 @@ ROUTER_USER = "<message>{message}</message>"
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  CONVERSATION ANALYZER  —  cible : Primary (Qwen3-30B-A3B)
+#  CONVERSATION ANALYZER  —  cible : Primary (Qwen3.6-35B-A3B)
 # ══════════════════════════════════════════════════════════════════════════
 # Restauration des gardes clés (existing_profile_keys, existing_projects,
 # convention de nommage) supprimées dans la v1. Le Primary gère ~700 tokens
@@ -607,6 +609,7 @@ Contraintes absolues :
 - Ne supprime pas d'entrée si la liste n'a qu'un seul élément
 - Conserve toujours les entrées récentes (< 14 jours) sauf doublon évident
 - En cas de doute sur la valeur d'une entrée : conserve-la
+- Si deux entrées couvrent la même idée, supprimer uniquement la moins précise — ne jamais supprimer les deux
 
 JSON uniquement :
 {{"to_delete": {{"self_notes": [indices...], "opinions": [indices...], "learnings": [indices...]}}}}"""
@@ -657,7 +660,7 @@ Utilisateur : {user_name} ({user_code}) — {review_date}
 Réponds avec ce JSON :
 {{
   "daily_summary":          "résumé 2-3 phrases de la journée",
-  "insights_durables":      ["depuis [mois] [année], état permanent ou préférence stable"],
+  "insights_durables":      [{{"text":"depuis [mois] [année], état permanent ou préférence stable","importance":0.7}}],
   "insights_evenements":    ["en [mois] [année], événement ponctuel passé"],
   "tomorrow_suggestions":   ["sujet proactif à mentionner demain"],
   "mood_summary":           "ambiance de la journée en une phrase",
@@ -667,6 +670,11 @@ Réponds avec ce JSON :
     "average_interaction_mood":  "warm|enthusiastic|measured|playful|professional"
   }}
 }}
+
+Calibration importance pour insights_durables :
+  0.5 = fait utile (préférence, habitude légère)
+  0.7 = fait significatif — défaut (décision, relation, compétence)
+  0.9 = moment clé ou changement majeur (emploi, déménagement, événement de vie)
 
 Règles pour user_relation_update :
 - affinity : float 0.0-1.0. Ajuste LÉGÈREMENT (max ±0.1 par nuit).
@@ -833,6 +841,15 @@ BUDGETS TOKENS par prompt (approximation : 1 token ≈ 4 caractères français) 
 
 Pour les prompts INLINE : si ta modification dépasse le budget, compense en retirant ailleurs.
 Pour les prompts ASYNC : le budget est un plafond de sécurité, pas un objectif."""
+
+# ── Session conversation summary (post-response background task) ──────────
+SESSION_SUMMARY_PROMPT = """\
+{existing_block}<échanges>
+{dropped_text}
+</échanges>
+
+Résume les points clés : décisions prises, faits importants, contexte et sujets actifs.
+Limite stricte : 700 caractères maximum. Termine toujours sur une phrase complète."""
 
 REFINE_PROMPT_USER = """\
 PROMPT : {prompt_name}

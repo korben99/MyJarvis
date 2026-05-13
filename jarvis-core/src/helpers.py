@@ -67,6 +67,7 @@ import httpx
 import pytz
 import redis
 from config import (
+    CHAT_LOG_TTL,
     LLM_LOCAL,
     PRIMARY_MODEL,
     QDRANT_URL,
@@ -341,8 +342,38 @@ def get_redis() -> redis.Redis:
     if _redis_client is None:
         with _redis_lock:
             if _redis_client is None:
-                _redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+                _redis_client = redis.from_url(
+                    REDIS_URL,
+                    decode_responses=True,
+                    socket_keepalive=True,
+                    health_check_interval=30,
+                    retry_on_timeout=True,
+                )
     return _redis_client
+
+
+_SESSION_SUMMARY_PREFIX = "session:summary:"
+
+
+def get_session_summary_data(user_code: str, session_id: str) -> dict | None:
+    """Return {text, msg_count} for the session conversation summary, or None."""
+    raw = get_redis().get(f"{_SESSION_SUMMARY_PREFIX}{user_code}:{session_id}")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def set_session_summary_data(user_code: str, session_id: str, text: str, msg_count: int) -> None:
+    """Persist conversation summary with its coverage watermark."""
+    data = json.dumps({"text": text, "msg_count": msg_count}, ensure_ascii=False)
+    get_redis().setex(
+        f"{_SESSION_SUMMARY_PREFIX}{user_code}:{session_id}",
+        CHAT_LOG_TTL,
+        data,
+    )
 
 
 def get_qdrant() -> QdrantClient:

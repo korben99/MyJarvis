@@ -16,7 +16,6 @@ describe_images_local(...)   → str   (async, mlx_vlm)
 import asyncio
 import copy
 import datetime
-import gc
 import json
 import logging
 import os
@@ -142,6 +141,10 @@ _infer_lock = threading.Lock()  # serialises all MLX inference (GPU Metal not pr
 # Background tasks yield the GPU when a chat caller is waiting.
 _chat_waiters: int = 0
 _chat_waiters_lock = threading.Lock()
+
+# asyncio.Event set when _infer_lock is released: wakes background tasks instantly
+# instead of polling every 2 s. Created lazily on first async call.
+_bg_wakeup: asyncio.Event | None = None
 
 # System-prompt KV cache: prefilled once, deepcopied per call.
 # Multi-turn session caching was removed: Qwen3's enable_thinking template adds
@@ -320,7 +323,7 @@ def preload_models() -> None:
         # Wired limit: 85% of Metal's max working set size (macOS-enforced cap).
         try:
             info = _mx.device_info()
-            max_ws = info.get("max_working_set_size", 0)
+            max_ws = info.get("max_recommended_working_set_size", 0)
             if max_ws > 0:
                 wired = int(max_ws * 0.85)
                 _mx.metal.set_wired_limit(wired)
@@ -612,7 +615,7 @@ def _generate_sync(
     """Blocking generation. Always call via asyncio.to_thread from async code."""
     model, tokenizer = _load_model(model_path)
     prompt = _build_prompt(messages, tokenizer, model_path, no_think, thinking_budget)
-    prompt_tokens = len(tokenizer.encode(prompt))
+    prompt_tokens = len(prompt) // 4
     profile = _model_profile(model_path)
     model_short = model_path.split("/")[-1]
 
@@ -625,7 +628,6 @@ def _generate_sync(
     )
 
     early_stopped = False
-    gc.collect()  # flush accumulated Python objects before entering the generation loop
 
     if json_response:
         result, seen_end_think, early_stopped = _stream_to_json(
@@ -644,7 +646,7 @@ def _generate_sync(
         seen_end_think = not no_think  # not used in non-json path
 
     _debug_log(model_short, no_think, prompt, result)
-    resp_tokens = len(tokenizer.encode(result))
+    resp_tokens = len(result) // 4
     _log_stats(model_short, "json" if json_response else "text", no_think,
                "early-stop" if early_stopped else "eos/limit",
                prompt_tokens, resp_tokens, effective_max)
@@ -728,6 +730,8 @@ async def call_llm_local_async(
         )
     finally:
         _infer_lock.release()
+        if _bg_wakeup is not None:
+            _bg_wakeup.set()
 
 
 async def call_llm_local_async_bg(
@@ -743,8 +747,20 @@ async def call_llm_local_async_bg(
     **_kwargs,
 ) -> str:
     """Async non-streaming, background priority: yields GPU when a chat caller is waiting."""
+    global _bg_wakeup
+    if _bg_wakeup is None:
+        _bg_wakeup = asyncio.Event()
+        _bg_wakeup.set()
     _t0 = time.time()
     while True:
+        with _chat_waiters_lock:
+            if _chat_waiters == 0:
+                acquired = _infer_lock.acquire(blocking=False)
+                if acquired:
+                    _bg_wakeup.clear()
+                    break
+        _bg_wakeup.clear()
+        # Second check after clear to avoid lost-wakeup race
         with _chat_waiters_lock:
             if _chat_waiters == 0:
                 acquired = _infer_lock.acquire(blocking=False)
@@ -753,7 +769,7 @@ async def call_llm_local_async_bg(
         _waited = time.time() - _t0
         if _waited > 5.0 and int(_waited) % 10 == 0:
             logger.debug("[BG-INFER] waiting for GPU (chat priority) — %.0fs", _waited)
-        await asyncio.sleep(2.0)
+        await _bg_wakeup.wait()
 
     logger.debug("[BG-INFER] lock acquired after %.3fs", time.time() - _t0)
     try:
@@ -763,6 +779,8 @@ async def call_llm_local_async_bg(
         )
     finally:
         _infer_lock.release()
+        if _bg_wakeup is not None:
+            _bg_wakeup.set()
 
 
 async def stream_local(
@@ -788,7 +806,7 @@ async def stream_local(
                      _t_infer - _t_lock_wait)
         mlx_model, tokenizer = _load_model(model)
         prompt = _build_prompt(messages, tokenizer, model, no_think, thinking_budget)
-        prompt_tokens = len(tokenizer.encode(prompt))
+        prompt_tokens = len(prompt) // 4
         model_short = model.split("/")[-1]
 
         sys_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
@@ -837,7 +855,7 @@ async def stream_local(
         finally:
             raw_resp = "".join(raw_chunks)
             _debug_log(model_short, no_think, prompt, raw_resp)
-            resp_tokens = len(tokenizer.encode(raw_resp))
+            resp_tokens = len(raw_resp) // 4
             thinking_active = "</think>" in raw_resp or "</think >" in raw_resp
             _log_stats(model_short, "stream", no_think, "eos/limit",
                        prompt_tokens, resp_tokens, budget)
@@ -866,6 +884,8 @@ async def stream_local(
     finally:
         stop_flag.set()
         _infer_lock.release()
+        if _bg_wakeup is not None:
+            _bg_wakeup.set()
 
 
 # ── Vision model (mlx_vlm) ────────────────────────────────────────────────

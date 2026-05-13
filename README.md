@@ -193,48 +193,53 @@ When `LLM_LOCAL=yes`, Jarvis uses `mlx_lm` directly (no HTTP server) — models 
 - Prevents the MLX allocator from retaining unused Metal buffers indefinitely between inferences, keeping headroom available for KV caches during long conversations.
 
 **Thinking control:**
-- `THINKING_BUDGET_TOKENS` (env, default 1024) — injects `<budget_remaining>N</budget_remaining>` in the `<think>` block via the ninja template patch. Acts as a **binary "think briefly" signal** on Qwen3.6 (see note below).
 - `no_think=True` — disables thinking entirely (`enable_thinking=False` + `thinking_budget=0`). Saves ~4 s TTFT on simple chat.
-- `no_think=False, thinking_budget=0` — full unconstrained thinking. On Qwen3.6, complex tasks can use ~1900 tokens of reasoning.
-- `no_think=False, thinking_budget>0` — reduced thinking mode (~400 tok on Qwen3.6, regardless of N).
+- `no_think=False, thinking_budget=0` — full unconstrained thinking (~1900 tok on Qwen3.6).
+- `no_think=False, thinking_budget>0` — thinking hard-cut by `ThinkingBudgetProcessor` at exactly `thinking_budget` tokens.
 - **Qwen3.6 ninja patch** (`QWEN36_NINJA_TEMPLATE`): Jinja2 template override. When `no_think=True`, outputs no `<think>` tag (better KV caching). When `no_think=False` with `thinking_budget>0`, injects `<think>\n<budget_remaining>N</budget_remaining>\n`.
 
-**Note on Qwen3.6 thinking budget (measured, `scripts/test_thinking_budget.py`):** Unlike Qwen3 base models which were trained with precise budget-forcing, Qwen3.6 treats `<budget_remaining>N</budget_remaining>` as a binary signal. Any positive value N produces ~400 tokens of thinking (~79% reduction vs ~1900 unconstrained). The exact value of N has no measurable effect. `THINKING_BUDGET_TOKENS` therefore acts as a boolean flag: `0` = think freely, `>0` = think concisely.
+**`ThinkingBudgetProcessor`** (`llm_local.py`): MLX logits processor that hard-cuts `</think>` at exactly `thinking_budget` tokens via logit manipulation — soft boost at 90% of budget, hard cut at 100%. The value is precise (not a boolean): too short a budget truncates reasoning mid-thought and degrades output quality. Per-task budgets: `THINKING_BUDGET_COMPACT=1024` (quick judgment), `THINKING_BUDGET_MEDIUM=2048` (chat/synthesis), `THINKING_BUDGET_DEEP=4000` (creative rewrite). Only active when `USE_THINKING_BUDGET_PROCESSOR=yes`.
 
 #### LLM Call Inventory
 
 Every LLM call in the codebase — model tier, thinking mode, and token budgets.
 
-`THINKING_BUDGET_TOKENS` (env) = 2048 in prod. Nightly calls with `no_think=False` use `THINKING_BUDGET_TOKENS + N` as `max_tokens`: ~400 tok thinking (brief mode) + N tok response headroom.
+Token budgets use per-task config variables (see `config.py`). Timeouts are derived via `llm_timeout(max_tokens)` = `max(10, max_tokens / TOKEN_SPEED_TPS * TIMEOUT_MARGIN)`.
 
 | Call site | File | Model | no_think | max_tokens | thinking_budget | Purpose |
 |-----------|------|-------|----------|-----------|----------------|---------|
-| Router | `llm_router.py` | Tier 1 — Hermes-3B | `True` | 300 | — | Intent + use_reasoning decision |
-| Main chat (simple) | `routes/chat.py` | Tier 2 — PRIMARY | `True` | 1 500 | — | Chat without RAG/web |
-| Main chat (reasoning) | `routes/chat.py` | Tier 2/3 — PRIMARY or REASONING | `False` | 2 500 | `THINKING_BUDGET_TOKENS` | Chat with RAG/web/reasoning (~400 tok think) |
-| Conversation analyzer | `analyzer.py` | Tier 2 — PRIMARY | `False` | 1 500 | **600** | Post-exchange fact/mood/ESS extraction |
-| Daily briefing | `briefing.py` | Tier 2 — PRIMARY | `True` | 3 000 | — | Morning briefing generation |
-| Calendar date extraction | `google_services.py` | Tier 2 — PRIMARY | `True` | 150 | — | Parse event datetime from text |
-| Web relevance judge | `web_search.py` | Tier 1 — ROUTER | `True` | 150 | — | Judge DDG snippets / enriched results sufficiency (Stage 1 & 2) |
-| Web query optimizer | `web_search.py` | Tier 1 — ROUTER | `True` | 50 | — | LLM-optimised query run concurrently with Stage-0 DDG (zero extra latency) |
-| Web dual refinement | `web_search.py` | Tier 1 — ROUTER | `True` | 80 | — | Generate 2 refined queries in one call when Stage 2 still insufficient (Stage 3) |
-| Global reflection (P1) | `self.py` | Tier 3 — REASONING | `False` | 3 500 | 400 | Jarvis self-state: gaps, notes, prompts |
-| User reflection (P2) | `self.py` | Tier 3 — REASONING | `False` | 3 500 | 600 | Per-user: profile, push, insights |
-| Nightly facts | `self.py` | Tier 3 — REASONING | `False` | `THINKING_BUDGET_TOKENS + 2000` | `THINKING_BUDGET_TOKENS` | User insight + relation update |
-| Nightly self analysis | `self.py` | Tier 3 — REASONING | `False` | `THINKING_BUDGET_TOKENS + 1500` | **0 (free)** | Jarvis learnings, growth log, opinions |
-| Nightly cleaning | `self.py` | Tier 3 — REASONING | `False` | `THINKING_BUDGET_TOKENS + 1000` | `THINKING_BUDGET_TOKENS` | Autobio fact archive/delete |
-| refine_prompt (initial) | `self.py` | Tier 3 — REASONING | `False` | `THINKING_BUDGET_TOKENS + 6000` | **0 (free)** | Propose prompt improvement |
-| refine_prompt (retry) | `self.py` | Tier 3 — REASONING | `False` | `THINKING_BUDGET_TOKENS + 6000` | **0 (free)** | Retry with critique feedback |
-| prune_self_memory | `self.py` | Tier 3 — REASONING | `False` | 1 800 | `THINKING_BUDGET_TOKENS` | Prune stale self-notes / opinions |
-| Proactive push | `self.py` | Tier 3 — REASONING | `True` | 600 | — | Generate iOS push message |
-| Action self-review | `self.py` | Tier 3 — REASONING | `False` | `THINKING_BUDGET_TOKENS + 300` | `THINKING_BUDGET_TOKENS` | LLM gate before risky reflection action |
-| Profile key dedup | `memory.py` | Tier 1 — ROUTER | `True` | ~300 | — | Namespace-scoped key dedup (1 call/group) |
+| Router | `llm_router.py` | Tier 1 — Hermes-3B | `True` | `MAX_TOKENS_SHORT` (300) | — | Intent + use_reasoning decision |
+| Main chat (simple) | `routes/chat.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_NO_THINK` (1 500) | — | Chat without RAG/web |
+| Main chat (web/RAG) | `routes/chat.py` | Tier 2 — PRIMARY | `False` | `MAX_TOKENS_SYNTHESIS` (8 000) | `THINKING_BUDGET_MEDIUM` (2 048) | Chat with RAG/web synthesis |
+| Main chat (reasoning) | `routes/chat.py` | Tier 2/3 — PRIMARY or REASONING | `False` | `MAX_TOKENS_REASONING` (10 000) | `THINKING_BUDGET_DEEP` (4 000) | Explicitly routed reasoning query |
+| Conversation analyzer | `analyzer.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_MEDIUM` (1 000) | — | Post-exchange fact/mood/ESS extraction |
+| Daily briefing | `briefing.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_BRIEFING` (3 000) | — | Morning briefing generation |
+| Calendar date extraction | `google_services.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_SHORT` (300) | — | Parse event datetime from text |
+| Web relevance judge | `web_search.py` | Tier 1 — ROUTER | `True` | `MAX_TOKENS_SHORT` (300) | — | Judge DDG snippets / enriched results sufficiency |
+| Web query optimizer | `web_search.py` | Tier 1 — ROUTER | `True` | `MAX_TOKENS_TINY` (80) | — | LLM-optimised query (zero extra latency) |
+| Web dual refinement | `web_search.py` | Tier 1 — ROUTER | `True` | `MAX_TOKENS_TINY` (80) | — | 2 refined queries when Stage 2 still insufficient |
+| Global reflection (P1) | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_MEDIUM` (1 000) | — | Jarvis self-state: gaps, notes, prompts |
+| User reflection (P2) | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_MEDIUM` (1 000) | — | Per-user: profile, push, insights |
+| Nightly facts | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_NO_THINK` (1 500) | — | User insight + relation update |
+| Nightly self analysis | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_NO_THINK` (1 500) | — | Jarvis learnings, growth log, opinions |
+| Nightly cleaning | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_COMPACT` (600) | — | Autobio fact archive/delete |
+| refine_prompt (initial) | `self.py` | Tier 3 — REASONING | `False` | `MAX_TOKENS_REASONING` (10 000) | `THINKING_BUDGET_DEEP` (4 000) | Propose prompt improvement |
+| refine_prompt (retry) | `self.py` | Tier 3 — REASONING | `False` | `MAX_TOKENS_REASONING` (10 000) | `THINKING_BUDGET_DEEP` (4 000) | Retry with critique feedback |
+| prune_self_memory | `self.py` | Tier 3 — REASONING | `False` | `MAX_TOKENS_THINK_COMPACT` (2 048) | `THINKING_BUDGET_COMPACT` (1 024) | Prune stale self-notes / opinions |
+| Proactive push | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_COMPACT` (600) | — | Generate iOS push message |
+| Action self-review | `self.py` | Tier 3 — REASONING | `False` | `MAX_TOKENS_THINK_COMPACT` (2 048) | `THINKING_BUDGET_COMPACT` (1 024) | LLM gate before risky reflection action |
+| Profile key dedup | `memory.py` | Tier 1 — ROUTER | `True` | `MAX_TOKENS_SHORT` (300) | — | Namespace-scoped key dedup |
+| Memory consolidate | `memory.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_COMPACT` (600) | — | Deduplicate / merge episodic memories |
+| Profile curative cleanup | `memory.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_COMPACT` (600) | — | Curative profile cleanup |
+| Ticker extraction | `trading.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_TINY` (80) | — | Extract ticker symbol from text |
+| Alert evaluation | `trading.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_MEDIUM` (1 000) | — | Evaluate price alert thresholds |
+| Threshold suggestion | `trading.py` | Tier 2 — PRIMARY | `False` | `MAX_TOKENS_THINK_MEDIUM` (5 048) | `THINKING_BUDGET_MEDIUM` (2 048) | Quantitative reasoning on price thresholds |
 
-**`no_think=True`** (router, briefing, calendar, web judge, push, prune): structured/short output, latency-sensitive — no thinking needed.
+**`no_think=True`**: structured/short output, latency-sensitive — router, briefing, calendar, web, push, nightly extractions.
 
-**`no_think=False` + `thinking_budget>0`** (~500 tok brief thinking): analyzer, chat with context, reflection, nightly cleaning, action review — tasks that benefit from reasoning but where latency or tight `max_tokens` budgets make free thinking costly.
+**`no_think=False` + `thinking_budget>0`** (hard-cut by processor): chat synthesis/reasoning, prune, action review, refine_prompt, trading thresholds — tasks where reasoning quality matters and budget controls latency.
 
-**`no_think=False` + `thinking_budget=0`** (~1900 tok free thinking): `refine_prompt`, `nightly_self` — deep creative/reflective tasks where quality > speed. Requires higher `max_tokens` headroom and longer timeouts (180–300s).
+**`no_think=False` + `thinking_budget=0`**: not currently used in production (all think-mode calls use a budget).
 
 #### Router Output Fields
 
@@ -640,7 +645,7 @@ User message
 | Optimisation | Gain TTFT | Détails |
 |---|---|---|
 | **no_think conditionnel** | −4 s sur chat simple | `chat_no_think=True` sauf RAG/web/reasoning. `thinking_budget=0` via chat template (KV-safe). |
-| **THINKING_BUDGET_TOKENS=1024** | −2 à −5 s | Limite le bloc `<think>` à ~1024 tokens au lieu de l'infini. |
+| **ThinkingBudgetProcessor** | −2 à −5 s | Hard-cut logits `</think>` au budget exact (COMPACT/MEDIUM/DEEP) — évite la réflexion infinie. |
 | **System prompt réduit** | −0.3 s | `SYSTEM_BASE_FR` réduit de ~400 chars/~100 tokens. |
 | **KV cache prefix caching** | −1 à −3 s dès le tour 2 | Cache KV MLX par session (LRU ×5). Seuls les nouveaux tokens sont calculés à chaque tour. |
 
@@ -679,7 +684,7 @@ Cartographie de tous les appels LLM de la codebase. Chaque ligne indique si le t
 |---|---|
 | **Think** | `think` = mode réflexion actif (`no_think=False`) · `no_think` = mode direct |
 | **Budget** | Tokens alloués (thinking + réponse partagent ce budget — kill switch, pas un cap dur) |
-| **Processor** | `✅` = `ThinkingBudgetProcessor` actif (force `</think>` à `THINKING_BUDGET_TOKENS=2048`) · `—` = inactif |
+| **Processor** | `✅` = `ThinkingBudgetProcessor` actif (hard cut `</think>` au budget exact via logits) · `—` = inactif |
 | **Justification** | Pourquoi ce mode pour cette tâche |
 
 ### Conversations (routes/chat.py)
@@ -690,7 +695,7 @@ Cartographie de tous les appels LLM de la codebase. Chaque ligne indique si le t
 | Chat web / RAG (synthèse) | PRIMARY | `think` | 8 000 | ✅ 2048 tok | Synthèse de sources multiples — thinking améliore la cohérence |
 | Chat reasoning (`use_reasoning`) | PRIMARY | `think` | 10 000 | ✅ 2048 tok | Requête complexe explicitement routée en thinking |
 
-> Le `ThinkingBudgetProcessor` est actif dès que `thinking_budget=THINKING_BUDGET_TOKENS` est passé (conversations think mode). Il force `</think>` après 2048 tok de réflexion, évitant la troncature de la réponse.
+> Le `ThinkingBudgetProcessor` est actif dès que `thinking_budget > 0` et `USE_THINKING_BUDGET_PROCESSOR=yes`. Il force `</think>` via manipulation de logits (soft boost à 90% du budget, hard cut à 100%), évitant que la réflexion empiète sur le budget réponse. La valeur est précise — un budget trop court tronque le raisonnement et dégrade la qualité.
 
 ### Background — Analyzer (analyzer.py)
 
@@ -711,37 +716,37 @@ Cartographie de tous les appels LLM de la codebase. Chaque ligne indique si le t
 
 | Fonction | Modèle | Think | Budget | Processor | Justification |
 |---|---|---|---|---|---|
-| `_call_global_reflection_llm` | REASONING | `no_think` | 800 | — | Classification mood/satisfaction sur l'échange global — extraction pure |
-| `_call_user_reflection_llm` | REASONING | `no_think` | 800 | — | Idem, par utilisateur |
-| `generate_proactive_push` | REASONING | `no_think` | 600 | — | Décision binaire + phrase courte — thinking superflu |
-| `_action_prune_self_memory` | REASONING | `no_think` | 1 200 | — | **Classification** : sélection d'indices à supprimer. Testé en thinking : décisions aléatoires et agressives à budget <4096 tok, 120 s. no_think = cohérent + 15 s. |
-| `_action_refine_self` | REASONING | `think` | 4 000 | ✅ 2 048 tok | Décision execute/skip avec contexte riche — thinking améliore la qualité du jugement contextuel. `THINKING_BUDGET_TOKENS` → ~2 000 tok libres pour le JSON. |
+| `_call_global_reflection_llm` | REASONING | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Classification mood/satisfaction sur l'échange global — extraction pure |
+| `_call_user_reflection_llm` | REASONING | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Idem, par utilisateur |
+| `generate_proactive_push` | REASONING | `no_think` | `MAX_TOKENS_COMPACT` (600) | — | Décision binaire + phrase courte — thinking superflu |
+| `_action_prune_self_memory` | REASONING | `think` | `MAX_TOKENS_THINK_COMPACT` (2 048) | ✅ `THINKING_BUDGET_COMPACT` (1 024) | Sélection d'entrées à supprimer — thinking court pour cohérence sans agressivité |
+| `_action_refine_self` | REASONING | `think` | `MAX_TOKENS_THINK_COMPACT` (2 048) | ✅ `THINKING_BUDGET_COMPACT` (1 024) | Décision execute/skip avec contexte riche — thinking améliore la qualité du jugement contextuel. |
 
 ### Background — Nightly review (self.py)
 
 | Fonction | Modèle | Think | Budget | Processor | Justification |
 |---|---|---|---|---|---|
-| `_nightly_self_facts` | REASONING | `no_think` | 1 500 | — | Extraction de faits depuis les conversations — tâche de parsing structuré, thinking n'apporte pas de valeur mesurable |
-| `_nightly_self_user` | REASONING | `no_think` | 1 500 | — | Extraction mise à jour profil utilisateur — idem |
-| `_nightly_cleaning` | REASONING | `no_think` | 600 | — | Nettoyage/déduplication — classification pure |
-| `_action_refine_prompt` (+ retry) | REASONING | `think` | 10 000 | ✅ 2 048 tok | **Créativité** : réécriture de prompt système. Thinking essentiel pour la qualité. `THINKING_BUDGET_TOKENS` → ~8 000 tok libres pour le prompt réécrit + rationale. |
+| `_nightly_self_facts` | REASONING | `no_think` | `MAX_TOKENS_NO_THINK` (1 500) | — | Extraction de faits depuis les conversations — tâche de parsing structuré, thinking n'apporte pas de valeur mesurable |
+| `_nightly_self_user` | REASONING | `no_think` | `MAX_TOKENS_NO_THINK` (1 500) | — | Extraction mise à jour profil utilisateur — idem |
+| `_nightly_cleaning` | REASONING | `no_think` | `MAX_TOKENS_COMPACT` (600) | — | Nettoyage/déduplication — classification pure |
+| `_action_refine_prompt` (+ retry) | REASONING | `think` | `MAX_TOKENS_REASONING` (10 000) | ✅ `THINKING_BUDGET_DEEP` (4 000) | **Créativité** : réécriture de prompt système. Thinking essentiel. ~6 000 tok libres pour le prompt réécrit + rationale. |
 
 ### Routing & Web search (llm_router.py, web_search.py)
 
 | Fonction | Modèle | Think | Budget | Processor | Justification |
 |---|---|---|---|---|---|
 | `llm_route` | ROUTER | `no_think` | 300 | — | Classification d'intention — JSON court, déterministe |
-| `_llm_judge_relevance` | ROUTER | `no_think` | 150 | — | Score de pertinence — binaire, ultra-court |
-| `_generate_optimized_query` | ROUTER | `no_think` | 50 | — | Réécriture de requête — tâche simple |
-| `_refine_web_queries` | ROUTER | `no_think` | 80 | — | Idem, 2 requêtes raffinées |
+| `_llm_judge_relevance` | ROUTER | `no_think` | `MAX_TOKENS_SHORT` (300) | — | Score de pertinence — binaire, ultra-court |
+| `_generate_optimized_query` | ROUTER | `no_think` | `MAX_TOKENS_TINY` (80) | — | Réécriture de requête — tâche simple |
+| `_refine_web_queries` | ROUTER | `no_think` | `MAX_TOKENS_TINY` (80) | — | Idem, 2 requêtes raffinées |
 
 ### Trading (trading.py)
 
 | Fonction | Modèle | Think | Budget | Processor | Justification |
 |---|---|---|---|---|---|
-| `_ticker_llm_call_async` | PRIMARY | `no_think` | 20 | — | Extraction symbole ticker — réponse ultra-courte |
-| `evaluate_alerts` | PRIMARY | `no_think` | 1 000 | — | Évaluation seuils d'alerte — classification technique |
-| `suggest_thresholds_llm` | PRIMARY | `think` | 5 000 | ✅ 2 048 tok | Raisonnement quantitatif sur seuils prix. `THINKING_BUDGET_TOKENS` → ~3 000 tok libres pour le JSON multi-positions. |
+| `_ticker_llm_call_async` | PRIMARY | `no_think` | `MAX_TOKENS_TINY` (80) | — | Extraction symbole ticker — réponse ultra-courte |
+| `evaluate_alerts` | PRIMARY | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Évaluation seuils d'alerte — classification technique |
+| `suggest_thresholds_llm` | PRIMARY | `think` | `MAX_TOKENS_THINK_MEDIUM` (5 048) | ✅ `THINKING_BUDGET_MEDIUM` (2 048) | Raisonnement quantitatif sur seuils prix. ~3 000 tok libres pour le JSON multi-positions. |
 
 ### Briefing (briefing.py)
 
@@ -755,26 +760,37 @@ Cartographie de tous les appels LLM de la codebase. Chaque ligne indique si le t
 Tâche de classification / extraction / formatage
   → no_think=True  (rapide, déterministe, résultat identique)
 
-Tâche de jugement contextuel / décision binaire avec nuance
-  → think=True, budget libre (thinking_budget=0 → processor inactif)
+Tâche conversationnelle ou créative (chat, refine_prompt, trading thresholds)
+  → think=True, thinking_budget=THINKING_BUDGET_MEDIUM ou DEEP → processor actif (hard cut précis)
 
-Tâche conversationnelle ou créative (chat, refine_prompt)
-  → think=True, thinking_budget=THINKING_BUDGET_TOKENS → processor actif (cap 2048 tok)
+Tâche de jugement avec contexte limité (prune, action review)
+  → think=True, thinking_budget=THINKING_BUDGET_COMPACT (1024) → brief thinking, résultat cohérent
 
-Jamais think pour une tâche multi-items avec JSON contraint
-  → Risque : thinking coupé en cours d'analyse → JSON agressif / incohérent (testé sur prune_self_memory)
+Ne pas utiliser thinking_budget=0 en production
+  → Risque : réflexion infinie (~1900 tok) → empiète sur le budget réponse, timeout imprévisible
 ```
 
 ### Variables de contrôle (.env)
 
 | Variable | Défaut | Rôle |
 |---|---|---|
-| `THINKING_BUDGET_TOKENS` | 2048 | Budget thinking pour les conversations + trading (= cap du processor) |
+| `TOKEN_SPEED_TPS` | 50 | Vitesse de génération estimée (tok/s) — calibre les timeouts |
+| `TIMEOUT_MARGIN` | 1.3 | Marge multiplicative pour `llm_timeout()` |
 | `USE_THINKING_BUDGET_PROCESSOR` | yes | Active le `ThinkingBudgetProcessor` sur les appels avec `thinking_budget > 0` |
-| `MAX_TOKENS_HARD_CAP` | 16 000 | Kill switch absolu tous appels locaux (thinking + réponse) |
-| `MAX_TOKENS_NO_THINK` | 1 500 | Budget conversations no_think |
-| `MAX_TOKENS_SYNTHESIS` | 8 000 | Budget conversations web/RAG thinking |
-| `MAX_TOKENS_REASONING` | 10 000 | Budget conversations use_reasoning thinking |
+| `THINKING_BUDGET_COMPACT` | 1 024 | Budget thinking court (prune, action review) |
+| `THINKING_BUDGET_MEDIUM` | 2 048 | Budget thinking moyen (chat synthesis, trading) |
+| `THINKING_BUDGET_DEEP` | 4 000 | Budget thinking long (refine_prompt, reasoning) |
+| `MAX_TOKENS_TINY` | 80 | Ticker, web optimizer — réponse ultra-courte |
+| `MAX_TOKENS_SHORT` | 300 | Router, calendar, web judge |
+| `MAX_TOKENS_COMPACT` | 600 | Push, nightly cleaning, memory ops |
+| `MAX_TOKENS_MEDIUM` | 1 000 | Analyzer, reflection, alerts |
+| `MAX_TOKENS_NO_THINK` | 1 500 | Chat simple, nightly facts |
+| `MAX_TOKENS_BRIEFING` | 3 000 | Daily briefing |
+| `MAX_TOKENS_THINK_COMPACT` | `COMPACT + 1024` | prune / action review (thinking + réponse) |
+| `MAX_TOKENS_THINK_MEDIUM` | `MEDIUM + 3000` | Trading thresholds (thinking + réponse) |
+| `MAX_TOKENS_SYNTHESIS` | 8 000 | Chat web/RAG think |
+| `MAX_TOKENS_REASONING` | 10 000 | Chat use_reasoning + refine_prompt |
+| `MAX_TOKENS_HARD_CAP` | 16 000 | Kill switch absolu tous appels locaux |
 
 ---
 
@@ -916,7 +932,10 @@ All variables go in `/opt/jarvis/.env`.
 | `ROUTER_MODEL_LOCAL` | `Hermes-3-Llama-3.2-3B-q6-affine` | Router model HF repo ID or local path |
 | `VISION_MODEL_LOCAL` | `mlx-community/Qwen2.5-VL-7B-Instruct-4bit` | Vision model HF repo ID or local path |
 | `HF_HOME` | `/opt/jarvis/models` | Root directory for HuggingFace model cache |
-| `THINKING_BUDGET_TOKENS` | `1024` | Max tokens for `<think>` block. `0` = disabled. Applied via chat template kwarg (KV-cache safe). |
+| `THINKING_BUDGET_COMPACT` | `1024` | Hard-cut budget (tok) for quick-judgment calls (prune, action review) |
+| `THINKING_BUDGET_MEDIUM` | `2048` | Hard-cut budget for chat synthesis + trading thresholds |
+| `THINKING_BUDGET_DEEP` | `4000` | Hard-cut budget for reasoning + refine_prompt |
+| `USE_THINKING_BUDGET_PROCESSOR` | `yes` | Activate `ThinkingBudgetProcessor` for calls with `thinking_budget > 0` |
 | `QWEN36_NINJA_TEMPLATE` | `/opt/jarvis/models/templates/qwen36_ninja.jinja` | Path to the Qwen3.6 ninja-patch Jinja2 template. Controls think/no_think without relying on the standard chat template. Download with `scripts/download_models.py`. |
 
 ### Infrastructure

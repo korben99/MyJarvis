@@ -35,6 +35,7 @@ from config import (
     RAG_TOP_K,
     REASONING_API_URL,
     REASONING_MODEL,
+    CONV_ANALYSIS_INTERVAL_MINUTES,
     REFLECTION_INTERVAL_HOURS,
     ROUTER_API_URL,
     ROUTER_MODEL,
@@ -114,11 +115,11 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(
             analyse_recent_conversations,
             trigger="interval",
-            minutes=60,
+            minutes=CONV_ANALYSIS_INTERVAL_MINUTES,
             id="conversation_analysis",
             next_run_time=datetime.now(tz) + timedelta(minutes=10),
         )
-        logger.info("Conversation analysis scheduled every 30 min")
+        logger.info("Conversation analysis scheduled every %d min", CONV_ANALYSIS_INTERVAL_MINUTES)
 
         if BRIEFING_ENABLED:
             scheduler.add_job(

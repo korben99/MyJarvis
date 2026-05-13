@@ -42,6 +42,7 @@ from pydantic import BaseModel, Field, ValidationError
 from config import (
     CHAT_LOG_TTL,
     IMPORTANCE_THRESHOLD,
+    MAX_TOKENS_MEDIUM,
     PRIMARY_MODEL,
     USER_CODES,
 )
@@ -160,7 +161,7 @@ async def analyze_exchange(
             [{"role": "user", "content": prompt}],
             model=PRIMARY_MODEL,
             temperature=0.0,  # use model profile default (Qwen3.6: 0.7 no-think)
-            max_tokens=900,
+            max_tokens=MAX_TOKENS_MEDIUM,
             json_response=True,
             no_think=True,
         )
@@ -216,8 +217,6 @@ async def analyze_exchange(
             _has_summary,
         )
 
-        # should_remember: LLM importance cleared threshold AND summary present
-        result["should_remember"] = importance > IMPORTANCE_THRESHOLD and _has_summary
         # Normalise memory_summary: None if missing/empty (LLM may omit field or send null)
         if not _has_summary:
             result["memory_summary"] = None
@@ -228,7 +227,6 @@ async def analyze_exchange(
         logger.error("Analysis error: %s", e)
         result = AnalysisResult().model_dump()
         result["importance"] = 0.0
-        result["should_remember"] = False
         return result
 
 
@@ -448,7 +446,10 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                 # ── Qdrant par session (importance-gated) ─────────────────
                 _imp_s = analysis.get("importance", 0.0)
                 _mem_s = analysis.get("memory_summary")
-                if _imp_s > IMPORTANCE_THRESHOLD and _mem_s:
+                _has_durable = bool(
+                    analysis.get("user_facts") or analysis.get("project_updates")
+                )
+                if (_imp_s > IMPORTANCE_THRESHOLD or _has_durable) and _mem_s:
                     entry = {
                         "session_id": sd["session_id"],
                         "timestamp": sd["max_ts"],

@@ -29,6 +29,8 @@ import httpx
 from ddgs import DDGS
 
 from config import (
+    MAX_TOKENS_SHORT,
+    MAX_TOKENS_TINY,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
@@ -559,7 +561,7 @@ async def _llm_judge_relevance(question: str, results: list[dict]) -> bool:
             )}],
             **_router_llm_params(),
             temperature=0,
-            max_tokens=150,
+            max_tokens=MAX_TOKENS_SHORT,
             json_response=True,
             no_think=True,
             timeout=8.0,
@@ -598,7 +600,7 @@ async def _generate_optimized_query(question: str, current_query: str) -> str:
             )}],
             **_router_llm_params(),
             temperature=0,
-            max_tokens=50,
+            max_tokens=MAX_TOKENS_TINY,
             json_response=False,
             no_think=True,
             timeout=6.0,
@@ -630,7 +632,7 @@ async def _refine_web_queries(
             )}],
             **_router_llm_params(),
             temperature=0,
-            max_tokens=80,
+            max_tokens=MAX_TOKENS_TINY,
             json_response=False,
             no_think=True,
             timeout=8.0,

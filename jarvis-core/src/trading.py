@@ -43,10 +43,14 @@ import redis as redis_lib
 import yfinance as yf
 from config import (
     BRIEFING_TIMEZONE,
+    MAX_TOKENS_MEDIUM,
+    MAX_TOKENS_THINK_MEDIUM,
+    MAX_TOKENS_TINY,
+    THINKING_BUDGET_MEDIUM,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
-    THINKING_BUDGET_TOKENS,
+    llm_timeout,
 )
 from helpers import call_llm_async, extract_llm_json, get_logger, get_redis
 from trade_keys import alert_queue_key, idx_key, import_ts_key, pos_key, price_cache_key
@@ -272,10 +276,10 @@ async def _ticker_llm_call_async(prompt: str) -> str:
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0,
-            max_tokens=20,
+            max_tokens=MAX_TOKENS_TINY,
             json_response=False,
             no_think=True,
-            timeout=15.0,
+            timeout=llm_timeout(MAX_TOKENS_TINY),
         )
     ).strip()
 
@@ -593,10 +597,10 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0,
-            max_tokens=1000,
+            max_tokens=MAX_TOKENS_MEDIUM,
             json_response=True,
             no_think=True,
-            timeout=20.0,
+            timeout=llm_timeout(MAX_TOKENS_MEDIUM),
         )
         if not content or not content.strip():
             logger.warning("Alert evaluation: empty LLM response, skipping")
@@ -787,11 +791,11 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=0.2,
-            max_tokens=5000,  # thinking ~THINKING_BUDGET_TOKENS + ~3000 JSON multi-positions
+            max_tokens=MAX_TOKENS_THINK_MEDIUM,
             json_response=True,
             no_think=False,
-            thinking_budget=THINKING_BUDGET_TOKENS,
-            timeout=90.0,
+            thinking_budget=THINKING_BUDGET_MEDIUM,
+            timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
         )
         result = extract_llm_json(content)
     except Exception as exc:

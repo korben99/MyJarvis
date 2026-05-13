@@ -34,7 +34,7 @@ import tempfile
 import time
 import uuid
 from datetime import date, datetime, timezone
-from threading import Lock
+from threading import Lock, Thread
 
 import numpy as np
 
@@ -52,6 +52,8 @@ from config import (
     MEMORY_DECAY_FACTOR,
     MEMORY_DECAY_THRESHOLD,
     NOVELTY_THRESHOLD,
+    MAX_TOKENS_COMPACT,
+    MAX_TOKENS_SHORT,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
@@ -67,6 +69,7 @@ from config import (
     ROUTER_TIMEOUT,
     SELF_MEMORY_PATH,
     USER_CODES,
+    llm_timeout,
 )
 from helpers import (
     call_llm,
@@ -121,6 +124,7 @@ def get_embed_model():
                         cache_folder=MODEL_CACHE_DIR,
                         local_files_only=True,
                         device=device,
+                        model_kwargs={"torch_dtype": "float16"},
                     )
                     logger.info(
                         "Embedding model loaded from local cache (%s) on %s",
@@ -136,6 +140,7 @@ def get_embed_model():
                         EMBED_MODEL_NAME,
                         cache_folder=MODEL_CACHE_DIR,
                         device=device,
+                        model_kwargs={"torch_dtype": "float16"},
                     )
                     logger.info(
                         "Embedding model downloaded and cached at %s on %s",
@@ -450,7 +455,7 @@ def _normalize_profile_keys_batch(
                 api_url=ROUTER_API_URL,
                 api_key=ROUTER_API_KEY,
                 temperature=0.1,
-                max_tokens=250,
+                max_tokens=MAX_TOKENS_SHORT,
                 json_response=True,
                 no_think=True,
                 timeout=ROUTER_TIMEOUT,
@@ -556,7 +561,7 @@ def _normalize_profile_key(
             api_url=ROUTER_API_URL,
             api_key=ROUTER_API_KEY,
             temperature=0.1,
-            max_tokens=150,
+            max_tokens=MAX_TOKENS_SHORT,
             json_response=True,
             no_think=True,
             timeout=ROUTER_TIMEOUT,
@@ -1413,10 +1418,10 @@ def search_memory(
             # facts take priority; a 0.4 factor ensures past facts appear in
             # positions ~4-5 when a semantically close current fact scores higher.
             status_factor = 0.4 if payload.get("status") == "past" else 1.0
-            # Weighted blend: semantic similarity (primary) + importance + recency
+            # Weighted blend: similarity + importance + recency
             # All weights sum to 1.0 so the score stays in ~[0, 1]
             final_score = (
-                sim * 0.65 + payload.get("importance", 0) * 0.25 + recency_bonus * 0.1
+                sim * 0.50 + payload.get("importance", 0) * 0.30 + recency_bonus * 0.20
             ) * status_factor
 
             # Interest-weight boost: user-declared topics nudge ranking gently.
@@ -1467,11 +1472,15 @@ def search_memory(
                 old_imp = m["_importance"]
                 new_imp = min(round(old_imp + 0.05, 4), _reinforce_cap)
                 if new_imp > old_imp:
-                    qdrant.set_payload(
-                        collection_name=QDRANT_MEMORY_COLLECTION,
-                        payload={"importance": new_imp},
-                        points=[m["_id"]],
-                    )
+                    Thread(
+                        target=qdrant.set_payload,
+                        kwargs={
+                            "collection_name": QDRANT_MEMORY_COLLECTION,
+                            "payload": {"importance": new_imp},
+                            "points": [m["_id"]],
+                        },
+                        daemon=True,
+                    ).start()
         except Exception as _e:
             logger.warning("Memory reinforcement failed (non-blocking): %s", _e)
 
@@ -1941,11 +1950,11 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
                 model=PRIMARY_MODEL,
                 api_url=PRIMARY_API_URL,
                 api_key=PRIMARY_API_KEY,
-                temperature=0.0,  # use model profile default (Qwen3.6: 0.7 no-think)
-                max_tokens=400,
+                temperature=0.0,
+                max_tokens=MAX_TOKENS_COMPACT,
                 json_response=True,
                 no_think=True,
-                timeout=30.0,
+                timeout=llm_timeout(MAX_TOKENS_COMPACT),
             )
 
             parsed = extract_llm_json(raw)
@@ -2044,11 +2053,11 @@ def curative_profile_cleanup(user_code: str):
                 model=PRIMARY_MODEL,
                 api_url=PRIMARY_API_URL,
                 api_key=PRIMARY_API_KEY,
-                temperature=0.0,  # use model profile default (Qwen3.6: 0.7 no-think)
-                max_tokens=600,  # profil ~20 clés → output JSON potentiellement >200 tok
+                temperature=0.0,
+                max_tokens=MAX_TOKENS_COMPACT,
                 json_response=True,
                 no_think=True,
-                timeout=30.0,
+                timeout=llm_timeout(MAX_TOKENS_COMPACT),
             )
         )
 

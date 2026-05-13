@@ -38,7 +38,7 @@ services:
       - QDRANT_URI=http://qdrant:6333
       - RAG_EMBEDDING_ENGINE=
       - RAG_EMBEDDING_MODEL=paraphrase-multilingual-MiniLM-L12-v2
-      - DEFAULT_MODELS=${PRIMARY_MODEL:-mlx-community/Qwen3-30B-A3B-4bit}
+      - DEFAULT_MODELS=${PRIMARY_MODEL:-spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit}
       - MAX_UPLOAD_SIZE=${MAX_UPLOAD_SIZE:-5242880}
       - ENABLE_FORWARD_USER_INFO_HEADERS=true
       - AIOHTTP_CLIENT_TIMEOUT=300

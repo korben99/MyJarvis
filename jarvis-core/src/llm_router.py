@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 
 import httpx
 from config import (
+    MAX_TOKENS_SHORT,
     ROUTER_API_KEY,
     ROUTER_API_URL,
     ROUTER_DATA_DIR,
@@ -165,7 +166,7 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
             api_url=ROUTER_API_URL,
             api_key=ROUTER_API_KEY,
             temperature=0.0,  # Hermes is designed for deterministic structured output
-            max_tokens=300,  # routing JSON is ~60 tok — cap to avoid runaway output
+            max_tokens=MAX_TOKENS_SHORT,
             json_response=True,
             no_think=True,
             timeout=ROUTER_TIMEOUT,

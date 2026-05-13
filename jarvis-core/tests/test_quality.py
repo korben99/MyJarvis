@@ -1422,7 +1422,7 @@ class TestIntegrationPerformance(unittest.TestCase):
     Mesures de latence TTFT (Time To First Token) sur des requêtes types.
     Utilise stream=True pour chronométrer le premier chunk côté client.
 
-    Seuils : orientés modèle local (Qwen3-30B-A3B-MLX). Ajuster via env vars.
+    Seuils : orientés modèle local (Qwen3.6-35B-A3B-MLX). Ajuster via env vars.
       JARVIS_TTFT_SIMPLE_MAX  (défaut 10s)  — réponse sans contexte externe
       JARVIS_TTFT_CONTEXT_MAX (défaut 20s)  — réponse avec météo/web/mémoire
     """

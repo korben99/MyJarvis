@@ -49,6 +49,14 @@ from config import (
     BRIEFING_TIMEZONE,
     GROWTH_LOG_MAX_ENTRIES,
     MAX_CHAIN_ITERATIONS,
+    MAX_TOKENS_COMPACT,
+    MAX_TOKENS_MEDIUM,
+    MAX_TOKENS_NO_THINK,
+    MAX_TOKENS_REASONING,
+    MAX_TOKENS_THINK_COMPACT,
+    THINKING_BUDGET_COMPACT,
+    THINKING_BUDGET_DEEP,
+    llm_timeout,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
@@ -57,8 +65,6 @@ from config import (
     REASONING_API_KEY,
     REASONING_API_URL,
     REASONING_MODEL,
-    REASONING_TIMEOUT,
-    THINKING_BUDGET_TOKENS,
     USER_ADMINS,
     USER_CODES,
     USER_EMAILS,
@@ -800,10 +806,10 @@ async def _call_global_reflection_llm(
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=0.0,
-            max_tokens=800,
+            max_tokens=MAX_TOKENS_MEDIUM,
             json_response=True,
             no_think=True,
-            timeout=30.0,
+            timeout=llm_timeout(MAX_TOKENS_MEDIUM),
         )
         return extract_llm_json(content)
     except ValueError as exc:
@@ -874,10 +880,10 @@ async def _call_user_reflection_llm(
                 api_url=REASONING_API_URL,
                 api_key=REASONING_API_KEY,
                 temperature=0.0,
-                max_tokens=800,
+                max_tokens=MAX_TOKENS_MEDIUM,
                 json_response=True,
                 no_think=True,
-                timeout=30.0,
+                timeout=llm_timeout(MAX_TOKENS_MEDIUM),
             )
             return extract_llm_json(content)
         except ValueError as exc:
@@ -1264,12 +1270,22 @@ def _build_conv_text(conversations: list[dict]) -> str:
     conv_text = ""
     for c in sorted_convs:
         imp = c.get("importance", 0.0)
-        conv_text += (
-            f"[importance:{imp:.2f}] "
-            f"User: {c.get('user', '')[:400]}\n"
-            f"Jarvis: {c.get('assistant', '')[:400]}\n"
-            f"Mood: {c.get('mood', '?')}\n\n"
-        )
+        summary = (c.get("memory_summary") or "").strip()
+        topics = c.get("topics") or []
+        mood = c.get("mood", "?")
+        header = f"[importance:{imp:.2f}] [mood:{mood}]"
+        if topics:
+            header += f" [topics: {', '.join(topics)}]"
+        if summary:
+            # Analyzer already distilled this exchange — use summary only
+            conv_text += f"{header}\n{summary}\n\n"
+        else:
+            # No summary available — fall back to raw exchange
+            conv_text += (
+                f"{header}\n"
+                f"User: {c.get('user', '')[:350]}\n"
+                f"Jarvis: {c.get('assistant', '')[:350]}\n\n"
+            )
     return conv_text[:6000] or "(no conversation content)"
 
 
@@ -1303,10 +1319,10 @@ async def _nightly_facts_user(
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=0.0,
-            max_tokens=1500,
+            max_tokens=MAX_TOKENS_NO_THINK,
             json_response=True,
             no_think=True,
-            timeout=45.0,
+            timeout=llm_timeout(MAX_TOKENS_NO_THINK),
         )
         return extract_llm_json(content)
     except Exception as exc:
@@ -1349,10 +1365,10 @@ async def _nightly_self_user(
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=0.0,
-            max_tokens=1500,
+            max_tokens=MAX_TOKENS_NO_THINK,
             json_response=True,
             no_think=True,
-            timeout=45.0,
+            timeout=llm_timeout(MAX_TOKENS_NO_THINK),
         )
         return extract_llm_json(content)
     except Exception as exc:
@@ -1397,10 +1413,10 @@ async def _nightly_cleaning_user(
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=0.0,
-            max_tokens=600,
+            max_tokens=MAX_TOKENS_COMPACT,
             json_response=True,
             no_think=True,
-            timeout=20.0,
+            timeout=llm_timeout(MAX_TOKENS_COMPACT),
         )
         return extract_llm_json(content)
     except Exception as exc:
@@ -1478,8 +1494,15 @@ async def run_nightly_interaction_review() -> None:
             user_insights = durables + evenements  # full context for cleaning
 
             # Only durable states go to autobio — nightly is the sole autobio writer
-            for insight in durables:
-                store_autobiographical_event(user_code, insight, importance=0.7)
+            for item in durables:
+                if isinstance(item, dict):
+                    insight = (item.get("text") or "").strip()
+                    importance = round(max(0.5, min(0.9, float(item.get("importance", 0.7)))), 2)
+                else:
+                    insight = str(item).strip()
+                    importance = 0.7
+                if insight:
+                    store_autobiographical_event(user_code, insight, importance=importance)
 
             # Store tomorrow's suggestions in Redis (24h)
             suggestions = facts.get("tomorrow_suggestions", [])
@@ -1963,12 +1986,12 @@ def _action_refine_prompt(params: dict) -> str:
             model=REASONING_MODEL,
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
-            temperature=0.0,  # use model profile default (Qwen3.6: 1.0 think)
-            max_tokens=10000,  # thinking ~THINKING_BUDGET_TOKENS + proposed_text + rationale
+            temperature=0.0,
+            max_tokens=MAX_TOKENS_REASONING,
+            thinking_budget=THINKING_BUDGET_DEEP,
             json_response=True,
             no_think=False,
-            thinking_budget=THINKING_BUDGET_TOKENS,
-            timeout=180.0,  # 10000 tok @ 60 tok/s ≈ 167s, marge légère
+            timeout=llm_timeout(MAX_TOKENS_REASONING),
         )
         result = extract_llm_json(content)
     except Exception as exc:
@@ -2028,12 +2051,12 @@ def _action_refine_prompt(params: dict) -> str:
                 model=REASONING_MODEL,
                 api_url=REASONING_API_URL,
                 api_key=REASONING_API_KEY,
-                temperature=0.0,  # use model profile default (Qwen3.6: 1.0 think)
-                max_tokens=10000,  # retry — même budget que l'appel initial
+                temperature=0.0,
+                max_tokens=MAX_TOKENS_REASONING,
+                thinking_budget=THINKING_BUDGET_DEEP,
                 json_response=True,
                 no_think=False,
-                thinking_budget=THINKING_BUDGET_TOKENS,
-                timeout=180.0,
+                timeout=llm_timeout(MAX_TOKENS_REASONING),
             )
             result = extract_llm_json(content)
             proposed_text = result.get("proposed_text", "").strip()
@@ -2265,11 +2288,12 @@ def _action_prune_self_memory(params: dict) -> str:
             model=REASONING_MODEL,
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
-            temperature=0.0,  # use model profile default (Qwen3.6: 0.7 no-think)
-            max_tokens=1200,  # classification pure — JSON ~300 tok, pas de think block
+            temperature=0.0,
+            max_tokens=MAX_TOKENS_THINK_COMPACT,
+            thinking_budget=THINKING_BUDGET_COMPACT,
             json_response=True,
-            no_think=True,   # thinking mode: variance élevée + 120s → décisions incohérentes
-            timeout=60.0,
+            no_think=False,
+            timeout=llm_timeout(MAX_TOKENS_THINK_COMPACT),
         )
     except Exception as exc:
         logger.error(
@@ -2534,10 +2558,10 @@ async def generate_proactive_push(user_code: str) -> str:
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=0.7,
-            max_tokens=600,
+            max_tokens=MAX_TOKENS_COMPACT,
             json_response=True,
             no_think=True,
-            timeout=30.0,
+            timeout=llm_timeout(MAX_TOKENS_COMPACT),
         )
         message = extract_llm_json(content).get("message")
     except Exception as exc:
@@ -2672,12 +2696,12 @@ async def _llm_review_before_action(
             model=REASONING_MODEL,
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
-            temperature=0.0,  # use model profile default (Qwen3.6: 1.0 think)
-            max_tokens=4000,  # thinking ~THINKING_BUDGET_TOKENS + JSON court (execute + reason)
+            temperature=0.0,
+            max_tokens=MAX_TOKENS_THINK_COMPACT,
+            thinking_budget=THINKING_BUDGET_COMPACT,
             json_response=True,
             no_think=False,
-            thinking_budget=THINKING_BUDGET_TOKENS,
-            timeout=80.0,  # 4000 tok @ 60 tok/s ≈ 67s, marge légère
+            timeout=llm_timeout(MAX_TOKENS_THINK_COMPACT),
         )
         result = extract_llm_json(content)
         execute = bool(result.get("execute", True))
