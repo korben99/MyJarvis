@@ -533,7 +533,7 @@ Date et heure actuelles — formatted in French, user timezone, with season
     ↓
 Tu parles avec <user_name>.
     ↓
-<contexte> build_memory_context() </contexte>  — only if memory is available
+<context> build_memory_context() </context>  — only if memory is available
     ↓
 <mes_avis> opinions </mes_avis>  — only if opinions exist (SYSTEM_BASE_FR instructs: never output as a section)
     ↓
@@ -542,15 +542,35 @@ VOICE_SUFFIX_FR  — only if voice_mode=True
 
 **Per-turn assembled context** — appended after the dynamic prefix, before the user's raw message:
 ```
-<resultats_web> / <souvenirs_pertinents> / <documents_personnels> / <agenda> / <emails_recus>  — fetched in parallel
+<conversation_summary> … </conversation_summary>  — only if a session summary exists (see below)
+    ↓
+<web_results> / <user_memories> / <documents> / <agenda> / <emails>  — fetched in parallel
+    ↓
+<project_detail> … </project_detail>  — only if project intent detected
     ↓
 "Analyse étape par étape..."  — only if use_reasoning=True
     ↓
-## MESSAGE UTILISATEUR
+<user_message>
 {raw user message}        ← always last, most salient for generation
+</user_message>
 ```
 
-The final user message = `dynamic_prefix + assembled_context + ## MESSAGE UTILISATEUR\n{raw_message}`. Storing this in Redis history preserves the full context per turn; the `/history` endpoint strips the prefix to show only the raw message to the iOS app.
+The final user message = `dynamic_prefix + [conversation_summary] + assembled_context + <user_message>{raw_message}</user_message>`. Storing this in Redis history preserves the full context per turn; the `/history` endpoint strips the prefix to show only the raw message to the iOS app.
+
+**Session conversation compression** (`_update_session_summary` in `routes/chat.py`):
+
+Triggered as a background task after each response (post-LLM, GPU free). When the uncovered conversation since the last summary exceeds `HIST_CONV_SUMMARIZE_THRESHOLD` tokens, the ROUTER model (warm in VRAM, 3B) generates a rolling summary capped at `SESSION_SUMMARY_TOKENS`. The summary and its coverage watermark (`msg_count`) are stored in Redis under `session:summary:{user_code}:{session_id}` with `CHAT_LOG_TTL`.
+
+**Injection cycle:**
+
+| State | `hist_slice` injected | Summary block |
+|---|---|---|
+| No summary yet | Last N messages trimmed to `HIST_CONV_TOKEN_BUDGET` | — |
+| Summary exists | Messages since `msg_count` (uncovered), trimmed to `HIST_CONV_TOKEN_BUDGET` | `<conversation_summary>` injected before context |
+
+When a new summary is generated, `msg_count` advances to the current total. On the next turn, `uncovered_n = total − msg_count = 0` → no raw history, only the summary block. Accumulation restarts from there.
+
+The cumulative prompt overhead is bounded at `HIST_CONV_TOKEN_BUDGET + SESSION_SUMMARY_TOKENS` regardless of session length.
 
 **`build_memory_context()` — sections injected in order:**
 
@@ -791,6 +811,9 @@ Ne pas utiliser thinking_budget=0 en production
 | `MAX_TOKENS_SYNTHESIS` | 8 000 | Chat web/RAG think |
 | `MAX_TOKENS_REASONING` | 10 000 | Chat use_reasoning + refine_prompt |
 | `MAX_TOKENS_HARD_CAP` | 16 000 | Kill switch absolu tous appels locaux |
+| `HIST_CONV_TOKEN_BUDGET` | 800 | Budget tokens pour l'historique brut injecté par tour |
+| `SESSION_SUMMARY_TOKENS` | 200 | Budget tokens du résumé de session (~700 chars) |
+| `HIST_CONV_SUMMARIZE_THRESHOLD` | 1 000 | Tokens de conversation non-couverts déclenchant la compression |
 
 ---
 
@@ -1195,11 +1218,11 @@ Jarvis maintains a slow-evolving perception of each user, updated exclusively du
 At each conversation, these three values are translated into **explicit directives** and injected into the system prompt alongside the internal state block:
 
 ```
-<etat_interne>
+<internal_state>
 Objectifs : G1: ... | G2: ...
 Focus : ...
 Dernière action autonome : ...
-</etat_interne>
+</internal_state>
 
 RELATION AVEC CET UTILISATEUR (injecté dans build_memory_context) :
 - Affinité : forte          ← label sémantique (forte/bonne/modérée/faible), pas de score numérique

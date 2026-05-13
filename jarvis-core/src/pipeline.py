@@ -101,7 +101,7 @@ def build_dynamic_prefix(
         include_suggestions=include_suggestions,
     )
     if memory_ctx:
-        parts.append(f"<contexte>\n{memory_ctx}\n</contexte>")
+        parts.append(f"<context>\n{memory_ctx}\n</context>")
 
     if include_opinions:
         opinions = self_mem.get("opinions", [])
@@ -156,11 +156,11 @@ def build_context(
     # 1. WEB
     if web_results == INTERNET_ERROR:
         _web_section = (
-            "<acces_internet>\n"
+            "<web_access>\n"
             "La connexion internet est actuellement indisponible. "
             "Informe l'utilisateur que tu ne peux pas effectuer la recherche demandée "
             "et propose-lui de réessayer plus tard.\n"
-            "</acces_internet>"
+            "</web_access>"
         )
         logger.warning("web: internet unavailable — injecting error context")
     elif web_results:
@@ -171,7 +171,7 @@ def build_context(
                 r = web_results[i]
                 date_tag = f"[{r['date']}] " if r.get("date") else ""
                 web_lines.append(f"[{date_tag}{r['title']}]\n{body}\nSource: {r['url']}")
-            _web_section = "<resultats_web>\n" + "\n\n".join(web_lines) + "\n</resultats_web>"
+            _web_section = "<web_results>\n" + "\n\n".join(web_lines) + "\n</web_results>"
         logger.info(
             "web recall %d/%d (budget=%d)",
             len(web_selected),
@@ -188,7 +188,7 @@ def build_context(
                 for chunk in rag_chunks[:len(rag_selected_texts)]
             ]
             context_parts.append(
-                "<documents_personnels>\n" + "\n\n".join(rag_lines) + "\n</documents_personnels>"
+                "<documents>\n" + "\n\n".join(rag_lines) + "\n</documents>"
             )
         logger.info(
             "rag recall %d/%d (budget=%d)",
@@ -223,7 +223,7 @@ def build_context(
         selected_memories = trim_chunks(stamped, MEMORY_CHAR_BUDGET)
         if selected_memories:
             context_parts.append(
-                "<souvenirs_utilisateur>\n" + "\n".join(selected_memories) + "\n</souvenirs_utilisateur>"
+                "<user_memories>\n" + "\n".join(selected_memories) + "\n</user_memories>"
             )
         logger.info(
             "memory recall %d/%d (budget=%d)",
@@ -264,7 +264,7 @@ def build_context(
             injected += 1
         if gmail_lines:
             context_parts.append(
-                "<emails_recus>\n" + "\n\n".join(gmail_lines) + "\n</emails_recus>"
+                "<emails>\n" + "\n\n".join(gmail_lines) + "\n</emails>"
             )
         logger.info(
             "gmail context: %d/%d messages injected (%d chars)",
@@ -286,7 +286,7 @@ def build_context(
         if pending_alerts:
             alert_lines = [f"• {a['message']} (détecté à {a['at'][:16]})" for a in pending_alerts]
             context_parts.append(
-                "<alertes_boursieres>\n" + "\n".join(alert_lines) + "\n</alertes_boursieres>"
+                "<market_alerts>\n" + "\n".join(alert_lines) + "\n</market_alerts>"
             )
             logger.info(
                 "trade alerts injected for %s: %d alert(s)",
@@ -311,7 +311,7 @@ def build_context(
         # RELATION already injected in build_dynamic_prefix prefix — skip here
         # to avoid double injection (~80 tokens) when use_self=True.
         self_ctx = (
-            f"<etat_interne>\n"
+            f"<internal_state>\n"
             f"Objectifs : {goals_text}\n"
             f"Focus : {focus or 'pas encore défini'}\n"
             f"Dernière action autonome : {last_action}"
@@ -322,7 +322,7 @@ def build_context(
                 if pending_proposals
                 else ""
             )
-            + "\n</etat_interne>"
+            + "\n</internal_state>"
         )
         context_parts.append(self_ctx)
         logger.info("self context injected for %s", user_code)

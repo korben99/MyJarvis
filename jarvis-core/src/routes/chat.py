@@ -988,12 +988,12 @@ async def chat(req: ChatRequest):
     if image_description:
         raw_user_content = (
             f"{req.message}\n\n"
-            f"<image_analysee>\n"
+            f"<image_analysis>\n"
             f"L'utilisateur a joint une image. Voici son analyse détaillée par le modèle vision "
             f"— traite ces informations comme si tu avais vu l'image toi-même et réponds directement "
             f"à la question sans demander de photo :\n\n"
             f"{image_description}\n"
-            f"</image_analysee>"
+            f"</image_analysis>"
         )
 
     # Project detail — injected once on first mention; history carries it forward.
@@ -1012,14 +1012,14 @@ async def chat(req: ChatRequest):
     _summary_data = get_session_summary_data(user_code, req.session_id)
     _session_summary = _summary_data["text"] if _summary_data else ""
 
-    # Build the user message: [dynamic_prefix] → [summary] → [context] → [project_detail] → <message_utilisateur>
+    # Build the user message: [dynamic_prefix] → [summary] → [context] → [project_detail] → <user_message>
     # XML tag clearly delimits the actual question from all injected context above.
     msg_parts = []
     if dynamic_prefix:
         msg_parts.append(dynamic_prefix)
     if _session_summary:
         msg_parts.append(
-            "<résumé_conversation>\n" + _session_summary + "\n</résumé_conversation>"
+            "<conversation_summary>\n" + _session_summary + "\n</conversation_summary>"
         )
     if assembled:
         msg_parts.append(assembled)
@@ -1028,7 +1028,7 @@ async def chat(req: ChatRequest):
     if reasoning_hint:
         msg_parts.append(reasoning_hint.strip())
     msg_parts.append(
-        "<message_utilisateur>\n" + raw_user_content + "\n</message_utilisateur>"
+        "<user_message>\n" + raw_user_content + "\n</user_message>"
     )
     user_content = "\n\n".join(msg_parts)
 

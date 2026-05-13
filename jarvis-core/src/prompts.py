@@ -29,14 +29,14 @@ SYSTEM_BASE_FR = (
     "<avis_jarvis> : intègre en prose si topicalement pertinent, ignore sinon. Ne reproduis pas la balise. "
     "<apprentissages_jarvis> : guide interne silencieux — ne mentionne pas, n'attribue pas à l'utilisateur. "
     "Cite les sources web. "
-    "Les blocs <contexte> contiennent des faits récents vérifiés — ils priment sur tes données d'entraînement. "
+    "Les blocs <context> contiennent des faits récents vérifiés — ils priment sur tes données d'entraînement. "
     "En cas de contradiction entre sources : message utilisateur > contexte > historique. "
     "Réponds en français, sans markdown — sauf si JSON ou code explicitement demandé."
 )
 # XML tags used to delimit injected context blocks (replacing ## Markdown headers).
 # XML tags are more watertight: the closing tag prevents the model from confusing
 # injected context with its own output or with adjacent sections.
-MEMORY_HEADER_FR = "<contexte>"  # closing </contexte> added at injection site
+MEMORY_HEADER_FR = "<context>"  # closing </context> added at injection site
 
 # Appended to the system prompt in voice mode
 VOICE_SUFFIX_FR = (
@@ -844,9 +844,9 @@ Pour les prompts ASYNC : le budget est un plafond de sécurité, pas un objectif
 
 # ── Session conversation summary (post-response background task) ──────────
 SESSION_SUMMARY_PROMPT = """\
-{existing_block}<échanges>
+{existing_block}<exchanges>
 {dropped_text}
-</échanges>
+</exchanges>
 
 Résume les points clés : décisions prises, faits importants, contexte et sujets actifs.
 Limite stricte : 700 caractères maximum. Termine toujours sur une phrase complète."""
