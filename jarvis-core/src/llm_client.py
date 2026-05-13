@@ -169,7 +169,7 @@ async def _resolve_image_part(part: dict, client: httpx.AsyncClient) -> dict:
     those internally and re-encode as base64.
     """
     url = part.get("image_url", {}).get("url", "")
-    logger.info("Vision._resolve: url=%r", url[:80] if url else "(empty)")
+    logger.info("Vision._resolve: url=%s", url[:url.index(",")] if url.startswith("data:") else (url[:80] or "(empty)"))
     if url.startswith("data:") or url.startswith("https://"):
         return part
 

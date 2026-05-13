@@ -364,6 +364,12 @@ async def _sse_stream(ctx: _SseCtx):
         # Strip thinking block before saving to Redis.
         # in_think_started=True → output began INSIDE think block (no opening tag).
         full_clean = _strip_sse_response("".join(full_parts), in_think_started)
+        if not full_clean:
+            logger.warning(
+                "sse_stream: empty visible response — session=%s started_in_think=%s "
+                "raw_len=%d (thinking truncation or empty generation — turn NOT saved)",
+                ctx.session_id, in_think_started, len("".join(full_parts)),
+            )
         if full_clean:
             append_conversation_message(
                 ctx.user_code, ctx.session_id, "user", ctx.raw_user_content
@@ -846,7 +852,7 @@ async def chat(req: ChatRequest):
                     "Vision: image described (%d chars)", len(image_description)
                 )
             else:
-                logger.warning("Vision: describe_images returned empty — parts=%r", req.image_parts[:1])
+                logger.warning("Vision: describe_images returned empty — %d part(s)", len(req.image_parts))
         else:
             logger.warning(
                 "Vision: image received but VISION_MODEL not configured — ignored"

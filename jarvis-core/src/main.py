@@ -47,6 +47,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 if LLM_LOCAL:
     from llm_local import preload_models
+    from pipeline import build_system_prompt
 from analyzer import analyse_recent_conversations
 from deps import _STREAM_CLIENTS, HTTP_CLIENT, QDRANT_CLIENT
 from embed_router import preload_embed_router
@@ -84,7 +85,7 @@ async def lifespan(app: FastAPI):
     )
 
     if LLM_LOCAL:
-        await asyncio.to_thread(preload_models)
+        await asyncio.to_thread(preload_models, build_system_prompt())
     logger.info(
         "RAG: %s, collection: %s, top_k: %d", QDRANT_URL, QDRANT_COLLECTION, RAG_TOP_K
     )

@@ -14,6 +14,7 @@ describe_images_local(...)   → str   (async, mlx_vlm)
 """
 
 import asyncio
+import concurrent.futures
 import copy
 import datetime
 import json
@@ -312,8 +313,9 @@ def _load_model(model_path: str) -> tuple:
         return model, tokenizer
 
 
-def preload_models() -> None:
-    """Load and warm-up models at startup. Call from main.py lifespan."""
+def preload_models(primary_system_content: str = "") -> None:
+    """Load and warm-up models at startup. Call from main.py lifespan.
+    primary_system_content: real system prompt → KV cache pre-built at startup (no cold-start on first request)."""
     if not LLM_LOCAL:
         return
     try:
@@ -342,17 +344,17 @@ def preload_models() -> None:
 
     if VISION_MODEL:
         try:
-            _load_vlm()
+            _vlm_executor.submit(_load_vlm).result(timeout=300)
             logger.info("MLX VLM preloaded: %s", VISION_MODEL)
+            _vlm_executor.submit(_warmup_vlm).result(timeout=120)
         except Exception as exc:
-            logger.warning("MLX VLM preload failed (non-fatal): %s", exc)
+            logger.warning("MLX VLM preload/warmup failed (non-fatal): %s", exc)
 
-    # JIT warmup: compile MLX graphs at startup, not on the first user request.
-    warmup_msgs = [
-        {"role": "system", "content": "Tu es un assistant."},
-        {"role": "user", "content": "Salut"},
-    ]
+    # JIT warmup: compile MLX graphs + pre-fill KV cache at startup.
+    # Primary model uses the real system prompt so the KV cache is ready on the first request.
     for path in model_paths:
+        sys = primary_system_content if (path == PRIMARY_MODEL and primary_system_content) else "Tu es un assistant."
+        warmup_msgs = [{"role": "system", "content": sys}, {"role": "user", "content": "Salut"}]
         try:
             _generate_sync(path, warmup_msgs, temperature=0.0, max_tokens=100, no_think=True)
             logger.info("MLX warmup OK: %s", path)
@@ -898,6 +900,10 @@ _vlm_model = None
 _vlm_processor = None
 _vlm_config = None
 _vlm_lock = threading.Lock()
+# Single-thread executor: MLX JIT-compiles VLM functions capturing the Metal stream of the
+# compiling thread. Preload and every inference call must run in the same thread so the
+# captured stream is always available.
+_vlm_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="jarvis-vlm")
 
 
 def _load_vlm() -> None:
@@ -912,6 +918,25 @@ def _load_vlm() -> None:
     _vlm_model, _vlm_processor = vlm_load(VISION_MODEL)
     _vlm_config = vlm_load_config(VISION_MODEL)
     logger.info("VLM: loaded in %.1fs", time.time() - t0)
+
+
+def _warmup_vlm() -> None:
+    """Run a tiny dummy inference to JIT-compile MLX VLM graphs. Must run in _vlm_executor."""
+    import io
+    from PIL import Image as _PIL
+    from mlx_vlm import generate as vlm_generate
+    from mlx_vlm.prompt_utils import apply_chat_template as vlm_apply_chat_template
+    from mlx_vlm.utils import load_image as vlm_load_image
+
+    _load_vlm()
+    buf = io.BytesIO()
+    _PIL.new("RGB", (32, 32), color=(128, 128, 128)).save(buf, format="JPEG")
+    buf.seek(0)
+    image = vlm_load_image(buf)
+    prompt_text = VISION_USER_PROMPT.format(text_prompt="Décris brièvement.")
+    formatted = vlm_apply_chat_template(_vlm_processor, _vlm_config, prompt_text, num_images=1)
+    vlm_generate(_vlm_model, _vlm_processor, formatted, image=image, max_tokens=10, temperature=0.0, verbose=False)
+    logger.info("VLM warmup OK: %s", VISION_MODEL.split("/")[-1] if VISION_MODEL else "?")
 
 
 def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
@@ -930,7 +955,13 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
             images.append(vlm_load_image(io.BytesIO(_b64.b64decode(b64data))))
         elif url.startswith("http"):
             images.append(url)
+        else:
+            logger.warning(
+                "_describe_images_sync: URL dropped (not data: or http) — url=%r",
+                url[:80],
+            )
     if not images:
+        logger.warning("_describe_images_sync: no image decoded from %d part(s)", len(image_parts))
         return ""
 
     prompt_text = VISION_USER_PROMPT.format(
@@ -947,9 +978,9 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
 
 
 async def describe_images_local(image_parts: list, text_prompt: str) -> str:
-    """Async VLM inference. Uses _vlm_lock so VLM load never blocks text inference."""
-    await asyncio.to_thread(_vlm_lock.acquire)
-    try:
-        return await asyncio.to_thread(_describe_images_sync, image_parts, text_prompt)
-    finally:
-        _vlm_lock.release()
+    """Async VLM inference. Same executor as preload → same thread → same MLX Metal stream."""
+    def _run():
+        with _vlm_lock:
+            return _describe_images_sync(image_parts, text_prompt)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_vlm_executor, _run)
