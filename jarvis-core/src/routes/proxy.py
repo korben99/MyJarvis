@@ -244,7 +244,14 @@ async def proxy_chat(
     req: _OAIChatRequest,
     authorization: str = Header(default=None),
     x_openwebui_user_email: str = Header(default=None),
+    x_openwebui_chat_id: str = Header(default=None),
+    x_openwebui_user_id: str = Header(default=None),
 ):
+    logger.debug(
+        "proxy headers: chat_id=%r user_id=%r email=%r",
+        x_openwebui_chat_id, x_openwebui_user_id, x_openwebui_user_email,
+    )
+
     # ── Auth: OpenWebUI email header (priority) or Bearer user_code ──
     user_code = None
 
@@ -313,9 +320,19 @@ async def proxy_chat(
         }
 
     # ── Delegate to /chat ──
+    # UUID natif OpenWebUI (X-OpenWebUI-Chat-Id) en priorité.
+    # Fallback SHA-256 pour les clients OpenAI-compatibles tiers sans ce header.
+    # iOS n'utilise pas ce proxy — il envoie son propre session_id directement via /chat.
+    session_id = (
+        f"owui-{x_openwebui_chat_id}"
+        if x_openwebui_chat_id
+        else _proxy_session_id(user_code, req.messages)
+    )
+    logger.info("proxy session_id=%r (source=%s)", session_id,
+                "owui-chat-id" if x_openwebui_chat_id else "sha256-first-msg")
     jarvis_req = ChatRequest(
         message=message or "Que contient cette image ?",
-        session_id=_proxy_session_id(user_code, req.messages),
+        session_id=session_id,
         user_code=user_code,
         stream=req.stream,
         image_parts=image_parts,

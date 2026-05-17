@@ -158,8 +158,11 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
   Règles STRICTES :
   - UNIQUEMENT ce que l'utilisateur a dit EXPLICITEMENT dans son message. Jamais depuis la réponse de Jarvis, le contexte ou par inférence. Doute → [].
   - Uniquement des faits DURABLES : valables dans plusieurs semaines/mois. Pas d'état temporaire.
-    Formes interdites : "termine X", "est en train de Y", "révise Z", "finit W" → pas durable → [].
-  - JAMAIS une négation ou absence : "n'a pas mentionné X", "ne fait pas Y", "pas intéressé par Z" → interdit.
+    Formes interdites : "termine X", "est en train de Y", "révise Z", "finit W", "lance un projet de X", "commence X" → pas durable → [].
+    RÈGLE ABSOLUE : si le fait va dans project_updates (nouveau projet, avancement, clôture), il NE DOIT PAS aussi apparaître dans user_facts. Ces deux champs sont mutuellement exclusifs.
+  - JAMAIS une négation ou absence — même reformulée positivement.
+    Interdit : {{"key":"situation:parents_separation","value":"ne vit plus avec ses parents"}} → négation → [].
+    Interdit : "n'a pas mentionné X", "ne fait pas Y", "pas intéressé par Z", "vit sans X" → [].
   - JAMAIS une localisation ou activité en cours au moment de la conversation (ex: "est à Lille", "est en train de travailler sur X").
   - Une clé = un seul fait. Si plusieurs réalités distinctes sur le même domaine → plusieurs clés séparées.
   - La valeur DOIT apporter une info que la clé ne contient pas déjà
@@ -171,11 +174,27 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
     Bon     : {{"key":"loisir:aviation","value":"tours de piste en avion ULM"}}
   - Questions, hypothèses ou intentions ("je pense à", "je veux", "que penses-tu de") → NOT des faits → [].
   - Nommage (clés nouvelles seulement, en français minuscule sans accents) :
-    Fait scalaire → clé simple : "profession"
-    Multi-valeur → "categorie:item" : "loisir:kart", "competence:python"
-    Catégories AUTORISÉES : loisir, competence, langue, sport, technologie, preference, placement, interet, apprécie, aversion, situation
+    Fait scalaire → clé simple : "profession", "name"
+    Multi-valeur → "categorie:item" : "loisir:kart", "competence:python", "famille:enfants"
+    Catégories AUTORISÉES et leur usage :
+      situation   → faits sur l'utilisateur lui-même (lieu de vie, mode de vie, équipement perso)
+      famille     → faits sur des tiers : parents, conjoint, enfants, fratrie — JAMAIS sur l'utilisateur
+      profession  → métier, employeur, projet professionnel
+      competence  → expertise ou savoir-faire acquis (technologie, domaine) — JAMAIS un projet ou action ponctuelle
+      loisir      → activités de loisir de l'utilisateur
+      sport       → pratique sportive (si distincts des loisirs)
+      technologie → outils ou équipements tech utilisés
+      sante       → santé, traitement, condition médicale durable
+      objectif    → buts, aspirations, projets de vie
+      etude       → matières, options, spécialités, notes scolaires
+      placement   → épargne, investissements, patrimoine
+      preference  → préférences générales (voyage, alimentation…)
+      interet     → centres d'intérêt intellectuels
+      apprécie    → choses explicitement appréciées
+      aversion    → choses explicitement rejetées
+      langue      → langues parlées ou apprises
     INTERDIT absolu : toute clé ou valeur contenant un nom de marque, modèle, référence produit.
-      Exemples interdits : "loisir:wristmaster", "loisir:longines", "model:X", "marque:X"
+      Exemples interdits : "loisir:wristmaster", "loisir:longines", "achat:somfy"
       Exemple autorisé  : "loisir:horlogerie" avec valeur "collectionneur de montres"
     L'item d'un loisir est une ACTIVITÉ GÉNÉRIQUE (horlogerie, kart, tennis), jamais un produit.
     La valeur décrit le RAPPORT à l'activité, jamais une référence ou un nom de modèle.

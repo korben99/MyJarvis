@@ -2550,6 +2550,10 @@ async def generate_proactive_push(user_code: str) -> str:
         f"s'enquérir de la santé, relancer un sujet important. "
         f"Si oui, écris un message court (1 phrase max, en français, naturel et chaleureux). "
         f"Si non, réponds null.\n\n"
+        f"RÈGLE ABSOLUE : ne jamais supposer qu'une action a été accomplie (achat, décision, voyage, démarche...) "
+        f"si elle n'est pas explicitement confirmée dans la conversation. "
+        f"Une question sur un sujet ou une comparaison en cours ne signifie pas que {user_name} a tranché. "
+        f"En cas de doute sur l'issue d'une situation, réponds null.\n\n"
         f'Réponds UNIQUEMENT en JSON : {{"message": "..."}} ou {{"message": null}}'
     )
 

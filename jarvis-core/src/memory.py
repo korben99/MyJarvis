@@ -323,13 +323,18 @@ _SCALAR_CANONICAL: dict[str, str] = {
     "voyages_prevus": "travel_plans",
 }
 
-# Namespace families: keys in the same family are compared together
+# Namespace families: keys in the same family are compared together for dedup.
+# Each family is isolated — namespaces from different families are NEVER compared.
 _NS_FAMILY: dict[str, frozenset] = {
-    "hobby": frozenset({"hobby", "interest", "loisir", "passion", "activite"}),
-    "skill": frozenset({"skill", "competence", "technologie", "outil"}),
-    "placement": frozenset({"placement", "investissement", "epargne"}),
-    "projet": frozenset({"projet", "project"}),
+    "hobby":         frozenset({"hobby", "interest", "loisir", "passion", "activite", "sport"}),
+    "skill":         frozenset({"skill", "competence"}),
+    "tech":          frozenset({"technologie", "outil"}),
+    "placement":     frozenset({"placement", "investissement", "epargne"}),
+    "projet":        frozenset({"projet", "project"}),
     "preoccupation": frozenset({"preoccupation", "concerns", "inquietude"}),
+    "etude":         frozenset({"etude", "matiere", "specialite", "option", "note"}),
+    # situation and famille are intentionally NOT grouped together:
+    # situation = facts about the user, famille = facts about third parties.
 }
 
 
@@ -431,8 +436,9 @@ def _normalize_profile_keys_batch(
             prompt = (
                 f"Clés existantes : [{keys_list}]\n"
                 f"Nouvelles clés  : [{new_list}]\n\n"
-                "Pour chaque nouvelle clé, indique le doublon exact parmi les existantes "
-                "(même concept, catégorie synonyme). Si aucun → null.\n"
+                "Pour chaque nouvelle clé, indique le doublon exact parmi les existantes.\n"
+                "RÈGLE STRICTE : doublon = même sujet ET même concept. Même préfixe namespace ≠ doublon.\n"
+                "Si le moindre doute → null.\n"
                 'Réponds : {"matches": [{"new": "clé", "match": "existante_ou_null"}, ...]}'
             )
             raw = call_llm(
@@ -442,19 +448,26 @@ def _normalize_profile_keys_batch(
                         "content": (
                             "Tu es un détecteur de doublons de clés de profil. "
                             "Réponds UNIQUEMENT avec du JSON valide.\n"
-                            "Exemples :\n"
+                            "RÈGLE : deux clés sont des doublons UNIQUEMENT si elles décrivent "
+                            "le MÊME sujet ET le MÊME concept. Même préfixe ≠ doublon.\n"
+                            "Exemples VRAIS doublons (namespace synonyme, même sujet) :\n"
                             '  existantes: ["hobby:kart"] nouvelles: ["loisir:kart"] '
                             '→ {"matches": [{"new": "loisir:kart", "match": "hobby:kart"}]}\n'
+                            "Exemples NON doublons (même préfixe, sujets ou concepts différents) :\n"
+                            '  existantes: ["situation:parents_location"] nouvelles: ["situation:lieu_residence"] '
+                            '→ {"matches": [{"new": "situation:lieu_residence", "match": null}]}\n'
+                            '  existantes: ["competence:ia"] nouvelles: ["competence:bricolage"] '
+                            '→ {"matches": [{"new": "competence:bricolage", "match": null}]}\n'
                             '  existantes: ["hobby:kart"] nouvelles: ["hobby:tennis"] '
                             '→ {"matches": [{"new": "hobby:tennis", "match": null}]}'
                         ),
                     },
                     {"role": "user", "content": prompt},
                 ],
-                model=ROUTER_MODEL,
-                api_url=ROUTER_API_URL,
-                api_key=ROUTER_API_KEY,
-                temperature=0.1,
+                model=PRIMARY_MODEL,
+                api_url=PRIMARY_API_URL,
+                api_key=PRIMARY_API_KEY,
+                temperature=0.0,
                 max_tokens=MAX_TOKENS_SHORT,
                 json_response=True,
                 no_think=True,
@@ -557,10 +570,10 @@ def _normalize_profile_key(
                 },
                 {"role": "user", "content": prompt},
             ],
-            model=ROUTER_MODEL,
-            api_url=ROUTER_API_URL,
-            api_key=ROUTER_API_KEY,
-            temperature=0.1,
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
+            temperature=0.0,
             max_tokens=MAX_TOKENS_SHORT,
             json_response=True,
             no_think=True,
@@ -1768,7 +1781,12 @@ def build_memory_context(
     ]
     if active_projects:
         plines = [f"- {p.get('name', 'sans nom')}" for p in active_projects]
-        parts.append("<projets_actifs>\n" + "\n".join(plines) + "\n</projets_actifs>")
+        parts.append(
+            "<projets_actifs>\n"
+            "[Exhaustif — absent = clôturé]\n"
+            + "\n".join(plines)
+            + "\n</projets_actifs>"
+        )
 
     # Emotional state — read-only decay applied inline (no Redis write, no lock)
     try:
