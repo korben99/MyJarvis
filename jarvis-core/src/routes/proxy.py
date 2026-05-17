@@ -71,9 +71,6 @@ def _extract_content_parts(content: str | list) -> tuple[str, list]:
 _OWUI_SYSTEM_KEYWORDS = (
     "### task:",
     "generate a title",
-    "suggest 3",
-    "suggest 4",
-    "suggest 5",
     "relevant follow",
     "follow-up question",
     "followup question",
@@ -228,6 +225,10 @@ async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
                         f"data: {json.dumps({'id': req_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'jarvis', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
                     )
                     yield "data: [DONE]\n\n"
+
+    # Guard: close unclosed think block if upstream stream ended without a done event.
+    if in_think:
+        yield _delta("\n</think>\n\n")
 
 
 @router.get("/v1/models")

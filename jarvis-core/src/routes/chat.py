@@ -381,7 +381,7 @@ async def _sse_stream(ctx: _SseCtx):
             )
         if full_clean:
             append_conversation_message(
-                ctx.user_code, ctx.session_id, "user", ctx.original_message
+                ctx.user_code, ctx.session_id, "user", ctx.raw_user_content
             )
             append_conversation_message(
                 ctx.user_code, ctx.session_id, "assistant", full_clean

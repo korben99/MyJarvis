@@ -653,6 +653,15 @@ def update_user_profile(user_code: str, key: str, value: str | None):
             old_val or "(empty)",
         )
     else:
+        if ":" in key:
+            ns = key.split(":")[0]
+            if ns not in _ALLOWED_PROFILE_NAMESPACES:
+                logger.warning(
+                    "update_user_profile: rejected unauthorized namespace key %r for %s",
+                    key, user_code,
+                )
+                return
+
         existing_keys = r.hkeys(profile_redis_key)
 
         # Key normalization: if new_key is semantically equivalent to an existing key
@@ -1052,6 +1061,11 @@ def apply_project_updates(user_code: str, project_events: list[dict]):
                 entry["name"] = new_name
                 entry["last_update"] = now
                 project_map[new_name] = entry
+            else:
+                logger.warning(
+                    "Project rename: '%s' not found — possible LLM confabulation (raw='%s', rename_to='%s')",
+                    old_resolved, old_raw, new_name,
+                )
             continue  # rename has no summary entry
 
         # Append summary to updates timeline (all actions except rename)
@@ -1473,7 +1487,13 @@ def search_memory(
             if interest_weights:
                 text_lower = payload.get("text", "").lower()
                 best_weight = max(
-                    (w for term, w in interest_weights.items() if term.lower() in text_lower),
+                    (
+                        w for term, w in interest_weights.items()
+                        if re.search(
+                            r"(?<!\w)" + re.escape(term.lower()) + r"(?!\w)",
+                            text_lower,
+                        )
+                    ),
                     default=1.0,
                 )
                 interest_boost = min(0.08, max(0.0, (best_weight - 1.0) * 0.04))

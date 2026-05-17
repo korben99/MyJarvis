@@ -317,14 +317,18 @@ async def _assemble_with_llm(
     """Call the LLM to write the final briefing text and HTML."""
     date_str = now_user(user_code).strftime("%A %d %B %Y")
 
+    def _esc(s: str) -> str:
+        """Escape braces in external data so str.format() doesn't crash on {word}."""
+        return s.replace("{", "{{").replace("}", "}}")
+
     calendar_text = (
         "\n".join(
             (
-                f"- {e['start']} : {e['summary']}"
-                + (f" ({e['location']})" if e.get("location") else "")
+                f"- {e['start']} : {_esc(e['summary'])}"
+                + (f" ({_esc(e['location'])})" if e.get("location") else "")
                 if e.get("all_day")
-                else f"- {fmt_event_time(e['start'], user_code, '%H:%M')} : {e['summary']}"
-                + (f" ({e['location']})" if e.get("location") else "")
+                else f"- {fmt_event_time(e['start'], user_code, '%H:%M')} : {_esc(e['summary'])}"
+                + (f" ({_esc(e['location'])})" if e.get("location") else "")
             )
             for e in sections.get("calendar", [])
         )
@@ -333,29 +337,30 @@ async def _assemble_with_llm(
 
     gmail_text = (
         "\n".join(
-            f"- De {m['from']} | {m['subject']}" for m in sections.get("gmail", [])[:5]
+            f"- De {_esc(m['from'])} | {_esc(m['subject'])}"
+            for m in sections.get("gmail", [])[:5]
         )
         or "Aucun email non lu."
     )
 
-    weather_text = sections.get("weather", "") or "Données météo indisponibles."
+    weather_text = _esc(sections.get("weather", "") or "Données météo indisponibles.")
     news_items = sections.get("news", [])
     news_text = (
         "\n".join(
-            f"- {n['title']} — {n['snippet']} [URL: {n['url']}]"
+            f"- {_esc(n['title'])} — {_esc(n['snippet'])} [URL: {n['url']}]"
             if isinstance(n, dict)
-            else f"- {n}"
+            else f"- {_esc(str(n))}"
             for n in news_items
         )
         or "Aucune actualité disponible."
     )
-    interests_text = ", ".join(sections.get("interests", [])) or "généralistes"
+    interests_text = _esc(", ".join(sections.get("interests", [])) or "généralistes")
     projects_text = (
-        "\n".join(f"- {p}" for p in sections.get("projects", []))
+        "\n".join(f"- {_esc(p)}" for p in sections.get("projects", []))
         or "Aucun projet rappelé."
     )
 
-    portfolio_text = (
+    portfolio_text = _esc(
         sections.get("portfolio") or "Aucune donnée de portefeuille disponible."
     )
 

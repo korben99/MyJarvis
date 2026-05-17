@@ -477,6 +477,12 @@ def _extract_gmail_query(message: str) -> str:
         return "subject:facture"
     if "aujourd'hui" in m or "du jour" in m:
         return "newer_than:1d"
+    # Numeric duration: "il y a 3 semaines", "depuis 2 jours", "les 4 derniers mois"
+    _dur = re.search(r"(\d+)\s*(jour|semaine|mois)", m)
+    if _dur:
+        n, unit = int(_dur.group(1)), _dur.group(2)
+        days = n if unit == "jour" else (n * 7 if unit == "semaine" else n * 30)
+        return f"newer_than:{days}d"
     if any(
         w in m for w in ["récent", "récents", "derniers", "semaine", "cette semaine"]
     ):
@@ -508,15 +514,18 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
 
     # ── 1. Règles déterministes ───────────────────────────────────────────────
 
-    # URL → memory (la page est déjà fetchée automatiquement en amont)
-    if re.search(r"https?://", msg):
-        logger.debug("Embed router: URL détectée → memory")
-        return _build_result("memory", msg, google_available)
-
-    # Détection reasoning (flag, pas intent)
+    # Détection reasoning (flag, pas intent) — doit précéder les early-returns
     force_reasoning = bool(
         any(t in msg_lower for t in _REASON_EXACT) or _REASON_REGEX.search(msg_lower)
     )
+
+    # URL → memory (la page est déjà fetchée automatiquement en amont)
+    if re.search(r"https?://", msg):
+        logger.debug("Embed router: URL détectée → memory")
+        result = _build_result("memory", msg, google_available)
+        if force_reasoning:
+            result.use_reasoning = True
+        return result
 
     # Commandes de gestion des propositions de prompt → self direct
     _proposal_explicit = (
@@ -544,7 +553,10 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
     )
     if _proposal_explicit:
         logger.debug("Embed router: proposal trigger → self direct")
-        return _build_result("self", msg, google_available)
+        result = _build_result("self", msg, google_available)
+        if force_reasoning:
+            result.use_reasoning = True
+        return result
 
     if len(msg) <= 50 and "?" not in msg:
         _norm = msg_lower.rstrip(" !.,")

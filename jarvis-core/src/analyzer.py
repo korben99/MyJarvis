@@ -353,7 +353,8 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                 for m in sorted(sd["msgs"], key=lambda x: x.get("ts", 0)):
                     role = "Utilisateur" if m.get("role") == "user" else "Jarvis"
                     content = m.get("content", "").strip()[:800]
-                    if content:
+                    # Skip slash-commands (/briefing, /agenda…) — no extractable facts
+                    if content and not (m.get("role") == "user" and content.startswith("/")):
                         turns.append(f"{role} : {content}")
                 conversation = "\n".join(turns)[:6000]
 

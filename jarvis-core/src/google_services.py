@@ -776,4 +776,3 @@ def create_calendar_event(
     except Exception as exc:
         logger.error("Calendar create unexpected error: %s", type(exc).__name__)
         return None
-    return 7

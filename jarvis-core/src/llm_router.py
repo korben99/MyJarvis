@@ -149,8 +149,8 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
     Returns RouterResult on success, None on any failure → caller falls back
     to the embedding router automatically.
     """
-    # Truncate to 100 chars — Qwen2.5-3B starts answering instead of routing on long inputs.
-    # The first 100 chars are enough to classify intent; the rest is noise for the router.
+    # Truncate to 200 chars — Qwen2.5-3B starts answering instead of routing on long inputs.
+    # The first 200 chars are enough to classify intent; the rest is noise for the router.
     routing_message = message[:200]
     prompt = get_prompt("ROUTER_USER").format(message=routing_message)
 

@@ -79,7 +79,13 @@ def _title_candidates(query: str) -> list[str]:
     if not words:
         return []
     try:
-        return [n for n in _load_doc_names() if any(w in n.lower() for w in words)]
+        return [
+            n for n in _load_doc_names()
+            if any(
+                re.search(r"(?<!\w)" + re.escape(w) + r"(?!\w)", n.lower())
+                for w in words
+            )
+        ]
     except Exception:
         return []
 
