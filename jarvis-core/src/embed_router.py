@@ -134,16 +134,23 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
     # ── Documents personnels / RAG ───────────────────────────────────────────
     "rag": [
         "cherche dans mes documents",
-        "dans mes notes",
         "j'ai un fichier sur ce sujet",
         "retrouve le document sur",
-        "mes notes sur",
         "cherche dans ma base documentaire",
         "regarde dans mes fichiers",
         "dans mes fichiers",
         "dans mes documents",
         "RAG",
-        "rag",
+        "lis ma fiche",
+        "lis un extrait de mon fichier",
+        "base-toi sur mon fichier",
+        "base-toi sur ma fiche",
+        "ma fiche sur",
+        "extrait de mon document",
+        "depuis mon RAG",
+        "qui est dans le rag",
+        "montre-moi ma fiche",
+        "consulte mon fichier",
     ],
     # ── Portefeuille boursier ────────────────────────────────────────────────
     "portfolio": [
@@ -331,6 +338,41 @@ _TEMPORAL_WORDS = {
 }
 
 
+# ── RAG query extraction ─────────────────────────────────────────────────────
+# Phase 1: strip command/routing phrases (compound patterns first, then single verbs)
+_RAG_CMD_RE = re.compile(
+    r"(?:"
+    r"base-toi sur (?:mon|ma)\s*|"
+    r"lis (?:un extrait de )?(?:mon|ma)\s*|"
+    r"montre(?:-moi)? (?:mon|ma)\s*|"
+    r"extrait de (?:mon|ma)\s*|"
+    r"consulte(?:r)? (?:mon|ma|mes)\s*|"
+    r"depuis (?:le |la |mon |ma |mes )?RAG\b\s*|"
+    r"dans (?:le |la |mon |ma |mes )?RAG\b\s*|"
+    r"sur (?:le |la |mon |ma |mes )?RAG\b\s*|"
+    r"qui est dans le RAG\b\s*|"
+    r"dans mes (?:documents?|notes?|fichiers?|base documentaire)\s*|"
+    r"dans (?:mon|ma) (?:document|fichier|fiche|note)\s*|"
+    r"(?:mes|mon|ma) (?:documents?|notes?|fichiers?)\s*|"
+    r"j'ai (?:un|une) (?:fichier|fiche|document|note) sur\s*|"
+    r"retrouve(?:r)? (?:le |la |un |une )?(?:document|fichier|fiche) sur\s*|"
+    r"\b(?:"
+    r"cherche(?:r)?|retrouve(?:r)?|trouve(?:r)?|recherche(?:r)?|"
+    r"regarde(?:r)?|consulte(?:r)?|montre(?:-moi)?|lis|lit|"
+    r"extrais?|extrait"
+    r")\b\s*|"
+    r"\bRAG\b\s*"
+    r")",
+    re.IGNORECASE,
+)
+
+# Phase 2: strip leading articles/possessives left after command removal
+_RAG_LEAD_NOISE_RE = re.compile(
+    r"^(?:(?:mon|ma|mes|le|la|les|l'|un|une|du|de|des|d')\s+)+",
+    re.IGNORECASE,
+)
+
+
 def preload_embed_router() -> None:
     """Précharge les vecteurs d'exemples au démarrage (évite la latence sur la première requête)."""
     if EMBED_ROUTER_ENABLED:
@@ -417,18 +459,10 @@ def _extract_calendar_days(message: str) -> int:
 
 
 def _extract_rag_query(message: str) -> str:
-    """Retire les phrases de commande du message pour n'en garder que les mots-clés sémantiques."""
-    cleaned = re.sub(
-        r"\b(cherche(?:r)?|retrouve(?:r)?|trouve(?:r)?|recherche(?:r)?|regarde(?:r)?|"
-        r"dans mes (documents?|notes?|fichiers?|base documentaire)|"
-        r"mes (documents?|notes?|fichiers?)|"
-        r"mode expert\s*:?|j'ai un fichier sur|RAG|rag)\b",
-        " ",
-        message,
-        flags=re.IGNORECASE,
-    ).strip()
-    # Collapse whitespace
+    """Strip RAG routing phrases, return semantic topic keywords."""
+    cleaned = _RAG_CMD_RE.sub(" ", message)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ?,!.")
+    cleaned = _RAG_LEAD_NOISE_RE.sub("", cleaned).strip()
     return cleaned or message
 
 

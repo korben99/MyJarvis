@@ -74,7 +74,7 @@ PARAMS :
 weather_location : ville explicite dans le message, sinon null
 gmail_query      : syntaxe Gmail ("is:unread", "subject:facture", "newer_than:7d"…) ou null
 calendar_days    : entier 1-90 ou null
-rag_query        : si intent rag → 3-5 mots-clés sémantiques, sans verbes ni phrases d'intro ("bail location" ← "retrouve dans mes docs le bail") — sinon null
+rag_query        : si intent rag → 3-5 mots-clés extraits du message (nom du doc + sujet si mentionnés, ex: "galop 6 équipements" ← "ma fiche galop 6 chapitre équipements") — sinon null
 project_name     : nom de projet mentionné explicitement, extrait tel quel ("attelage BMW", "Jarvis v9") — sinon null
 use_reasoning    : true si arbitrage/comparaison d'options, diagnostic bug à cause inconnue, conseil fiscal/juridique/médical, ou calcul multi-étapes
                    false pour : how-to, explications, résumé, traduction, conversation, recall factuel
@@ -93,6 +93,9 @@ EXEMPLES :
 
 "retrouve dans mes notes ce que j'avais écrit sur la régulation MiCA"
 {"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"régulation MiCA","project_name":null,"use_reasoning":false}
+
+"base-toi sur ma fiche galop 6, chapitre équipements"
+{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"galop 6 équipements","project_name":null,"use_reasoning":false}
 
 "mes rendez-vous de demain et les mails urgents"
 {"intents":["calendar","gmail"],"weather_location":null,"gmail_query":"is:important","calendar_days":2,"rag_query":null,"project_name":null,"use_reasoning":false}

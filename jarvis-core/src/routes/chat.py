@@ -57,8 +57,10 @@ from helpers import (
     fmt_now_fr,
     get_logger,
     get_session_summary_data,
+    get_sticky_rag,
     rel_time_fr,
     set_session_summary_data,
+    set_sticky_rag,
 )
 from llm_client import describe_images, stream_openai
 from llm_router import llm_route
@@ -946,6 +948,20 @@ async def chat(req: ChatRequest):
         web_results = inline_url_results + [
             r for r in _web_to_merge if r.get("url") not in _seen_urls
         ]
+
+    # ── Sticky RAG: store fresh results / inject cached on memory-only turns ─
+    if rag_chunks:
+        # Fresh RAG call succeeded → persist for subsequent turns.
+        set_sticky_rag(user_code, req.session_id, rag_chunks)
+    elif use_memory and not use_rag:
+        # Memory turn, no fresh RAG → re-inject last stored document context.
+        _sticky = get_sticky_rag(user_code, req.session_id)
+        if _sticky:
+            rag_chunks = _sticky
+            logger.info(
+                "chat: sticky RAG re-injected (%d chunks) for %s/%s",
+                len(rag_chunks), user_code, req.session_id,
+            )
 
     logger.debug(
         "[TTFT] gather2 done (all context sources resolved) — %.3fs", time.time() - _t0

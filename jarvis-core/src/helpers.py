@@ -393,6 +393,32 @@ def set_session_summary_data(user_code: str, session_id: str, text: str, msg_cou
     )
 
 
+_STICKY_RAG_PREFIX = "jarvis:sticky_rag:"
+
+
+def get_sticky_rag(user_code: str, session_id: str) -> list | None:
+    """Return the last RAG chunks stored for this session, or None."""
+    raw = get_redis().get(f"{_STICKY_RAG_PREFIX}{user_code}:{session_id}")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def set_sticky_rag(user_code: str, session_id: str, chunks: list) -> None:
+    """Persist RAG chunks for automatic re-injection on subsequent memory turns."""
+    try:
+        get_redis().setex(
+            f"{_STICKY_RAG_PREFIX}{user_code}:{session_id}",
+            CHAT_LOG_TTL,
+            json.dumps(chunks, ensure_ascii=False),
+        )
+    except Exception as exc:
+        logger.warning("set_sticky_rag failed: %s", exc)
+
+
 def get_qdrant() -> QdrantClient:
     """Return the shared Qdrant connection (singleton, thread-safe)."""
     global _qdrant_client

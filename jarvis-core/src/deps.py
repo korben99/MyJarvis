@@ -18,7 +18,7 @@ logger = get_logger("jarvis-deps")
 
 # ── Context budgets (max chars per source injected into the system prompt) ──
 MEMORY_CHAR_BUDGET   = int(os.getenv("MEMORY_CHAR_BUDGET",   "2500"))
-RAG_CHAR_BUDGET      = int(os.getenv("RAG_CHAR_BUDGET",      "4000"))
+RAG_CHAR_BUDGET      = int(os.getenv("RAG_CHAR_BUDGET",      "7000"))
 WEB_CHAR_BUDGET      = int(os.getenv("WEB_CHAR_BUDGET",      "6000"))
 GOOGLE_CHAR_BUDGET   = int(os.getenv("GOOGLE_CHAR_BUDGET",   "3000"))
 TOTAL_CONTEXT_BUDGET = int(os.getenv("TOTAL_CONTEXT_BUDGET", "14000"))
