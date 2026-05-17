@@ -128,8 +128,10 @@ async def _update_session_summary(user_code: str, session_id: str) -> None:
             return
 
         dropped_text = "\n".join(
-            f"{m['role']}: {m.get('content', '')[:400]}" for m in uncovered
+            m.get("content", "")[:400] for m in uncovered if m["role"] == "user"
         )
+        if not dropped_text.strip():
+            return
         existing_block = f"Résumé précédent :\n{existing_text}\n\n" if existing_text else ""
         prompt = get_prompt("SESSION_SUMMARY_PROMPT").format(
             existing_block=existing_block,
@@ -137,9 +139,9 @@ async def _update_session_summary(user_code: str, session_id: str) -> None:
         )
         content = await call_llm_async(
             [{"role": "user", "content": prompt}],
-            model=ROUTER_MODEL,
-            api_url=ROUTER_API_URL,
-            api_key=ROUTER_API_KEY,
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
             temperature=0.0,
             max_tokens=SESSION_SUMMARY_TOKENS,
             no_think=True,
@@ -1068,6 +1070,11 @@ async def chat(req: ChatRequest):
         _total = int(REDIS_CLIENT.llen(f"chat:{user_code}:{req.session_id}"))
         _uncovered_n = max(0, _total - _summary_data["msg_count"])
         _uncovered_hist = hist[-_uncovered_n:] if _uncovered_n > 0 else []
+        # Always keep last assistant message so Jarvis knows what he just said.
+        if not _uncovered_hist and hist:
+            last_assistant = next((m for m in reversed(hist) if m["role"] == "assistant"), None)
+            if last_assistant:
+                _uncovered_hist = [last_assistant]
         hist_slice = _trim_history_to_budget(_uncovered_hist, HIST_CONV_TOKEN_BUDGET)
     else:
         hist_slice = _trim_history_to_budget(hist, HIST_CONV_TOKEN_BUDGET)

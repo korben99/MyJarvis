@@ -70,7 +70,9 @@ if LLM_LOCAL:
     ROUTER_MODEL = os.getenv(
         "ROUTER_MODEL_LOCAL", "/opt/jarvis/models/hub/Hermes-3-Llama-3.2-3B-q6-affine"
     )
-    PRIMARY_MODEL = os.getenv("PRIMARY_MODEL_LOCAL", "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit")
+    PRIMARY_MODEL = os.getenv(
+        "PRIMARY_MODEL_LOCAL", "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit"
+    )
     REASONING_MODEL = os.getenv("REASONING_MODEL_LOCAL") or PRIMARY_MODEL
     VISION_MODEL = os.getenv(
         "VISION_MODEL_LOCAL", "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-5bit"
@@ -130,8 +132,8 @@ def is_hermes(model: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════
 
 # ── Vitesse de génération (mesurée, MLX + queue lock, conservateur) ──────
-TOKEN_SPEED_TPS = float(os.getenv("TOKEN_SPEED_TPS", "50"))   # tok/s
-TIMEOUT_MARGIN  = float(os.getenv("TIMEOUT_MARGIN",  "1.3"))  # marge sécurité
+TOKEN_SPEED_TPS = float(os.getenv("TOKEN_SPEED_TPS", "50"))  # tok/s
+TIMEOUT_MARGIN = float(os.getenv("TIMEOUT_MARGIN", "1.3"))  # marge sécurité
 
 
 def llm_timeout(max_tokens: int) -> float:
@@ -140,35 +142,51 @@ def llm_timeout(max_tokens: int) -> float:
 
 
 # ── no_think — output seul, pas de bloc think ────────────────────────────
-MAX_TOKENS_TINY     = int(os.getenv("MAX_TOKENS_TINY",     "80"))    # ticker, query rewriter
-MAX_TOKENS_SHORT    = int(os.getenv("MAX_TOKENS_SHORT",    "300"))   # router, normalize, judge
-MAX_TOKENS_COMPACT  = int(os.getenv("MAX_TOKENS_COMPACT",  "600"))   # push, cleaning, consolidate
-MAX_TOKENS_MEDIUM   = int(os.getenv("MAX_TOKENS_MEDIUM",   "1000"))  # analyzer, reflection, alerts
-MAX_TOKENS_NO_THINK = int(os.getenv("MAX_TOKENS_NO_THINK", "1500"))  # chat simple, nightly self
+MAX_TOKENS_TINY = int(os.getenv("MAX_TOKENS_TINY", "80"))  # ticker, query rewriter
+MAX_TOKENS_SHORT = int(os.getenv("MAX_TOKENS_SHORT", "300"))  # router, normalize, judge
+MAX_TOKENS_COMPACT = int(
+    os.getenv("MAX_TOKENS_COMPACT", "600")
+)  # push, cleaning, consolidate
+MAX_TOKENS_MEDIUM = int(
+    os.getenv("MAX_TOKENS_MEDIUM", "1000")
+)  # analyzer, reflection, alerts
+MAX_TOKENS_NO_THINK = int(
+    os.getenv("MAX_TOKENS_NO_THINK", "1500")
+)  # chat simple, nightly self
 MAX_TOKENS_BRIEFING = int(os.getenv("MAX_TOKENS_BRIEFING", "3000"))  # briefing assembly
 
 # ── think — THINKING_BUDGET_* + headroom réponse ────────────────────────
 # Le ThinkingBudgetProcessor coupe le think exactement à THINKING_BUDGET_* tokens.
 # max_tokens doit toujours > thinking_budget + taille_réponse_attendue.
-THINKING_BUDGET_COMPACT = int(os.getenv("THINKING_BUDGET_COMPACT", "1024"))  # classification, décision binaire
-THINKING_BUDGET_MEDIUM  = int(os.getenv("THINKING_BUDGET_MEDIUM",  "2048"))  # raisonnement modéré
-THINKING_BUDGET_DEEP    = int(os.getenv("THINKING_BUDGET_DEEP",    "4000"))  # créativité, analyse longue
+THINKING_BUDGET_COMPACT = int(
+    os.getenv("THINKING_BUDGET_COMPACT", "1024")
+)  # classification, décision binaire
+THINKING_BUDGET_MEDIUM = int(
+    os.getenv("THINKING_BUDGET_MEDIUM", "2048")
+)  # raisonnement modéré
+THINKING_BUDGET_DEEP = int(
+    os.getenv("THINKING_BUDGET_DEEP", "4000")
+)  # créativité, analyse longue
 
-MAX_TOKENS_THINK_COMPACT = THINKING_BUDGET_COMPACT + 1024   # prune, action_review
-MAX_TOKENS_THINK_MEDIUM  = THINKING_BUDGET_MEDIUM  + 3000   # trading thresholds
-MAX_TOKENS_SYNTHESIS     = int(os.getenv("MAX_TOKENS_SYNTHESIS", "8000"))   # chat web/RAG
-MAX_TOKENS_REASONING     = int(os.getenv("MAX_TOKENS_REASONING", "10000"))  # refine_prompt, chat reasoning
+MAX_TOKENS_THINK_COMPACT = THINKING_BUDGET_COMPACT + 1024  # prune, action_review
+MAX_TOKENS_THINK_MEDIUM = THINKING_BUDGET_MEDIUM + 3000  # trading thresholds
+MAX_TOKENS_SYNTHESIS = int(os.getenv("MAX_TOKENS_SYNTHESIS", "8000"))  # chat web/RAG
+MAX_TOKENS_REASONING = int(
+    os.getenv("MAX_TOKENS_REASONING", "10000")
+)  # refine_prompt, chat reasoning
 
 # ── Hard cap (kill switch runaway — indépendant des budgets ci-dessus) ───
 MAX_TOKENS_HARD_CAP = int(os.getenv("MAX_TOKENS_HARD_CAP", "16000"))
 
 # ── Historique conversationnel (chat.py) ─────────────────────────────────
-HIST_CONV_TOKEN_BUDGET        = int(os.getenv("HIST_CONV_TOKEN_BUDGET",        "800"))
-SESSION_SUMMARY_TOKENS        = int(os.getenv("SESSION_SUMMARY_TOKENS",        "300"))
-HIST_CONV_SUMMARIZE_THRESHOLD = int(os.getenv("HIST_CONV_SUMMARIZE_THRESHOLD", "1000"))
+HIST_CONV_TOKEN_BUDGET = int(os.getenv("HIST_CONV_TOKEN_BUDGET", "1000"))
+SESSION_SUMMARY_TOKENS = int(os.getenv("SESSION_SUMMARY_TOKENS", "400"))
+HIST_CONV_SUMMARIZE_THRESHOLD = int(os.getenv("HIST_CONV_SUMMARIZE_THRESHOLD", "1500"))
 
 # ThinkingBudgetProcessor : activé via USE_THINKING_BUDGET_PROCESSOR=yes
-USE_THINKING_BUDGET_PROCESSOR = os.getenv("USE_THINKING_BUDGET_PROCESSOR", "no").lower() == "yes"
+USE_THINKING_BUDGET_PROCESSOR = (
+    os.getenv("USE_THINKING_BUDGET_PROCESSOR", "no").lower() == "yes"
+)
 
 
 def tokens_param(model: str) -> str:

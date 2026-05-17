@@ -54,8 +54,10 @@ from config import (
     MAX_TOKENS_NO_THINK,
     MAX_TOKENS_REASONING,
     MAX_TOKENS_THINK_COMPACT,
+    MAX_TOKENS_THINK_MEDIUM,
     THINKING_BUDGET_COMPACT,
     THINKING_BUDGET_DEEP,
+    THINKING_BUDGET_MEDIUM,
     llm_timeout,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
@@ -2697,21 +2699,21 @@ async def _llm_review_before_action(
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=0.0,
-            max_tokens=MAX_TOKENS_THINK_COMPACT,
-            thinking_budget=THINKING_BUDGET_COMPACT,
+            max_tokens=MAX_TOKENS_THINK_MEDIUM,
+            thinking_budget=THINKING_BUDGET_MEDIUM,
             json_response=True,
             no_think=False,
-            timeout=llm_timeout(MAX_TOKENS_THINK_COMPACT),
+            timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
         )
         result = extract_llm_json(content)
-        execute = bool(result.get("execute", True))
+        execute = bool(result.get("execute", False))
         reason = result.get("reason", "")
         return execute, reason
     except Exception as exc:
         logger.warning(
-            "Action self-review failed (%s) — allowing action by default", exc
+            "Action self-review failed (%s) — blocking action by default", exc
         )
-        return True, "review failed — defaulting to execute"
+        return False, "review failed — defaulting to block"
 
 
 # ══════════════════════════════════════════════════
