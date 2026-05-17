@@ -561,10 +561,15 @@ def _normalize_profile_key(
                     "role": "system",
                     "content": (
                         "Tu es un détecteur de doublons de clés de profil. "
-                        "Réponds UNIQUEMENT avec du JSON valide, sans aucun autre texte.\n"
-                        "Exemples :\n"
-                        '  "hobby:ia" vs "interest:ia" → {"match": "hobby:ia"}\n'
+                        "Réponds UNIQUEMENT avec du JSON valide.\n"
+                        "RÈGLE : deux clés sont des doublons UNIQUEMENT si elles décrivent "
+                        "le MÊME sujet ET le MÊME concept. Même préfixe ≠ doublon.\n"
+                        "Exemples VRAIS doublons (namespace synonyme, même sujet) :\n"
                         '  "hobby:kart" vs "loisir:kart" → {"match": "hobby:kart"}\n'
+                        '  "hobby:ia" vs "interest:ia" → {"match": "hobby:ia"}\n'
+                        "Exemples NON doublons (même préfixe, sujets ou concepts différents) :\n"
+                        '  "situation:parents_location" vs "situation:lieu_residence" → {"match": null}\n'
+                        '  "competence:ia" vs "competence:bricolage" → {"match": null}\n'
                         '  "hobby:kart" vs "hobby:tennis" → {"match": null}'
                     ),
                 },
@@ -666,7 +671,17 @@ def update_user_profile(user_code: str, key: str, value: str | None):
         )
 
 
-_BLOCKED_PROFILE_NAMESPACES = frozenset({"projet", "project"})
+# Whitelist of authorized profile namespaces (prefix before ":").
+# Scalar keys with no prefix (name, travel_preference…) are always allowed.
+# Any key with a prefix NOT in this set is silently rejected.
+_ALLOWED_PROFILE_NAMESPACES = frozenset({
+    "situation", "famille", "profession", "competence", "loisir", "sport",
+    "technologie", "sante", "objectif", "etude", "placement", "preference",
+    "interet", "apprecie", "aversion", "langue",
+})
+
+# Hard cap: never persist more than this many new facts per analyzer call.
+_MAX_FACTS_PER_BATCH = 6
 
 
 def update_user_profile_batch(user_code: str, facts: list[dict]) -> None:
@@ -679,21 +694,28 @@ def update_user_profile_batch(user_code: str, facts: list[dict]) -> None:
     if not facts:
         return
 
-    # Guard: reject keys with namespaces that conflict with dedicated Redis structures.
-    # projet:* belongs in user:{code}:projects, not in the profile hash.
+    # Guard: only allow explicitly authorized namespaces.
+    # Scalar keys (no ":") are always allowed.
     filtered = []
     for f in facts:
         k = f.get("key", "")
         ns = k.split(":")[0] if ":" in k else ""
-        if ns in _BLOCKED_PROFILE_NAMESPACES:
+        if ns and ns not in _ALLOWED_PROFILE_NAMESPACES:
             logger.warning(
-                "update_user_profile_batch: rejected blocked namespace key '%s' for %s",
-                k,
-                user_code,
+                "update_user_profile_batch: rejected unauthorized namespace key '%s' for %s",
+                k, user_code,
             )
             continue
         filtered.append(f)
     facts = filtered
+
+    # Hard cap: guard against analyzer returning an implausibly large fact list.
+    if len(facts) > _MAX_FACTS_PER_BATCH:
+        logger.warning(
+            "update_user_profile_batch: %d facts exceeds cap %d for %s — truncating",
+            len(facts), _MAX_FACTS_PER_BATCH, user_code,
+        )
+        facts = facts[:_MAX_FACTS_PER_BATCH]
 
     r = get_redis()
     profile_redis_key = f"user:{user_code}:profile"
@@ -726,7 +748,13 @@ def update_user_profile_batch(user_code: str, facts: list[dict]) -> None:
             old_val or "(empty)",
         )
 
+    # Track evicted keys so that if two new facts resolve to the same existing key,
+    # only the first write evicts it — subsequent writes skip the already-gone eviction.
+    already_evicted: set[str] = set()
     for fact in new_facts:
+        dup = dedup_map.get(fact["key"])
+        if dup in already_evicted:
+            dup = None  # eviction already done by a prior fact in this batch
         _write_profile_fact(
             r,
             profile_redis_key,
@@ -734,9 +762,11 @@ def update_user_profile_batch(user_code: str, facts: list[dict]) -> None:
             user_code,
             fact["key"],
             fact["value"],
-            dedup_map.get(fact["key"]),
+            dup,
             now_ts,
         )
+        if dup:
+            already_evicted.add(dup)
 
 
 def set_interest_weight(user_code: str, term: str, weight: float):

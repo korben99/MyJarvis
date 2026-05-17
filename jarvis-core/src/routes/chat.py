@@ -1029,11 +1029,12 @@ async def chat(req: ChatRequest):
     # to keep the static system prefix token-identical → KV cache valid.
     reasoning_hint = ""
     if llm_result and llm_result.use_reasoning:
-        # Short hint — "étape par étape" triggers verbose formal checklists in the think block.
-        reasoning_hint = "\n\nRéfléchis avant de répondre."
+        # Guide la qualité du raisonnement sans déclencher de checklist formelle.
+        # "étape par étape" produit des listes verbeuses — à éviter.
+        reasoning_hint = "\n\nAnalyse en profondeur — pèse les options et les risques avant de conclure."
     elif not chat_no_think and assembled:
-        # Web/RAG synthesis — only when there is actual context to synthesize.
-        reasoning_hint = "\n\nSynthétise brièvement le contexte ci-dessus avant de répondre."
+        # Web/RAG : le think doit servir à identifier les infos pertinentes, pas à résumer.
+        reasoning_hint = "\n\nAppuie ta réponse sur le contexte ci-dessus."
 
     raw_user_content = req.message
     if req.image_parts and not image_description:
