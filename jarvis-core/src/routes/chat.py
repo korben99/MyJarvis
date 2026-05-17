@@ -92,17 +92,22 @@ logger = get_logger("jarvis-chat")
 
 router = APIRouter()
 def _trim_history_to_budget(hist: list[dict], budget_tokens: int) -> list[dict]:
-    """Keep the most recent messages that fit within the token budget (4 chars ≈ 1 token)."""
+    """Keep the most recent messages within token budget, always preserving the last exchange."""
+    if not hist:
+        return []
     budget_chars = budget_tokens * 4
-    selected: list[dict] = []
-    used = 0
-    for msg in reversed(hist):
+    # Always keep the last exchange (last 2 messages = preceding user + last assistant).
+    min_keep = min(2, len(hist))
+    guaranteed = hist[-min_keep:]
+    used = sum(len(m.get("content", "")) for m in guaranteed)
+    older: list[dict] = []
+    for msg in reversed(hist[:-min_keep]):
         cost = len(msg.get("content", ""))
-        if used + cost > budget_chars and selected:
+        if used + cost > budget_chars:
             break
-        selected.append(msg)
+        older.append(msg)
         used += cost
-    return list(reversed(selected))
+    return list(reversed(older)) + guaranteed
 
 
 async def _update_session_summary(user_code: str, session_id: str) -> None:
@@ -1069,12 +1074,15 @@ async def chat(req: ChatRequest):
     if _session_summary:
         _total = int(REDIS_CLIENT.llen(f"chat:{user_code}:{req.session_id}"))
         _uncovered_n = max(0, _total - _summary_data["msg_count"])
-        _uncovered_hist = hist[-_uncovered_n:] if _uncovered_n > 0 else []
-        # Always keep last assistant message so Jarvis knows what he just said.
-        if not _uncovered_hist and hist:
-            last_assistant = next((m for m in reversed(hist) if m["role"] == "assistant"), None)
-            if last_assistant:
-                _uncovered_hist = [last_assistant]
+        _uncovered_hist = list(hist[-_uncovered_n:]) if _uncovered_n > 0 else []
+        # Prepend last assistant message from covered history if not already present,
+        # so Jarvis always knows what he said before the current user reply.
+        has_assistant = any(m["role"] == "assistant" for m in _uncovered_hist)
+        if not has_assistant:
+            _covered = hist[:-_uncovered_n] if _uncovered_n > 0 else hist
+            last_asst = next((m for m in reversed(_covered) if m["role"] == "assistant"), None)
+            if last_asst:
+                _uncovered_hist = [last_asst] + _uncovered_hist
         hist_slice = _trim_history_to_budget(_uncovered_hist, HIST_CONV_TOKEN_BUDGET)
     else:
         hist_slice = _trim_history_to_budget(hist, HIST_CONV_TOKEN_BUDGET)
