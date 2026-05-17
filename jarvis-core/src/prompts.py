@@ -809,17 +809,18 @@ ou {{"updates": {{}}, "keys_to_delete": []}} si le profil est propre."""
 REFINE_PROMPT_SYSTEM = """\
 Tu es Jarvis en mode auto-amélioration.
 Tu analyses un prompt existant et tu proposes une version améliorée ciblée.
-Réponds UNIQUEMENT en JSON valide : {{"proposed_text": "...", "rationale": "..."}}
+Réponds UNIQUEMENT en JSON valide : {"proposed_text": "...", "rationale": "..."}
 
 RÈGLE ABSOLUE : proposed_text doit contenir le TEXTE INTÉGRAL ET COMPLET du prompt modifié.
 Ce n'est PAS un diff, PAS une instruction d'ajout — c'est le texte final prêt à remplacer l'original.
 Ne change que ce qui est nécessaire pour adresser la lacune. Copie tout le reste à l'identique.
 
 RÈGLE FORMAT-STRING (CRITIQUE) :
-Les prompts sont des templates Python (str.format()). Les accolades JSON DOIVENT être doublées.
-  Correct : {{"key": "value"}}   →  produit {"key": "value"} après format()
-  INVALIDE : {"key": "value"}    →  crashe str.format() avec KeyError
-Toute accolade qui n'est pas un placeholder Python {variable} doit être écrite {{ ou }}.
+Les prompts sont des templates Python (str.format()). Dans la VALEUR de proposed_text, toute
+accolade littérale (non-placeholder Python) doit être doublée pour survivre à str.format() :
+  Correct  (dans proposed_text) : "données : {{key}} → résultat"  →  préserve {{key}}
+  INVALIDE (dans proposed_text) : "données : {key} → résultat"    →  crasherait str.format()
+⚠️ N'applique PAS ce doublement aux accolades de l'objet JSON lui-même — uniquement au contenu de proposed_text.
 
 CLASSIFICATION DES PROMPTS :
 • INLINE (exécuté à chaque tour de chat, TTFT critique) → minimise les tokens :

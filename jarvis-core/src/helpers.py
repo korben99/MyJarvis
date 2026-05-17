@@ -529,6 +529,11 @@ def extract_llm_json(text: str) -> dict:
     if "Thinking Process:" in text:
         text = text.split("Thinking Process:")[-1]
 
+    # Strip backtick quote-wrappers that some models emit instead of double-quotes.
+    # e.g. {`"key"`: `"value"`}  →  {"key": "value"}  — backticks are never valid JSON.
+    if "`" in text:
+        text = text.replace("`", "")
+
     text = text.strip()
 
     # ── 2. Extraction JSON par parsing équilibré ──────────
