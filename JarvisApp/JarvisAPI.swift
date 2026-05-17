@@ -329,7 +329,8 @@ class JarvisAPI: ObservableObject {
                 // Existing messages are a prefix of history — append only new ones.
                 let newMessages = history.dropFirst(messages.count).map {
                     ChatMessage(role: ChatMessage.Role(rawValue: $0.role) ?? .assistant,
-                                content: $0.content)
+                                content: $0.content,
+                                timestamp: $0.ts.map { Date(timeIntervalSince1970: $0) } ?? Date())
                 }
                 messages.append(contentsOf: newMessages)
                 return
@@ -338,7 +339,8 @@ class JarvisAPI: ObservableObject {
             // Full replace fallback (conversation was cleared or history diverged).
             messages = history.map {
                 ChatMessage(role: ChatMessage.Role(rawValue: $0.role) ?? .assistant,
-                            content: $0.content)
+                            content: $0.content,
+                            timestamp: $0.ts.map { Date(timeIntervalSince1970: $0) } ?? Date())
             }
 
         } catch {

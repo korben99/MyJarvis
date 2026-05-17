@@ -18,11 +18,11 @@ struct ChatMessage: Identifiable, Equatable {
         case user, assistant, system
     }
 
-    init(role: Role, content: String, imageData: Data? = nil, isStreaming: Bool = false) {
+    init(role: Role, content: String, imageData: Data? = nil, timestamp: Date = Date(), isStreaming: Bool = false) {
         self.role = role
         self.content = content
         self.imageData = imageData
-        self.timestamp = Date()
+        self.timestamp = timestamp
         self.isStreaming = isStreaming
     }
 
@@ -35,6 +35,7 @@ struct ChatMessage: Identifiable, Equatable {
 struct HistoryMessage: Codable {
     let role: String
     let content: String
+    let ts: Double?
 }
 
 // MARK: - API Types

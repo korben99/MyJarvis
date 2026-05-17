@@ -279,7 +279,11 @@ async def clear(user_code: str, session_id: str):
 
     if user_code not in USER_CODES:
         raise HTTPException(404, "Unknown user")
-    REDIS_CLIENT.delete(f"chat:{user_code}:{session_id}")
+    REDIS_CLIENT.delete(
+        f"chat:{user_code}:{session_id}",
+        f"session:summary:{user_code}:{session_id}",
+        f"jarvis:sticky_rag:{user_code}:{session_id}",
+    )
     return {"status": "cleared", "session_id": session_id}
 
 
