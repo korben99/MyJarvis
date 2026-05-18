@@ -270,6 +270,7 @@ def _strip_sse_response(raw: str, started_in_think: bool) -> str:
     - started_in_think=False : flux normal. On retire les blocs <think>…</think>
       complets, puis tout <think> ouvert non fermé (troncature budget).
     """
+    raw = raw.replace("</think >", "</think>")  # Qwen3.6 hallucination normalization
     if started_in_think:
         if "</think>" in raw:
             return raw.split("</think>", 1)[1].strip()
@@ -352,7 +353,7 @@ async def _sse_stream(ctx: _SseCtx):
             if think_frag:
                 yield f"data: {json.dumps({'think': think_frag})}\n\n"
 
-            if first_chunk:
+            if first_chunk and clean:
                 clean = clean.lstrip("\n")
                 if clean:
                     logger.debug(

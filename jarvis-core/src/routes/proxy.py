@@ -228,7 +228,7 @@ async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
                 except json.JSONDecodeError:
                     continue
 
-                if "think" in data:
+                if "think" in data and data["think"]:
                     if not in_think:
                         yield _delta("<think>")
                         in_think = True
@@ -238,7 +238,8 @@ async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
                     if in_think:
                         yield _delta("</think>")
                         in_think = False
-                    yield _delta(data["content"])
+                    if data["content"]:
+                        yield _delta(data["content"])
 
                 elif data.get("done"):
                     if in_think:
@@ -248,10 +249,15 @@ async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
                         f"data: {json.dumps({'id': req_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'jarvis', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
                     )
                     yield "data: [DONE]\n\n"
+                    return
 
-    # Guard: close unclosed think block if upstream stream ended without a done event.
+    # Guard: upstream ended without a done event — close think block and signal stop.
     if in_think:
         yield _delta("</think>")
+    yield (
+        f"data: {json.dumps({'id': req_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'jarvis', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+    )
+    yield "data: [DONE]\n\n"
 
 
 @router.get("/v1/models")

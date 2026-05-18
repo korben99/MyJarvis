@@ -989,7 +989,7 @@ async def stream_local(
                 if not chunk.text:
                     continue
 
-                text = chunk.text
+                text = _norm_think_close(chunk.text)
                 if profile.stop_tokens:
                     joined = "".join(raw_chunks)
                     acc = joined + text
