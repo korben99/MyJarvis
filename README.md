@@ -128,7 +128,7 @@ tail -f /opt/jarvis/logs/jarvis-service.log
 | **Redis** | Docker, port 6379 | Working memory, session context, conversation cache |
 | **`deps.py`** | Python module | Shared runtime singletons: Redis, Qdrant, embed model, HTTP clients, context budgets |
 | **`llm_client.py`** | Python module | LLM HTTP client: streaming SSE, model tier selection, vision pipeline |
-| **`rag.py`** | Python module | Qdrant document retrieval (embed query → search → score filter) |
+| **`rag.py`** | Python module | Two-stage RAG: Stage 1 identifies the target document (title keyword match → semantic confirmation, or global semantic fallback); Stage 2 does focused semantic retrieval within that document. Doc-name cache lazy-loaded in memory. |
 | **`pipeline.py`** | Python module | System prompt construction, 7-source context assembly, post-exchange logging |
 | **`analyzer.py`** | Python module | Scheduled batch analysis (every 30 min): fact extraction, ESS scoring, Qdrant vectorisation |
 | **`embed_router.py`** | Python module | Fast-path intent classifier via cosine similarity — bypasses LLM router for ~80 % of requests |
@@ -149,11 +149,11 @@ Tier 0 — EMBED ROUTER  Zero-LLM fast path — cosine similarity against pre-em
 
 Tier 1 — ROUTER        Full LLM intent classifier, JSON only
                         Target: Hermes-3-Llama-3.2-3B-Q4-affine (local MLX, ~2 GB)
-                        System prompt KV-cached (~666 tok prefilled once, deepcopied per call)
+                        LRU-cached — system prompt ~666 tok, hits from turn 2 onward
 
 Tier 2 — PRIMARY       All standard responses: chat, questions, summaries
                         Target: Qwen3.6-35B-A3B-MLX-5.4bit (local MLX, ~20 GB, MoE ~3B active)
-                        System prompt KV-cached (~262 tok prefilled once, deepcopied per call)
+                        LRU-cached — full conversation history cached; only new user msg computed
 
 Tier 3 — REASONING      use_reasoning=True Use Qwen3 in thinking mode
 ```
@@ -176,17 +176,21 @@ Everything else (chat, questions, summaries, portfolio, translations, writing, c
 **Local MLX mode (`LLM_LOCAL=yes`):**
 When `LLM_LOCAL=yes`, Jarvis uses `mlx_lm` directly (no HTTP server) — models are loaded into unified memory at startup. Set `HF_HOME` to control where models are stored. Download models with `python scripts/download_models.py`.
 
-**System prompt KV cache (prefix caching):**
-- `_get_system_cache()` in `llm_local.py` pre-fills the fixed system prompt into a KV cache once per model, then `deepcopy()`s it for every call.
-- Applied to **all inference paths**: `stream_local` (streaming chat), `_generate_sync` (router, analyzer, self-reflection, web judge).
-- Hermes router: ~666 tokens prefilled → only the 5-token `"Message: {message}"` part is computed per call.
-- Qwen3.6-35B primary: ~262 tokens prefilled → saves ~0.3–0.5 s prefill per turn.
-- The system message must remain **token-identical** every turn (no dynamic content) — enforced by the `build_dynamic_prefix` / `build_context` split.
+**LRU prompt cache (session-level prefix caching):**
+- `llm_local.py` uses `LRUPromptCache` (mlx-lm trie-based prefix cache) instead of a single system-only KV cache.
+- After each generation, the full token sequence (prompt + output) is inserted into the trie. On the next call, `fetch_nearest_cache()` returns the longest common prefix — system + entire conversation history — and only the new user message (`remaining`) is computed.
+- One `LRUPromptCache` per model path, `LRU_KV_SIZE=32` slots, `LRU_KV_GB=4.0` GB memory budget (hard cap, real guard). At ~7.5 KB/token for Qwen3.6 6-bit, 32 × 3000-tok average ≈ 700 MB.
+- Applied to **all inference paths**: `stream_local` (streaming chat), `_generate_sync` (router, analyzer, self-reflection, web judge, trading).
+- Session benefit: turn N computes only the new user message (~200–600 tok); everything before is cached. Hit rate grows linearly with conversation length — by turn 4+, 85–95 % of prompt tokens are free.
+- Multi-user / multi-session safe: 32 slots cover all concurrent chat sessions (iPhone + OpenWebUI, multiple users) plus background tasks (analyzer, trading, self-reflection, 7 nightly prompts) without eviction.
+- **Sticky RAG**: `routes/chat.py` re-injects the same RAG chunks across turns of a session → the previous user message (with its RAG context) is exact in the trie → perfect cache hit on history.
+- **ArraysCache patch**: Qwen3.6 hybrid architecture (10 full-attention + 30 linear-attention layers) requires patching `ArraysCache.is_trimmable()` to enable the "longer key" branch in the trie. Without it, only the ~262-token system prefix is cached (old behavior). Applied at import time; no quality impact.
+- The system message must remain **token-identical** every turn — enforced by the `build_dynamic_prefix` / `build_context` split. All dynamic content (date, memory, RAG, opinions) goes into the user message prefix.
 
 **KV cache quantization (`QUANT_KV=yes`):**
 - Uses mlx_lm's built-in `QuantizedKVCache` (Metal-accelerated, no monkey-patching).
-- Applied only to the primary model — the router keeps a standard cache.
-- `QUANT_KV_BITS=4` (default) — 4× memory bandwidth reduction during decode (~420 MB → ~105 MB/step at 3200-token context). Use `8` for near-lossless quality if regressions are observed.
+- Applied only to the primary/reasoning model — the router keeps a standard cache.
+- `QUANT_KV_BITS=6` — good balance between memory bandwidth reduction and precision. Use `4` to halve memory further, `8` for near-lossless quality.
 
 **Metal allocator cache limit:**
 - `mx.set_cache_limit(4 GB)` set at startup in `preload_models()`.
@@ -629,6 +633,38 @@ Publication dates (YYYY-MM-DD) extracted from: <meta property="article:published
 <time datetime>, JSON-LD datePublished. Shown in context as [date] Title.
 ```
 
+### RAG Pipeline (`rag.py`)
+
+Two-stage retrieval: first identify the right document, then search deeply within it.
+
+```
+search_documents(query, top_k=RAG_TOP_K)
+    │
+    ├── Embed query (sentence-transformers, normalize=True)
+    │
+    ├── Stage 1a — Title match (keyword-based, zero cost)
+    │       Tokenise query → significant words (≥3 chars, French stopwords excluded)
+    │       Match against in-memory doc-name cache (lazy-loaded from Qdrant on first call)
+    │       If candidates found → semantic confirmation query (limit=3, score≥0)
+    │                            → top hit identifies target_doc
+    │
+    ├── Stage 1b — Global semantic fallback  (if no title match)
+    │       Qdrant query across all docs (limit=5, score ≥ RAG_SCORE_THRESHOLD=0.4)
+    │       No results → return []
+    │       Top hit identifies target_doc
+    │
+    └── Stage 2 — Focused retrieval within target_doc
+            Qdrant filtered query (metadata.name == target_doc)
+            limit=top_k, score ≥ RAG_DOC_THRESHOLD = max(0.25, RAG_SCORE_THRESHOLD − 0.15)
+            Each chunk truncated to CHUNK_MAX_CHARS=2500 chars (≈600 tokens)
+            Fallback: if threshold filters everything → retry with score≥0 (always returns something)
+```
+
+**Design rationale:**
+- Title match avoids semantic drift on proper nouns and filenames — "budget_2025.pdf" matches keyword "budget" without embedding.
+- Stage 2 threshold (RAG_DOC_THRESHOLD) is more permissive than the global threshold because we're already in the right document — avoids returning off-topic chunks from neighbouring pages.
+- Doc-name cache is lazy-loaded in memory (cleared on restart), never re-queried mid-session — Qdrant scroll once per process lifetime.
+
 ### Request Flow
 
 ```
@@ -981,8 +1017,9 @@ All variables go in `/opt/jarvis/.env`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RAG_TOP_K` | `5` | Number of documents to retrieve |
-| `RAG_SCORE_THRESHOLD` | `0.4` | Minimum similarity score — applied server-side in Qdrant (`score_threshold` param) |
+| `RAG_TOP_K` | `5` | Max chunks returned per query (Stage 2 focused retrieval) |
+| `RAG_SCORE_THRESHOLD` | `0.4` | Global semantic threshold for Stage 1b fallback |
+| `RAG_DOC_THRESHOLD` | `max(0.25, threshold − 0.15)` | Per-document threshold for Stage 2 — computed in code, not an env var |
 
 ### Google Services
 

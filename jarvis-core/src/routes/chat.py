@@ -5,6 +5,7 @@ The main Jarvis pipeline: routing → context gathering → LLM → streaming SS
 """
 
 import asyncio
+import contextlib
 import json
 import re
 import time
@@ -21,16 +22,13 @@ from config import (
     MAX_TOKENS_NO_THINK,
     MAX_TOKENS_REASONING,
     MAX_TOKENS_SYNTHESIS,
-    SESSION_SUMMARY_TOKENS,
-    THINKING_BUDGET_DEEP,
-    THINKING_BUDGET_MEDIUM,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
     PRIMARY_TIMEOUT,
-    ROUTER_API_KEY,
-    ROUTER_API_URL,
-    ROUTER_MODEL,
+    SESSION_SUMMARY_TOKENS,
+    THINKING_BUDGET_COMPACT,
+    THINKING_BUDGET_MEDIUM,
     USER_CITIES,
     USER_CODES,
     USER_TIMEZONES,
@@ -93,6 +91,8 @@ from web_search import (
 logger = get_logger("jarvis-chat")
 
 router = APIRouter()
+
+
 def _trim_history_to_budget(hist: list[dict], budget_tokens: int) -> list[dict]:
     """Keep the most recent messages within token budget, always preserving the last exchange."""
     if not hist:
@@ -139,7 +139,9 @@ async def _update_session_summary(user_code: str, session_id: str) -> None:
         )
         if not dropped_text.strip():
             return
-        existing_block = f"Résumé précédent :\n{existing_text}\n\n" if existing_text else ""
+        existing_block = (
+            f"Résumé précédent :\n{existing_text}\n\n" if existing_text else ""
+        )
         prompt = get_prompt("SESSION_SUMMARY_PROMPT").format(
             existing_block=existing_block,
             dropped_text=dropped_text,
@@ -155,9 +157,14 @@ async def _update_session_summary(user_code: str, session_id: str) -> None:
             timeout=llm_timeout(SESSION_SUMMARY_TOKENS),
         )
         if content and content.strip():
-            set_session_summary_data(user_code, session_id, content.strip(), int(total_count))
+            set_session_summary_data(
+                user_code, session_id, content.strip(), int(total_count)
+            )
             logger.debug(
-                "session summary updated: %s/%s (covers %d msgs)", user_code, session_id, total_count
+                "session summary updated: %s/%s (covers %d msgs)",
+                user_code,
+                session_id,
+                total_count,
             )
     except Exception as exc:
         logger.warning("session summary update failed: %s", exc)
@@ -165,12 +172,10 @@ async def _update_session_summary(user_code: str, session_id: str) -> None:
 
 # Derived fetch limit: enough messages for injection + one threshold's worth of summarization.
 # Not a config variable — purely an implementation detail derived from existing constants.
-_HIST_FETCH_N = max(HIST_CONV_TOKEN_BUDGET // 50, HIST_CONV_SUMMARIZE_THRESHOLD // 50, 10)
+_HIST_FETCH_N = max(
+    HIST_CONV_TOKEN_BUDGET // 50, HIST_CONV_SUMMARIZE_THRESHOLD // 50, 10
+)
 
-# Think banner throttle — emit one SSE event every N tokens (≈8/s at 120 tok/s).
-# iOS ThinkingBanner already shows suffix(120) so sending the last 200 chars is enough.
-_THINK_EMIT_EVERY = 15
-_THINK_PREVIEW_CHARS = 200
 
 # user_codes whose Redis profile has been initialised this process lifetime.
 # Avoids a Redis hget on every request — populated on first message per user.
@@ -287,6 +292,7 @@ class _SseCtx:
     timeout: float
     no_think: bool
     max_tokens: int
+    thinking_budget: int
     session_id: str
     t0: float  # timer global requête (pour les logs TTFT)
     start: float  # timer démarrage appel LLM (pour duration_ms)
@@ -322,11 +328,6 @@ async def _sse_stream(ctx: _SseCtx):
             in_think  # snapshot avant la boucle (in_think mute dans le loop)
         )
         first_chunk = True
-        # Think throttle: accumulate fragments, emit a sliding window every
-        # _THINK_EMIT_EVERY tokens so the iOS banner updates at ~8/s instead
-        # of ~120/s — readable scroll without changing the iOS side.
-        _think_accum: list[str] = []
-        _think_since_emit: int = 0
 
         async for chunk in stream_openai(
             ctx.messages,
@@ -337,7 +338,7 @@ async def _sse_stream(ctx: _SseCtx):
             no_think=ctx.no_think,
             session_id=ctx.session_id,
             max_tokens=ctx.max_tokens,
-            thinking_budget=THINKING_BUDGET_MEDIUM if not ctx.no_think else 0,
+            thinking_budget=ctx.thinking_budget,
         ):
             full_parts.append(chunk)
 
@@ -349,14 +350,7 @@ async def _sse_stream(ctx: _SseCtx):
             clean, think_frag, in_think = filter_think_chunk(chunk, in_think)
 
             if think_frag:
-                _think_accum.append(think_frag)
-                _think_since_emit += 1
-                if _think_since_emit >= _THINK_EMIT_EVERY:
-                    snapshot = "".join(_think_accum)
-                    yield f"data: {json.dumps({'think': snapshot[-_THINK_PREVIEW_CHARS:]})}\n\n"
-                    _think_since_emit = 0
-                    if len(snapshot) > _THINK_PREVIEW_CHARS * 2:
-                        _think_accum = [snapshot[-_THINK_PREVIEW_CHARS:]]
+                yield f"data: {json.dumps({'think': think_frag})}\n\n"
 
             if first_chunk:
                 clean = clean.lstrip("\n")
@@ -377,7 +371,9 @@ async def _sse_stream(ctx: _SseCtx):
             logger.warning(
                 "sse_stream: empty visible response — session=%s started_in_think=%s "
                 "raw_len=%d (thinking truncation or empty generation — turn NOT saved)",
-                ctx.session_id, in_think_started, len("".join(full_parts)),
+                ctx.session_id,
+                in_think_started,
+                len("".join(full_parts)),
             )
         if full_clean:
             append_conversation_message(
@@ -707,7 +703,9 @@ async def chat(req: ChatRequest):
         )
         if not _embed_result.use_memory:
             _spec_mem_task.cancel()
-            _prefetched_memory_coro = _empty()
+            with contextlib.suppress(asyncio.CancelledError):
+                await _spec_mem_task
+            _prefetched_memory_coro = asyncio.create_task(_empty())
         else:
             _prefetched_memory_coro = _spec_mem_task
 
@@ -853,7 +851,11 @@ async def chat(req: ChatRequest):
 
     # ── Vision: describe images (two-stage pipeline) ────────────────────────
     image_description = ""
-    logger.info("vision: image_parts=%d image_base64=%s", len(req.image_parts), bool(req.image_base64))
+    logger.info(
+        "vision: image_parts=%d image_base64=%s",
+        len(req.image_parts),
+        bool(req.image_base64),
+    )
     if req.image_parts:
         if VISION_MODEL:
             logger.info("vision: calling describe_images (model=%s)", VISION_MODEL)
@@ -863,7 +865,10 @@ async def chat(req: ChatRequest):
                     "Vision: image described (%d chars)", len(image_description)
                 )
             else:
-                logger.warning("Vision: describe_images returned empty — %d part(s)", len(req.image_parts))
+                logger.warning(
+                    "Vision: describe_images returned empty — %d part(s)",
+                    len(req.image_parts),
+                )
         else:
             logger.warning(
                 "Vision: image received but VISION_MODEL not configured — ignored"
@@ -960,7 +965,9 @@ async def chat(req: ChatRequest):
             rag_chunks = _sticky
             logger.info(
                 "chat: sticky RAG re-injected (%d chunks) for %s/%s",
-                len(rag_chunks), user_code, req.session_id,
+                len(rag_chunks),
+                user_code,
+                req.session_id,
             )
 
     logger.debug(
@@ -994,7 +1001,9 @@ async def chat(req: ChatRequest):
             _gap = time.time() - _last_ts
             _gap_txt = "moins d'une minute" if _gap < 60 else rel_time_fr(_last_ts)
             _gap_line = f"Dernier message : {_gap_txt}."
-            dynamic_prefix = (dynamic_prefix + f"\n\n{_gap_line}") if dynamic_prefix else _gap_line
+            dynamic_prefix = (
+                (dynamic_prefix + f"\n\n{_gap_line}") if dynamic_prefix else _gap_line
+            )
 
     # ════════════════════════════════════════════════════════════════════════
     # STEP 6 — MESSAGE ASSEMBLY — context + prefix + history → final prompt
@@ -1081,9 +1090,7 @@ async def chat(req: ChatRequest):
         msg_parts.append(_project_detail_block)
     if reasoning_hint:
         msg_parts.append(reasoning_hint.strip())
-    msg_parts.append(
-        "<user_message>\n" + raw_user_content + "\n</user_message>"
-    )
+    msg_parts.append("<user_message>\n" + raw_user_content + "\n</user_message>")
     user_content = "\n\n".join(msg_parts)
 
     # When a session summary exists, inject only the messages NOT yet covered by it.
@@ -1097,7 +1104,9 @@ async def chat(req: ChatRequest):
         has_assistant = any(m["role"] == "assistant" for m in _uncovered_hist)
         if not has_assistant:
             _covered = hist[:-_uncovered_n] if _uncovered_n > 0 else hist
-            last_asst = next((m for m in reversed(_covered) if m["role"] == "assistant"), None)
+            last_asst = next(
+                (m for m in reversed(_covered) if m["role"] == "assistant"), None
+            )
             if last_asst:
                 _uncovered_hist = [last_asst] + _uncovered_hist
         hist_slice = _trim_history_to_budget(_uncovered_hist, HIST_CONV_TOKEN_BUDGET)
@@ -1123,9 +1132,16 @@ async def chat(req: ChatRequest):
     # max_tokens budget: no-think / web-rag synthesis / deep reasoning (see config.py)
     _use_reasoning = bool(llm_result and llm_result.use_reasoning)
     _max_tokens = (
-        MAX_TOKENS_NO_THINK  if chat_no_think
-        else MAX_TOKENS_REASONING if _use_reasoning
+        MAX_TOKENS_NO_THINK
+        if chat_no_think
+        else MAX_TOKENS_REASONING
+        if _use_reasoning
         else MAX_TOKENS_SYNTHESIS
+    )
+    _thinking_budget = (
+        0 if chat_no_think
+        else THINKING_BUDGET_MEDIUM if _use_reasoning
+        else THINKING_BUDGET_COMPACT
     )
 
     # ════════════════════════════════════════════════════════════════════════
@@ -1140,6 +1156,7 @@ async def chat(req: ChatRequest):
             timeout=_use_timeout,
             no_think=chat_no_think,
             max_tokens=_max_tokens,
+            thinking_budget=_thinking_budget,
             session_id=req.session_id,
             t0=_t0,
             start=start,
@@ -1164,7 +1181,11 @@ async def chat(req: ChatRequest):
         timeout=_use_timeout,
         no_think=chat_no_think,
         max_tokens=_max_tokens,
-        thinking_budget=(THINKING_BUDGET_DEEP if _use_reasoning else THINKING_BUDGET_MEDIUM) if not chat_no_think else 0,
+        thinking_budget=(
+            THINKING_BUDGET_MEDIUM if _use_reasoning else THINKING_BUDGET_COMPACT
+        )
+        if not chat_no_think
+        else 0,
     )
 
     append_conversation_message(user_code, req.session_id, "user", req.message)

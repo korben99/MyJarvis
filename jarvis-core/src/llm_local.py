@@ -45,6 +45,7 @@ from config import (
     is_qwen36,
 )
 from prompts import VISION_USER_PROMPT
+import mlx.core as mx
 from mlx_lm import generate, load, stream_generate
 from mlx_lm.models.cache import (
     ArraysCache,
@@ -55,21 +56,23 @@ from mlx_lm.models.cache import (
 )
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
-# ── ArraysCache trim patch ────────────────────────────────────────────────
-# Qwen3.6 (and Qwen3.5) use a hybrid architecture: full_attention layers have
-# KVCache (trimmable), linear_attention layers have ArraysCache (recurrent state,
-# NOT trimmable by default).  Without this patch, LRUPromptCache.fetch_nearest_cache
-# skips the "longer key" branch entirely and falls back to the system-only prefix,
-# defeating session-level caching.
+# ── ArraysCache trim patch — REMOVED ─────────────────────────────────────
+# Qwen3.6 uses a hybrid architecture: full_attention → KVCache (trimmable),
+# linear_attention → ArraysCache (recurrent state, NOT trimmable).
 #
-# The patch makes ArraysCache.trim() a no-op that satisfies the protocol:
-# KVCache layers are correctly trimmed; ArraysCache layers keep their accumulated
-# recurrent state.  The linear attention heads will see a slightly wider context
-# than the trimmed prefix, which is an acceptable approximation in practice.
-if not getattr(ArraysCache, "_trim_patched", False):
-    ArraysCache.is_trimmable = lambda self: True
-    ArraysCache.trim = lambda self, n: n
-    ArraysCache._trim_patched = True
+# A previous patch made ArraysCache.trim() a no-op to enable multi-turn LRU hits.
+# Root-cause bug: on a partial LRU hit covering a previous full turn, KVCache was
+# correctly trimmed to the matching prefix but ArraysCache kept the full previous
+# generation state (think block + response + <|im_end|>).  This inconsistency caused
+# the model to generate EOS immediately after a forced </think>, producing empty
+# responses.
+#
+# Without the patch, LRUPromptCache.fetch_nearest_cache skips partial-hit entries
+# that require trimming (since ArraysCache is not trimmable) and falls back to the
+# system-only prefix.  System-level caching is preserved; multi-turn caching is
+# disabled for Qwen3.6.  This is correct: the raw-output LRU key (including <think>)
+# never matches the next turn's prompt (which uses the clean response), so multi-turn
+# hits were always triggering a short-prefix match that required a large trim.
 
 HF_HOME = os.getenv("HF_HOME", "/opt/jarvis/models")
 os.environ["HF_HOME"] = HF_HOME
@@ -283,6 +286,27 @@ def _get_lru(model_path: str) -> LRUPromptCache:
         return _lru_caches[model_path]
 
 
+def _eval_kv_cache(cache) -> None:
+    """Materialize all MLX arrays in a KV cache into device-wide Metal buffers.
+    Must be called before storing a cache built in one thread for use in another —
+    unevaluated (lazy) arrays hold a reference to the creating thread's Metal stream,
+    which is destroyed when that thread exits, causing 'There is no Stream(gpu, N)'."""
+    to_eval = []
+    for layer in cache:
+        for attr in ("keys", "values"):
+            v = getattr(layer, attr, None)
+            if v is not None:
+                if isinstance(v, list):
+                    to_eval.extend(x for x in v if x is not None)
+                else:
+                    to_eval.append(v)
+        state = getattr(layer, "state", None)
+        if state:
+            to_eval.extend(x for x in state if x is not None)
+    if to_eval:
+        mx.eval(*to_eval)
+
+
 def _make_system_kv(
     model_path: str, model, tokenizer, system_content: str
 ) -> tuple[Any, list[int]] | None:
@@ -316,6 +340,7 @@ def _make_system_kv(
     except Exception as exc:
         logger.warning("System KV cache build failed: %s", exc)
         return None
+    _eval_kv_cache(cache)
     logger.info(
         "LRU: system prompt prefilled (%d tok, model=%s)",
         sys_token_count, model_path.split("/")[-1],
@@ -367,6 +392,7 @@ def _lru_get_cache(
                     model_path.split("/")[-1],
                 )
                 return None, prompt_token_ids
+        _eval_kv_cache(cache)
         return cache, remaining
 
     # LRU miss: build fresh system KV cache
@@ -406,6 +432,7 @@ def _lru_insert(
         if not out_ids:
             return
         lru = _get_lru(model_path)
+        _eval_kv_cache(cache)
         lru.insert_cache(model_path, prompt_token_ids + out_ids, cache, cache_type="assistant")
         logger.debug(
             "LRU insert: key=%d tok (prompt=%d + output=%d) model=%s",

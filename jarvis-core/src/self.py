@@ -35,6 +35,8 @@ Action catalog (v1 — grows in future versions):
 """
 
 import asyncio
+import difflib
+import html as _html
 import json
 import os
 import re
@@ -75,6 +77,7 @@ from config import (
 )
 import numpy as np
 
+from apns import is_real_apns_token, send_apns_push
 from google_services import is_google_available, send_gmail_message
 from helpers import (
     call_llm,
@@ -1053,7 +1056,11 @@ def _action_send_notification(params: dict) -> str:
 
 
 def _action_queue_push(params: dict) -> str:
-    """Queue an iOS push notification for a user. Polled by the app via GET /device/pending/{user_code}."""
+    """
+    Queue an iOS push notification for a user.
+    - Always queues to Redis (polled by the app as fallback).
+    - If device has a real APNs token, also fires an immediate APNs push.
+    """
     user_code = params.get("user_code", "")
     message = params.get("message", "").strip()
 
@@ -1065,11 +1072,14 @@ def _action_queue_push(params: dict) -> str:
     r = get_redis()
 
     # Device must be registered
-    if not r.exists(f"{_DEVICE_TOKEN_PREFIX}:{user_code}"):
+    token_key = f"{_DEVICE_TOKEN_PREFIX}:{user_code}"
+    device_token = r.get(token_key) or ""
+    if not device_token:
         return f"queue_push: no device registered for {user_code}"
 
     cooldown_key = f"{_PUSH_COOLDOWN_PREFIX}:{user_code}"
 
+    # Always queue to Redis — polling fallback if APNs fails or app is in foreground.
     pending_key = f"{_PUSH_PENDING_PREFIX}:{user_code}"
     r.rpush(
         pending_key,
@@ -1086,6 +1096,11 @@ def _action_queue_push(params: dict) -> str:
     # Also inject into the persistent iOS conversation so the message is visible
     # when the user opens the app — even if the notification was missed.
     append_conversation_message(user_code, "iphone-main", "assistant", message)
+
+    # Fire APNs immediately when device has a real token (instant delivery, app can be killed).
+    if is_real_apns_token(device_token):
+        asyncio.ensure_future(send_apns_push(device_token, body=message))
+        logger.info("APNs push scheduled for %s — %s", user_code, message[:80])
 
     logger.info("Self action: push queued for %s — %s", user_code, message[:80])
     return f"push queued for {user_code}: {message[:80]}"
@@ -1850,13 +1865,21 @@ def reject_proposal(proposal_id: str) -> str:
 
 def _notify_proposal(user_code: str, proposal: dict) -> None:
     """Send an email notification with the proposal diff."""
-    import difflib
-    import html as _html
-
     to = USER_EMAILS.get(user_code, "")
     if not to or not is_google_available(user_code):
+        logger.warning(
+            "_notify_proposal: skipped for %s (no email or Google unavailable)", user_code
+        )
         return
 
+    try:
+        _send_proposal_email(user_code, to, proposal)
+    except Exception as exc:
+        logger.error("_notify_proposal: unexpected error for %s: %s", user_code, exc)
+
+
+def _send_proposal_email(user_code: str, to: str, proposal: dict) -> None:
+    """Inner send — separated so _notify_proposal can wrap it in try/except."""
     pid = proposal["id"]
     name = proposal["prompt_name"]
     rationale = proposal["rationale"]
@@ -2000,9 +2023,17 @@ def _action_refine_prompt(params: dict) -> str:
         logger.error("refine_prompt: LLM call failed: %s", exc)
         return f"refine_prompt: LLM call failed ({type(exc).__name__})"
 
-    proposed_text = result.get("proposed_text", "").strip()
+    raw_proposed = result.get("proposed_text")
     rationale = result.get("rationale", "").strip()
 
+    # LLM explicitly decided no change is needed — not an error
+    if raw_proposed is None:
+        logger.info(
+            "refine_prompt: no modification needed for %s — %s", prompt_name, rationale
+        )
+        return f"refine_prompt: no modification needed for {prompt_name} ({rationale})"
+
+    proposed_text = raw_proposed.strip() if isinstance(raw_proposed, str) else ""
     if not proposed_text:
         return "refine_prompt: LLM returned empty proposed_text"
 
@@ -2674,7 +2705,7 @@ async def _llm_review_before_action(
     Self-challenge LLM call before executing a consequential action.
     Uses the router model (fast, binary decision).
     Returns (should_execute, reason).
-    Fail-open: if the review call fails, the action is allowed.
+    Fail-closed: if the review call fails, the action is blocked (conservative default).
     """
     context_str, criteria_str = _build_review_context(
         action, global_ctx, user_ctx, params
@@ -2811,7 +2842,8 @@ async def run_self_reflection() -> dict:
                 logger.info("P1 self-review rejected %s: %s", action, rev_reason)
                 action = "nothing"
                 params = {"reason": f"self-review: {rev_reason}"}
-                stop = True
+                # Don't stop the chain — let the LLM try another action.
+                # Guard 2 (duplicate detection) prevents infinite loops.
 
         outcome = await asyncio.to_thread(_execute_action, action, params)
 
@@ -2913,7 +2945,8 @@ async def run_self_reflection() -> dict:
                     )
                     action = "nothing"
                     params = {"reason": f"self-review: {rev_reason}"}
-                    stop = True
+                    # Don't stop the chain — let the LLM try another action.
+                    # Guard 2 (duplicate detection) prevents infinite loops.
 
             outcome = await asyncio.to_thread(_execute_action, action, params)
 

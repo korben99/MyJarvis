@@ -36,6 +36,9 @@ final class NotificationService: NSObject, ObservableObject {
     private let pollInterval: TimeInterval = 30 * 60   // 30 min foreground interval
     private var isPolling = false   // prevents concurrent polls delivering duplicate notifications
 
+    // Real APNs device token (64-char hex). Empty until APNs registration succeeds.
+    private var apnsToken: String = ""
+
     // Short-timeout session: background tasks have limited execution time (~30 s),
     // so we can't afford URLSession.shared's 60 s default request timeout.
     private let session: URLSession = {
@@ -173,16 +176,32 @@ final class NotificationService: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - APNs token
+
+    /// Called by AppDelegate once the OS returns a real APNs device token.
+    /// Persists it and re-registers with the backend immediately.
+    func setAPNsToken(_ token: String) async {
+        guard token != apnsToken else { return }
+        apnsToken = token
+        UserDefaults.standard.set(token, forKey: "apnsToken")
+        await registerDevice()
+    }
+
     // MARK: - Device registration
 
-    /// Register this device with the backend so the reflection cycle can queue pushes.
-    /// Call once after the server URL is resolved (a token of "ios-polling" is used
-    /// as a placeholder — APNs tokens are not needed for the polling strategy).
+    /// Register this device with the backend.
+    /// Sends the real APNs token when available, otherwise a polling placeholder
+    /// so the polling path remains functional as a fallback.
     func registerDevice() async {
         guard !resolvedURL.isEmpty, !userCode.isEmpty else { return }
         guard let url = URL(string: "\(resolvedURL)/device/register") else { return }
 
-        let body = DeviceRegisterRequest(user_code: userCode, device_token: "ios-polling-\(userCode)")
+        // Prefer real APNs token; fall back to polling placeholder.
+        let token = apnsToken.isEmpty
+            ? (UserDefaults.standard.string(forKey: "apnsToken") ?? "ios-polling-\(userCode)")
+            : apnsToken
+
+        let body = DeviceRegisterRequest(user_code: userCode, device_token: token)
         var request    = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

@@ -283,6 +283,7 @@
 				INFOPLIST_FILE = JarvisApp/Info.plist;
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Jarvis connects to your local AI server";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Jarvis needs microphone access for voice commands";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Jarvis uses on-device speech recognition to detect the wake word \"Jarvis\"";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -318,6 +319,7 @@
 				INFOPLIST_FILE = JarvisApp/Info.plist;
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Jarvis connects to your local AI server";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Jarvis needs microphone access for voice commands";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Jarvis uses on-device speech recognition to detect the wake word \"Jarvis\"";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

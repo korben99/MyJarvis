@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>fr.jarvis.push-poll</string>
+	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
@@ -14,12 +18,8 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>fetch</string>
+		<string>remote-notification</string>
 	</array>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Jarvis needs microphone access for voice commands</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Jarvis connects to your local AI server</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Jarvis uses on-device speech recognition to detect the wake word "Jarvis"</string>
 </dict>
 </plist>

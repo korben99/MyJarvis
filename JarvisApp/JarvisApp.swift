@@ -8,6 +8,8 @@ import BackgroundTasks
 
 @main
 struct JarvisApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
     @StateObject private var settings    = AppSettings()
     @StateObject private var api         = JarvisAPI()
     @StateObject private var speechEngine = SpeechEngine()

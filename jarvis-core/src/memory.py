@@ -77,6 +77,7 @@ from helpers import (
     get_logger,
     get_qdrant,
     get_redis,
+    keyword_overlap_score,
     normalize_key,
     redis_get_json,
     redis_set_json,
@@ -1762,11 +1763,23 @@ def _invalidate_timeline_cache(user_code: str) -> None:
         pass
 
 
+# Profile keys always injected regardless of message relevance.
+# These provide essential grounding context (location, employer, age, language).
+_PROFILE_ALWAYS_INJECT = {"location", "current_employer", "age", "langue", "name"}
+
+# Only filter if profile exceeds this count — small profiles are injected whole.
+_PROFILE_FILTER_THRESHOLD = 8
+
+# Max "other" (non-always) keys to keep after relevance scoring.
+_PROFILE_MAX_SCORED = 8
+
+
 def build_memory_context(
     session_id: str,
     user_code: str,
     self_mem: dict | None = None,
     include_suggestions: bool = True,
+    user_message: str = "",
 ) -> str:
     """Build a memory context string to inject into the system prompt.
 
@@ -1775,6 +1788,9 @@ def build_memory_context(
 
     include_suggestions — set False for pure utility intents (weather/calendar/gmail)
                           to skip the SUJETS À ABORDER section (~50 tokens saved).
+    user_message        — when provided, profile keys are filtered to the most
+                          relevant ones (keyword overlap scoring). Always-inject
+                          keys (location, employer…) are kept regardless of score.
 
     All Redis reads are batched into a single pipeline round-trip.
     """
@@ -1799,6 +1815,26 @@ def build_memory_context(
     _emotion_raw = _pipe_results[3]
     _sugg_raw = _pipe_results[4]
     _timeline_cached = _pipe_results[5]
+
+    # Context-aware profile filtering: keep always-inject keys + top-N by keyword overlap.
+    # Only applied when user_message is provided and profile is large enough to be worth filtering.
+    if user_message and len(profile) > _PROFILE_FILTER_THRESHOLD:
+        _total = len(profile)
+        always = {k: v for k, v in profile.items()
+                  if k.split(":")[0] in _PROFILE_ALWAYS_INJECT or k in _PROFILE_ALWAYS_INJECT}
+        rest = {k: v for k, v in profile.items() if k not in always}
+        scored = sorted(
+            rest.items(),
+            key=lambda kv: keyword_overlap_score(
+                kv[0].replace(":", " ") + " " + kv[1], user_message
+            ),
+            reverse=True,
+        )
+        profile = {**always, **dict(scored[:_PROFILE_MAX_SCORED])}
+        logger.debug(
+            "profile context-aware: %d/%d keys injected for %s (msg=%r…)",
+            len(profile), _total, user_code, user_message[:40],
+        )
 
     # User profile — namespaced keys (hobby:kart) are grouped by category for readability
     if profile:

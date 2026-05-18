@@ -609,19 +609,23 @@ def extract_llm_json(text: str) -> dict:
                 except json.JSONDecodeError:
                     break  # fallback
 
-    # ── 3. Retry with unquoted-key fix ───────────────────────
-    # Handles JS-style object literals produced by the model:
-    #   action: "nothing"  →  "action": "nothing"
-    # Only quotes words preceded by {, comma, or newline (never inside string values).
-
+    # ── 3. Retry with malformed-key fixes ────────────────────
+    # Pattern A: fully unquoted key — action: "nothing" → "action": "nothing"
     _unquoted_key_re = re.compile(r"([{,\n]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:(?!\s*/))")
+    # Pattern B: missing opening quote — ,params": → ,"params":
+    # Covers Qwen3.6 bug where model emits ,key": instead of ,"key":
+    _half_quoted_key_re = re.compile(r'([{,\n]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(":\s*)')
 
     matches = re.findall(r"\{.*\}", text, re.DOTALL)
     for candidate in reversed(matches):  # try biggest first
         try:
+            fixed = _half_quoted_key_re.sub(
+                lambda m: m.group(1) + '"' + m.group(2) + m.group(3),
+                candidate,
+            )
             fixed = _unquoted_key_re.sub(
                 lambda m: m.group(1) + '"' + m.group(2) + '"' + m.group(3),
-                candidate,
+                fixed,
             )
             return json.loads(fixed)
         except json.JSONDecodeError:

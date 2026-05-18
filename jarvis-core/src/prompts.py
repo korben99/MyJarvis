@@ -435,7 +435,8 @@ Décide :
   • Cooldown 24h intégré — si déjà tenté dans ÉTAPES_PRÉCÉDENTES avec résultat "cooldown", ne pas retenter → `nothing`
 
 **refine_prompt** — proposer une amélioration de prompt.
-  params: {{"prompt_name":"...","topic":"...","user_code":"..."}}
+  params: {{"prompt_name":"...","topic":"...","context":"...","user_code":"..."}}
+  • context OBLIGATOIRE : décrire l'échec concret observé ET pourquoi CE prompt en est responsable
   • Noms valides : SYSTEM_BASE_FR · ROUTER_SYSTEM · ROUTER_USER
                   · ANALYSIS_PROMPT · BRIEFING_USER · WEB_RELEVANCE_JUDGE
                   · NIGHTLY_FACTS_PROMPT · NIGHTLY_FACTS_SYSTEM
@@ -443,6 +444,13 @@ Décide :
                   · NIGHTLY_CLEANING_PROMPT · NIGHTLY_CLEANING_SYSTEM
                   · REFLECTION_PROMPT · REFLECTION_SYSTEM
                   · REFLECTION_USER_PROMPT · REFLECTION_USER_SYSTEM
+  • Routing — quel prompt cibler selon le type de lacune :
+      réponse conversationnelle incorrecte/imprécise → SYSTEM_BASE_FR
+      routage d'intent erroné                        → ROUTER_SYSTEM / ROUTER_USER
+      analyse de conversation insuffisante           → ANALYSIS_PROMPT
+      briefing incomplet ou mal structuré            → BRIEFING_USER
+      réflexion autonome (comportement Phase 1/2)    → REFLECTION_SYSTEM / REFLECTION_PROMPT
+      recherche web mal évaluée                      → WEB_RELEVANCE_JUDGE
   • Uniquement si lacune récurrente (≥ 3 fois dans LACUNES)
   • Interdit si une proposition est déjà en attente pour ce prompt
 
@@ -874,13 +882,22 @@ TEXTE ACTUEL (à modifier) :
 
 TAILLE ACTUELLE : ~{current_token_count} tokens (budget max : {max_token_budget} tokens)
 
+Avant de modifier, réponds mentalement : "Quelle phrase ou règle concrète ajouterais-je ou retirerais-je, \
+et quel comportement précis changerait ?" Si tu ne peux pas répondre avec précision, retourne null.
+
 Retourne le texte COMPLET du prompt modifié dans proposed_text — pas seulement les lignes ajoutées.
 Conserve la structure, le ton et la langue d'origine. Modifie uniquement ce qui adresse la lacune.
 Si le prompt est de type SYSTEM : intègre au maximum 1-2 phrases courtes, jamais de protocole en étapes.
+Une modification valide change un comportement observable et précis — jamais une généralité vague.
 
 CONTRAINTE DE TAILLE : le proposed_text ne doit PAS dépasser {max_token_budget} tokens.
 Si tu ajoutes du contenu, retire un volume équivalent de contenu moins utile.
 
+Si après analyse le prompt actuel est déjà correct pour cette lacune (ou si aucune modification \
+concrète et non-vague n'est possible), retourne :
+{{"proposed_text": null, "rationale": "explication pourquoi ce prompt n'est pas la cause ou ne peut pas être amélioré concrètement"}}
+
+Sinon :
 {{"proposed_text": "<texte intégral du prompt modifié>", "rationale": "..."}}"""
 
 

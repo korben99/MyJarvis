@@ -13,10 +13,6 @@ import time
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-
 from config import (
     EMAIL_TO_CODE,
     PRIMARY_API_KEY,
@@ -27,8 +23,12 @@ from config import (
     ROUTER_MODEL,
     USER_CODES,
 )
+from fastapi import APIRouter, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from helpers import get_logger
 from llm_client import stream_openai
+from pydantic import BaseModel
+
 from routes.chat import ChatRequest, chat
 
 logger = get_logger("jarvis-proxy")
@@ -37,7 +37,7 @@ router = APIRouter()
 
 class _OAIMessage(BaseModel):
     role: str
-    content: str | list   # list for multipart (image + text) from Open WebUI
+    content: str | list  # list for multipart (image + text) from Open WebUI
 
 
 class _OAIChatRequest(BaseModel):
@@ -57,10 +57,13 @@ def _extract_content_parts(content: str | list) -> tuple[str, list]:
     if isinstance(content, str):
         return content, []
     text = "\n".join(
-        p.get("text", "") for p in content
+        p.get("text", "")
+        for p in content
         if isinstance(p, dict) and p.get("type") == "text"
     ).strip()
-    images = [p for p in content if isinstance(p, dict) and p.get("type") == "image_url"]
+    images = [
+        p for p in content if isinstance(p, dict) and p.get("type") == "image_url"
+    ]
     return text, images
 
 
@@ -94,16 +97,34 @@ async def _owui_system_stream(message: str, req_id: str, created: int):
         api_key,
         no_think=True,
     ):
-        yield "data: " + json.dumps({
-            "id": req_id, "object": "chat.completion.chunk",
-            "created": created, "model": "jarvis",
-            "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
-        }) + "\n\n"
-    yield "data: " + json.dumps({
-        "id": req_id, "object": "chat.completion.chunk",
-        "created": created, "model": "jarvis",
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-    }) + "\n\n"
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "id": req_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": "jarvis",
+                    "choices": [
+                        {"index": 0, "delta": {"content": chunk}, "finish_reason": None}
+                    ],
+                }
+            )
+            + "\n\n"
+        )
+    yield (
+        "data: "
+        + json.dumps(
+            {
+                "id": req_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": "jarvis",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+        )
+        + "\n\n"
+    )
     yield "data: [DONE]\n\n"
 
 
@@ -171,7 +192,9 @@ def _proxy_session_id(user_code: str, messages: list[_OAIMessage]) -> str:
     first_user = next((m.content for m in messages if m.role == "user"), "default")
     if isinstance(first_user, list):
         first_user, _ = _extract_content_parts(first_user)
-    return hashlib.sha256(f"{user_code}:{(first_user or 'default')[:120]}".encode()).hexdigest()[:20]
+    return hashlib.sha256(
+        f"{user_code}:{(first_user or 'default')[:120]}".encode()
+    ).hexdigest()[:20]
 
 
 async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
@@ -207,19 +230,19 @@ async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
 
                 if "think" in data:
                     if not in_think:
-                        yield _delta("<think>\n")
+                        yield _delta("<think>")
                         in_think = True
                     yield _delta(data["think"])
 
                 elif "content" in data:
                     if in_think:
-                        yield _delta("\n</think>\n\n")
+                        yield _delta("</think>")
                         in_think = False
                     yield _delta(data["content"])
 
                 elif data.get("done"):
                     if in_think:
-                        yield _delta("\n</think>\n\n")
+                        yield _delta("</think>")
                         in_think = False
                     yield (
                         f"data: {json.dumps({'id': req_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'jarvis', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
@@ -228,7 +251,7 @@ async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
 
     # Guard: close unclosed think block if upstream stream ended without a done event.
     if in_think:
-        yield _delta("\n</think>\n\n")
+        yield _delta("</think>")
 
 
 @router.get("/v1/models")
@@ -236,7 +259,9 @@ async def proxy_list_models():
     """Open endpoint — returns the Jarvis model for OpenWebUI's model selector."""
     return {
         "object": "list",
-        "data": [{"id": "jarvis", "object": "model", "owned_by": "jarvis", "created": 0}],
+        "data": [
+            {"id": "jarvis", "object": "model", "owned_by": "jarvis", "created": 0}
+        ],
     }
 
 
@@ -250,7 +275,9 @@ async def proxy_chat(
 ):
     logger.debug(
         "proxy headers: chat_id=%r user_id=%r email=%r",
-        x_openwebui_chat_id, x_openwebui_user_id, x_openwebui_user_email,
+        x_openwebui_chat_id,
+        x_openwebui_user_id,
+        x_openwebui_user_email,
     )
 
     # ── Auth: OpenWebUI email header (priority) or Bearer user_code ──
@@ -259,7 +286,9 @@ async def proxy_chat(
     if x_openwebui_user_email:
         user_code = EMAIL_TO_CODE.get(x_openwebui_user_email.lower())
         if not user_code:
-            raise HTTPException(401, f"No Jarvis user found for email {x_openwebui_user_email!r}")
+            raise HTTPException(
+                401, f"No Jarvis user found for email {x_openwebui_user_email!r}"
+            )
 
     if not user_code and authorization and authorization.startswith("Bearer "):
         token = authorization[7:].strip()
@@ -269,7 +298,10 @@ async def proxy_chat(
             user_code = EMAIL_TO_CODE.get(token.lower())
 
     if not user_code or user_code not in USER_CODES:
-        raise HTTPException(401, "Unauthorized — set your email as API key in OpenWebUI, or your user code for iOS")
+        raise HTTPException(
+            401,
+            "Unauthorized — set your email as API key in OpenWebUI, or your user code for iOS",
+        )
 
     # ── Extract last user message ──
     last_user_msg = next(
@@ -283,18 +315,24 @@ async def proxy_chat(
         "proxy: content type=%s image_parts=%d extra_keys=%s",
         type(last_user_msg.content).__name__,
         len(image_parts),
-        [k for k in (last_user_msg.model_fields_set or set()) if k not in ("role", "content")],
+        [
+            k
+            for k in (last_user_msg.model_fields_set or set())
+            if k not in ("role", "content")
+        ],
     )
     if isinstance(last_user_msg.content, list):
         logger.info(
             "proxy: content parts=%s",
-            [p.get("type") if isinstance(p, dict) else type(p).__name__
-             for p in last_user_msg.content],
+            [
+                p.get("type") if isinstance(p, dict) else type(p).__name__
+                for p in last_user_msg.content
+            ],
         )
     if not message and not image_parts:
         raise HTTPException(400, "No usable message found")
 
-    req_id  = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    req_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
 
     # ── Strip OpenWebUI RAG template (document injection via '+' button) ──
@@ -306,7 +344,9 @@ async def proxy_chat(
     # ── OpenWebUI system requests (title, suggestions…) — handled at proxy level ──
     # These never reach the Jarvis pipeline; chat.py stays OpenWebUI-agnostic.
     if message and any(kw in message.lower() for kw in _OWUI_SYSTEM_KEYWORDS):
-        logger.debug("OpenWebUI system request — handled at proxy, bypassing Jarvis pipeline")
+        logger.debug(
+            "OpenWebUI system request — handled at proxy, bypassing Jarvis pipeline"
+        )
         if req.stream:
             return StreamingResponse(
                 _owui_system_stream(message, req_id, created),
@@ -314,9 +354,17 @@ async def proxy_chat(
                 headers={"Cache-Control": "no-cache"},
             )
         return {
-            "id": req_id, "object": "chat.completion", "created": created,
+            "id": req_id,
+            "object": "chat.completion",
+            "created": created,
             "model": "jarvis",
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": message}, "finish_reason": "stop"}],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": message},
+                    "finish_reason": "stop",
+                }
+            ],
             "usage": {},
         }
 
@@ -329,8 +377,11 @@ async def proxy_chat(
         if x_openwebui_chat_id
         else _proxy_session_id(user_code, req.messages)
     )
-    logger.info("proxy session_id=%r (source=%s)", session_id,
-                "owui-chat-id" if x_openwebui_chat_id else "sha256-first-msg")
+    logger.info(
+        "proxy session_id=%r (source=%s)",
+        session_id,
+        "owui-chat-id" if x_openwebui_chat_id else "sha256-first-msg",
+    )
     jarvis_req = ChatRequest(
         message=message or "Que contient cette image ?",
         session_id=session_id,
@@ -347,14 +398,14 @@ async def proxy_chat(
             headers={"Cache-Control": "no-cache"},
         )
     return {
-        "id":      req_id,
-        "object":  "chat.completion",
+        "id": req_id,
+        "object": "chat.completion",
         "created": created,
-        "model":   "jarvis",
+        "model": "jarvis",
         "choices": [
             {
-                "index":         0,
-                "message":       {"role": "assistant", "content": response["response"]},
+                "index": 0,
+                "message": {"role": "assistant", "content": response["response"]},
                 "finish_reason": "stop",
             }
         ],

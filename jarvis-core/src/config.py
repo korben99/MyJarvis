@@ -374,3 +374,12 @@ for _code in USER_GOOGLE:
     _tok = os.getenv(f"GOOGLE_REFRESH_TOKEN_{_code}", "")
     if _tok:
         GOOGLE_USER_TOKENS[_code] = _tok
+
+# ── APNs (Apple Push Notification service) ───────────────────────────────────
+# Key and identifiers from developer.apple.com → Certificates, IDs & Profiles → Keys
+APNS_KEY_ID   = os.getenv("APNS_KEY_ID",   "")   # 10-char alphanumeric key ID
+APNS_TEAM_ID  = os.getenv("APNS_TEAM_ID",  "")   # 10-char team ID
+APNS_BUNDLE_ID = os.getenv("APNS_BUNDLE_ID", "com.sebastienviou.JarvisApp")
+APNS_KEY_PATH = os.getenv("APNS_KEY_PATH", "")   # absolute path to AuthKey_XXXXXX.p8
+APNS_ENV      = os.getenv("APNS_ENV",      "production")  # "production" or "sandbox"
+

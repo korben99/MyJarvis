@@ -28,7 +28,7 @@ contains financial or tabular information.
 
 import asyncio
 
-from config import USER_TIMEZONES
+from config import USER_ADMINS, USER_TIMEZONES
 from deps import (
     GOOGLE_CHAR_BUDGET,
     MEMORY_CHAR_BUDGET,
@@ -100,6 +100,7 @@ def build_dynamic_prefix(
         user_code,
         self_mem=self_mem,
         include_suggestions=include_suggestions,
+        user_message=user_message,
     )
     if memory_ctx:
         parts.append(f"<context>\n{memory_ctx}\n</context>")
@@ -120,6 +121,15 @@ def build_dynamic_prefix(
 
     if voice_mode:
         parts.append(get_prompt("VOICE_SUFFIX_FR").strip())
+
+    if user_code in USER_ADMINS:
+        pending = list_pending_proposals()
+        if pending:
+            names = ", ".join(p["prompt_name"] for p in pending[:3])
+            parts.append(
+                f"[Rappel Jarvis] {len(pending)} proposition(s) de prompt en attente"
+                f" ({names}) — dis 'montre les propositions' pour les voir."
+            )
 
     return "\n\n".join(parts), self_mem
 
