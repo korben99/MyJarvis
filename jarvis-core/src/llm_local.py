@@ -434,14 +434,42 @@ def _lru_insert(
         lru = _get_lru(model_path)
         _eval_kv_cache(cache)
         lru.insert_cache(model_path, prompt_token_ids + out_ids, cache, cache_type="assistant")
+        used_gb = lru.nbytes / 1024**3
         logger.debug(
-            "LRU insert: key=%d tok (prompt=%d + output=%d) model=%s",
+            "LRU insert: key=%d tok (prompt=%d + output=%d) model=%s — %d/%d slots | %.2f/%.1f GB",
             len(prompt_token_ids) + len(out_ids),
             len(prompt_token_ids), len(out_ids),
             model_path.split("/")[-1],
+            len(lru), lru.max_size,
+            used_gb, lru.max_bytes / 1024**3,
         )
     except Exception as exc:
         logger.warning("LRU insert failed (%s) — non-fatal", exc)
+
+
+def get_lru_stats() -> dict:
+    """Return current LRU memory usage for all loaded models. Safe to call at any time."""
+    result = {}
+    with _lru_lock:
+        for model_path, lru in _lru_caches.items():
+            by_type = lru.stats_by_type()
+            result[model_path.split("/")[-1]] = {
+                "slots_used": len(lru),
+                "slots_max": lru.max_size,
+                "bytes_used": lru.nbytes,
+                "bytes_max": lru.max_bytes,
+                "gb_used": round(lru.nbytes / 1024**3, 3),
+                "gb_max": round(lru.max_bytes / 1024**3, 1),
+                "pct_bytes": round(lru.nbytes * 100 / lru.max_bytes, 1) if lru.max_bytes else 0,
+                "by_type": {
+                    t: {
+                        "slots": v["n_sequences"],
+                        "gb": round(v["n_bytes"] / 1024**3, 3),
+                    }
+                    for t, v in by_type.items()
+                },
+            }
+    return result
 
 
 # ── Model loading ─────────────────────────────────────────────────────────
