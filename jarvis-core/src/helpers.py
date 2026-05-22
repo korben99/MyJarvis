@@ -497,9 +497,15 @@ def filter_think_chunk(chunk: str, in_think: bool) -> tuple[str, str, bool]:
     Correctly handles chunks that carry text *before* an opening tag or *after*
     a closing tag — cases a simple flag-only approach silently drops.
 
+    False-close detection: Qwen3 occasionally emits </think> as a notation inside
+    its reasoning (e.g. "Je vois</think>: ..."). A real </think> is always followed
+    by \\n or end-of-chunk; a false one is followed by non-newline content.
+    Single-token boundary case (after="") is handled upstream via _pending_close.
+
     Returns:
         (visible_text, think_fragment, new_in_think_state)
     """
+    chunk = chunk.replace("</think >", "</think>")  # normalize space variant
     visible: list[str] = []
     thinking: list[str] = []
     while chunk:
@@ -517,9 +523,17 @@ def filter_think_chunk(chunk: str, in_think: bool) -> tuple[str, str, bool]:
             if pos == -1:
                 thinking.append(chunk)  # whole remainder is think content
                 break
-            thinking.append(chunk[:pos])
-            chunk = chunk[pos + 8 :]  # advance past </think>
-            in_think = False
+            after = chunk[pos + 8 :]  # text following </think>
+            if after and after[0] != "\n":
+                # False close: model used </think> as notation mid-reasoning.
+                # Keep the tag in think content and stay in think mode.
+                thinking.append(chunk[: pos + 8])
+                chunk = after
+                # in_think stays True
+            else:
+                thinking.append(chunk[:pos])
+                chunk = after
+                in_think = False
     return "".join(visible), "".join(thinking), in_think
 
 
@@ -680,7 +694,7 @@ _LOCAL_DEFAULT_MAX_TOKENS = (
 def _llm_body(
     messages: list[dict],
     model: str,
-    temperature: float,
+    temperature: float | None,
     max_tokens: int | None,
     json_response: bool,
 ) -> dict:
@@ -697,8 +711,9 @@ def _llm_body(
     body: dict = {
         "model": model,
         "messages": messages,
-        "temperature": temperature,
     }
+    if temperature is not None:
+        body["temperature"] = temperature
     if max_tokens is not None:
         body[tokens_param(model)] = max_tokens
     if json_response:
@@ -712,7 +727,7 @@ def call_llm(
     model: str,
     api_url: str,
     api_key: str,
-    temperature: float = 0.1,
+    temperature: float | None = None,
     max_tokens: int | None = None,
     json_response: bool = True,
     no_think: bool = False,
@@ -753,7 +768,7 @@ async def call_llm_async(
     model: str,
     api_url: str,
     api_key: str,
-    temperature: float = 0.1,
+    temperature: float | None = None,
     max_tokens: int | None = None,
     json_response: bool = True,
     no_think: bool = False,

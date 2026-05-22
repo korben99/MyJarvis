@@ -15,6 +15,7 @@ from typing import Optional
 from briefing import gather_briefing, get_stored_briefing, store_briefing
 from config import (
     BRIEFING_TIMEZONE,
+    DEFAULT_TEMP,
     HIST_CONV_SUMMARIZE_THRESHOLD,
     HIST_CONV_TOKEN_BUDGET,
     IOS_MAX_MESSAGES,
@@ -135,7 +136,8 @@ async def _update_session_summary(user_code: str, session_id: str) -> None:
             return
 
         dropped_text = "\n".join(
-            m.get("content", "")[:400] for m in uncovered if m["role"] == "user"
+            f"{'Utilisateur' if m['role'] == 'user' else 'Jarvis'} : {m.get('content', '')[:300]}"
+            for m in uncovered
         )
         if not dropped_text.strip():
             return
@@ -151,7 +153,7 @@ async def _update_session_summary(user_code: str, session_id: str) -> None:
             model=PRIMARY_MODEL,
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
-            temperature=0.0,
+            temperature=DEFAULT_TEMP,
             max_tokens=SESSION_SUMMARY_TOKENS,
             no_think=True,
             timeout=llm_timeout(SESSION_SUMMARY_TOKENS),
@@ -273,7 +275,7 @@ def _strip_sse_response(raw: str, started_in_think: bool) -> str:
     raw = raw.replace("</think >", "</think>")  # Qwen3.6 hallucination normalization
     if started_in_think:
         if "</think>" in raw:
-            return raw.split("</think>", 1)[1].strip()
+            return raw.rsplit("</think>", 1)[1].strip()
         # Truncation mid-reasoning : aucune réponse visible
         return ""
     # Flux normal (no_think ou modèle cloud)
@@ -329,6 +331,9 @@ async def _sse_stream(ctx: _SseCtx):
             in_think  # snapshot avant la boucle (in_think mute dans le loop)
         )
         first_chunk = True
+        # When </think> arrives as a lone single-token chunk (after=""), we can't
+        # tell real vs false close until the next chunk reveals what follows.
+        _pending_close = False
 
         async for chunk in stream_openai(
             ctx.messages,
@@ -348,7 +353,25 @@ async def _sse_stream(ctx: _SseCtx):
             # think-block content. Think fragments are forwarded as a
             # separate SSE event so the iOS client can display them as a
             # live ticker without mixing them into the chat bubble.
-            clean, think_frag, in_think = filter_think_chunk(chunk, in_think)
+            if _pending_close:
+                _pending_close = False
+                if chunk and chunk[0] != "\n":
+                    # False close confirmed: model used </think> as notation.
+                    # Retroactively route the deferred tag to think and stay in.
+                    in_think = True
+                    yield f"data: {json.dumps({'think': '</think>'})}\n\n"
+                    clean, think_frag, in_think = filter_think_chunk(chunk, True)
+                else:
+                    # Real close confirmed by following \n (or empty next chunk).
+                    clean, think_frag, in_think = filter_think_chunk(chunk, False)
+            else:
+                prev_in_think = in_think
+                clean, think_frag, in_think = filter_think_chunk(chunk, in_think)
+                # Single-token </think> boundary: filter returned ("", "", False)
+                # with no content on either side — defer until next chunk decides.
+                if prev_in_think and not in_think and not clean and not think_frag:
+                    _pending_close = True
+                    continue
 
             if think_frag:
                 yield f"data: {json.dumps({'think': think_frag})}\n\n"
@@ -376,6 +399,9 @@ async def _sse_stream(ctx: _SseCtx):
                 in_think_started,
                 len("".join(full_parts)),
             )
+            # Budget-forced </think> mid-sentence can cause Qwen3.6 to emit EOS
+            # immediately — give the iOS client a visible fallback instead of silence.
+            yield f"data: {json.dumps({'content': '⚠️ Réponse incomplète — budget de réflexion dépassé. Reformule ta question.'})}\n\n"
         if full_clean:
             append_conversation_message(
                 ctx.user_code, ctx.session_id, "user", ctx.raw_user_content

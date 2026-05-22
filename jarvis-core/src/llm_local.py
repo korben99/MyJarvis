@@ -505,16 +505,16 @@ def preload_models(primary_system_content: str = "") -> None:
         return
     try:
         import mlx.core as _mx
-        _mx.set_cache_limit(12 * 1024**3)
+        _mx.set_cache_limit(8 * 1024**3)
         try:
             info = _mx.device_info()
             max_ws = info.get("max_recommended_working_set_size", 0)
             if max_ws > 0:
-                wired = int(max_ws * 0.85)
+                wired = int(max_ws * 0.70)
                 _mx.set_wired_limit(wired)
-                logger.info("MLX: cache_limit=12 GB, wired_limit=%.0f GB", wired / 1024**3)
+                logger.info("MLX: cache_limit=8 GB, wired_limit=%.0f GB", wired / 1024**3)
             else:
-                logger.info("MLX: cache_limit=12 GB (wired_limit skipped — device_info unavailable)")
+                logger.info("MLX: cache_limit=8 GB (wired_limit skipped — device_info unavailable)")
         except Exception as exc:
             logger.info("MLX: cache_limit=12 GB (wired_limit skipped: %s)", exc)
     except Exception as exc:
@@ -537,7 +537,7 @@ def preload_models(primary_system_content: str = "") -> None:
         sys = primary_system_content if (path == PRIMARY_MODEL and primary_system_content) else "Tu es un assistant."
         warmup_msgs = [{"role": "system", "content": sys}, {"role": "user", "content": "Salut"}]
         try:
-            _generate_sync(path, warmup_msgs, temperature=0.0, max_tokens=100, no_think=True)
+            _generate_sync(path, warmup_msgs, temperature=None, max_tokens=100, no_think=True)
             logger.info("MLX warmup OK: %s", path)
         except Exception as exc:
             logger.warning("MLX warmup failed for %s: %s", path, exc)
@@ -704,7 +704,7 @@ def _setup_gen(
         if profile.use_quant_kv else {}
     )
     effective_temp = (
-        temperature if (temperature is not None and temperature > 0)
+        temperature if temperature is not None
         else (profile.temp_nothink if no_think else profile.temp_think)
     )
     sampler = make_sampler(
@@ -784,7 +784,7 @@ def _stream_to_json(
 def _generate_sync(
     model_path: str,
     messages: list[dict],
-    temperature: float,
+    temperature: float | None,
     max_tokens: int,
     no_think: bool,
     session_id: str = "",
@@ -794,6 +794,10 @@ def _generate_sync(
     """Blocking generation. Always call via asyncio.to_thread from async code."""
     model, tokenizer = _load_model(model_path)
     prompt_text = _build_prompt(messages, tokenizer, model_path, no_think, thinking_budget)
+    # Force JSON start for Hermes: append "{" after the generation prompt so the model
+    # cannot open with a chat response. The "{" is restored before extraction below.
+    if json_response and is_hermes(model_path):
+        prompt_text = prompt_text.rstrip("\n") + "{"
     tok_ids = _prompt_token_ids(prompt_text, tokenizer)
     prompt_tokens = len(tok_ids)
     profile = _model_profile(model_path)
@@ -839,19 +843,22 @@ def _generate_sync(
     # For json_response: extract the clean JSON object after </think>.
     if json_response:
         if "</think>" in result:
-            json_portion = result.split("</think>", 1)[-1]
+            json_portion = result.rsplit("</think>", 1)[-1]
         elif seen_end_think:
             json_portion = result
         else:
             logger.warning("_generate_sync: </think> never generated (raw=%r…)", result[:80])
             json_portion = None
+        # Restore the "{" that was injected into the prompt for Hermes.
+        if json_portion is not None and is_hermes(model_path):
+            json_portion = "{" + json_portion
         extracted = _first_complete_json(json_portion) if json_portion is not None else None
         if extracted is not None:
             return extracted
 
     # Strip thinking block from result.
     if "</think>" in result:
-        return _strip_thinking(result.split("</think>", 1)[-1].strip())
+        return _strip_thinking(result.rsplit("</think>", 1)[-1].strip())
     if "<think>" in result:
         return _strip_thinking(result.split("<think>", 1)[0].strip())
     if not no_think:
@@ -867,7 +874,7 @@ def call_llm_local(
     messages: list[dict],
     *,
     model: str,
-    temperature: float = 0.1,
+    temperature: float | None = None,
     max_tokens: int = 500,
     no_think: bool = False,
     session_id: str = "",
@@ -887,7 +894,7 @@ async def call_llm_local_async(
     messages: list[dict],
     *,
     model: str,
-    temperature: float = 0.1,
+    temperature: float | None = None,
     max_tokens: int = 500,
     no_think: bool = False,
     session_id: str = "",
@@ -921,7 +928,7 @@ async def call_llm_local_async_bg(
     messages: list[dict],
     *,
     model: str,
-    temperature: float = 0.1,
+    temperature: float | None = None,
     max_tokens: int = 3000,
     no_think: bool = False,
     session_id: str = "",
@@ -1133,6 +1140,7 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
     from mlx_vlm.utils import load_image as vlm_load_image
 
     _load_vlm()
+    mx.clear_cache()  # libère les buffers de calcul MLX avant l'inférence VLM
     images = []
     for part in image_parts:
         url = (part.get("image_url") or {}).get("url", "")

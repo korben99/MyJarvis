@@ -18,6 +18,7 @@ MODELS = [
     "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit",
     "NousResearch/Hermes-3-Llama-3.2-3B",
     "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-5bit",
+    "majentik/Qwen3.6-35B-A3B-RotorQuant-MLX-6bit",
 ]
 
 # Fichiers de template à télécharger séparément (indépendants du cache HF).

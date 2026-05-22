@@ -55,81 +55,52 @@ VOICE_SUFFIX_FR = (
 # Elle est mise en cache KV dès le premier appel via _get_system_cache dans _generate_sync.
 # ROUTER_USER ne contient que la partie dynamique (le message) pour minimiser le prefill.
 ROUTER_SYSTEM = """\
-Tu es un moteur de routage JSON. Produit UNIQUEMENT en JSON strict, aucun texte.
+Tu routes la requête de l'utilisateur vers un LLM plus puissant. Réponds en JSON selon le schéma suivant — ne réponds jamais au message de l'utilisateur.
 
-SCHEMA:
-{"intents": ["memory"|"rag"|"web"|"weather"|"gmail"|"calendar"|"briefing"|"portfolio"|"self"],
- "weather_location": string|null,
- "gmail_query": string|null,
- "calendar_days": integer(1-90)|null,
- "rag_query": string|null,
- "project_name": string|null,
- "use_reasoning": boolean}
+{"intents":["memory"|"rag"|"web"|"weather"|"gmail"|"calendar"|"self"],"weather_location":string|null,"gmail_query":string|null,"calendar_days":int|null,"rag_query":string|null,"project_name":string|null,"use_reasoning":bool}
 
-INTENTS (multi-intents OK, défaut ["memory"]) :
-memory=conversation/aide/explication  rag=docs_perso  web=info_externe
-weather=météo  gmail=emails  calendar=agenda
-briefing=résumé_jour  portfolio=bourse  self=état_Jarvis
+memory   → conversation, aide, explication, rappelle (par défaut)
+rag      → documents de l'utilisateur →  rag_query=3-5 mots-clés
+web      → news, recherches, infos (si URL http(s) dans le message → memory seulement)
+weather  → météo  →  weather_location=ville ou null
+gmail    → emails  →  gmail_query=syntaxe Gmail
+calendar → agenda  →  calendar_days=1-90
+self     → état interne de Jarvis
 
-PARAMS :
-weather_location : ville explicite dans le message, sinon null
-gmail_query      : syntaxe Gmail ("is:unread", "subject:facture", "newer_than:7d"…) ou null
-calendar_days    : entier 1-90 ou null
-rag_query        : si intent rag → 3-5 mots-clés extraits du message (nom du doc + sujet si mentionnés, ex: "galop 6 équipements" ← "ma fiche galop 6 chapitre équipements") — sinon null
-project_name     : nom de projet mentionné explicitement, extrait tel quel ("attelage BMW", "Jarvis v9") — sinon null
-use_reasoning    : true si arbitrage/comparaison d'options, diagnostic bug à cause inconnue, conseil fiscal/juridique/médical, ou calcul multi-étapes
-                   false pour : how-to, explications, résumé, traduction, conversation, recall factuel
+use_reasoning=true pour réaliser un diagnostic, calcul multi-étapes, conseil médical/fiscal/juridique/mathématique ou physique avancé
 
-RÈGLE URL : URL http(s) dans le message → ["memory"] uniquement, jamais "web"
-RÈGLE web : infos éphémères (cours, news, résultats en direct) → web. Explications durables → memory.
-RÈGLE ABSOLUE : tu produis TOUJOURS du JSON valide, ne réponds JAMAIS au message de l'utilisateur.
-
-EXEMPLES :
-
-"les mails importants du comptable"
-{"intents":["gmail"],"weather_location":null,"gmail_query":"from:comptable is:important","calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
-
-"mon agenda des 14 prochains jours"
+"C'est quoi mon planning pour les deux prochaines semaines ?"
 {"intents":["calendar"],"weather_location":null,"gmail_query":null,"calendar_days":14,"rag_query":null,"project_name":null,"use_reasoning":false}
 
-"retrouve dans mes notes ce que j'avais écrit sur la régulation MiCA"
-{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"régulation MiCA","project_name":null,"use_reasoning":false}
+"Est-ce que j'ai reçu des mails de la banque cette semaine ?"
+{"intents":["gmail"],"weather_location":null,"gmail_query":"from:comptable newer_than:7d","calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
 
-"base-toi sur ma fiche galop 6, chapitre équipements"
-{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"galop 6 équipements","project_name":null,"use_reasoning":false}
+"Il fait quel temps à Bordeaux ce week-end ? On pense partir samedi."
+{"intents":["weather"],"weather_location":"Bordeaux","gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
 
-"mes rendez-vous de demain et les mails urgents"
-{"intents":["calendar","gmail"],"weather_location":null,"gmail_query":"is:important","calendar_days":2,"rag_query":null,"project_name":null,"use_reasoning":false}
-
-"quel temps à Lyon ce week-end et mon planning samedi"
-{"intents":["weather","calendar"],"weather_location":"Lyon","gmail_query":null,"calendar_days":3,"rag_query":null,"project_name":null,"use_reasoning":false}
-
-"mes docs sur le trading algorithmique et les dernières news du secteur"
-{"intents":["rag","web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"trading algorithmique","project_name":null,"use_reasoning":false}
-
-"quelle commande pour donner accès à un dossier à un autre utilisateur sur macOS ?"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
-
-"arbitre entre garder ou vendre mes actions TotalEnergies"
-{"intents":["portfolio","web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
-
-"est-ce plus avantageux de clôturer mon PER avant 62 ans ou après ?"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
-
-"pourquoi mon script Python se bloque aléatoirement sur macOS mais pas sur Linux ?"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
-
-"cours actuel de l'or"
+"C'est quoi le cours du Bitcoin ?"
 {"intents":["web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
 
-"comment avance l'attelage BMW ?"
+"Tu peux retrouver mon document sur le brevet mixture-of-expert ?"
+{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"brevet mixture-of-expert","project_name":null,"use_reasoning":false}
+
+"Montre-moi mon planning de demain et vérifie mes mails non lus."
+{"intents":["calendar","gmail"],"weather_location":null,"gmail_query":"is:unread is:important","calendar_days":2,"rag_query":null,"project_name":null,"use_reasoning":false}
+
+"Retrouve dans mes docs ce que j'ai noté sur le RGPD et donne-moi aussi les dernières actualités réglementaires."
+{"intents":["rag","web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"RGPD réglementation","project_name":null,"use_reasoning":false}
+
+"Où on en est sur le projet attelage BMW ? On avance ?"
 {"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":"attelage BMW","use_reasoning":false}
 
-"où en est Jarvis v9 ?"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":"Jarvis v9","use_reasoning":false}
-
-"je te l'avais déjà dit en début de conversation, tu n'as pas retenu ?"
+"Question qui n'a rien à voir — tu sais à quelle vitesse montent les ascenseurs dans les grands hôtels ?"
 {"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
+
+"Mon script Python plante aléatoirement en prod mais jamais en local."
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
+
+"C'est quoi tes dernières réflexions Jarvis ?"
+{"intents":["self"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
 """
 
 ROUTER_USER = "<message>{message}</message>"
@@ -557,7 +528,7 @@ Décide la prochaine action pour {user_name} :
 
 Règles :
 - Tous les textes (reason, question, message, insight) en français.
-- `reason` OBLIGATOIRE pour toutes les actions, y compris `nothing`.
+- `reason` OBLIGATOIRE pour toutes les actions, y compris `nothing`. 1 phrase courte max.
 - JSON limité à 4 clés : focus, action, reason, params.
 
 {{"focus":"...","action":"...","reason":"...","params":{{...}}}}"""
@@ -867,10 +838,11 @@ SESSION_SUMMARY_PROMPT = """\
 {dropped_text}
 </exchanges>
 
-Transcris uniquement ce que l'utilisateur a dit EXPLICITEMENT — mots, faits, chiffres, affirmations directes.
-N'interprète rien. N'infère rien. N'inclus pas les réponses de Jarvis.
-Si l'utilisateur a posé une question ou exploré une piste, note-le comme tel (ex: "cherche une GMT acier"), pas comme une décision.
-Limite stricte : 1000 caractères. Phrases courtes. Termine sur une phrase complète."""
+Résume ces échanges en deux volets compacts :
+1. Ce que l'utilisateur a dit/demandé explicitement (faits, chiffres, décisions, questions posées).
+2. Ce que Jarvis a répondu de substantiel (conseils donnés, informations fournies, positions prises).
+N'interprète rien. Phrases courtes. Si un volet est vide, omets-le.
+Limite stricte : 1200 caractères. Termine sur une phrase complète."""
 
 REFINE_PROMPT_USER = """\
 PROMPT : {prompt_name}

@@ -29,6 +29,7 @@ import httpx
 from ddgs import DDGS
 
 from config import (
+    DEFAULT_TEMP,
     MAX_TOKENS_SHORT,
     MAX_TOKENS_TINY,
     PRIMARY_API_KEY,
@@ -184,8 +185,26 @@ async def search_weather(query: str) -> list[dict]:
             geo.raise_for_status()
             places = geo.json().get("results")
             if not places:
-                logger.warning("Weather: location not found for '%s'", location)
-                return []
+                # Expand French abbreviations: St- → Saint-, Ste- → Sainte-
+                expanded = None
+                loc_lower = location.lower()
+                if loc_lower.startswith("ste-") or loc_lower.startswith("ste "):
+                    expanded = "Sainte-" + location[4:]
+                elif loc_lower.startswith("st-") or loc_lower.startswith("st "):
+                    expanded = "Saint-" + location[3:]
+                if expanded:
+                    logger.info("Weather: '%s' not found, retrying as '%s'", location, expanded)
+                    geo2 = await _HTTP.get(
+                        "https://geocoding-api.open-meteo.com/v1/search",
+                        params={"name": expanded, "count": 1, "language": "fr"},
+                    )
+                    geo2.raise_for_status()
+                    places = geo2.json().get("results")
+                    if places:
+                        location = expanded
+                if not places:
+                    logger.warning("Weather: location not found for '%s'", location)
+                    return []
             place   = places[0]
             lat     = place["latitude"]
             lon     = place["longitude"]
@@ -566,7 +585,7 @@ async def _llm_judge_relevance(question: str, results: list[dict]) -> bool:
                 snippets=snippets,
             )}],
             **_router_llm_params(),
-            temperature=0,
+            temperature=DEFAULT_TEMP,
             max_tokens=MAX_TOKENS_SHORT,
             json_response=True,
             no_think=True,
@@ -605,7 +624,7 @@ async def _generate_optimized_query(question: str, current_query: str) -> str:
                 f"Same language as the question. Output only the query."
             )}],
             **_router_llm_params(),
-            temperature=0,
+            temperature=DEFAULT_TEMP,
             max_tokens=MAX_TOKENS_TINY,
             json_response=False,
             no_think=True,
@@ -637,7 +656,7 @@ async def _refine_web_queries(
                 f"Output exactly:\nQ1: <first query>\nQ2: <second query>"
             )}],
             **_router_llm_params(),
-            temperature=0,
+            temperature=DEFAULT_TEMP,
             max_tokens=MAX_TOKENS_TINY,
             json_response=False,
             no_think=True,

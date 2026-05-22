@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, File, Header, HTTPException, UploadFile
 
-from config import PRIMARY_API_KEY, PRIMARY_API_URL, PRIMARY_MODEL, USER_CODES
+from config import DEFAULT_TEMP, PRIMARY_API_KEY, PRIMARY_API_URL, PRIMARY_MODEL, USER_CODES
 from deps import REDIS_CLIENT
 from helpers import call_llm_async, get_logger
 from trading import (
@@ -119,7 +119,7 @@ async def portfolio_analysis(user_code: str, authorization: str = Header(default
                 {"role": "user",   "content": f"Analyse ce portefeuille et donne tes observations :\n\n{summary}"},
             ],
             model=PRIMARY_MODEL, api_url=PRIMARY_API_URL, api_key=PRIMARY_API_KEY,
-            temperature=0.4, max_tokens=2000, json_response=False, no_think=True, timeout=40.0,
+            temperature=DEFAULT_TEMP, max_tokens=2000, json_response=False, no_think=True, timeout=40.0,
         )
         return {"user": USER_CODES[user_code], "analysis": analysis, "portfolio_snapshot": summary}
     except Exception as exc:

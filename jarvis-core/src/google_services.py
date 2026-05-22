@@ -32,6 +32,7 @@ import httplib2
 import pytz
 from config import (
     BRIEFING_TIMEZONE,
+    DEFAULT_TEMP,
     GOOGLE_CALENDAR_ID,
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
@@ -681,7 +682,7 @@ async def extract_calendar_event_llm(message: str) -> dict | None:
             model=_model,
             api_url=_api_url,
             api_key=_api_key,
-            temperature=0,
+            temperature=DEFAULT_TEMP,
             max_tokens=MAX_TOKENS_SHORT,
             json_response=True,
             no_think=True,

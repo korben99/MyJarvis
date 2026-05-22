@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from config import (
     CHAT_LOG_TTL,
+    DEFAULT_TEMP,
     IMPORTANCE_THRESHOLD,
     MAX_TOKENS_MEDIUM,
     PRIMARY_MODEL,
@@ -160,7 +161,7 @@ async def analyze_exchange(
         content = await call_llm_local_async_bg(
             [{"role": "user", "content": prompt}],
             model=PRIMARY_MODEL,
-            temperature=0.0,  # use model profile default (Qwen3.6: 0.7 no-think)
+            temperature=DEFAULT_TEMP,
             max_tokens=MAX_TOKENS_MEDIUM,
             json_response=True,
             no_think=True,

@@ -178,6 +178,10 @@ MAX_TOKENS_REASONING = int(
 # ── Hard cap (kill switch runaway — indépendant des budgets ci-dessus) ───
 MAX_TOKENS_HARD_CAP = int(os.getenv("MAX_TOKENS_HARD_CAP", "16000"))
 
+# Sentinel température : None = utilise le profil du modèle (défini dans llm_local._model_profile).
+# Passer 0.0 signifie greedy réel. Passer une valeur >0 signifie température explicite.
+DEFAULT_TEMP: float | None = None
+
 # ── Historique conversationnel (chat.py) ─────────────────────────────────
 HIST_CONV_TOKEN_BUDGET = int(os.getenv("HIST_CONV_TOKEN_BUDGET", "1000"))
 SESSION_SUMMARY_TOKENS = int(os.getenv("SESSION_SUMMARY_TOKENS", "400"))

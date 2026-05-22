@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from config import (
+    DEFAULT_TEMP,
     MAX_TOKENS_BRIEFING,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
@@ -390,7 +391,7 @@ async def _assemble_with_llm(
             model=PRIMARY_MODEL,
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
-            temperature=0.6,
+            temperature=DEFAULT_TEMP,
             max_tokens=MAX_TOKENS_BRIEFING,
             json_response=True,
             no_think=True,
