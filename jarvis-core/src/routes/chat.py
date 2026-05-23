@@ -309,6 +309,8 @@ class _SseCtx:
     user_code: str
     raw_user_content: str
     original_message: str
+    history_user_content: str  # req.message stripped of injected doc — saved to Redis/convlog
+    image_parts: list  # non-empty when vision processing is deferred to _sse_stream
 
 
 async def _complete_after_disconnect(ctx: _SseCtx) -> None:
@@ -322,6 +324,27 @@ async def _complete_after_disconnect(ctx: _SseCtx) -> None:
         logger.info(
             "post-disconnect completion: user=%s session=%s", ctx.user_code, ctx.session_id
         )
+        if ctx.image_parts:
+            logger.info("post-disconnect: processing deferred vision (%d parts)", len(ctx.image_parts))
+            _img_desc = await describe_images(ctx.image_parts, ctx.original_message)
+            ctx.image_parts = []
+            if _img_desc:
+                _new_raw = (
+                    f"{ctx.original_message}\n\n"
+                    f"<image_analysis>\n"
+                    f"L'utilisateur a joint une image. Voici son analyse détaillée par le modèle vision "
+                    f"— traite ces informations comme si tu avais vu l'image toi-même et réponds directement "
+                    f"à la question sans demander de photo :\n\n"
+                    f"{_img_desc}\n"
+                    f"</image_analysis>"
+                )
+                _old_block = f"<user_message>\n{ctx.raw_user_content}\n</user_message>"
+                _new_block = f"<user_message>\n{_new_raw}\n</user_message>"
+                ctx.messages[-1]["content"] = ctx.messages[-1]["content"].replace(
+                    _old_block, _new_block, 1
+                )
+                ctx.raw_user_content = _new_raw
+
         content = await call_llm_async(
             ctx.messages,
             model=ctx.use_model,
@@ -339,7 +362,7 @@ async def _complete_after_disconnect(ctx: _SseCtx) -> None:
         # Strip think block (même logique que le path streaming)
         _in_think_started = LLM_LOCAL and is_qwen3(ctx.use_model) and not ctx.no_think
         clean = _strip_sse_response(content, _in_think_started) or content.strip()
-        append_conversation_message(ctx.user_code, ctx.session_id, "user", ctx.raw_user_content)
+        append_conversation_message(ctx.user_code, ctx.session_id, "user", ctx.history_user_content)
         append_conversation_message(ctx.user_code, ctx.session_id, "assistant", clean)
         logger.info("post-disconnect: saved to history (%d chars)", len(clean))
         # APNS push — réveille l'app iOS
@@ -350,7 +373,7 @@ async def _complete_after_disconnect(ctx: _SseCtx) -> None:
                 preview += "…"
             await send_apns_push(device_token, body=preview, title="Jarvis")
         asyncio.create_task(
-            post_analysis(ctx.session_id, ctx.user_code, ctx.original_message, clean)
+            post_analysis(ctx.session_id, ctx.user_code, ctx.history_user_content, clean)
         )
         asyncio.create_task(_update_session_summary(ctx.user_code, ctx.session_id))
     except Exception as exc:
@@ -371,6 +394,48 @@ async def _sse_stream(ctx: _SseCtx):
     """
     full_parts: list[str] = []
     try:
+        # ── Deferred vision processing ──────────────────────────────────────
+        # describe_images can take 2+ min for large images. Running it here,
+        # AFTER the StreamingResponse is returned, lets iOS receive this first
+        # SSE event and reset its connection timeout before processing starts.
+        if ctx.image_parts:
+            yield "data: " + json.dumps({"think": "📷 Analyse de l'image en cours…"}) + "\n\n"
+            _vision_task = asyncio.create_task(
+                describe_images(ctx.image_parts, ctx.original_message)
+            )
+            try:
+                # Send keepalives every 15 s so iOS doesn't close the connection
+                # (vision can take 2+ min for large images).
+                while not _vision_task.done():
+                    try:
+                        await asyncio.wait_for(asyncio.shield(_vision_task), timeout=15)
+                    except asyncio.TimeoutError:
+                        yield "data: " + json.dumps({"think": "…"}) + "\n\n"
+                _img_desc = _vision_task.result()
+            except asyncio.CancelledError:
+                _vision_task.cancel()
+                raise  # ctx.image_parts still set → _complete_after_disconnect handles it
+            ctx.image_parts = []
+            if _img_desc:
+                logger.info("vision: image described (%d chars) [deferred]", len(_img_desc))
+                _new_raw = (
+                    f"{ctx.original_message}\n\n"
+                    f"<image_analysis>\n"
+                    f"L'utilisateur a joint une image. Voici son analyse détaillée par le modèle vision "
+                    f"— traite ces informations comme si tu avais vu l'image toi-même et réponds directement "
+                    f"à la question sans demander de photo :\n\n"
+                    f"{_img_desc}\n"
+                    f"</image_analysis>"
+                )
+                _old_block = f"<user_message>\n{ctx.raw_user_content}\n</user_message>"
+                _new_block = f"<user_message>\n{_new_raw}\n</user_message>"
+                ctx.messages[-1]["content"] = ctx.messages[-1]["content"].replace(
+                    _old_block, _new_block, 1
+                )
+                ctx.raw_user_content = _new_raw
+            else:
+                logger.warning("vision: describe_images returned empty [deferred]")
+
         # With Qwen3 local + enable_thinking=True, apply_chat_template appends
         # <think>\n to the prompt (not to the output).  The model's first output
         # tokens are already INSIDE the think block — no opening <think> tag ever
@@ -455,7 +520,7 @@ async def _sse_stream(ctx: _SseCtx):
             yield f"data: {json.dumps({'content': '⚠️ Réponse incomplète — budget de réflexion dépassé. Reformule ta question.'})}\n\n"
         if full_clean:
             append_conversation_message(
-                ctx.user_code, ctx.session_id, "user", ctx.raw_user_content
+                ctx.user_code, ctx.session_id, "user", ctx.history_user_content
             )
             append_conversation_message(
                 ctx.user_code, ctx.session_id, "assistant", full_clean
@@ -477,7 +542,7 @@ async def _sse_stream(ctx: _SseCtx):
         yield f"data: {_done_payload}\n\n"
         asyncio.create_task(
             post_analysis(
-                ctx.session_id, ctx.user_code, ctx.original_message, full_clean
+                ctx.session_id, ctx.user_code, ctx.history_user_content, full_clean
             )
         )
         asyncio.create_task(_update_session_summary(ctx.user_code, ctx.session_id))
@@ -488,7 +553,7 @@ async def _sse_stream(ctx: _SseCtx):
                 full_clean = _strip_sse_response("".join(full_parts), in_think_started)
                 if full_clean:
                     append_conversation_message(
-                        ctx.user_code, ctx.session_id, "user", ctx.raw_user_content
+                        ctx.user_code, ctx.session_id, "user", ctx.history_user_content
                     )
                     append_conversation_message(
                         ctx.user_code, ctx.session_id, "assistant", full_clean
@@ -497,7 +562,7 @@ async def _sse_stream(ctx: _SseCtx):
                         post_analysis(
                             ctx.session_id,
                             ctx.user_code,
-                            ctx.original_message,
+                            ctx.history_user_content,
                             full_clean,
                         )
                     )
@@ -748,12 +813,20 @@ async def chat(req: ChatRequest):
         ) is not None:
             return result
 
+    # ── Inline document injection — detect early so routers see only the query ─
+    _has_injected_doc = "[Document injecté" in req.message
+    _history_user_msg = (
+        req.message.split("\n\n[Document injecté")[0].strip()
+        if _has_injected_doc
+        else req.message
+    )
+
     # ════════════════════════════════════════════════════════════════════════
     # STEP 2 — EMBEDDING ROUTER — fast cosine-similarity intent classifier
     # ~2-5 ms. Skips the LLM router (~1.3 s) when confident.
     # Returns None when score is low or ambiguous → LLM router takes over.
     # ════════════════════════════════════════════════════════════════════════
-    _embed_result = embed_route(req.message, google_available=_google_available)
+    _embed_result = embed_route(_history_user_msg, google_available=_google_available)
 
     # ════════════════════════════════════════════════════════════════════════
     # STEP 3 — LLM ROUTER + dynamic prefix + conversation history (parallel)
@@ -772,8 +845,8 @@ async def chat(req: ChatRequest):
     # ("ok", "merci", "oui"). asyncio cancel() doesn't stop the underlying thread,
     # so avoiding the launch entirely is the only way to prevent wasted CPU.
     _spec_mem_task: asyncio.Task = asyncio.ensure_future(
-        async_search_memory(user_code, req.message, 5)
-        if len(req.message.strip()) >= 15
+        async_search_memory(user_code, _history_user_msg, 5)
+        if len(_history_user_msg.strip()) >= 15
         else _empty()
     )
 
@@ -786,18 +859,12 @@ async def chat(req: ChatRequest):
             or _embed_result.use_web
             or _embed_result.use_self
         )
-        if not _embed_result.use_memory:
-            _spec_mem_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await _spec_mem_task
-            _prefetched_memory_coro = asyncio.create_task(_empty())
-        else:
-            _prefetched_memory_coro = _spec_mem_task
-
         if _embed_result.use_small_talk:
             # Small talk (acquiescements purs) — pas de profil, pas de recall mémoire.
             # Seul l'historique de conversation suffit.
             _spec_mem_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await _spec_mem_task
             tz = USER_TIMEZONES.get(user_code, "Europe/Paris")
             _name_part = f" Tu parles avec {user_name}." if user_name else ""
             dynamic_prefix = f"Date : {fmt_now_fr(tz)}.{_name_part}"
@@ -811,6 +878,13 @@ async def chat(req: ChatRequest):
                 time.time() - _t0,
             )
         else:
+            if not _embed_result.use_memory:
+                _spec_mem_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await _spec_mem_task
+                _prefetched_memory_coro = asyncio.create_task(_empty())
+            else:
+                _prefetched_memory_coro = _spec_mem_task
             _gather_ep = await asyncio.gather(
                 asyncio.to_thread(
                     build_dynamic_prefix,
@@ -820,7 +894,7 @@ async def chat(req: ChatRequest):
                     req.voice_mode,
                     _rich_intent,
                     _rich_intent,  # include_opinions, include_suggestions
-                    req.message,
+                    _history_user_msg,
                 ),
                 asyncio.to_thread(
                     get_conversation, user_code, req.session_id, _HIST_FETCH_N
@@ -856,9 +930,9 @@ async def chat(req: ChatRequest):
                 user_code,
                 user_name or "",
                 req.voice_mode,
-                user_message=req.message,
+                user_message=_history_user_msg,
             ),
-            llm_route(req.message, google_available=_google_available),
+            llm_route(_history_user_msg, google_available=_google_available),
             asyncio.to_thread(
                 get_conversation, user_code, req.session_id, _HIST_FETCH_N
             ),
@@ -911,10 +985,8 @@ async def chat(req: ChatRequest):
         _llm_rag_query = ""
 
     # ── Inline document injection — freeze intents ─────────────────────────
-    # When OpenWebUI injects a file via _strip_owui_rag(), the document is already
-    # in the message. No Qdrant search or web lookup needed — and both would return
-    # noise (generic tutorials instead of analysis of the actual file).
-    _has_injected_doc = "[Document injecté" in req.message
+    # _has_injected_doc / _history_user_msg already computed before STEP 2 so
+    # embed_route / llm_route / async_search_memory see only the user query.
     if _has_injected_doc:
         use_rag = False
         use_web_auto = False
@@ -946,30 +1018,9 @@ async def chat(req: ChatRequest):
             }
         ] + req.image_parts
 
-    # ── Vision: describe images (two-stage pipeline) ────────────────────────
-    image_description = ""
-    logger.info(
-        "vision: image_parts=%d image_base64=%s",
-        len(req.image_parts),
-        bool(req.image_base64),
-    )
-    if req.image_parts:
-        if VISION_MODEL:
-            logger.info("vision: calling describe_images (model=%s)", VISION_MODEL)
-            image_description = await describe_images(req.image_parts, req.message)
-            if image_description:
-                logger.info(
-                    "Vision: image described (%d chars)", len(image_description)
-                )
-            else:
-                logger.warning(
-                    "Vision: describe_images returned empty — %d part(s)",
-                    len(req.image_parts),
-                )
-        else:
-            logger.warning(
-                "Vision: image received but VISION_MODEL not configured — ignored"
-            )
+    # ── Vision: placeholder for _sse_stream ────────────────────────────────
+    # describe_images runs inside _sse_stream (keepalive path) — raw_user_content
+    # gets the "non traitée" fallback here; _sse_stream replaces it after vision.
 
     # ════════════════════════════════════════════════════════════════════════
     # STEP 4 — INTENT SHORT-CIRCUITS — self / briefing
@@ -1078,7 +1129,8 @@ async def chat(req: ChatRequest):
     # contains factual signals (price, version, current state, …).
     # Memory score guard avoids firing when a relevant memory hit already exists.
     if (
-        not web_results
+        not _has_injected_doc
+        and not web_results
         and not rag_chunks
         and not inline_url_results
         and _auto_web_needed(req.message, memory_chunks)
@@ -1144,19 +1196,14 @@ async def chat(req: ChatRequest):
         # Web/RAG : le think doit servir à identifier les infos pertinentes, pas à résumer.
         reasoning_hint = "\n\nAppuie ta réponse sur le contexte ci-dessus."
 
-    raw_user_content = req.message
-    if req.image_parts and not image_description:
-        raw_user_content = f"{req.message}\n\n[Image jointe reçue mais non traitée par le modèle vision — ne demande pas de photo, réponds sans l'avoir vue.]"
-    if image_description:
-        raw_user_content = (
-            f"{req.message}\n\n"
-            f"<image_analysis>\n"
-            f"L'utilisateur a joint une image. Voici son analyse détaillée par le modèle vision "
-            f"— traite ces informations comme si tu avais vu l'image toi-même et réponds directement "
-            f"à la question sans demander de photo :\n\n"
-            f"{image_description}\n"
-            f"</image_analysis>"
-        )
+    # Placeholder when images are present — _sse_stream replaces this block with
+    # the actual <image_analysis> once describe_images completes.
+    raw_user_content = (
+        f"{req.message}\n\n[Image jointe reçue mais non traitée par le modèle vision"
+        f" — ne demande pas de photo, réponds sans l'avoir vue.]"
+        if req.image_parts
+        else req.message
+    )
 
     # Project detail — injected once on first mention; history carries it forward.
     _project_name = (llm_result.project_name if llm_result else "") or ""
@@ -1264,6 +1311,8 @@ async def chat(req: ChatRequest):
             user_code=user_code,
             raw_user_content=raw_user_content,
             original_message=req.message,
+            history_user_content=_history_user_msg,
+            image_parts=req.image_parts if VISION_MODEL else [],
         )
         return StreamingResponse(
             _sse_stream(ctx),
@@ -1272,6 +1321,11 @@ async def chat(req: ChatRequest):
         )
 
     # ── JSON response (non-streaming) ───────────────────────────────────────
+    # Image analysis requires SSE streaming (keepalive during vision processing).
+    # Non-streaming + image is not a supported combination — reject explicitly.
+    if req.image_parts:
+        raise HTTPException(400, "Image analysis requires stream=true")
+
     resp = await call_llm_async(
         messages,
         model=use_model,
@@ -1280,18 +1334,14 @@ async def chat(req: ChatRequest):
         timeout=_use_timeout,
         no_think=chat_no_think,
         max_tokens=_max_tokens,
-        thinking_budget=(
-            THINKING_BUDGET_MEDIUM if _use_reasoning else THINKING_BUDGET_COMPACT
-        )
-        if not chat_no_think
-        else 0,
+        thinking_budget=_thinking_budget,
     )
 
-    append_conversation_message(user_code, req.session_id, "user", req.message)
+    append_conversation_message(user_code, req.session_id, "user", _history_user_msg)
     append_conversation_message(user_code, req.session_id, "assistant", resp)
     ms = int((time.time() - start) * 1000)
 
-    asyncio.create_task(post_analysis(req.session_id, user_code, req.message, resp))
+    asyncio.create_task(post_analysis(req.session_id, user_code, _history_user_msg, resp))
     asyncio.create_task(_update_session_summary(user_code, req.session_id))
 
     return {

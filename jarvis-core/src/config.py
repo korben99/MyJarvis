@@ -184,7 +184,7 @@ DEFAULT_TEMP: float | None = None
 
 # ── Historique conversationnel (chat.py) ─────────────────────────────────
 HIST_CONV_TOKEN_BUDGET = int(os.getenv("HIST_CONV_TOKEN_BUDGET", "1000"))
-SESSION_SUMMARY_TOKENS = int(os.getenv("SESSION_SUMMARY_TOKENS", "400"))
+SESSION_SUMMARY_TOKENS = int(os.getenv("SESSION_SUMMARY_TOKENS", "600"))
 HIST_CONV_SUMMARIZE_THRESHOLD = int(os.getenv("HIST_CONV_SUMMARIZE_THRESHOLD", "1500"))
 
 # ThinkingBudgetProcessor : activé via USE_THINKING_BUDGET_PROCESSOR=yes

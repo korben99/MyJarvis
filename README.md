@@ -133,7 +133,7 @@ tail -f /opt/jarvis/logs/jarvis-service.log
 | **`analyzer.py`** | Python module | Scheduled batch analysis (every 30 min): fact extraction, ESS scoring, Qdrant vectorisation |
 | **`embed_router.py`** | Python module | Fast-path intent classifier via cosine similarity — bypasses LLM router for ~80 % of requests |
 | **`routes/chat.py`** | Python module | Main chat pipeline: routing → context gather → auto-web fallback → LLM → SSE stream |
-| **`routes/proxy.py`** | Python module | OpenAI-compatible proxy `/v1/*` for Open WebUI and iOS |
+| **`routes/proxy.py`** | Python module | OpenAI-compatible proxy `/v1/*` for Open WebUI — strips OWUI RAG templates, handles OWUI system calls (title generation, follow-up suggestions) at proxy level without touching the Jarvis pipeline |
 | **`prompts.py`** | Python module | Single source of truth for all LLM prompts — supports live overrides via `get_prompt()` |
 | **`web_search.py`** | Python module | Web search: Tavily API (primary), Open-Meteo weather, DDG 4-stage parallel pipeline (fallback). Parallel speculative page fetch, LLM query optimization, dual query refinement, HTML publication date extraction. |
 | **`helpers.py`** | Python module | Shared utilities: LLM HTTP clients, logging setup, Redis/Qdrant factory, JSON parsing |
@@ -668,18 +668,29 @@ search_documents(query, top_k=RAG_TOP_K)
 ### Request Flow
 
 ```
-User message
+User message (via /chat or /v1/chat/completions)
+    │
+    ├─ [proxy only] _strip_owui_rag(): strips OpenWebUI RAG template (### Task / ### Context / ### Query)
+    │     → extracts real user question + document content → clean "question\n\n[Document injecté…]\n…" form
+    │     → single large source (Full Context Mode): truncated to OWUI_MAX_DOC_CHARS instead of dropped
+    │
+    ├─ _has_injected_doc / _history_user_msg computed early (before routing)
+    │     → _history_user_msg = message stripped of "[Document injecté…]" block
+    │     → used for all router calls, auto-web guard, Redis/convlog saves — injected doc never stored
+    │
     → build_system_prompt() [static, instant]
-    → asyncio.to_thread(build_dynamic_prefix) ┐  run in parallel
+    → asyncio.to_thread(build_dynamic_prefix) ┐  run in parallel (use _history_user_msg)
     → Tier 1 Router (intents + use_reasoning) ┘  (~300-400 ms saved)
     → Keyword dispatch: calendar write / confirm / cancel short-circuit here
     → Parallel context gathering (memory + RAG + web + Google + self + portfolio)
+    │     auto-web fallback suppressed when _has_injected_doc (document already provides context)
     → Pending trade alerts injected if any are queued
     → Self context injected: internal state (focus, goals, last action)
                            + per-user relation (affinity, style, tonal directives)
     → user_content = dynamic_prefix + assembled_context + ## MESSAGE UTILISATEUR + raw_message
-      (stored in Redis history; /history endpoint returns the raw message for display)
+      (stored in Redis history with _history_user_msg — no document/image content in history)
     → Tier 2 PRIMARY or Tier 3 REASONING (messages list + session KV cache → streaming)
+    →   [if image_parts] describe_images() runs inside _sse_stream (deferred, keepalive every 15 s)
     →   MLX KV cache: only new tokens computed from turn 2 onward (session_id scoped)
     →   streaming via shared per-timeout httpx.AsyncClient (connection pool reused)
     → Conversation analyzer / PRIMARY_MODEL (extract facts, mood, topics, importance, memory_summary)
@@ -704,6 +715,7 @@ User message
 | **ThinkingBudgetProcessor** | −2 à −5 s | Hard-cut logits `</think>` au budget exact (COMPACT/MEDIUM/DEEP) — évite la réflexion infinie. |
 | **System prompt réduit** | −0.3 s | `SYSTEM_BASE_FR` réduit de ~400 chars/~100 tokens. |
 | **KV cache prefix caching** | −1 à −3 s dès le tour 2 | Cache KV MLX par session (LRU ×5). Seuls les nouveaux tokens sont calculés à chaque tour. |
+| **Vision resize 1024 px** | ~3–5× sur inférence VLM | Photo iPhone (12 MP) redimensionnée avant `vlm_generate` — de 8–10 tiles à 2–4 tiles. `max_tokens` 1200 → 700. |
 
 ### Architecture KV cache
 
@@ -1358,18 +1370,24 @@ curl -X PUT http://localhost:8000/portfolio/position/KORBEN99/IE0002XZSHO1 \
 Jarvis supports image attachments using a **two-stage pipeline**:
 
 ```
-Image → VISION_MODEL (describe) → "=== IMAGE ANALYSÉE ===" context block
+Image → VISION_MODEL (describe) → <image_analysis> context block
                                           ↓
                          full pipeline → PRIMARY/REASONING MODEL (analyze with memory + RAG)
 ```
 
-1. The vision model produces a detailed description of the image (max 600 tokens).
-2. That description is injected as a context block, alongside memory, RAG, emails, etc.
+1. The vision model produces a detailed description of the image (max 700 tokens).
+2. That description is injected as a `<image_analysis>` context block, alongside memory, RAG, emails, etc.
 3. The main model then answers the user's question with full Jarvis context.
 
-This decouples vision from reasoning — a local `Qwen2.5-VL-72B` can handle description while `gpt-5.1` handles analysis. Setting `VISION_MODEL` to the same model as `PRIMARY_MODEL` also works (two calls to the same model).
+This decouples vision from reasoning — a local `Qwen3-VL-8B` can handle description while the primary model handles analysis. Setting `VISION_MODEL` to the same model as `PRIMARY_MODEL` also works (two calls to the same model).
 
 **If `VISION_MODEL` is not set**, images are silently ignored and only the text is processed.
+
+**Image requires `stream=true`** — vision processing can take 1–2 minutes; the non-streaming path returns HTTP 400.
+
+**iOS keepalive during vision:** `describe_images` runs inside `_sse_stream` (not in `chat()`), so the `StreamingResponse` is returned immediately. An initial `{"think": "📷 Analyse de l'image en cours…"}` event is sent at once, then a `{"think": "…"}` keepalive every 15 seconds while the vision model runs — prevents iOS from closing the connection on a silent socket.
+
+**Image preprocessing (local path):** Before sending to `mlx_vlm`, images are resized to max 1024 px on the longest side. An iPhone photo (~12 MP, 4032×3024) gets tiled into 8–10 tiles at full resolution; after resize it drops to 2–4 tiles → ~3–5× faster VLM inference.
 
 **Autonomous threshold management** — during its reflection cycles, Jarvis can update `threshold_high` / `threshold_low` on any position via the `update_trade_threshold` action in `self.py`.
 
@@ -1651,7 +1669,7 @@ A native Swift/SwiftUI app for iPhone that connects to the Jarvis API. Voice and
 
 1. **Text chat** — streaming SSE chat with the Jarvis API, session history, clear conversation
 2. **Voice mode** — WhisperKit on-device STT + AVSpeech TTS; concise responses optimised for listening
-3. **Image attachments** — send a photo from camera or library; JPEG compressed and sent as base64 to the VISION_MODEL pipeline
+3. **Image attachments** — send a photo from camera or library; JPEG compressed and sent as base64 to the VISION_MODEL pipeline. `describe_images` runs deferred inside `_sse_stream` with periodic keepalives (every 15 s) to prevent iOS timeout during the 1–2 min VLM inference.
 4. **Wake word** — always-on keyword detection (on-device, no cloud) to trigger voice mode hands-free
 5. **Proactive push notifications** — BGAppRefreshTask polls `/device/pending/{user_code}` every ~2h in background (15 min in foreground); messages generated by the Jarvis reflection cycle are delivered as local notifications
 

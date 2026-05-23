@@ -842,7 +842,7 @@ Résume ces échanges en deux volets compacts :
 1. Ce que l'utilisateur a dit/demandé explicitement (faits, chiffres, décisions, questions posées).
 2. Ce que Jarvis a répondu de substantiel (conseils donnés, informations fournies, positions prises).
 N'interprète rien. Phrases courtes. Si un volet est vide, omets-le.
-Limite stricte : 1200 caractères. Termine sur une phrase complète."""
+Limite stricte : 1800 caractères. Termine sur une phrase complète."""
 
 REFINE_PROMPT_USER = """\
 PROMPT : {prompt_name}
@@ -954,15 +954,14 @@ JSON uniquement."""
 # ══════════════════════════════════════════════════════════════════════════
 
 VISION_USER_PROMPT = (
-    "Décris cette image avec un maximum de précision et de détail. "
-    "Tu es un observateur factuel : décris uniquement ce que tu vois, sans interpréter, sans émettre d'avis, sans tirer de conclusions. "
-    "Structure ta description dans cet ordre : "
-    "(1) Sujet principal — nature exacte, contexte, composition d'ensemble. "
-    "(2) Texte et inscriptions — tout texte, chiffre, marque, modèle ou référence visible, retranscrit mot pour mot. "
-    "(3) Détails techniques — matériaux, état de surface, finitions, caractéristiques distinctives, défauts ou anomalies visibles. "
-    "(4) Éléments spatiaux — positions relatives, angles, proportions, symétrie ou asymétrie notable. "
-    "Ne limite pas la longueur : la précision prime sur la concision. Sans markdown. "
-    "Contexte de la question (pour orienter ton attention visuelle, pas pour que tu y répondes) : {text_prompt}"
+    "Question : {text_prompt}\n\n"
+    "Analyse l'image pour répondre à cette question. "
+    "Décris en priorité ce qui permet d'y répondre, puis les détails complémentaires utiles. "
+    "Structure : "
+    "(1) Identification du sujet principal — type exact, marque, modèle, couleur, contexte. "
+    "(2) Texte et inscriptions visibles — retranscrits mot pour mot. "
+    "(3) Caractéristiques distinctives — forme, finitions, éléments reconnaissables. "
+    "Factuel uniquement, sans interprétation. 150 à 250 mots. Sans markdown."
 )
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -170,6 +170,8 @@ def _strip_owui_rag(message: str) -> str:
         return message
 
     query = query_match.group(1).strip()
+    # Strip OWUI default-template <query>…</query> wrapper (present when no custom template)
+    query = re.sub(r"^\s*<query>\s*|\s*</query>\s*$", "", query, flags=re.DOTALL).strip()
 
     # Extract <source>…</source> blocks (OpenWebUI may inject multiple chunks)
     sources = re.findall(r"<source[^>]*>(.*?)</source>", message, re.DOTALL)
@@ -177,24 +179,29 @@ def _strip_owui_rag(message: str) -> str:
     source_names = re.findall(r'<source[^>]*\bname="([^"]+)"', message)
     if sources:
         n_total = len(sources)
-        # Cap total injected content to stay within Qwen3.6's context window.
-        # OWUI may return all chunks for large files (170 KB → 219 chunks).
-        # Chunks are already sorted by semantic similarity — take the most relevant first.
         _MAX_DOC_CHARS = OWUI_MAX_DOC_CHARS
         selected, used_chars = [], 0
         for s in sources:
-            if used_chars + len(s) > _MAX_DOC_CHARS:
+            remaining = _MAX_DOC_CHARS - used_chars
+            if len(s) > remaining:
+                # Truncate rather than drop — critical for Full Context Mode (single large source)
+                if not selected:
+                    selected.append(s[:remaining])
+                    used_chars = _MAX_DOC_CHARS
                 break
             selected.append(s)
             used_chars += len(s)
         n = len(selected)
-        truncated = n < n_total
 
         header = source_names[0] if source_names else "fichier"
         if n == 1:
+            original_len = len(sources[0])
             doc_body = selected[0].strip()
-            doc_label = f"[Document injecté — {header}]"
+            truncated = original_len > _MAX_DOC_CHARS
+            trunc_note = f", tronqué à {_MAX_DOC_CHARS // 1000}k chars" if truncated else ""
+            doc_label = f"[Document injecté — {header}{trunc_note}]"
         else:
+            truncated = n < n_total
             parts = [f"# extrait {i + 1}/{n}\n{s.strip()}" for i, s in enumerate(selected)]
             doc_body = "\n\n".join(parts)
             trunc_note = f", tronqué {n}/{n_total} extraits" if truncated else ", ordre non garanti"
@@ -207,7 +214,7 @@ def _strip_owui_rag(message: str) -> str:
             n,
             n_total,
             source_names[:3] or [],
-            truncated,
+            truncated if n == 1 else n < n_total,
         )
         return clean
 

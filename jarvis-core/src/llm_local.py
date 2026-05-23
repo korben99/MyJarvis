@@ -1139,6 +1139,8 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
     from mlx_vlm.prompt_utils import apply_chat_template as vlm_apply_chat_template
     from mlx_vlm.utils import load_image as vlm_load_image
 
+    from PIL import Image as _PIL
+
     _load_vlm()
     mx.clear_cache()  # libère les buffers de calcul MLX avant l'inférence VLM
     images = []
@@ -1146,7 +1148,21 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
         url = (part.get("image_url") or {}).get("url", "")
         if url.startswith("data:"):
             _, b64data = url.split(",", 1)
-            images.append(vlm_load_image(io.BytesIO(_b64.b64decode(b64data))))
+            pil_img = _PIL.open(io.BytesIO(_b64.b64decode(b64data))).convert("RGB")
+            # Resize to max 1024px — reduces visual tiles and speeds up inference significantly.
+            # iPhone photos (~12 MP) generate dozens of tiles at full resolution.
+            max_dim = 1024
+            if max(pil_img.size) > max_dim:
+                ratio = max_dim / max(pil_img.size)
+                pil_img = pil_img.resize(
+                    (int(pil_img.size[0] * ratio), int(pil_img.size[1] * ratio)),
+                    _PIL.LANCZOS,
+                )
+                logger.debug("vision: resized to %s", pil_img.size)
+            buf = io.BytesIO()
+            pil_img.save(buf, format="JPEG", quality=85)
+            buf.seek(0)
+            images.append(vlm_load_image(buf))
         elif url.startswith("http"):
             images.append(url)
         else:
@@ -1165,7 +1181,7 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
     result = vlm_generate(
         _vlm_model, _vlm_processor, formatted,
         image=images[0] if len(images) == 1 else images,
-        max_tokens=1200, temperature=0.7,
+        max_tokens=700, temperature=0.7,
         repetition_penalty=1.5, repetition_context_size=256, verbose=False,
     )
     return result.text if hasattr(result, "text") else str(result)
