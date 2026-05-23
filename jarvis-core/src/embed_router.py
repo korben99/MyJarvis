@@ -514,10 +514,16 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
 
     # ── 1. Règles déterministes ───────────────────────────────────────────────
 
-    # Détection reasoning (flag, pas intent) — doit précéder les early-returns
-    force_reasoning = bool(
-        any(t in msg_lower for t in _REASON_EXACT) or _REASON_REGEX.search(msg_lower)
-    )
+    # Commandes explicites de raisonnement ("mode expert", "analyse approfondie"…) :
+    # retour immédiat memory+reasoning, sans embedding ni LLM router.
+    if any(t in msg_lower for t in _REASON_EXACT):
+        logger.debug("Embed router: _REASON_EXACT → memory + use_reasoning=True")
+        result = _build_result("memory", msg, google_available)
+        result.use_reasoning = True
+        return result
+
+    # Détection reasoning via regex (flag, pas intent) — doit précéder les early-returns
+    force_reasoning = bool(_REASON_REGEX.search(msg_lower))
 
     # URL → memory (la page est déjà fetchée automatiquement en amont)
     if re.search(r"https?://", msg):
