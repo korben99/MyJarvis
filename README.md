@@ -179,12 +179,12 @@ When `LLM_LOCAL=yes`, Jarvis uses `mlx_lm` directly (no HTTP server) — models 
 **LRU prompt cache (session-level prefix caching):**
 - `llm_local.py` uses `LRUPromptCache` (mlx-lm trie-based prefix cache) instead of a single system-only KV cache.
 - After each generation, the full token sequence (prompt + output) is inserted into the trie. On the next call, `fetch_nearest_cache()` returns the longest common prefix — system + entire conversation history — and only the new user message (`remaining`) is computed.
-- One `LRUPromptCache` per model path, `LRU_KV_SIZE=32` slots, `LRU_KV_GB=4.0` GB memory budget (hard cap, real guard). At ~7.5 KB/token for Qwen3.6 6-bit, 32 × 3000-tok average ≈ 700 MB.
+- One `LRUPromptCache` per model path, `LRU_KV_SIZE=8` slots, `LRU_KV_GB=4.0` GB memory budget. Observed ~80–100 MB/slot in production (6-bit KV quant, ~1500–2500 tok context) → 8 slots ≈ 1 GB overhead. Note: `lru.nbytes` under-reports actual Metal usage; real Metal consumption visible via `mx.metal.get_active_memory()` logged after each insert.
 - Applied to **all inference paths**: `stream_local` (streaming chat), `_generate_sync` (router, analyzer, self-reflection, web judge, trading).
 - Session benefit: turn N computes only the new user message (~200–600 tok); everything before is cached. Hit rate grows linearly with conversation length — by turn 4+, 85–95 % of prompt tokens are free.
-- Multi-user / multi-session safe: 32 slots cover all concurrent chat sessions (iPhone + OpenWebUI, multiple users) plus background tasks (analyzer, trading, self-reflection, 7 nightly prompts) without eviction.
+- Multi-user / multi-session safe: 8 slots cover concurrent sessions (iPhone + OpenWebUI) plus background tasks (analyzer, trading, self-reflection) without eviction.
 - **Sticky RAG**: `routes/chat.py` re-injects the same RAG chunks across turns of a session → the previous user message (with its RAG context) is exact in the trie → perfect cache hit on history.
-- **ArraysCache patch**: Qwen3.6 hybrid architecture (10 full-attention + 30 linear-attention layers) requires patching `ArraysCache.is_trimmable()` to enable the "longer key" branch in the trie. Without it, only the ~262-token system prefix is cached (old behavior). Applied at import time; no quality impact.
+- **Qwen3.6 multi-turn limitation**: architecture hybride (KVCache + ArraysCache non-trimmable) — seul le system prompt (~231 tok) est mis en cache entre les tours. Le contexte conversationnel est reprefillé à chaque tour. Cache hit limité au system prompt ; gain ≈ 231 tok évités sur ~1700–2000 remaining.
 - The system message must remain **token-identical** every turn — enforced by the `build_dynamic_prefix` / `build_context` split. All dynamic content (date, memory, RAG, opinions) goes into the user message prefix.
 
 **KV cache quantization (`QUANT_KV=yes`):**
@@ -732,13 +732,52 @@ Tour N : skip de (N-1) × ~900 tokens → seulement ~600 tokens nouveaux
 
 Le système prompt est **token-identique** à chaque tour (SYSTEM_BASE_FR pur, sans date ni profil). Le contexte dynamique (date, profil, mémoires, opinions) est préfixé dans le message utilisateur courant, suivi du marqueur `## MESSAGE UTILISATEUR` puis du message brut. Le préfixe est strippé à l'affichage dans `/history`.
 
-### Mesures de référence
+### Mesures de référence — Mac Mini M4 Pro 48 GB (2026-05-23)
 
-| Scénario | TTFT avant | TTFT après |
-|---|---|---|
-| Chat simple (no_think) | ~9.5 s | ~5.5 s |
-| Chat simple, tour 2+ (KV cache) | ~5.5 s | ~3–4 s (est.) |
-| Question complexe (RAG/web) | ~5.5 s | ~5.5 s (inchangé) |
+#### Modèles comparés
+
+| Modèle | Poids Metal | Metal total au repos | Marge / 48 GB |
+|---|---|---|---|
+| `spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit` | ~23.6 GB | n/a (avant logging Metal) | — |
+| `majentik/Qwen3.6-35B-A3B-RotorQuant-MLX-6bit` | ~26.3 GB | **~35.9 GB** | ~12 GB |
+| `majentik/Qwen3.6-35B-A3B-RotorQuant-MLX-5bit` | ~21.9 GB | **~31.7 GB** | ~16 GB |
+
+Metal total = modèle principal + Hermes 3.2B + VLM 8B + OS/Python. Mesuré via `mx.metal.get_active_memory()`.
+
+#### Vitesse de prefill (remaining_tokens / first_token_time, mode no_think)
+
+| Modèle | Remaining tok | First token | Prefill tok/s |
+|---|---|---|---|
+| 5.4bit standard | ~1 560–1 960 | ~2.2–2.7 s | **~695–725** |
+| RotorQuant 6bit | ~1 715–1 916 | ~2.5–2.7 s | **~699–713** |
+| RotorQuant 5bit | ~2 184–2 265 | ~3.2–3.3 s | **~683–694** |
+
+Les prompts 5bit étaient ~400 tok plus longs (session avancée) — prefill normalisé équivalent aux autres. RotorQuant montrera son avantage sur les très grands contextes (>4 000 remaining) où la bande passante mémoire devient dominante.
+
+#### Vitesse de décode (tok/s, mode no_think)
+
+| Modèle | Décode tok/s |
+|---|---|
+| 5.4bit standard | ~55–60 |
+| RotorQuant 6bit | ~62–82 |
+| RotorQuant 5bit | **~72+** |
+
+#### TTFT end-to-end (iPhone → premier token visible, no_think)
+
+| Modèle | TTFT typique | dont router | dont prefill RotorQuant |
+|---|---|---|---|
+| 5.4bit standard | ~3.5–4.7 s | ~1.2–2.6 s | ~2.2–2.7 s |
+| RotorQuant 6bit | ~3.8–5.1 s | ~1.2–2.6 s | ~2.5–2.7 s |
+| RotorQuant 5bit | ~4.5–5.4 s | ~1.2–2.6 s | ~3.2–3.3 s |
+
+Le router (Hermes 3.2B) représente 30–50 % du TTFT selon le cache hit. Le prefill RotorQuant ≈ 2.5 s est incompressible pour ~1700–1900 remaining tokens.
+
+#### Mode thinking (first visible token = après bloc think)
+
+| Modèle | TTFT visible | Génération think | Décode think |
+|---|---|---|---|
+| 5.4bit standard | ~28–42 s | ~2 048–3 072 tok | ~55–57 tok/s |
+| RotorQuant 6bit | ~59 s (1 mesure, budget 3 072) | ~3 072 tok | ~55 tok/s |
 
 ---
 
