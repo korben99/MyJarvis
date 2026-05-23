@@ -221,6 +221,7 @@ QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "open-webui_knowledge")
 QDRANT_MEMORY_COLLECTION = os.getenv("QDRANT_MEMORY_COLLECTION", "jarvis_memory")
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", os.getenv("QDRANT_TOP_K", "8")))
 RAG_SCORE_THRESHOLD = float(os.getenv("RAG_SCORE_THRESHOLD", "0.4"))
+OWUI_MAX_DOC_CHARS = int(os.getenv("OWUI_MAX_DOC_CHARS", "80000"))
 
 # ── Features ──────────────────────────────────────────────────────────────
 SELF_MEMORY_PATH = os.getenv("SELF_MEMORY_PATH", "/app/data/jarvis-self.json")

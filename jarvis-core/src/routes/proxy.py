@@ -15,6 +15,7 @@ from typing import Optional
 
 from config import (
     EMAIL_TO_CODE,
+    OWUI_MAX_DOC_CHARS,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
@@ -170,15 +171,43 @@ def _strip_owui_rag(message: str) -> str:
 
     query = query_match.group(1).strip()
 
-    # Extract <source>…</source> blocks (OpenWebUI may inject multiple)
+    # Extract <source>…</source> blocks (OpenWebUI may inject multiple chunks)
     sources = re.findall(r"<source[^>]*>(.*?)</source>", message, re.DOTALL)
+    # Collect filenames from name="…" attributes for context header
+    source_names = re.findall(r'<source[^>]*\bname="([^"]+)"', message)
     if sources:
-        doc_body = "\n\n---\n".join(s.strip() for s in sources)
-        clean = f"{query}\n\n[Document injecté par l'utilisateur]\n{doc_body}"
+        n_total = len(sources)
+        # Cap total injected content to stay within Qwen3.6's context window.
+        # OWUI may return all chunks for large files (170 KB → 219 chunks).
+        # Chunks are already sorted by semantic similarity — take the most relevant first.
+        _MAX_DOC_CHARS = OWUI_MAX_DOC_CHARS
+        selected, used_chars = [], 0
+        for s in sources:
+            if used_chars + len(s) > _MAX_DOC_CHARS:
+                break
+            selected.append(s)
+            used_chars += len(s)
+        n = len(selected)
+        truncated = n < n_total
+
+        header = source_names[0] if source_names else "fichier"
+        if n == 1:
+            doc_body = selected[0].strip()
+            doc_label = f"[Document injecté — {header}]"
+        else:
+            parts = [f"# extrait {i + 1}/{n}\n{s.strip()}" for i, s in enumerate(selected)]
+            doc_body = "\n\n".join(parts)
+            trunc_note = f", tronqué {n}/{n_total} extraits" if truncated else ", ordre non garanti"
+            doc_label = f"[Document injecté — {header}, {n} extraits{trunc_note}]"
+
+        clean = f"{query}\n\n{doc_label}\n{doc_body}"
         logger.debug(
-            "_strip_owui_rag: stripped template → query=%r, sources=%d",
+            "_strip_owui_rag: stripped template → query=%r, sources=%d/%d names=%s truncated=%s",
             query[:80],
-            len(sources),
+            n,
+            n_total,
+            source_names[:3] or [],
+            truncated,
         )
         return clean
 

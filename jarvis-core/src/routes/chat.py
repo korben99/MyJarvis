@@ -61,6 +61,7 @@ from helpers import (
     set_session_summary_data,
     set_sticky_rag,
 )
+from apns import send_apns_push
 from llm_client import describe_images, stream_openai
 from llm_router import llm_route
 from memory import (
@@ -92,6 +93,10 @@ from web_search import (
 logger = get_logger("jarvis-chat")
 
 router = APIRouter()
+
+# Fire-and-forget background tasks must be kept alive until completion.
+# Without a strong reference, the GC can collect the Task before it runs.
+_background_tasks: set = set()
 
 
 def _trim_history_to_budget(hist: list[dict], budget_tokens: int) -> list[dict]:
@@ -306,6 +311,52 @@ class _SseCtx:
     original_message: str
 
 
+async def _complete_after_disconnect(ctx: _SseCtx) -> None:
+    """LLM completion après déconnexion client (ex. écran veille pendant vision).
+
+    Cas : client déconnecté avant le premier token SSE (full_parts=[]).
+    On relance un appel LLM non-streaming, sauvegarde user+assistant dans Redis,
+    puis push APNS pour réveiller l'app iOS.
+    """
+    try:
+        logger.info(
+            "post-disconnect completion: user=%s session=%s", ctx.user_code, ctx.session_id
+        )
+        content = await call_llm_async(
+            ctx.messages,
+            model=ctx.use_model,
+            api_url=ctx.api_url,
+            api_key=ctx.api_key,
+            timeout=ctx.timeout,
+            no_think=ctx.no_think,
+            max_tokens=ctx.max_tokens,
+            thinking_budget=ctx.thinking_budget,
+            json_response=False,
+        )
+        if not content or not content.strip():
+            logger.warning("post-disconnect: LLM returned empty response, nothing saved")
+            return
+        # Strip think block (même logique que le path streaming)
+        _in_think_started = LLM_LOCAL and is_qwen3(ctx.use_model) and not ctx.no_think
+        clean = _strip_sse_response(content, _in_think_started) or content.strip()
+        append_conversation_message(ctx.user_code, ctx.session_id, "user", ctx.raw_user_content)
+        append_conversation_message(ctx.user_code, ctx.session_id, "assistant", clean)
+        logger.info("post-disconnect: saved to history (%d chars)", len(clean))
+        # APNS push — réveille l'app iOS
+        device_token = REDIS_CLIENT.get(f"jarvis:device:token:{ctx.user_code}")
+        if device_token:
+            preview = clean[:120].replace("\n", " ")
+            if len(clean) > 120:
+                preview += "…"
+            await send_apns_push(device_token, body=preview, title="Jarvis")
+        asyncio.create_task(
+            post_analysis(ctx.session_id, ctx.user_code, ctx.original_message, clean)
+        )
+        asyncio.create_task(_update_session_summary(ctx.user_code, ctx.session_id))
+    except Exception as exc:
+        logger.warning("post-disconnect completion failed: %s", exc)
+
+
 async def _sse_stream(ctx: _SseCtx):
     """Générateur SSE pour le streaming Qwen3/cloud.
 
@@ -456,6 +507,13 @@ async def _sse_stream(ctx: _SseCtx):
                     )
             except Exception as _save_err:
                 logger.warning("Failed to save on disconnect: %s", _save_err)
+        else:
+            # Aucun token généré — client déconnecté pendant vision ou init LLM.
+            # Garder une référence forte pour éviter que le GC collecte la task
+            # avant qu'elle tourne (gotcha asyncio documenté).
+            _t = asyncio.create_task(_complete_after_disconnect(ctx))
+            _background_tasks.add(_t)
+            _t.add_done_callback(_background_tasks.discard)
 
 
 # ── Pipeline helpers ───────────────────────────────────────────────────────────
@@ -852,6 +910,18 @@ async def chat(req: ChatRequest):
         _llm_weather_location = ""
         _llm_rag_query = ""
 
+    # ── Inline document injection — freeze intents ─────────────────────────
+    # When OpenWebUI injects a file via _strip_owui_rag(), the document is already
+    # in the message. No Qdrant search or web lookup needed — and both would return
+    # noise (generic tutorials instead of analysis of the actual file).
+    _has_injected_doc = "[Document injecté" in req.message
+    if _has_injected_doc:
+        use_rag = False
+        use_web_auto = False
+        use_gmail = False
+        use_calendar = False
+        use_memory = True
+
     # ── Model selection ─────────────────────────────────────────────────────
     # Always PRIMARY infrastructure — reasoning is handled via no_think flag only.
     use_model = req.model or PRIMARY_MODEL
@@ -862,7 +932,7 @@ async def chat(req: ChatRequest):
     # ── no_think for simple intents (memory/conversation) ──────────────────
     # Complex intents (web, RAG, reasoning) keep chain-of-thought.
     # Typical saving: ~4 s of TTFT on conversational exchanges.
-    _complex_intents = use_rag or use_web_auto or req.use_web or req.use_rag
+    _complex_intents = use_rag or use_web_auto or req.use_web or req.use_rag or _has_injected_doc
     chat_no_think = (
         False if (llm_result and llm_result.use_reasoning) else not _complex_intents
     )
@@ -923,7 +993,9 @@ async def chat(req: ChatRequest):
     gmail_query = _llm_gmail_query or ""
     cal_days = _llm_cal_days or 7
     _weather_query = _llm_weather_location or USER_CITIES.get(user_code, "Paris")
-    _inline_urls = _URL_RE.findall(req.message)
+    # Ne pas scanner les URLs dans un document injecté — elles appartiennent au
+    # code source, pas à la requête utilisateur (évite les fetches localhost/internes).
+    _inline_urls = [] if _has_injected_doc else _URL_RE.findall(req.message)
 
     logger.debug(
         "[TTFT] gather2 start (rag=%s memory=%s web_auto=%s web_req=%s gmail=%s cal=%s urls=%d) — %.3fs",
