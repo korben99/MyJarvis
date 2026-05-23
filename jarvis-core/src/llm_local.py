@@ -418,6 +418,16 @@ def _lru_get_cache(
     return sys_cache, remaining
 
 
+def _metal_mem_str() -> str:
+    """Return a short Metal memory status string, or empty string if unavailable."""
+    try:
+        active_mb = mx.metal.get_active_memory() / 1024**2
+        cache_mb = mx.metal.get_cache_memory() / 1024**2
+        return f"Metal active={active_mb:.0f} MB cache={cache_mb:.0f} MB"
+    except Exception:
+        return ""
+
+
 def _lru_insert(
     model_path: str,
     model,
@@ -435,13 +445,15 @@ def _lru_insert(
         _eval_kv_cache(cache)
         lru.insert_cache(model_path, prompt_token_ids + out_ids, cache, cache_type="assistant")
         used_gb = lru.nbytes / 1024**3
+        metal = _metal_mem_str()
         logger.debug(
-            "LRU insert: key=%d tok (prompt=%d + output=%d) model=%s — %d/%d slots | %.2f/%.1f GB",
+            "LRU insert: key=%d tok (prompt=%d + output=%d) model=%s — %d/%d slots | %.2f/%.1f GB (lru) | %s",
             len(prompt_token_ids) + len(out_ids),
             len(prompt_token_ids), len(out_ids),
             model_path.split("/")[-1],
             len(lru), lru.max_size,
             used_gb, lru.max_bytes / 1024**3,
+            metal,
         )
     except Exception as exc:
         logger.warning("LRU insert failed (%s) — non-fatal", exc)
@@ -505,18 +517,18 @@ def preload_models(primary_system_content: str = "") -> None:
         return
     try:
         import mlx.core as _mx
-        _mx.set_cache_limit(8 * 1024**3)
+        _mx.set_cache_limit(4 * 1024**3)
         try:
             info = _mx.device_info()
             max_ws = info.get("max_recommended_working_set_size", 0)
             if max_ws > 0:
                 wired = int(max_ws * 0.70)
                 _mx.set_wired_limit(wired)
-                logger.info("MLX: cache_limit=8 GB, wired_limit=%.0f GB", wired / 1024**3)
+                logger.info("MLX: cache_limit=4 GB, wired_limit=%.0f GB", wired / 1024**3)
             else:
-                logger.info("MLX: cache_limit=8 GB (wired_limit skipped — device_info unavailable)")
+                logger.info("MLX: cache_limit=4 GB (wired_limit skipped — device_info unavailable)")
         except Exception as exc:
-            logger.info("MLX: cache_limit=12 GB (wired_limit skipped: %s)", exc)
+            logger.info("MLX: cache_limit=4 GB (wired_limit skipped: %s)", exc)
     except Exception as exc:
         logger.warning("MLX memory limits: %s (non-fatal)", exc)
 
@@ -860,6 +872,10 @@ def _generate_sync(
     # result is the raw LLM output (including think block if any) — inserted before stripping.
     if lru_cache is not None and result:
         _lru_insert(model_path, model, tok_ids, result, lru_cache, tokenizer)
+    mx.clear_cache()
+    metal = _metal_mem_str()
+    if metal:
+        logger.debug("Metal after clear_cache (sync): %s", metal)
 
     # For json_response: extract the clean JSON object after </think>.
     if json_response:
@@ -1081,6 +1097,14 @@ async def stream_local(
             # Only insert on clean completion (not on error or stop_flag abort).
             if lru_cache is not None and raw_resp and _generation_ok and not stop_flag.is_set():
                 _lru_insert(model, mlx_model, tok_ids, raw_resp, lru_cache, tokenizer)
+
+            # Free MLX compute buffers accumulated during inference.
+            # Without this, the 4 GB compute cache fills up across multiple large requests
+            # and pushes total Metal usage past the available unified memory limit.
+            mx.clear_cache()
+            metal = _metal_mem_str()
+            if metal:
+                logger.debug("Metal after clear_cache (stream): %s", metal)
 
             loop.call_soon_threadsafe(queue.put_nowait, None)
 
