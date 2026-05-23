@@ -1,5 +1,5 @@
 """
-prompts.py — All LLM prompt constants for Jarvis v9
+prompts.py — All LLM prompt constants for Jarvis v10
           — Also hosts get_prompt() for live override support (autocoding)
 =====================================================
 Single source of truth for every prompt string.
@@ -8,7 +8,6 @@ Logic files import from here — they never define prompts inline.
 Intended for future self-modification: Jarvis can rewrite entries in this
 file between restarts to tune its own behaviour without touching logic code.
 
-Version: 2.0  (2026-03-26)
 
 ═══════════════════════════════════════════════════════════════════════════
 """

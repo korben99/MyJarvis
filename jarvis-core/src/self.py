@@ -82,7 +82,7 @@ from apns import is_real_apns_token, send_apns_push
 from google_services import is_google_available, send_gmail_message
 from helpers import (
     call_llm,
-    call_llm_async,
+    call_llm_async_bg,
     extract_llm_json,
     fmt_now_fr,
     get_logger,
@@ -814,7 +814,7 @@ async def _call_global_reflection_llm(
     )
 
     try:
-        content = await call_llm_async(
+        content = await call_llm_async_bg(
             [
                 {"role": "system", "content": get_prompt("REFLECTION_SYSTEM")},
                 {"role": "user", "content": prompt},
@@ -891,7 +891,7 @@ async def _call_user_reflection_llm(
             # think prématurément (EOS mid-reasoning, pas de </think>), retournant une
             # réponse vide. Désactivé depuis la migration vers Qwen3.6 (non-DWQ).
             # no_think=True,
-            content = await call_llm_async(
+            content = await call_llm_async_bg(
                 messages,
                 model=REASONING_MODEL,
                 api_url=REASONING_API_URL,
@@ -1339,7 +1339,7 @@ async def _nightly_facts_user(
         existing_autobio=existing_autobio_str,
     )
     try:
-        content = await call_llm_async(
+        content = await call_llm_async_bg(
             [
                 {"role": "system", "content": get_prompt("NIGHTLY_FACTS_SYSTEM")},
                 {"role": "user", "content": prompt},
@@ -1385,7 +1385,7 @@ async def _nightly_self_user(
         else "aucune",
     )
     try:
-        content = await call_llm_async(
+        content = await call_llm_async_bg(
             [
                 {"role": "system", "content": get_prompt("NIGHTLY_SELF_SYSTEM")},
                 {"role": "user", "content": prompt},
@@ -1433,7 +1433,7 @@ async def _nightly_cleaning_user(
         new_user_insights=new_insights_str,
     )
     try:
-        content = await call_llm_async(
+        content = await call_llm_async_bg(
             [
                 {"role": "system", "content": get_prompt("NIGHTLY_CLEANING_SYSTEM")},
                 {"role": "user", "content": prompt},
@@ -2601,7 +2601,7 @@ async def generate_proactive_push(user_code: str) -> str:
     )
 
     try:
-        content = await call_llm_async(
+        content = await call_llm_async_bg(
             [{"role": "user", "content": prompt}],
             model=REASONING_MODEL,
             api_url=REASONING_API_URL,
@@ -2737,7 +2737,7 @@ async def _llm_review_before_action(
     )
 
     try:
-        content = await call_llm_async(
+        content = await call_llm_async_bg(
             [
                 {"role": "system", "content": get_prompt("ACTION_REVIEW_SYSTEM")},
                 {"role": "user", "content": prompt},

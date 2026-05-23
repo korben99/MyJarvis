@@ -1,5 +1,5 @@
 """
-PROJECT JARVIS v9
+PROJECT JARVIS v10
 Jarvis Conversation Analyzer
 =============================
 After each exchange, extracts:
@@ -37,8 +37,6 @@ import json
 import time
 from datetime import date, datetime, timezone
 
-from pydantic import BaseModel, Field, ValidationError
-
 from config import (
     CHAT_LOG_TTL,
     DEFAULT_TEMP,
@@ -50,6 +48,7 @@ from config import (
 from helpers import extract_llm_json, get_logger, get_redis
 from llm_local import call_llm_local_async_bg
 from prompts import get_prompt
+from pydantic import BaseModel, Field, ValidationError
 
 logger = get_logger("jarvis-analyzer")
 
@@ -101,7 +100,9 @@ async def analyze_exchange(
         def _proj_label(p: dict) -> str:
             name = p["name"]
             updates = p.get("updates") or []
-            last_summary = updates[-1]["summary"] if updates else p.get("description", "")
+            last_summary = (
+                updates[-1]["summary"] if updates else p.get("description", "")
+            )
             lu = p.get("last_update", "")
             age_label = ""
             if lu:
@@ -115,7 +116,9 @@ async def analyze_exchange(
                     age_label = f" [màj il y a {int(age_days)}j]"
                 except (ValueError, TypeError):
                     pass
-            short_summary = last_summary[:60] + "…" if len(last_summary) > 60 else last_summary
+            short_summary = (
+                last_summary[:60] + "…" if len(last_summary) > 60 else last_summary
+            )
             detail = f" — {short_summary}" if short_summary else ""
             if p.get("status") == "done":
                 return f"{name} (terminé{age_label}{detail})"
@@ -135,7 +138,9 @@ async def analyze_exchange(
                             _now_ts
                             - datetime.strptime(
                                 p["last_update"][:19], "%Y-%m-%dT%H:%M:%S"
-                            ).replace(tzinfo=timezone.utc).timestamp()
+                            )
+                            .replace(tzinfo=timezone.utc)
+                            .timestamp()
                         )
                         < _90d
                     )
@@ -355,7 +360,9 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                     role = "Utilisateur" if m.get("role") == "user" else "Jarvis"
                     content = m.get("content", "").strip()[:800]
                     # Skip slash-commands (/briefing, /agenda…) — no extractable facts
-                    if content and not (m.get("role") == "user" and content.startswith("/")):
+                    if content and not (
+                        m.get("role") == "user" and content.startswith("/")
+                    ):
                         turns.append(f"{role} : {content}")
                 conversation = "\n".join(turns)[:6000]
 
@@ -428,7 +435,11 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                                     if _imp > 0 and _e.get("importance", 0.0) == 0.0:
                                         _e["importance"] = _imp
                                         _changed = True
-                                    if _mood_s != "neutral" and _e.get("mood") in (None, "", "neutral"):
+                                    if _mood_s != "neutral" and _e.get("mood") in (
+                                        None,
+                                        "",
+                                        "neutral",
+                                    ):
                                         _e["mood"] = _mood_s
                                         _changed = True
                                     if _changed:

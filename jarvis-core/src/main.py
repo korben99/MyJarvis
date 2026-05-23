@@ -1,5 +1,5 @@
 """
-PROJECT JARVIS v9 — Bootstrap
+PROJECT JARVIS v10 — Bootstrap
 ==============================
 Endpoints découpés en modules dans routes/ :
   routes/chat.py          POST /chat, GET /users/{code}/history/{session}
@@ -30,6 +30,7 @@ from config import (
     BRIEFING_ENABLED,
     BRIEFING_TIME,
     BRIEFING_TIMEZONE,
+    CONV_ANALYSIS_INTERVAL_MINUTES,
     LLM_LOCAL,
     OPENAI_API_KEY,
     OPENAI_API_URL,
@@ -41,7 +42,6 @@ from config import (
     RAG_TOP_K,
     REASONING_API_URL,
     REASONING_MODEL,
-    CONV_ANALYSIS_INTERVAL_MINUTES,
     REFLECTION_INTERVAL_HOURS,
     ROUTER_API_URL,
     ROUTER_MODEL,
@@ -126,7 +126,10 @@ async def lifespan(app: FastAPI):
             id="conversation_analysis",
             next_run_time=datetime.now(tz) + timedelta(minutes=10),
         )
-        logger.info("Conversation analysis scheduled every %d min", CONV_ANALYSIS_INTERVAL_MINUTES)
+        logger.info(
+            "Conversation analysis scheduled every %d min",
+            CONV_ANALYSIS_INTERVAL_MINUTES,
+        )
 
         if BRIEFING_ENABLED:
             scheduler.add_job(

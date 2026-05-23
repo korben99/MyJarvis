@@ -77,7 +77,7 @@ from config import (
     USERS,
     tokens_param,
 )
-from llm_local import call_llm_local, call_llm_local_async
+from llm_local import call_llm_local, call_llm_local_async, call_llm_local_async_bg
 from qdrant_client import QdrantClient
 
 _LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL, REASONING_MODEL} if LLM_LOCAL else set()
@@ -785,6 +785,43 @@ async def call_llm_async(
     """
     if LLM_LOCAL and model in _LOCAL_MODELS:
         return await call_llm_local_async(
+            messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens or _LOCAL_DEFAULT_MAX_TOKENS,
+            no_think=no_think,
+            json_response=json_response,
+            thinking_budget=thinking_budget,
+        )
+    resp = await _get_llm_async_client().post(
+        f"{api_url}/chat/completions",
+        headers=_llm_headers(api_key),
+        json=_llm_body(messages, model, temperature, max_tokens, json_response),
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+async def call_llm_async_bg(
+    messages: list[dict],
+    *,
+    model: str,
+    api_url: str,
+    api_key: str,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    json_response: bool = True,
+    no_think: bool = False,
+    timeout: float = 30.0,
+    thinking_budget: int = 0,
+) -> str:
+    """Background-priority async LLM call — yields GPU to chat callers when waiting.
+    Use for self-reflection and other background tasks instead of call_llm_async.
+    Falls back to normal HTTP path for cloud models (no local lock contention there).
+    """
+    if LLM_LOCAL and model in _LOCAL_MODELS:
+        return await call_llm_local_async_bg(
             messages,
             model=model,
             temperature=temperature,

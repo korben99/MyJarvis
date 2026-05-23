@@ -1,5 +1,5 @@
 """
-PROJECT JARVIS v8
+PROJECT JARVIS v10
 Jarvis Memory System
 ====================
 - Working memory: Redis (current session, mood, active context)
@@ -37,7 +37,6 @@ from datetime import date, datetime, timezone
 from threading import Lock, Thread
 
 import numpy as np
-
 from config import (
     AUTOBIO_DEDUP_THRESHOLD,
     AUTOBIO_RECENCY_WINDOW_DAYS,
@@ -48,13 +47,13 @@ from config import (
     EMBED_MODEL_NAME,
     EPISODIC_RETENTION_DAYS,
     IMPORTANCE_THRESHOLD,
+    MAX_TOKENS_COMPACT,
+    MAX_TOKENS_SHORT,
     MEMORY_CONSOLIDATION_IMPORTANCE,
     MEMORY_DECAY_DURABLE_MIN,
     MEMORY_DECAY_FACTOR,
     MEMORY_DECAY_THRESHOLD,
     NOVELTY_THRESHOLD,
-    MAX_TOKENS_COMPACT,
-    MAX_TOKENS_SHORT,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
@@ -253,7 +252,11 @@ def update_emotional_state(updates: dict):
             try:
                 elapsed_h = max(
                     0.0,
-                    (datetime.now(timezone.utc) - datetime.fromisoformat(last_updated)).total_seconds() / 3600,
+                    (
+                        datetime.now(timezone.utc)
+                        - datetime.fromisoformat(last_updated)
+                    ).total_seconds()
+                    / 3600,
                 )
                 _apply_decay_unlocked(state, elapsed_h)
             except (ValueError, TypeError):
@@ -328,13 +331,13 @@ _SCALAR_CANONICAL: dict[str, str] = {
 # Namespace families: keys in the same family are compared together for dedup.
 # Each family is isolated — namespaces from different families are NEVER compared.
 _NS_FAMILY: dict[str, frozenset] = {
-    "hobby":         frozenset({"hobby", "interest", "loisir", "passion", "activite", "sport"}),
-    "skill":         frozenset({"skill", "competence"}),
-    "tech":          frozenset({"technologie", "outil"}),
-    "placement":     frozenset({"placement", "investissement", "epargne"}),
-    "projet":        frozenset({"projet", "project"}),
+    "hobby": frozenset({"hobby", "interest", "loisir", "passion", "activite", "sport"}),
+    "skill": frozenset({"skill", "competence"}),
+    "tech": frozenset({"technologie", "outil"}),
+    "placement": frozenset({"placement", "investissement", "epargne"}),
+    "projet": frozenset({"projet", "project"}),
     "preoccupation": frozenset({"preoccupation", "concerns", "inquietude"}),
-    "etude":         frozenset({"etude", "matiere", "specialite", "option", "note"}),
+    "etude": frozenset({"etude", "matiere", "specialite", "option", "note"}),
     # situation and famille are intentionally NOT grouped together:
     # situation = facts about the user, famille = facts about third parties.
 }
@@ -660,7 +663,8 @@ def update_user_profile(user_code: str, key: str, value: str | None):
             if ns not in _ALLOWED_PROFILE_NAMESPACES:
                 logger.warning(
                     "update_user_profile: rejected unauthorized namespace key %r for %s",
-                    key, user_code,
+                    key,
+                    user_code,
                 )
                 return
 
@@ -685,11 +689,26 @@ def update_user_profile(user_code: str, key: str, value: str | None):
 # Whitelist of authorized profile namespaces (prefix before ":").
 # Scalar keys with no prefix (name, travel_preference…) are always allowed.
 # Any key with a prefix NOT in this set is silently rejected.
-_ALLOWED_PROFILE_NAMESPACES = frozenset({
-    "situation", "famille", "profession", "competence", "loisir", "sport",
-    "technologie", "sante", "objectif", "etude", "placement", "preference",
-    "interet", "apprecie", "aversion", "langue",
-})
+_ALLOWED_PROFILE_NAMESPACES = frozenset(
+    {
+        "situation",
+        "famille",
+        "profession",
+        "competence",
+        "loisir",
+        "sport",
+        "technologie",
+        "sante",
+        "objectif",
+        "etude",
+        "placement",
+        "preference",
+        "interet",
+        "apprecie",
+        "aversion",
+        "langue",
+    }
+)
 
 # Hard cap: never persist more than this many new facts per analyzer call.
 _MAX_FACTS_PER_BATCH = 6
@@ -714,7 +733,8 @@ def update_user_profile_batch(user_code: str, facts: list[dict]) -> None:
         if ns and ns not in _ALLOWED_PROFILE_NAMESPACES:
             logger.warning(
                 "update_user_profile_batch: rejected unauthorized namespace key '%s' for %s",
-                k, user_code,
+                k,
+                user_code,
             )
             continue
         filtered.append(f)
@@ -724,7 +744,9 @@ def update_user_profile_batch(user_code: str, facts: list[dict]) -> None:
     if len(facts) > _MAX_FACTS_PER_BATCH:
         logger.warning(
             "update_user_profile_batch: %d facts exceeds cap %d for %s — truncating",
-            len(facts), _MAX_FACTS_PER_BATCH, user_code,
+            len(facts),
+            _MAX_FACTS_PER_BATCH,
+            user_code,
         )
         facts = facts[:_MAX_FACTS_PER_BATCH]
 
@@ -843,9 +865,11 @@ def get_project_detail(user_code: str, project_name: str) -> dict | None:
 
 def get_project_timeline_text(project: dict) -> str:
     """Format a project's timeline for prompt injection."""
-    status_fr = {"done": "terminé", "in_progress": "en cours", "active": "en cours"}.get(
-        project.get("status", ""), project.get("status", "en cours")
-    )
+    status_fr = {
+        "done": "terminé",
+        "in_progress": "en cours",
+        "active": "en cours",
+    }.get(project.get("status", ""), project.get("status", "en cours"))
     lines = [f"Projet : {project['name']} ({status_fr})"]
     updates = project.get("updates") or []
     if updates:
@@ -967,8 +991,14 @@ def _fuzzy_project_name(
         if score < threshold:
             continue
         is_active = existing_proj.get("status") != "done"
-        best_is_active = project_map.get(best_match, {}).get("status") != "done" if best_match else False
-        if score > best_score or (score == best_score and is_active and not best_is_active):
+        best_is_active = (
+            project_map.get(best_match, {}).get("status") != "done"
+            if best_match
+            else False
+        )
+        if score > best_score or (
+            score == best_score and is_active and not best_is_active
+        ):
             best_score = score
             best_match = existing_name
     return best_match
@@ -1045,7 +1075,8 @@ def apply_project_updates(user_code: str, project_events: list[dict]):
             else:
                 logger.warning(
                     "Project done: '%s' not found — possible LLM confabulation (raw='%s')",
-                    resolved, name,
+                    resolved,
+                    name,
                 )
 
         elif action == "rename":
@@ -1066,7 +1097,9 @@ def apply_project_updates(user_code: str, project_events: list[dict]):
             else:
                 logger.warning(
                     "Project rename: '%s' not found — possible LLM confabulation (raw='%s', rename_to='%s')",
-                    old_resolved, old_raw, new_name,
+                    old_resolved,
+                    old_raw,
+                    new_name,
                 )
             continue  # rename has no summary entry
 
@@ -1157,7 +1190,8 @@ def store_memory_vector(user_code: str, entry: dict):
         if abs(_norm - 1.0) > 0.01:
             logger.error(
                 "[memory_invariant] NON-NORMALIZED vector for user=%s norm=%.4f — re-normalizing",
-                user_code, _norm,
+                user_code,
+                _norm,
             )
             _arr = np.array(vector, dtype=np.float32)
             vector = (_arr / _norm).tolist()
@@ -1168,7 +1202,8 @@ def store_memory_vector(user_code: str, entry: dict):
         if not (0.0 <= novelty <= 1.0):
             logger.error(
                 "[memory_invariant] novelty out of range for user=%s novelty=%.4f — clamping",
-                user_code, novelty,
+                user_code,
+                novelty,
             )
             novelty = max(0.0, min(1.0, novelty))
 
@@ -1176,7 +1211,9 @@ def store_memory_vector(user_code: str, entry: dict):
             # #5 — Structured decision log
             logger.info(
                 "[memory_decision] user=%s stored=False type=episodic reason=duplicate novelty=%.3f summary=%r",
-                user_code, novelty, text[:80],
+                user_code,
+                novelty,
+                text[:80],
             )
             return
 
@@ -1209,7 +1246,10 @@ def store_memory_vector(user_code: str, entry: dict):
         # #5 — Structured decision log
         logger.info(
             "[memory_decision] user=%s stored=True type=episodic novelty=%.3f importance=%.2f summary=%r",
-            user_code, novelty, importance, text[:80],
+            user_code,
+            novelty,
+            importance,
+            text[:80],
         )
 
     except Exception as e:
@@ -1397,9 +1437,7 @@ def get_autobiographical_facts(
             with_payload=True,
         )[0]
 
-        results.sort(
-            key=lambda r: r.payload.get("timestamp", 0), reverse=newest_first
-        )
+        results.sort(key=lambda r: r.payload.get("timestamp", 0), reverse=newest_first)
         return [r.payload["text"] for r in results]
     except Exception as e:
         logger.error("get_autobiographical_facts failed: %s", e)
@@ -1490,7 +1528,8 @@ def search_memory(
                 text_lower = payload.get("text", "").lower()
                 best_weight = max(
                     (
-                        w for term, w in interest_weights.items()
+                        w
+                        for term, w in interest_weights.items()
                         if re.search(
                             r"(?<!\w)" + re.escape(term.lower()) + r"(?!\w)",
                             text_lower,
@@ -1821,8 +1860,11 @@ def build_memory_context(
     # Only applied when user_message is provided and profile is large enough to be worth filtering.
     if user_message and len(profile) > _PROFILE_FILTER_THRESHOLD:
         _total = len(profile)
-        always = {k: v for k, v in profile.items()
-                  if k.split(":")[0] in _PROFILE_ALWAYS_INJECT or k in _PROFILE_ALWAYS_INJECT}
+        always = {
+            k: v
+            for k, v in profile.items()
+            if k.split(":")[0] in _PROFILE_ALWAYS_INJECT or k in _PROFILE_ALWAYS_INJECT
+        }
         rest = {k: v for k, v in profile.items() if k not in always}
         scored = sorted(
             rest.items(),
@@ -1834,7 +1876,10 @@ def build_memory_context(
         profile = {**always, **dict(scored[:_PROFILE_MAX_SCORED])}
         logger.debug(
             "profile context-aware: %d/%d keys injected for %s (msg=%r…)",
-            len(profile), _total, user_code, user_message[:40],
+            len(profile),
+            _total,
+            user_code,
+            user_message[:40],
         )
 
     # User profile — namespaced keys (hobby:kart) are grouped by category for readability
@@ -1894,7 +1939,10 @@ def build_memory_context(
             try:
                 _eh = max(
                     0.0,
-                    (datetime.now(timezone.utc) - datetime.fromisoformat(_last)).total_seconds() / 3600,
+                    (
+                        datetime.now(timezone.utc) - datetime.fromisoformat(_last)
+                    ).total_seconds()
+                    / 3600,
                 )
                 _apply_decay_unlocked(emotion, _eh)
             except (ValueError, TypeError):
