@@ -373,14 +373,25 @@ def _check_service_health() -> dict:
     except Exception:
         health["qdrant"] = "unreachable"
 
-    # Primary LLM (lightweight models list call)
+    # Primary LLM — local: check model files exist; remote: ping /models endpoint.
     try:
-        r = httpx.get(
-            f"{PRIMARY_API_URL}/models",
-            headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
-            timeout=5,
-        )
-        health["llm"] = "ok" if r.status_code == 200 else f"http_{r.status_code}"
+        from config import LLM_LOCAL
+        if LLM_LOCAL:
+            import os as _os
+            model_dir = _os.path.join("/opt/jarvis/models/hub", PRIMARY_MODEL.replace("/", "--", 1).replace("/", "--"))
+            # HuggingFace cache layout: models--org--name
+            hf_dir = _os.path.join(
+                "/opt/jarvis/models/hub",
+                "models--" + PRIMARY_MODEL.replace("/", "--"),
+            )
+            health["llm"] = "ok" if (_os.path.isdir(hf_dir) or _os.path.isdir(model_dir)) else "model_missing"
+        else:
+            r = httpx.get(
+                f"{PRIMARY_API_URL}/models",
+                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
+                timeout=5,
+            )
+            health["llm"] = "ok" if r.status_code == 200 else f"http_{r.status_code}"
     except Exception:
         health["llm"] = "unreachable"
 

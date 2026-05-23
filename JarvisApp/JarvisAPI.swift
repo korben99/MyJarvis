@@ -289,6 +289,14 @@ class JarvisAPI: ObservableObject {
     func clearConversation() async {
         messages.removeAll()
         guard let userCode = UserDefaults.standard.string(forKey: "userCode"), !userCode.isEmpty else { return }
+        // Re-resolve URL if needed — mirrors sendMessage() so the DELETE is never
+        // silently skipped when resolvedURL was cleared after a prior network failure.
+        if resolvedURL.isEmpty {
+            if let (url, route, _) = await resolveActiveURL() {
+                resolvedURL   = url
+                activeNetwork = route
+            }
+        }
         guard !resolvedURL.isEmpty,
               let url = URL(string: "\(resolvedURL)/conversations/\(userCode)/\(sessionID)") else { return }
         var req = URLRequest(url: url)
@@ -324,7 +332,7 @@ class JarvisAPI: ObservableObject {
                 return  // no change
             }
 
-            if history.count > messages.count,
+            if !messages.isEmpty, history.count > messages.count,
                zip(messages, history).allSatisfy({ $0.role.rawValue == $1.role && $0.content == $1.content }) {
                 // Existing messages are a prefix of history — append only new ones.
                 let newMessages = history.dropFirst(messages.count).map {

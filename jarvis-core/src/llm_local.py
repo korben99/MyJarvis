@@ -628,6 +628,8 @@ class ThinkingBudgetProcessor:
         self._thinking_count = 0
         self._thinking_done = False
         self._end_think_id: int | None = None
+        self._newline_id: int | None = None
+        self._force_close = False  # True after \n forced — next step forces </think>
 
         if budget_tokens <= 0:
             return
@@ -642,8 +644,19 @@ class ThinkingBudgetProcessor:
                     self._end_think_id = ids[0]
                 else:
                     logger.warning("ThinkingBudgetProcessor: </think> is %d tokens — disabled", len(ids))
+            nl_ids = tokenizer.encode("\n", add_special_tokens=False)
+            if len(nl_ids) == 1:
+                self._newline_id = nl_ids[0]
         except Exception as exc:
             logger.warning("ThinkingBudgetProcessor init: %s", exc)
+
+    def _force_token(self, token_id: int, logits):
+        mx = self._mx
+        n = logits.shape[-1]
+        left = mx.full([token_id], -1e9, dtype=logits.dtype)
+        mid = mx.array([100.0], dtype=logits.dtype)
+        right = mx.full([n - token_id - 1], -1e9, dtype=logits.dtype)
+        return mx.concatenate([left, mid, right]).reshape(logits.shape)
 
     def __call__(self, tokens, logits):
         mx = self._mx
@@ -658,16 +671,24 @@ class ThinkingBudgetProcessor:
             self._thinking_done = True
             return logits
 
+        # Step 2: \n was just forced — now force </think>
+        if self._force_close:
+            self._force_close = False
+            logger.debug("ThinkingBudgetProcessor: forcing </think>")
+            return self._force_token(self._end_think_id, logits)
+
         self._thinking_count += 1
         n = logits.shape[-1]
         idx = self._end_think_id
 
         if self._thinking_count >= self.budget:
+            # Step 1: force \n so </think> lands on its own line (matches training distribution).
+            if self._newline_id is not None:
+                self._force_close = True
+                logger.debug("ThinkingBudgetProcessor: budget=%d — forcing \\n</think>", self._thinking_count)
+                return self._force_token(self._newline_id, logits)
             logger.debug("ThinkingBudgetProcessor: budget=%d reached — forcing </think>", self._thinking_count)
-            left = mx.full([idx], -1e9, dtype=logits.dtype)
-            mid = mx.array([100.0], dtype=logits.dtype)
-            right = mx.full([n - idx - 1], -1e9, dtype=logits.dtype)
-            return mx.concatenate([left, mid, right]).reshape(logits.shape)
+            return self._force_token(self._end_think_id, logits)
 
         soft_start = max(0, self.budget - max(1, self.budget // 10))
         if self._thinking_count >= soft_start:

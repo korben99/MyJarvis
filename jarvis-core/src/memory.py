@@ -1100,7 +1100,7 @@ def compute_memory_novelty(
         qdrant = get_qdrant()
 
         if vector is None:
-            vector = model.encode(text, normalize_embeddings=True).tolist()
+            vector = model.encode(text, normalize_embeddings=True, num_workers=0).tolist()
 
         results = qdrant.query_points(
             collection_name=QDRANT_MEMORY_COLLECTION,
@@ -1150,7 +1150,7 @@ def store_memory_vector(user_code: str, entry: dict):
         model = get_embed_model()
         qdrant = get_qdrant()
         logger.info("Vector memory candidate: %s", text[:80])
-        vector = model.encode(text, normalize_embeddings=True).tolist()
+        vector = model.encode(text, normalize_embeddings=True, num_workers=0).tolist()
 
         # #1 — Invariant: vector must be unit-norm before storage
         _norm = float(np.linalg.norm(vector))
@@ -1228,7 +1228,7 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
         model = get_embed_model()
         qdrant = get_qdrant()
 
-        vector = model.encode(summary, normalize_embeddings=True).tolist()
+        vector = model.encode(summary, normalize_embeddings=True, num_workers=0).tolist()
 
         # Dedup check: skip if a very similar autobio already exists
         existing = qdrant.query_points(
@@ -1305,7 +1305,7 @@ def _autobio_op(user_code: str, query: str, threshold: float, action: str) -> in
     try:
         model = get_embed_model()
         qdrant = get_qdrant()
-        vector = model.encode(query, normalize_embeddings=True).tolist()
+        vector = model.encode(query, normalize_embeddings=True, num_workers=0).tolist()
 
         filt: dict = {
             "must": [
@@ -1439,7 +1439,7 @@ def search_memory(
         model = get_embed_model()
         qdrant = get_qdrant()
 
-        vector = model.encode(query, normalize_embeddings=True).tolist()
+        vector = model.encode(query, normalize_embeddings=True, num_workers=0).tolist()
 
         results = qdrant.query_points(
             collection_name=QDRANT_MEMORY_COLLECTION,

@@ -12,7 +12,13 @@ Endpoints découpés en modules dans routes/ :
 """
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
+
+# Prevent HuggingFace tokenizers from spawning loky worker processes.
+# Without this, a hard kill leaves orphaned semaphores that trigger
+# resource_tracker warnings on the next startup.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 from datetime import datetime, timedelta, timezone
 
 import deps

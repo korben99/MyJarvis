@@ -196,11 +196,9 @@ _URL_RE = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]{5,}')
 # router classified the message as "memory" (conversational phrasing).
 _AUTO_WEB_RE = re.compile(
     r"\bprix\b|\btarif\b|\bcombien\b|\bcoûte?\b"
-    r"|\bversion\b|\bmodèle\b"
     r"|\bsorti\b|\bdisponible\b|\blancé\b"
-    r"|\bactuel\b|\bactuelle\b|\bactuellem?ent\b"
-    r"|\bdernier\b|\bdernière\b"
-    r"|\bspecs?\b|\bcaractéristique\b"
+    r"|\bactuellem?ent\b"
+    r"|\bspecs?\b|\bcaractéristiques?\b"
     r"|\bqui est\b|\bc\'est qui\b"
     r"|\bcompar[e-]\b",
     re.IGNORECASE,
@@ -773,7 +771,7 @@ async def _handle_briefing(
 
 @router.post("/chat")
 async def chat(req: ChatRequest):
-    if not PRIMARY_API_KEY:
+    if not PRIMARY_API_KEY and not LLM_LOCAL:
         raise HTTPException(503, "No LLM API key configured")
 
     user_code = req.user_code
@@ -1187,14 +1185,10 @@ async def chat(req: ChatRequest):
 
     # Chain-of-thought hint injected into user message (not system prompt)
     # to keep the static system prefix token-identical → KV cache valid.
+    # Only for deep reasoning — web/RAG context is self-explanatory.
     reasoning_hint = ""
     if llm_result and llm_result.use_reasoning:
-        # Guide la qualité du raisonnement sans déclencher de checklist formelle.
-        # "étape par étape" produit des listes verbeuses — à éviter.
         reasoning_hint = "\n\nAnalyse en profondeur — pèse les options et les risques avant de conclure."
-    elif not chat_no_think and assembled:
-        # Web/RAG : le think doit servir à identifier les infos pertinentes, pas à résumer.
-        reasoning_hint = "\n\nAppuie ta réponse sur le contexte ci-dessus."
 
     # Placeholder when images are present — _sse_stream replaces this block with
     # the actual <image_analysis> once describe_images completes.

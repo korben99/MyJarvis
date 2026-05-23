@@ -29,7 +29,7 @@ services:
       - openwebui_data:/app/backend/data
     environment:
       - WEBUI_NAME=Jarvis
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-local}
       - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
       - WEBUI_SECRET_KEY=jarvisopenwebui
       - ENABLE_API_KEYS=true
