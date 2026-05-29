@@ -185,8 +185,9 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
     summary   : 1 phrase décrivant ce qui s'est passé (obligatoire pour create/update/done, "" pour rename)
     rename_to : nouveau nom (uniquement pour action "rename")
   Critère temporel : projet = engagement multi-sessions sur plusieurs jours/semaines, avec étapes et livrable clair.
-    Action ponctuelle du quotidien = PAS un create. Mais si l'activité correspond à un projet de la liste → TOUJOURS émettre "update" ou "done".
+    Action ponctuelle du quotidien = PAS un create. Émettre "update" ou "done" UNIQUEMENT si l'utilisateur mentionne EXPLICITEMENT le projet par son nom ou par un référent direct et sans ambiguïté (ex : "j'ai posé l'attelage" quand "installation attelage BMW" est dans la liste). Une discussion technique générique sans nom de projet → [].
     Ex : "j'ai posé l'attelage ce soir" seul → pas de create. Si "installation attelage BMW" est dans la liste → {{"name":"installation attelage BMW","action":"done","summary":"Pose de l'attelage terminée"}}.
+    Contre-exemple : discussion sur les perfs d'un modèle IA sans mention d'un projet précis → [] même si un projet IA existe dans la liste.
   - "create" uniquement si l'utilisateur annonce EXPLICITEMENT une nouvelle initiative absente de la liste, clairement multi-étapes.
   - Noms de 2 à 4 mots en minuscules, séparés par des espaces (jamais de tirets).
   Exemples :
