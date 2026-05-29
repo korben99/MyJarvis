@@ -519,6 +519,7 @@ Positions (J = variation intraday depuis la veille · PV_total = plus-value depu
 Réponds UNIQUEMENT avec ce JSON, sans texte autour :
 {{"alert": true, "message": "raison courte"}}  ← si alerte
 {{"alert": false, "message": ""}}               ← si pas d'alerte
+"""
 
 
 async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
