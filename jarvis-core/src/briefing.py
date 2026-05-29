@@ -177,7 +177,14 @@ def _get_user_interests(user_code: str) -> list[str]:
     profile = get_user_profile(user_code)
     interests = []
 
-    for key in _INTEREST_KEYS:
+    # Profile keys use "category:subcategory" format (e.g. "loisir:equitation").
+    # Match any profile key whose category prefix is in _INTEREST_KEYS.
+    _interest_key_set = set(_INTEREST_KEYS)
+    matched_keys = [
+        k for k in profile
+        if k.split(":")[0] in _interest_key_set
+    ]
+    for key in matched_keys:
         val = profile.get(key, "").strip()
         if not val:
             continue

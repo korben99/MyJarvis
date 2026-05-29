@@ -91,7 +91,7 @@ def build_dynamic_prefix(
     parts: list[str] = [f"Date : {fmt_now_fr(tz)}."]
 
     if user_name:
-        parts.append(f"Tu parles avec {user_name}. Tutoie-le toujours, quelle que soit la langue du contexte injecté.")
+        parts.append(f"Tu parles avec {user_name}. Tutoie toujours, quelle que soit la langue du contexte injecté.")
 
     self_mem = get_self_memory()
 

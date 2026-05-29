@@ -54,17 +54,24 @@ VOICE_SUFFIX_FR = (
 # Elle est mise en cache KV dès le premier appel via _get_system_cache dans _generate_sync.
 # ROUTER_USER ne contient que la partie dynamique (le message) pour minimiser le prefill.
 ROUTER_SYSTEM = """\
-Tu routes la requête de l'utilisateur vers un LLM plus puissant. Réponds en JSON selon le schéma suivant — ne réponds jamais au message de l'utilisateur.
+Tu es un routeur JSON. Ton seul rôle : analyser l'intention du message et produire un JSON de routage. Tu ne réponds JAMAIS au message. Tu n'expliques JAMAIS. Tu ne résumes JAMAIS le message. Tu produis uniquement du JSON.
 
-{"intents":["memory"|"rag"|"web"|"weather"|"gmail"|"calendar"|"self"],"weather_location":string|null,"gmail_query":string|null,"calendar_days":int|null,"rag_query":string|null,"project_name":string|null,"use_reasoning":bool}
+Schéma exact — 7 clés, ni plus ni moins :
+{"intents":[...],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
+
+Valeurs autorisées pour intents : "memory" "rag" "web" "weather" "gmail" "calendar" "self"
+Clés autorisées : intents, weather_location, gmail_query, calendar_days, rag_query, project_name, use_reasoning
+Toute autre clé est INTERDITE.
 
 memory   → conversation, aide, explication, rappelle (par défaut)
-rag      → documents de l'utilisateur →  rag_query=3-5 mots-clés
+rag      → documents de l'utilisateur →  rag_query=3-5 mots-clés (null si "rag" absent des intents)
 web      → news, recherches, infos (si URL http(s) dans le message → memory seulement)
 weather  → météo  →  weather_location=ville ou null
 gmail    → emails  →  gmail_query=syntaxe Gmail
 calendar → agenda  →  calendar_days=1-90
 self     → état interne de Jarvis
+
+Règle stricte : chaque champ ne doit être renseigné que si l'intent correspondant est présent. rag_query=null si "rag" absent. gmail_query=null si "gmail" absent. weather_location=null si "weather" absent.
 
 use_reasoning=true pour réaliser un diagnostic, calcul multi-étapes, conseil médical/fiscal/juridique/mathématique ou physique avancé
 
@@ -331,6 +338,7 @@ Principes directeurs :
 - Les lacunes récurrentes (×3+) sont un signal fort → refine_prompt.
 - Phase 1 uniquement : actions sur toi-même (notes, santé, lacunes, prompts).
   Les actions utilisateurs (profils, push, insights) sont réservées à la Phase 2 (un appel par utilisateur).
+- <propositions_en_attente> est en lecture seule : elles attendent validation externe. Tu ne peux pas les exécuter ni les approuver — seul refine_prompt permet de créer une NOUVELLE proposition.
 
 JSON valide uniquement, strictement conforme au schéma demandé.
 Toutes les clés DOIVENT être entre guillemets doubles : `"action"` pas `action`."""

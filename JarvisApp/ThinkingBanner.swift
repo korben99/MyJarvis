@@ -59,23 +59,26 @@ struct ThinkingBanner: View {
             GeometryReader { geo in
                 TimelineView(.animation(minimumInterval: 1.0 / 30, paused: displayText.isEmpty)) { tl in
                     let elapsed = tl.date.timeIntervalSince(startTime)
-                    // Approximate glyph width for SF Mono / system monospaced at 11 pt.
-                    let charW  = 6.8
-                    let textW  = Double(displayText.count) * charW
-                    let contW  = Double(geo.size.width)
-                    // One full cycle = text travels from right edge to left edge.
-                    // Window is capped at 120 chars so cycle stays short enough
-                    // that recent tokens are always visible.
-                    let cycle  = max(textW + contW, contW * 1.5)
-                    let speed  = 80.0   // pts / s — faster to keep up with live thinking
+                    // Fixed frame width = worst-case 120 chars × 6.8 pt (SF Mono 11 pt).
+                    // Using a constant here prevents the cycle from changing as tokens
+                    // arrive (displayText grows 0→120), which would cause phase jumps
+                    // and make the container appear to resize.
+                    let textW  = 120.0 * 6.8          // 816 pt — constant
+                    let contW  = max(Double(geo.size.width), 1.0)  // guard against 0 on first pass
+                    let cycle  = textW + contW
+                    let speed  = 80.0
                     let phase  = (elapsed * speed).truncatingRemainder(dividingBy: cycle)
-                    let xOff   = contW - phase  // starts at right, scrolls left
+                    let xOff   = contW - phase
 
                     Text(displayText)
                         .font(.system(size: 11, weight: .light, design: .monospaced))
                         .foregroundColor(.white.opacity(0.45))
                         .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
+                        // Explicit fixed frame instead of fixedSize(horizontal:).
+                        // fixedSize propagates the text's ideal width up through
+                        // TimelineView → GeometryReader → HStack, making the
+                        // clipping window appear to change size on each layout pass.
+                        .frame(width: CGFloat(textW), alignment: .leading)
                         .offset(x: xOff)
                 }
             }

@@ -516,8 +516,9 @@ Variation journalière totale du portefeuille : {daily_pnl_pct:+.2f}%
 Positions (J = variation intraday depuis la veille · PV_total = plus-value depuis l'achat) :
 {portfolio}
 
-Réponds en JSON uniquement : {{"alert": true/false, "message": "..."}}
-Si alert=false, message doit être une chaîne vide."""
+Réponds UNIQUEMENT avec ce JSON, sans texte autour :
+{{"alert": true, "message": "raison courte"}}  ← si alerte
+{{"alert": false, "message": ""}}               ← si pas d'alerte
 
 
 async def evaluate_alerts(user_code: str) -> tuple[bool, str]:

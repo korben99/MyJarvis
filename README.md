@@ -1,23 +1,7 @@
 # Jarvis v9 — On-Premise Personal AI Assistant
 
 Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonomous reflection, and integration with Gmail, Google Calendar, web search, and a document knowledge base.
-# Arrêter
-launchctl stop com.jarvis.api
-# Redémarrer (ex: après un update)
-alias jarvis-reload='launchctl kickstart -k gui/$(id -u)/com.jarvis.api'
-# Désactiver définitivement
-launchctl unload ~/Library/LaunchAgents/com.jarvis.api.plist
-# Logs en live
-tail -f /opt/jarvis/logs/jarvis-service.log
-┌───────────────┬──────────────────────────────────────────────────────             
-│     Alias     │                       Commande                       │
-├───────────────┼──────────────────────────────────────────────────────┤             
-│ jarvis-start  │ kickstart — démarre le service                       │             
-├───────────────┼──────────────────────────────────────────────────────┤            
-│ jarvis-stop   │ kill SIGTERM — arrêt propre (launchd ne relance pas) │         
-├───────────────┼──────────────────────────────────────────────────────┤  
-│ jarvis-reload │ kickstart -k — stop + redémarre immédiatement        │
-└───────────────┴──────────────────────────────────────────────────────┘
+
 ---
 
 ## Architecture
@@ -56,10 +40,6 @@ tail -f /opt/jarvis/logs/jarvis-service.log
 │  ┌──────────────────────────────────────────────────┐    │
 │  │  Trading Surveillance  yfinance + Redis · alerts │    │
 │  └──────────────────────────────────────────────────┘    │
-└──────────────────────────────────────────────────────────┘
-            │ HTTPS (cloud fallback)
-┌───────────▼──────────────────────────────────────────────┐
-│  Cloud Reasoning GPT-4								   │
 └──────────────────────────────────────────────────────────┘
 ```
 ## MEMORY STRUCTURE
@@ -112,8 +92,6 @@ tail -f /opt/jarvis/logs/jarvis-service.log
   │ Qwen3.6-35B-A3B-MLX-5.4bit │ briefing, analyse conv, refine prompt, réflexion, nightly      │ False pour reason         │
   │ (primary — local MLX ~20G) │ review, trading, calendrier, extraction, chat standard         │ True pour chat simple     │
   ├────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────────────────┤
-  │ Claude Sonnet / GPT-4.x    │ Fallback si problème	 (non activé par defaut)	            │ —                         │
-  │ (reasoning — cloud)        │                                                                │                           │
   └────────────────────────────┴────────────────────────────────────────────────────────────────┴───────────────────────────┘
 
 
@@ -140,7 +118,7 @@ tail -f /opt/jarvis/logs/jarvis-service.log
 
 ### Four-Tier LLM Architecture
 
-Jarvis routes every request through a layered model stack. Each tier has its own API endpoint so you can run some tiers locally (Qwen via mlx-lm) and others on the cloud.
+Jarvis routes every request through a layered model stack. All tiers run locally via MLX on Apple Silicon (`LLM_LOCAL=yes`).
 
 ```
 Tier 0 — EMBED ROUTER  Zero-LLM fast path — cosine similarity against pre-embedded examples
@@ -148,7 +126,7 @@ Tier 0 — EMBED ROUTER  Zero-LLM fast path — cosine similarity against pre-em
                         Falls through to Tier 1 if score < 0.74 or ambiguity margin < 0.06
 
 Tier 1 — ROUTER        Full LLM intent classifier, JSON only
-                        Target: Hermes-3-Llama-3.2-3B-Q4-affine (local MLX, ~2 GB)
+                        Target: Hermes-3-Llama-3.2-3B-q6-affine (local MLX, ~2 GB)
                         LRU-cached — system prompt ~666 tok, hits from turn 2 onward
 
 Tier 2 — PRIMARY       All standard responses: chat, questions, summaries
@@ -259,7 +237,7 @@ The router returns a structured JSON decision consumed by the chat pipeline:
 
 `memory_scope` and `conversation_type` were removed — the intent system already encodes these decisions cleanly. RAG fires when the router includes `rag` in intents; memory always searches both episodic and autobiographical layers.
 
-If the LLM router is unavailable or fails (timeout / parse error), all `use_*` flags default to `False` — no context is fetched and the LLM answers from the system prompt alone. This is the safe fallback; the embedding-based semantic router has been removed.
+If the LLM router is unavailable or fails (timeout / parse error), all `use_*` flags default to `False` — no context is fetched and the LLM answers from the system prompt alone. This is the safe fallback; the embedding-based semantic router (Tier 0) is still active but only used when the LLM router is unavailable.
 
 ### Five-Layer Memory System
 
@@ -539,7 +517,7 @@ Tu parles avec <user_name>.
     ↓
 <context> build_memory_context() </context>  — only if memory is available
     ↓
-<mes_avis> opinions </mes_avis>  — only if opinions exist (SYSTEM_BASE_FR instructs: never output as a section)
+<avis_jarvis> opinions </avis_jarvis>  — only if opinions exist (SYSTEM_BASE_FR instructs: never output as a section)
     ↓
 VOICE_SUFFIX_FR  — only if voice_mode=True
 ```
@@ -563,7 +541,7 @@ The final user message = `dynamic_prefix + [conversation_summary] + assembled_co
 
 **Session conversation compression** (`_update_session_summary` in `routes/chat.py`):
 
-Triggered as a background task after each response (post-LLM, GPU free). When the uncovered conversation since the last summary exceeds `HIST_CONV_SUMMARIZE_THRESHOLD` tokens, the ROUTER model (warm in VRAM, 3B) generates a rolling summary capped at `SESSION_SUMMARY_TOKENS`. The summary and its coverage watermark (`msg_count`) are stored in Redis under `session:summary:{user_code}:{session_id}` with `CHAT_LOG_TTL`.
+Triggered as a background task after each response (post-LLM, GPU free). When the uncovered conversation since the last summary exceeds `HIST_CONV_SUMMARIZE_THRESHOLD` tokens, the PRIMARY model generates a rolling summary capped at `SESSION_SUMMARY_TOKENS`. The summary and its coverage watermark (`msg_count`) are stored in Redis under `session:summary:{user_code}:{session_id}` with `CHAT_LOG_TTL`.
 
 **Injection cycle:**
 
@@ -899,8 +877,8 @@ Ne pas utiliser thinking_budget=0 en production
 | `MAX_TOKENS_REASONING` | 10 000 | Chat use_reasoning + refine_prompt |
 | `MAX_TOKENS_HARD_CAP` | 16 000 | Kill switch absolu tous appels locaux |
 | `HIST_CONV_TOKEN_BUDGET` | 800 | Budget tokens pour l'historique brut injecté par tour |
-| `SESSION_SUMMARY_TOKENS` | 200 | Budget tokens du résumé de session (~700 chars) |
-| `HIST_CONV_SUMMARIZE_THRESHOLD` | 1 000 | Tokens de conversation non-couverts déclenchant la compression |
+| `SESSION_SUMMARY_TOKENS` | 600 | Budget tokens du résumé de session (~2 400 chars) |
+| `HIST_CONV_SUMMARIZE_THRESHOLD` | 1 500 | Tokens de conversation non-couverts déclenchant la compression |
 
 ---
 
@@ -957,6 +935,30 @@ python3 scripts/upload-to-openwebui.py
 
 Export your Boursorama positions as CSV (*Mes comptes → Exporter*) and drop the file in `TradeData/`. Jarvis imports it automatically on the next hourly tick, or immediately on restart.
 
+### macOS launchd Service
+
+The Jarvis API runs as a launchd agent (`com.jarvis.api`) on macOS. Useful commands:
+
+```bash
+# Arrêter
+launchctl stop com.jarvis.api
+
+# Redémarrer après un update
+launchctl kickstart -k gui/$(id -u)/com.jarvis.api
+
+# Désactiver définitivement
+launchctl unload ~/Library/LaunchAgents/com.jarvis.api.plist
+
+# Logs en live
+tail -f /opt/jarvis/logs/jarvis-service.log
+```
+
+| Alias | Commande |
+|-------|---------|
+| `jarvis-start` | `kickstart` — démarre le service |
+| `jarvis-stop` | `kill SIGTERM` — arrêt propre (launchd ne relance pas) |
+| `jarvis-reload` | `kickstart -k` — stop + redémarre immédiatement |
+
 ### Common Commands
 
 ```bash
@@ -982,29 +984,18 @@ python scripts/download_models.py
 
 All variables go in `/opt/jarvis/.env`.
 
-### Shared OpenAI credentials
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OPENAI_API_KEY` | — | Shared API key (fallback for any tier not explicitly configured) |
-| `OPENAI_API_URL` | `https://api.openai.com/v1` | Shared base URL (fallback) |
-
 ### Tier 1 — Router model
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ROUTER_MODEL` | `Hermes-3B-Instruct` | Intent classifier. Set to empty to disable and use embedding router. |
-| `ROUTER_API_URL` | *(OPENAI_API_URL)* | Override to point at a local  |
-| `ROUTER_API_KEY` | *(OPENAI_API_KEY)* | API key for the router (mlx-lm ignores auth but requires a value) |
+| `ROUTER_MODEL_LOCAL` | `Hermes-3-Llama-3.2-3B-q6-affine` | Router model HF repo ID or local path. Leave empty to disable and use only the embedding router (Tier 0). |
 | `ROUTER_TIMEOUT` | `6` | Timeout in seconds (short — fast model only) |
 
 ### Tier 2 — Primary model
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PRIMARY_MODEL` | `Qwen3.6-35B-A3B` | Handles all standard responses: chat, trading, briefing, self-reflection |
-| `PRIMARY_API_URL` | *(OPENAI_API_URL)* | Override to point at a local |
-| `PRIMARY_API_KEY` | *(OPENAI_API_KEY)* | API key for the primary model |
+| `PRIMARY_MODEL_LOCAL` | `spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit` | Primary model HF repo ID or local path |
 | `PRIMARY_TIMEOUT` | `60` | Timeout in seconds |
 
 ### Tier 2b — Analysis model
@@ -1012,35 +1003,26 @@ All variables go in `/opt/jarvis/.env`.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ANALYSIS_MODEL` | *(PRIMARY_MODEL)* | Post-exchange fact/mood extraction. Defaults to PRIMARY if unset. |
-| `ANALYSIS_API_URL` | *(PRIMARY_API_URL)* | Override independently if needed |
-| `ANALYSIS_API_KEY` | *(PRIMARY_API_KEY)* | API key for the analysis model |
 
 ### Tier 3 — Reasoning model
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REASONING_MODEL` | *(PRIMARY_MODEL)* | Complex queries only — used when router sets `use_reasoning=true` |
-| `REASONING_API_URL` | *(OPENAI_API_URL)* | Typically cloud (OpenAI / Anthropic) |
-| `REASONING_API_KEY` | *(OPENAI_API_KEY)* | API key for the reasoning model |
+| `REASONING_MODEL` | *(PRIMARY_MODEL)* | Complex queries only — used when router sets `use_reasoning=true`. Defaults to PRIMARY (Qwen3.6 in full thinking mode). |
 | `REASONING_TIMEOUT` | `90` | Timeout in seconds (longer — deep reasoning) |
 
 ### Vision model
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VISION_MODEL` | *(empty — disabled)* | First-stage image description (e.g. `gpt-4o-mini`, `qwen2.5-vl-72b`). Leave empty to ignore images. |
-| `VISION_API_URL` | *(OPENAI_API_URL)* | Override for a local Qwen2.5-VL |
-| `VISION_API_KEY` | *(OPENAI_API_KEY)* | API key for the vision model |
+| `VISION_MODEL_LOCAL` | `lmstudio-community/Qwen3-VL-8B-Instruct-MLX-5bit` | Vision model HF repo ID or local path. Leave empty to ignore images. |
 | `VISION_TIMEOUT` | `30` | Timeout in seconds |
 
 ### Local MLX mode (Apple Silicon)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_LOCAL` | `no` | Set to `yes` to use mlx_lm directly instead of HTTP OpenAI endpoints |
-| `PRIMARY_MODEL_LOCAL` | `spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit` | Primary model HF repo ID or local path |
-| `ROUTER_MODEL_LOCAL` | `Hermes-3-Llama-3.2-3B-q6-affine` | Router model HF repo ID or local path |
-| `VISION_MODEL_LOCAL` | `mlx-community/Qwen2.5-VL-7B-Instruct-4bit` | Vision model HF repo ID or local path |
+| `LLM_LOCAL` | `yes` | Uses mlx_lm directly — models loaded into unified memory at startup, no HTTP server needed |
 | `HF_HOME` | `/opt/jarvis/models` | Root directory for HuggingFace model cache |
 | `THINKING_BUDGET_COMPACT` | `1024` | Hard-cut budget (tok) for quick-judgment calls (prune, action review) |
 | `THINKING_BUDGET_MEDIUM` | `2048` | Hard-cut budget for chat synthesis + trading thresholds |

@@ -149,9 +149,8 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
     Returns RouterResult on success, None on any failure → caller falls back
     to the embedding router automatically.
     """
-    # Truncate to 200 chars — Qwen2.5-3B starts answering instead of routing on long inputs.
-    # The first 200 chars are enough to classify intent; the rest is noise for the router.
-    routing_message = message[:200]
+    # Truncate to 400 chars — enough to classify intent without risking the router answering.
+    routing_message = message[:400]
     prompt = get_prompt("ROUTER_USER").format(message=routing_message)
 
     try:
@@ -217,8 +216,8 @@ async def llm_route(message: str, google_available: bool = True) -> RouterResult
             except (ValueError, TypeError):
                 calendar_days = 7
 
-        weather_location: str = parsed.get("weather_location") or ""
-        rag_query: str = parsed.get("rag_query") or ""
+        weather_location: str = (parsed.get("weather_location") or "") if "weather" in intents else ""
+        rag_query: str = (parsed.get("rag_query") or "") if "rag" in intents else ""
         project_name: str = parsed.get("project_name") or ""
         use_reasoning: bool = bool(parsed.get("use_reasoning", False))
     except Exception as exc:

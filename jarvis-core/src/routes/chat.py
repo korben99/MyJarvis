@@ -122,7 +122,7 @@ async def _update_session_summary(user_code: str, session_id: str) -> None:
     """Post-response background task: compress conversation history into a rolling summary.
 
     Self-contained: fetches state from Redis, checks threshold, generates if needed.
-    Uses the ROUTER model (warm in VRAM, 3B) — runs after response is sent, no GPU conflict.
+    Uses the PRIMARY model — runs after response is sent, no GPU conflict.
     Trigger: uncovered messages (since last summary) exceed HIST_CONV_SUMMARIZE_THRESHOLD.
     """
     try:
@@ -288,7 +288,7 @@ class _SseCtx:
 async def _complete_after_disconnect(ctx: _SseCtx) -> None:
     """LLM completion après déconnexion client (ex. écran veille pendant vision).
 
-    Cas : client déconnecté avant le premier token SSE (full_parts=[]).
+    Cas : client déconnecté avant le premier token SSE (raw_chunks=[]).
     On relance un appel LLM non-streaming, sauvegarde user+assistant dans Redis,
     puis push APNS pour réveiller l'app iOS.
     """
@@ -364,7 +364,7 @@ async def _sse_stream(ctx: _SseCtx):
     - Sauvegarde la réponse nettoyée dans Redis (historique) en fin de flux.
     - Gère la déconnexion client (CancelledError) : sauvegarde partielle.
     """
-    full_parts: list[str] = []
+    raw_chunks: list[str] = []
     try:
         # ── Deferred vision processing ──────────────────────────────────────
         # describe_images can take 2+ min for large images. Running it here,
@@ -434,7 +434,7 @@ async def _sse_stream(ctx: _SseCtx):
             max_tokens=ctx.max_tokens,
             thinking_budget=ctx.thinking_budget,
         ):
-            full_parts.append(chunk)
+            raw_chunks.append(chunk)
 
             # ── Think filtering ─────────────────────────────────────────────
             # filter_think_chunk splits each chunk into visible text and
@@ -478,24 +478,24 @@ async def _sse_stream(ctx: _SseCtx):
 
         # Strip thinking block before saving to Redis.
         # in_think_started=True → output began INSIDE think block (no opening tag).
-        full_clean = _strip_sse_response("".join(full_parts), in_think_started)
-        if not full_clean:
+        response_text = _strip_sse_response("".join(raw_chunks), in_think_started)
+        if not response_text:
             logger.warning(
                 "sse_stream: empty visible response — session=%s started_in_think=%s "
                 "raw_len=%d (thinking truncation or empty generation — turn NOT saved)",
                 ctx.session_id,
                 in_think_started,
-                len("".join(full_parts)),
+                len("".join(raw_chunks)),
             )
             # Budget-forced </think> mid-sentence can cause Qwen3.6 to emit EOS
             # immediately — give the iOS client a visible fallback instead of silence.
             yield f"data: {json.dumps({'content': '⚠️ Réponse incomplète — budget de réflexion dépassé. Reformule ta question.'})}\n\n"
-        if full_clean:
+        if response_text:
             append_conversation_message(
                 ctx.user_code, ctx.session_id, "user", ctx.history_user_content
             )
             append_conversation_message(
-                ctx.user_code, ctx.session_id, "assistant", full_clean
+                ctx.user_code, ctx.session_id, "assistant", response_text
             )
         ms = int((time.time() - ctx.start) * 1000)
         _done_payload = json.dumps(
@@ -514,40 +514,46 @@ async def _sse_stream(ctx: _SseCtx):
         yield f"data: {_done_payload}\n\n"
         asyncio.create_task(
             post_analysis(
-                ctx.session_id, ctx.user_code, ctx.history_user_content, full_clean
+                ctx.session_id, ctx.user_code, ctx.history_user_content, response_text
             )
         )
         asyncio.create_task(_update_session_summary(ctx.user_code, ctx.session_id))
     except asyncio.CancelledError:
         logger.info("Client disconnected")
-        if full_parts:
+        _saved = False
+        if raw_chunks:
             try:
-                full_clean = _strip_sse_response("".join(full_parts), in_think_started)
-                if full_clean:
+                response_text = _strip_sse_response("".join(raw_chunks), in_think_started)
+                if response_text:
                     append_conversation_message(
                         ctx.user_code, ctx.session_id, "user", ctx.history_user_content
                     )
                     append_conversation_message(
-                        ctx.user_code, ctx.session_id, "assistant", full_clean
+                        ctx.user_code, ctx.session_id, "assistant", response_text
                     )
                     asyncio.create_task(
                         post_analysis(
                             ctx.session_id,
                             ctx.user_code,
                             ctx.history_user_content,
-                            full_clean,
+                            response_text,
                         )
                     )
                     logger.info(
                         "Saved response to Redis after disconnect (%d chars)",
-                        len(full_clean),
+                        len(response_text),
                     )
+                    _saved = True
             except Exception as _save_err:
                 logger.warning("Failed to save on disconnect: %s", _save_err)
-        else:
-            # Aucun token généré — client déconnecté pendant vision ou init LLM.
-            # Garder une référence forte pour éviter que le GC collecte la task
-            # avant qu'elle tourne (gotcha asyncio documenté).
+        if not _saved:
+            # Two cases: no tokens at all (zero chunks), or chunks received but all
+            # inside the <think> block with no visible response extracted yet
+            # (client went to sleep mid-reasoning on a long thinking request).
+            # _complete_after_disconnect re-runs the LLM non-streaming and pushes
+            # the result via APNS to wake the iOS app.
+            reason = "mid-think disconnect" if raw_chunks else "no tokens received"
+            logger.info("post-disconnect completion triggered (%s)", reason)
             _t = asyncio.create_task(_complete_after_disconnect(ctx))
             _background_tasks.add(_t)
             _t.add_done_callback(_background_tasks.discard)
@@ -1171,24 +1177,6 @@ async def chat(req: ChatRequest):
     _summary_data = get_session_summary_data(user_code, req.session_id)
     _session_summary = _summary_data["text"] if _summary_data else ""
 
-    # Build the user message: [dynamic_prefix] → [summary] → [context] → [project_detail] → <user_message>
-    # XML tag clearly delimits the actual question from all injected context above.
-    msg_parts = []
-    if dynamic_prefix:
-        msg_parts.append(dynamic_prefix)
-    if _session_summary:
-        msg_parts.append(
-            "<conversation_summary>\n" + _session_summary + "\n</conversation_summary>"
-        )
-    if assembled:
-        msg_parts.append(assembled)
-    if _project_detail_block:
-        msg_parts.append(_project_detail_block)
-    if reasoning_hint:
-        msg_parts.append(reasoning_hint.strip())
-    msg_parts.append("<user_message>\n" + raw_user_content + "\n</user_message>")
-    user_content = "\n\n".join(msg_parts)
-
     # When a session summary exists, inject only the messages NOT yet covered by it.
     # The summary replaces everything up to msg_count; new messages are still injected raw.
     if _session_summary:
@@ -1208,9 +1196,39 @@ async def chat(req: ChatRequest):
         hist_slice = _trim_history_to_budget(_uncovered_hist, HIST_CONV_TOKEN_BUDGET)
     else:
         hist_slice = _trim_history_to_budget(hist, HIST_CONV_TOKEN_BUDGET)
+
+    # Build the user message.
+    # Without summary: standard path — hist_slice as separate messages keeps the chat format
+    # intact and maximises LRU cache reuse.
+    # With summary: inline hist_slice as text so the model reads in chronological order —
+    # summary (old) → recent exchanges → context → question — with no fake assistant turn.
+    msg_parts = []
+    if dynamic_prefix:
+        msg_parts.append(dynamic_prefix)
+    if _session_summary:
+        msg_parts.append(
+            "<conversation_summary>\n" + _session_summary + "\n</conversation_summary>"
+        )
+        if hist_slice:
+            _role_label = {"user": "User", "assistant": "Jarvis"}
+            _hist_lines = "\n".join(
+                f"{_role_label.get(m['role'], m['role'])} : {m['content']}"
+                for m in hist_slice
+            )
+            msg_parts.append("<recent_exchanges>\n" + _hist_lines + "\n</recent_exchanges>")
+    if assembled:
+        msg_parts.append(assembled)
+    if _project_detail_block:
+        msg_parts.append(_project_detail_block)
+    if reasoning_hint:
+        msg_parts.append(reasoning_hint.strip())
+    msg_parts.append("<user_message>\n" + raw_user_content + "\n</user_message>")
+    user_content = "\n\n".join(msg_parts)
+
     messages = [{"role": "system", "content": system_prompt}]
-    for m in hist_slice:
-        messages.append({"role": m["role"], "content": m["content"]})
+    if not _session_summary:
+        for m in hist_slice:
+            messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": user_content})
 
     logger.debug(
