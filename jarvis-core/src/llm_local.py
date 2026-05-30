@@ -41,10 +41,11 @@ from config import (
     USE_THINKING_BUDGET_PROCESSOR,
     VISION_MODEL,
     is_hermes,
+    is_qwen25,
     is_qwen3,
     is_qwen36,
 )
-from prompts import VISION_USER_PROMPT
+from prompts import VISION_USER_PROMPT, get_prompt
 import mlx.core as mx
 from mlx_lm import generate, load, stream_generate
 from mlx_lm.models.cache import (
@@ -137,6 +138,15 @@ def _model_profile(model_path: str) -> _ModelProfile:
             repetition_penalty=1.0, repetition_context_size=256,
             frequency_penalty=0.15, presence_penalty=1.5,
             use_quant_kv=QUANT_KV, stop_tokens=(),
+        )
+    if is_qwen25(model_path):
+        return _ModelProfile(
+            temp_think=0.0, temp_nothink=0.0,
+            top_p_think=1.0, top_p_nothink=1.0,
+            top_k=0, min_p=0.0,
+            repetition_penalty=1.0, repetition_context_size=64,
+            frequency_penalty=0.0, presence_penalty=0.0,
+            use_quant_kv=False, stop_tokens=(),
         )
     if is_qwen3(model_path):
         return _ModelProfile(
@@ -421,8 +431,8 @@ def _lru_get_cache(
 def _metal_mem_str() -> str:
     """Return a short Metal memory status string, or empty string if unavailable."""
     try:
-        active_mb = mx.metal.get_active_memory() / 1024**2
-        cache_mb = mx.metal.get_cache_memory() / 1024**2
+        active_mb = mx.get_active_memory() / 1024**2
+        cache_mb = mx.get_cache_memory() / 1024**2
         return f"Metal active={active_mb:.0f} MB cache={cache_mb:.0f} MB"
     except Exception:
         return ""
@@ -546,8 +556,13 @@ def preload_models(primary_system_content: str = "") -> None:
             logger.warning("MLX VLM preload/warmup failed (non-fatal): %s", exc)
 
     for path in model_paths:
-        sys = primary_system_content if (path == PRIMARY_MODEL and primary_system_content) else "Tu es un assistant."
-        warmup_msgs = [{"role": "system", "content": sys}, {"role": "user", "content": "Salut"}]
+        if path == PRIMARY_MODEL and primary_system_content:
+            sys_content = primary_system_content
+        elif path == ROUTER_MODEL:
+            sys_content = get_prompt("ROUTER_SYSTEM")
+        else:
+            sys_content = "Tu es un assistant."
+        warmup_msgs = [{"role": "system", "content": sys_content}, {"role": "user", "content": "Salut"}]
         try:
             _generate_sync(path, warmup_msgs, temperature=None, max_tokens=100, no_think=True)
             logger.info("MLX warmup OK: %s", path)

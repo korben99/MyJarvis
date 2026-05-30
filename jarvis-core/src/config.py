@@ -95,6 +95,12 @@ def is_qwen(model: str) -> bool:
     return "qwen" in (model or "").lower()
 
 
+def is_qwen25(model: str) -> bool:
+    """True for Qwen2.5.x models — no thinking mode, deterministic JSON output."""
+    m = (model or "").lower()
+    return "qwen2.5" in m or "qwen25" in m
+
+
 def is_qwen3(model: str) -> bool:
     """True for Qwen3.x models — supports enable_thinking + thinking_budget in apply_chat_template.
     llm_local._build_prompt catches TypeError if a kwarg isn't available (e.g. old tokenizer version
