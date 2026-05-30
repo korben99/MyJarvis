@@ -45,6 +45,7 @@ from config import (
     REFLECTION_INTERVAL_HOURS,
     ROUTER_API_URL,
     ROUTER_MODEL,
+    USER_ADMINS,
     USER_CODES,
     USER_TRADING,
 )
@@ -91,7 +92,8 @@ async def lifespan(app: FastAPI):
     )
 
     if LLM_LOCAL:
-        await asyncio.to_thread(preload_models, build_system_prompt())
+        _warmup_code = next(iter(USER_ADMINS), "")
+        await asyncio.to_thread(preload_models, build_system_prompt(_warmup_code))
     logger.info(
         "RAG: %s, collection: %s, top_k: %d", QDRANT_URL, QDRANT_COLLECTION, RAG_TOP_K
     )

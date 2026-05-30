@@ -812,7 +812,7 @@ async def chat(req: ChatRequest):
     # instead of running sequentially after it.
     # ════════════════════════════════════════════════════════════════════════
     user_name = USER_CODES.get(user_code)
-    system_prompt = build_system_prompt()
+    system_prompt = build_system_prompt(user_code)
 
     # Speculative memory search — started immediately, in parallel with routing.
     # Memory is the most common intent (~80 % of requests); the embedding call
@@ -844,8 +844,7 @@ async def chat(req: ChatRequest):
             with contextlib.suppress(asyncio.CancelledError):
                 await _spec_mem_task
             tz = USER_TIMEZONES.get(user_code, "Europe/Paris")
-            _name_part = f" Tu parles avec {user_name}." if user_name else ""
-            dynamic_prefix = f"Date : {fmt_now_fr(tz)}.{_name_part}"
+            dynamic_prefix = f"Date : {fmt_now_fr(tz)}."
             _self_mem = {}
             hist = await asyncio.to_thread(
                 get_conversation, user_code, req.session_id, _HIST_FETCH_N

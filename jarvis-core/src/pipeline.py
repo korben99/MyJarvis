@@ -28,7 +28,7 @@ contains financial or tabular information.
 
 import asyncio
 
-from config import USER_ADMINS, USER_TIMEZONES
+from config import USERS, USER_ADMINS, USER_TIMEZONES
 from deps import (
     GOOGLE_CHAR_BUDGET,
     MEMORY_CHAR_BUDGET,
@@ -57,13 +57,28 @@ logger = get_logger("jarvis-pipeline")
 # ── System prompt ──────────────────────────────────────────────────────────────
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(user_code: str = "") -> str:
     """
-    Return the STATIC system prompt (SYSTEM_BASE_FR only).
-    No date, no profile, no opinions — those go into build_dynamic_prefix().
-    This string is token-identical across all turns → KV cache hit every time.
+    Return the per-user system prompt: SYSTEM_BASE_FR + nom + profil_stable.
+    Token-identical across all turns for a given user → KV cache hit every time.
+    Profil_stable only contains constant facts (family, location, job, interests).
+    Dynamic content (date, memory, projects, mood) stays in build_dynamic_prefix().
     """
-    return get_prompt("SYSTEM_BASE_FR")
+    base = get_prompt("SYSTEM_BASE_FR")
+    user = USERS.get(user_code, {})
+    firstname = user.get("firstname", "")
+    profile: dict = user.get("profile", {})
+
+    parts = [base]
+    if firstname:
+        parts.append(
+            f"Tu parles avec {firstname}. Tutoie toujours, quelle que soit la langue du contexte injecté."
+        )
+    if profile:
+        fields = " — ".join(f"{k} : {v}" for k, v in profile.items() if v)
+        parts.append(f"<profil_stable>\n{fields}\n</profil_stable>")
+
+    return "\n\n".join(parts)
 
 
 def build_dynamic_prefix(
@@ -88,10 +103,7 @@ def build_dynamic_prefix(
     include_suggestions  — False for the same utility intents (tomorrow_suggestions).
     """
     tz = USER_TIMEZONES.get(user_code, "Europe/Paris")
-    parts: list[str] = [f"Date : {fmt_now_fr(tz)}."]
-
-    if user_name:
-        parts.append(f"Tu parles avec {user_name}. Tutoie toujours, quelle que soit la langue du contexte injecté.")
+    parts: list[str] = []
 
     self_mem = get_self_memory()
 
@@ -130,6 +142,9 @@ def build_dynamic_prefix(
                 f"[Rappel Jarvis] {len(pending)} proposition(s) de prompt en attente"
                 f" ({names}) — dis 'montre les propositions' pour les voir."
             )
+
+    # Date at the end — closest to the user message for better temporal grounding.
+    parts.append(f"Date : {fmt_now_fr(tz)}.")
 
     return "\n\n".join(parts), self_mem
 

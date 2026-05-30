@@ -26,8 +26,8 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
 │                                                          │
 │  ┌──────────────────────────┐  ┌──────────────────────┐  │
 │  │  LLM Router (Tier 1)     │  │  Primary LLM (T2)    │  │
-│  │  Hermes-3-Llama-3.2-3B   │  │  Qwen3.6-35B-A3B     │  │
-│  │  MLX · ~2 GB · KV-cached │  │  MLX-5.4bit · ~20 GB │  │
+│  │  Qwen2.5-1.5B-router-v1  │  │  Qwen3.6-35B-A3B     │  │
+│  │  LoRA fine-tuned · ~1 GB │  │  MLX-5.4bit · ~20 GB │  │
 │  └──────────────────────────┘  └──────────────────────┘  │
 │  ┌──────────────┐  ┌───────────┐  ┌──────────────────┐   │
 │  │  Memory Sys  │  │  Briefing │  │  Proto-Self /    │   │
@@ -86,8 +86,8 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
   ┌────────────────────────────┬────────────────────────────────────────────────────────────────┬───────────────────────────┐
   │           Modèle           │                              Rôle                              │         no_think          │
   ├────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────────────────┤
-  │ Hermes-3-Llama-3.2-3B      │ routing, dédup profil, judge web                               │ True                      │
-  │ (router — local MLX ~2 GB) │                                                                │                           │
+  │ Qwen2.5-1.5B-router-v1-4bit │ routing, judge web                                            │ True                      │
+  │ (router — local MLX ~1 GB) │ LoRA fine-tuned, 492 échantillons, val loss 0.047             │                           │
   ├────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────────────────┤
   │ Qwen3.6-35B-A3B-MLX-5.4bit │ briefing, analyse conv, refine prompt, réflexion, nightly      │ False pour reason         │
   │ (primary — local MLX ~20G) │ review, trading, calendrier, extraction, chat standard         │ True pour chat simple     │
@@ -126,8 +126,9 @@ Tier 0 — EMBED ROUTER  Zero-LLM fast path — cosine similarity against pre-em
                         Falls through to Tier 1 if score < 0.74 or ambiguity margin < 0.06
 
 Tier 1 — ROUTER        Full LLM intent classifier, JSON only
-                        Target: Hermes-3-Llama-3.2-3B-q6-affine (local MLX, ~2 GB)
-                        LRU-cached — system prompt ~666 tok, hits from turn 2 onward
+                        Target: Qwen2.5-1.5B-router-v1-4bit (local MLX, ~1 GB)
+                        LoRA fine-tuned sur Qwen2.5-1.5B-Instruct bf16 — 492 échantillons, val loss 0.047
+                        LRU-cached — system prompt ~1095 tok, hits from turn 2 onward (~95% cache hit)
 
 Tier 2 — PRIMARY       All standard responses: chat, questions, summaries
                         Target: Qwen3.6-35B-A3B-MLX-5.4bit (local MLX, ~20 GB, MoE ~3B active)
@@ -190,7 +191,7 @@ Token budgets use per-task config variables (see `config.py`). Timeouts are deri
 
 | Call site | File | Model | no_think | max_tokens | thinking_budget | Purpose |
 |-----------|------|-------|----------|-----------|----------------|---------|
-| Router | `llm_router.py` | Tier 1 — Hermes-3B | `True` | `MAX_TOKENS_SHORT` (300) | — | Intent + use_reasoning decision |
+| Router | `llm_router.py` | Tier 1 — Qwen2.5-1.5B LoRA | `True` | `MAX_TOKENS_SHORT` (300) | — | Intent + use_reasoning decision |
 | Main chat (simple) | `routes/chat.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_NO_THINK` (1 500) | — | Chat without RAG/web |
 | Main chat (web/RAG) | `routes/chat.py` | Tier 2 — PRIMARY | `False` | `MAX_TOKENS_SYNTHESIS` (8 000) | `THINKING_BUDGET_MEDIUM` (2 048) | Chat with RAG/web synthesis |
 | Main chat (reasoning) | `routes/chat.py` | Tier 2/3 — PRIMARY or REASONING | `False` | `MAX_TOKENS_REASONING` (10 000) | `THINKING_BUDGET_DEEP` (4 000) | Explicitly routed reasoning query |
@@ -504,23 +505,32 @@ To forget faster: lower `MEMORY_DECAY_FACTOR` toward `0.70` or raise `MEMORY_DEC
 
 The prompt is split into a **static system message** and a **per-turn dynamic prefix** injected at the start of each user message. This separation is required for MLX KV-cache prefix caching (see Performance section).
 
-**Static system message** — `build_system_prompt()` — identical every turn:
+**Static system message** — `build_system_prompt(user_code)` — token-identical every turn for a given user (KV-cached):
 ```
-SYSTEM_BASE_FR          (~500 chars — Jarvis personality, tool rules)
+SYSTEM_BASE_FR                    (~500 chars — Jarvis personality, tool rules)
+    ↓
+"Tu parles avec <firstname>. Tutoie toujours…"
+    ↓
+<profil_stable>                   (~60–80 tokens — données biographiques constantes depuis users_list.json)
+famille / taille / poids / année de naissance / habitation / travail / intérêts / voiture
+</profil_stable>
 ```
+
+Le système prompt est **per-user** mais reste token-identique d'un tour à l'autre → LRU cache hit garanti.
+Le `<profil_stable>` contient uniquement des faits constants (≥ 6 mois de stabilité). Les données dynamiques restent dans le prefix.
 
 **Dynamic prefix** — `build_dynamic_prefix()` — prepended to each user message (run in thread alongside the LLM router, via `asyncio.to_thread`):
 ```
-Date et heure actuelles — formatted in French, user timezone, with season
-    ↓
-Tu parles avec <user_name>.
-    ↓
 <context> build_memory_context() </context>  — only if memory is available
     ↓
-<avis_jarvis> opinions </avis_jarvis>  — only if opinions exist (SYSTEM_BASE_FR instructs: never output as a section)
+<avis_jarvis> opinions </avis_jarvis>  — only if opinions exist
     ↓
 VOICE_SUFFIX_FR  — only if voice_mode=True
+    ↓
+Date et heure actuelles — formatted in French, user timezone, with season  ← EN FIN pour ancrage temporel
 ```
+
+La date est placée en **fin de prefix**, juste avant le message utilisateur, pour un meilleur ancrage temporel.
 
 **Per-turn assembled context** — appended after the dynamic prefix, before the user's raw message:
 ```
@@ -692,23 +702,27 @@ User message (via /chat or /v1/chat/completions)
 | **no_think conditionnel** | −4 s sur chat simple | `chat_no_think=True` sauf RAG/web/reasoning. `thinking_budget=0` via chat template (KV-safe). |
 | **ThinkingBudgetProcessor** | −2 à −5 s | Hard-cut logits `</think>` au budget exact (COMPACT/MEDIUM/DEEP) — évite la réflexion infinie. |
 | **System prompt réduit** | −0.3 s | `SYSTEM_BASE_FR` réduit de ~400 chars/~100 tokens. |
-| **KV cache prefix caching** | −1 à −3 s dès le tour 2 | Cache KV MLX par session (LRU ×5). Seuls les nouveaux tokens sont calculés à chaque tour. |
+| **KV cache prefix caching** | −1 à −3 s dès le tour 2 | Cache KV MLX par session (LRU ×8). Seuls les nouveaux tokens sont calculés à chaque tour. |
 | **Vision resize 1024 px** | ~3–5× sur inférence VLM | Photo iPhone (12 MP) redimensionnée avant `vlm_generate` — de 8–10 tiles à 2–4 tiles. `max_tokens` 1200 → 700. |
+| **Router LoRA Qwen2.5-1.5B** | −0.5 à −1.2 s vs Hermes-3B | Fine-tuned sur 492 échantillons (val loss 0.047). Warmup avec `ROUTER_SYSTEM` → LRU hit dès le 1er appel. Tour 2+ : 95% cache hit (1044/1093 tok). |
+| **Profil stable dans system prompt** | ~0.1 s / tour | `<profil_stable>` (~80 tokens) injecté dans le system prompt per-user — jamais reprocessé après le warmup. |
 
 ### Architecture KV cache
 
 ```
-Tour 1 : [SYS statique ~100 tok] + [CTX dynamique + msg1 ~600 tok]
-          ↑ tout calculé                ↑ tout calculé
-          └── mis en cache ─────────────┘
+Tour 1 : [SYS+profil_stable ~310 tok] + [CTX dynamique + msg1 ~600 tok]
+          ↑ tout calculé                   ↑ tout calculé
+          └── mis en cache ────────────────┘
 
-Tour 2 : [SYS ~100 tok] + [CTX1+msg1+rep1 ~900 tok] + [CTX2+msg2 ~600 tok]
-          ↑ cache hit    ↑ cache hit                    ↑ seulement ça calculé
+Tour 2 : [SYS+profil ~310 tok] + [CTX1+msg1+rep1 ~900 tok] + [CTX2+msg2 ~600 tok]
+          ↑ cache hit            ↑ cache hit                    ↑ seulement ça calculé
 
 Tour N : skip de (N-1) × ~900 tokens → seulement ~600 tokens nouveaux
 ```
 
-Le système prompt est **token-identique** à chaque tour (SYSTEM_BASE_FR pur, sans date ni profil). Le contexte dynamique (date, profil, mémoires, opinions) est préfixé dans le message utilisateur courant, suivi du marqueur `## MESSAGE UTILISATEUR` puis du message brut. Le préfixe est strippé à l'affichage dans `/history`.
+Le `<profil_stable>` (~80 tokens : famille, taille, job…) est inclus dans le système prompt per-user — jamais reprocessé.
+
+Le système prompt est **token-identique** à chaque tour pour un utilisateur donné (SYSTEM_BASE_FR + nom + `<profil_stable>`). Le contexte dynamique (mémoires, opinions, date) est préfixé dans le message utilisateur courant. Le préfixe est strippé à l'affichage dans `/history`.
 
 ### Mesures de référence — Mac Mini M4 Pro 48 GB (2026-05-23)
 
@@ -749,6 +763,17 @@ Les prompts 5bit étaient ~400 tok plus longs (session avancée) — prefill nor
 | RotorQuant 5bit | ~4.5–5.4 s | ~1.2–2.6 s | ~3.2–3.3 s |
 
 Le router (Hermes 3.2B) représente 30–50 % du TTFT selon le cache hit. Le prefill RotorQuant ≈ 2.5 s est incompressible pour ~1700–1900 remaining tokens.
+
+**Mise à jour 2026-05-30 — router LoRA Qwen2.5-1.5B :**
+
+| Mesure | Hermes 3.2B | Qwen2.5-1.5B LoRA |
+|--------|-------------|-------------------|
+| gather1 (router + ctx) — tour 1 | ~1.4 s | ~1.4 s (LRU miss) |
+| gather1 — tour 2+ | — | **~0.8 s** (LRU hit 1044/1093 tok) |
+| TTFT visible — tour 1 | ~5.3 s | ~5.3 s |
+| TTFT visible — tour 2+ | — | **~4.7 s** (−0.6 s) |
+
+Le warmup utilise désormais `ROUTER_SYSTEM` au lieu du prompt générique → LRU seedé correctement dès le démarrage.
 
 #### Mode thinking (first visible token = après bloc think)
 
@@ -820,7 +845,7 @@ Cartographie de tous les appels LLM de la codebase. Chaque ligne indique si le t
 
 | Fonction | Modèle | Think | Budget | Processor | Justification |
 |---|---|---|---|---|---|
-| `llm_route` | ROUTER | `no_think` | 300 | — | Classification d'intention — JSON court, déterministe |
+| `llm_route` | ROUTER (Qwen2.5-1.5B LoRA) | `no_think` | 300 | — | Classification d'intention — JSON court, déterministe |
 | `_llm_judge_relevance` | ROUTER | `no_think` | `MAX_TOKENS_SHORT` (300) | — | Score de pertinence — binaire, ultra-court |
 | `_generate_optimized_query` | ROUTER | `no_think` | `MAX_TOKENS_TINY` (80) | — | Réécriture de requête — tâche simple |
 | `_refine_web_queries` | ROUTER | `no_think` | `MAX_TOKENS_TINY` (80) | — | Idem, 2 requêtes raffinées |
@@ -988,7 +1013,7 @@ All variables go in `/opt/jarvis/.env`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ROUTER_MODEL_LOCAL` | `Hermes-3-Llama-3.2-3B-q6-affine` | Router model HF repo ID or local path. Leave empty to disable and use only the embedding router (Tier 0). |
+| `ROUTER_MODEL_LOCAL` | `Qwen2.5-1.5B-router-v1-4bit` | Router model local path. LoRA fine-tuned Qwen2.5-1.5B-Instruct, quantized 4-bit. Leave empty to disable and use only the embedding router (Tier 0). |
 | `ROUTER_TIMEOUT` | `6` | Timeout in seconds (short — fast model only) |
 
 ### Tier 2 — Primary model
@@ -1110,8 +1135,18 @@ Users are defined in `jarvis-core/JarvisData/users_list.json`. Each entry contai
 - `language` — `fr` or `en`
 - `briefing_enabled` — boolean
 - `trading` — boolean — set to `true` to enable hourly portfolio surveillance for this user
+- `profile` — object of stable biographical facts injected into the cached system prompt (never in the dynamic prefix). Fields: `famille`, `taille`, `poids`, `année de naissance`, `habitation`, `travail`, `intérêts`, `voiture`. Add/remove keys freely — all non-empty values are rendered as `k : v` in `<profil_stable>`. Update here, not via the analyzer (which tracks dynamic facts in Redis).
 
 Only users with `"trading": true` participate in scheduled trade checks (CSV import, price fetch, alert evaluation). Users without this flag are never included, regardless of whether a CSV exists in `TradeData/`.
+
+**Profile split — stable vs dynamic:**
+
+| Layer | Storage | Updated by | Content |
+|-------|---------|-----------|---------|
+| `profile` (users_list.json) | File | Human manually | Constant facts: identity, family, physique, location, job, interests. Never changes except via file edit. |
+| Redis `user:{code}:profile` | Redis hash | `analyzer.py` (conversation analysis) | Dynamic facts learned from conversations: skills, preferences, current habits, etc. |
+
+The analyzer receives the stable profile at each analysis run and is instructed not to recreate keys already covered by `profil_stable`.
 
 ---
 

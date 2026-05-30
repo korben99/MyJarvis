@@ -44,6 +44,7 @@ from config import (
     MAX_TOKENS_MEDIUM,
     PRIMARY_MODEL,
     USER_CODES,
+    USERS,
 )
 from helpers import extract_llm_json, get_logger, get_redis
 from llm_local import call_llm_local_async_bg
@@ -89,6 +90,7 @@ async def analyze_exchange(
     conversation: str,
     existing_projects: list = None,
     existing_profile_keys: list = None,
+    stable_profile: dict = None,
 ) -> dict:
     """Analyze a conversation exchange using the LLM."""
     try:
@@ -151,11 +153,17 @@ async def analyze_exchange(
         profile_keys_str = (
             ", ".join(existing_profile_keys) if existing_profile_keys else "aucune"
         )
+        stable_str = (
+            "\n".join(f"  {k}: {v}" for k, v in stable_profile.items() if v)
+            if stable_profile
+            else "aucun"
+        )
         prompt = get_prompt("ANALYSIS_PROMPT").format(
             current_date=date.today().isoformat(),
             conversation=conversation[:5000],
             existing_projects=projects_context,
             existing_profile_keys=profile_keys_str,
+            stable_profile=stable_str,
         )
 
         # Appel LLM : priorité basse (bg) pour ne pas bloquer le chat.
@@ -297,6 +305,7 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
             # ── Collecte des nouveaux messages par session ─────────────────
             existing_projects = get_user_projects(uc)
             existing_profile_keys = list(get_user_profile(uc).keys())
+            stable_profile: dict = USERS.get(uc, {}).get("profile", {})
 
             sessions_data: list[dict] = []
             for chat_key in session_keys:
@@ -368,7 +377,7 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
 
                 try:
                     analysis = await analyze_exchange(
-                        conversation, existing_projects, existing_profile_keys
+                        conversation, existing_projects, existing_profile_keys, stable_profile
                     )
                 except Exception as exc:
                     logger.error(
