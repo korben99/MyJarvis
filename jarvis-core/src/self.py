@@ -1647,7 +1647,8 @@ async def run_nightly_interaction_review() -> None:
             )
 
         # ── Call 4: profile dedup (Redis profile hash) ────────────────────
-        await asyncio.to_thread(curative_profile_cleanup, user_code)
+        stable_profile = USERS.get(user_code, {}).get("profile", {})
+        await asyncio.to_thread(curative_profile_cleanup, user_code, stable_profile)
 
         logger.info("Nightly review done for %s — %s", user_code, summary[:80])
 

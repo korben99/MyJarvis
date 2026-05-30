@@ -780,8 +780,12 @@ CURATIVE_CLEANUP_PROMPT = """\
 Voici le profil Redis d'un utilisateur ({profile_count} clés) :
 {profile_str}
 
-Identifie les doublons sémantiques (même information sous deux noms différents) \
-et les entrées obsolètes (contredites par une clé plus récente).
+Profil stable (données constantes déjà présentes dans le system prompt — supprimer toute clé Redis qui double ces données) :
+{stable_profile}
+
+Identifie les doublons sémantiques (même information sous deux noms différents), \
+les entrées obsolètes (contredites par une clé plus récente), \
+et les clés dont l'information est déjà couverte par le profil stable.
 
 RÈGLE OBLIGATOIRE pour les doublons :
   étape 1 — consolide la valeur sur la clé à conserver dans 'updates'

@@ -2156,7 +2156,7 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
         )
 
 
-def curative_profile_cleanup(user_code: str):
+def curative_profile_cleanup(user_code: str, stable_profile: dict | None = None):
     """
     Curative cleanup of the Redis user profile hash. Called nightly by the nightly
     review scheduler (run_nightly_interaction_review). Separated from monthly
@@ -2195,9 +2195,15 @@ def curative_profile_cleanup(user_code: str):
         profile_str = "\n".join(
             f'- "{k}" (mis à jour : {_fmt_ts(k)}): {v}' for k, v in profile.items()
         )
+        stable_str = (
+            "\n".join(f"  {k}: {v}" for k, v in stable_profile.items() if v)
+            if stable_profile
+            else "aucun"
+        )
         prompt = get_prompt("CURATIVE_CLEANUP_PROMPT").format(
             profile_count=len(profile),
             profile_str=profile_str,
+            stable_profile=stable_str,
         )
 
         parsed = extract_llm_json(
