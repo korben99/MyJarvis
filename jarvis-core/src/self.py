@@ -1016,6 +1016,7 @@ def _action_flag_knowledge_gap(params: dict) -> str:
     results = pipe.execute()
     count = int(results[2] or 0)
 
+    emotional_state.update({"confiance": -0.15})
     logger.info("Self action: knowledge gap flagged — %s (count=%d)", topic, count)
     return f"flagged knowledge gap: {topic} (count={count})"
 
@@ -2853,6 +2854,9 @@ async def run_self_reflection() -> dict:
 
         outcome = await asyncio.to_thread(_execute_action, action, params)
 
+        if action not in ("nothing", "flag_knowledge_gap"):
+            emotional_state.update({"confiance": +0.1})
+
         step = {
             "phase": "global",
             "iteration": i + 1,
@@ -2963,6 +2967,9 @@ async def run_self_reflection() -> dict:
             ) and not outcome.startswith(f"{action} [")
             if _looks_like_error and action != "nothing":
                 _failed_actions.add(action)
+                emotional_state.update({"confiance": -0.1})
+            elif action not in ("nothing", "flag_knowledge_gap") and not _looks_like_error:
+                emotional_state.update({"confiance": +0.1})
 
             step = {
                 "phase": f"user:{user_code}",

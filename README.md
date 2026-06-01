@@ -114,6 +114,7 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
 | **`routes/proxy.py`** | Python module | OpenAI-compatible proxy `/v1/*` for Open WebUI — strips OWUI RAG templates, handles OWUI system calls (title generation, follow-up suggestions) at proxy level without touching the Jarvis pipeline |
 | **`prompts.py`** | Python module | Single source of truth for all LLM prompts — supports live overrides via `get_prompt()` |
 | **`web_search.py`** | Python module | Web search: Tavily API (primary), Open-Meteo weather, DDG 4-stage parallel pipeline (fallback). Parallel speculative page fetch, LLM query optimization, dual query refinement, HTML publication date extraction. |
+| **`emotional_state.py`** | Python module | Jarvis internal emotional state — 3 float dimensions with lazy time-decay, Redis-backed, no circular imports |
 | **`helpers.py`** | Python module | Shared utilities: LLM HTTP clients, logging setup, Redis/Qdrant factory, JSON parsing |
 
 ### Four-Tier LLM Architecture
@@ -249,6 +250,61 @@ If the LLM router is unavailable or fails (timeout / parse error), all `use_*` f
 | Episodic Memory | Qdrant | Conversation summaries that passed the importance threshold |
 | Autobiographical Memory | Qdrant | High-importance milestones consolidated from episodic memory |
 | Self Memory | JSON file | Jarvis identity, goals, focus, reflection log, per-user relations |
+
+### Emotional State
+
+Jarvis maintains a continuous internal emotional state, stored in Redis (`jarvis:emotional_state`) and managed exclusively by `emotional_state.py` — a standalone module with no circular imports. The state colors Jarvis's responses when injected into the prompt via `<etat_emotionnel_jarvis>`.
+
+**Three dimensions** — each a float in `[−1.0, +1.0]`, decaying lazily toward 0.0 on read:
+
+| Dimension | Positive (+1.0) | Negative (−1.0) | Decay rate |
+|-----------|----------------|----------------|------------|
+| `humeur` | joyeux | triste | 0.10 /h (~10 h to neutral) |
+| `confiance` | confiant | dans le doute | 0.05 /h (~20 h — doubt lingers) |
+| `energie` | en forme | fatigué | 0.15 /h (~7 h to neutral) |
+
+Dimensions stay silent when `abs(value) < 0.25` (`_THRESHOLD`). The `<etat_emotionnel_jarvis>` block is omitted entirely when all dims are below threshold. All writes atomically apply decay first, then delta, then clamp to `[−1.0, +1.0]`.
+
+**Update triggers:**
+
+| Source | When | Effect |
+|--------|------|--------|
+| `analyzer.py` → `update_from_analysis(mood, sat)` | Every 30 min, post-exchange | Sums mood + satisfaction deltas, calls `update()` |
+| `self.py` — `_action_flag_knowledge_gap` | Each gap flag | `confiance −0.15` |
+| `self.py` — successful reflection action (phases 1 & 2) | Per-cycle | `confiance +0.10` |
+| `self.py` — failed reflection action (phase 2) | Per-cycle | `confiance −0.10` |
+
+**Mood → delta mapping** (`mood` field from `ANALYSIS_PROMPT`, 7 values):
+
+| mood | humeur | confiance | energie |
+|------|--------|-----------|---------|
+| `happy` | +0.3 | — | +0.1 |
+| `frustrated` | −0.3 | — | −0.1 |
+| `stressed` | −0.2 | −0.1 | −0.1 |
+| `curious` | +0.1 | — | +0.1 |
+| `tired` | — | — | −0.3 |
+| `focused` | — | — | +0.1 |
+| `neutral` | — | — | — |
+
+**Satisfaction → delta mapping** (`satisfaction` field from `ANALYSIS_PROMPT`, 3 values):
+
+| satisfaction | humeur | confiance | energie |
+|--------------|--------|-----------|---------|
+| `positive` | +0.1 | +0.2 | +0.1 |
+| `negative` | −0.1 | −0.3 | −0.1 |
+| `unknown` | — | — | — |
+
+When both fields are present, their deltas are summed before a single `update()` call.
+
+**Public API** (`emotional_state.py`):
+
+| Function | Description |
+|----------|-------------|
+| `get_state()` | Returns current state dict with lazy decay applied. Thread-safe. |
+| `update(deltas)` | Applies dimension deltas atomically (decay → delta → clamp). |
+| `update_from_analysis(mood, satisfaction)` | Convenience wrapper used by `analyzer.py`. |
+| `render_prompt_lines()` | Returns non-neutral dims as French strings — empty list when all neutral. |
+| `describe()` | One-line summary for `GET /status` and reflection context (`"joyeux, confiant"` or `"neutre"`). |
 
 #### Importance Scoring
 
@@ -419,7 +475,7 @@ EVERY 30 MIN — analyzer.py → analyse_recent_conversations()
   ├── update_user_profile_batch()       → Redis user:{code}:profile (hash)
   │     └── _normalize_profile_keys_batch()  [LLM: 1 call/namespace group, only when needed]
   ├── apply_project_updates()           → Redis user:{code}:projects
-  ├── update_emotional_state()          → Redis jarvis:emotional_state
+  ├── emotional_state.update_from_analysis()  → Redis jarvis:emotional_state
   ├── set_interest_weight()             → Redis user:{code}:interests
   └── store_memory_vector()             → Qdrant episodic     [if importance > 0.35 and summary present]
 
@@ -470,7 +526,7 @@ EVERY 2H — self.py → run_self_reflection()
 | `update_user_profile_batch()` | memory.py | Every 30 min | Redis profile hash | batch dedup via 3-stage pipeline |
 | `_normalize_profile_keys_batch()` | memory.py | Inside batch update | — | groups by NS prefix; 1 LLM call/group |
 | `apply_project_updates()` | memory.py | Every 30 min | Redis projects | fuzzy name match ≥ 60% |
-| `update_emotional_state()` | memory.py | Every 30 min | Redis emotional state | mood → preset state dict |
+| `update_from_analysis(mood, sat)` | emotional_state.py | Every 30 min (analyzer) | Redis `jarvis:emotional_state` | mood + satisfaction deltas; lazy decay on read |
 | `store_memory_vector()` | memory.py | Every 30 min (LLM importance > 0.35 + summary) | Qdrant episodic | — |
 | `store_autobiographical_event()` | memory.py | Nightly (durables) / reflect / monthly | Qdrant autobio | dedup + reinforce check before write |
 | `archive_autobiographical_event()` | memory.py | Nightly cleaning | Qdrant autobio payload | status="past"; invalidates timeline cache |
@@ -572,7 +628,7 @@ The cumulative prompt overhead is bounded at `HIST_CONV_TOKEN_BUDGET + SESSION_S
 | `PRÉFÉRENCES` | Redis hash `user:{code}:preferences` | Only if prefs exist |
 | `PROJETS ACTIFS` | Redis `user:{code}:projects` — status `in_progress` only | Only if projects exist |
 | `SUJETS RÉCENTS (24h)` | Topics from last 10 conversations in Redis | Only if topics exist |
-| `ÉTAT ÉMOTIONNEL` | Redis `jarvis:emotional_state` | Only if mood ≠ neutral |
+| `ÉTAT ÉMOTIONNEL` | `emotional_state.render_prompt_lines()` → `<etat_emotionnel_jarvis>` | Only if any dim ≥ 0.25 |
 | `APPRENTISSAGES RÉCENTS` | `jarvis-self.json → learnings[-5:]` | Only if learnings exist |
 | `FRISE CHRONOLOGIQUE` | Top 5 autobio Qdrant points by importance+recency — each prefixed with a French relative timestamp (`il y a 3 jours`, `il y a 2 semaines`, …) | Only if autobio exists |
 | `SUJETS À ABORDER AUJOURD'HUI` | Redis `jarvis:{code}:tomorrow_suggestions` (TTL 24h, written by nightly review) | Only if key exists |
@@ -1246,7 +1302,7 @@ Conversations from the day are sorted by importance score descending before bein
 | `pending_proposals` | `prompt_proposals.json` | Prevents duplicate refine_prompt proposals |
 | `last_reflection` | Redis sorted set (1 entry) | Previous action + outcome |
 | `behavioral_patterns` | Computed from last 20 reflection log entries | Action frequency, nothing-clustering by hour, recurring focus keywords |
-| `emotional_state` | Redis `jarvis:emotional_state` | Current mood (neutral / curious / concerned…) |
+| `emotional_state` | `emotional_state.describe()` | Current internal state: humeur, confiance, energie (returns `"neutre"` when all dims < 0.25) |
 | `self_notes[-5:]` | `jarvis-self.json` | Last 5 personal observations written by `update_self_note` |
 | `opinions[-5:]` | `jarvis-self.json` | Last 5 topic opinions written by `add_self_opinion` |
 | `user_relations` | `jarvis-self.json` | Affinity + style per user |
@@ -1550,11 +1606,14 @@ All Jarvis modules share a single logging configuration defined in `helpers.py`.
 
 ### Setup
 
-`setup_logging()` is called once at startup (in the FastAPI `lifespan`). It configures the root logger with:
-- **Console handler** — INFO level, same format as before
-- **Rotating file handler** — 5 MB × 3 backups, written to `/app/logs/jarvis-api.log`
+`setup_logging()` is called once at startup (in the FastAPI `lifespan`). It configures the root logger with two rotating file handlers:
 
-The log directory is bind-mounted from the host (`./logs:/app/logs`), so logs are immediately accessible at `/opt/jarvis/logs/jarvis-api.log` without entering the container.
+| File | Level | Rotation | Purpose |
+|------|-------|----------|---------|
+| `jarvis-api.log` | INFO+ | 5 MB × 3 backups | Operational — normal production log |
+| `jarvis-debug.log` | DEBUG+ | 10 MB × 2 backups | Verbose — detailed trace for debugging |
+
+Both files are written to `/opt/jarvis/logs/` and are accessible directly on the host.
 
 ### Usage in modules
 

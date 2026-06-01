@@ -33,19 +33,19 @@ _THRESHOLD = 0.25
 
 # Deltas applied from analyzer mood field
 _MOOD_DELTAS: dict[str, dict[str, float]] = {
-    "happy":      {"humeur":    +0.3},
-    "frustrated": {"humeur":    -0.3},
-    "stressed":   {"humeur":    -0.2},
-    "curious":    {"humeur":    +0.1},
-    "tired":      {"energie":   -0.3},
-    "focused":    {"energie":   +0.1},
+    "happy":      {"humeur": +0.3, "energie": +0.1},
+    "frustrated": {"humeur": -0.3, "energie": -0.1},
+    "stressed":   {"humeur": -0.2, "confiance": -0.1, "energie": -0.1},
+    "curious":    {"humeur": +0.1, "energie": +0.1},
+    "tired":      {"energie": -0.3},
+    "focused":    {"energie": +0.1},
     "neutral":    {},
 }
 
 # Deltas applied from analyzer satisfaction field
 _SATISFACTION_DELTAS: dict[str, dict[str, float]] = {
-    "positive": {"confiance": +0.2},
-    "negative": {"confiance": -0.3},
+    "positive": {"confiance": +0.2, "humeur": +0.1, "energie": +0.1},
+    "negative": {"confiance": -0.3, "humeur": -0.1, "energie": -0.1},
 }
 
 # Human-readable labels for prompt injection
