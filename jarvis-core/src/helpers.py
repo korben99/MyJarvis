@@ -56,7 +56,6 @@ import json
 import logging
 import os
 import re
-import sys
 import time
 import unicodedata
 from datetime import date, datetime
@@ -93,7 +92,7 @@ _logging_configured = False
 
 def setup_logging(log_file: str = "/opt/jarvis/logs/jarvis-api.log") -> None:
     """
-    Configure the root Jarvis logger once: console + rotating file handlers.
+    Configure the root Jarvis logger once: two rotating file handlers.
     - jarvis-api.log  : INFO+  (5 MB × 3, operational)
     - jarvis-debug.log: DEBUG+ (10 MB × 2, verbose — for review)
     Safe to call multiple times (no-op after first call).
@@ -106,12 +105,6 @@ def setup_logging(log_file: str = "/opt/jarvis/logs/jarvis-api.log") -> None:
     fmt = logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT)
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
-
-    # Console — INFO only (stdout so launchd's StandardOutPath captures it)
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setLevel(logging.INFO)
-    sh.setFormatter(fmt)
-    root.addHandler(sh)
 
     log_dir = os.path.dirname(log_file)
     os.makedirs(log_dir, exist_ok=True)

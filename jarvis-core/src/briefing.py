@@ -34,6 +34,7 @@ from config import (
     llm_timeout,
     USER_CODES,
     USER_EMAILS,
+    USERS,
     USER_TIMEZONES,
 )
 from google_services import (
@@ -170,37 +171,46 @@ _STOP_WORDS = {
 
 def _get_user_interests(user_code: str) -> list[str]:
     """
-    Extract interest keywords from the user's Redis profile.
-    Looks at all profile keys likely to contain useful interests,
-    not just a fixed whitelist.
-    """
-    profile = get_user_profile(user_code)
-    interests = []
+    Extract interest keywords from the user's Redis profile + stable profile.
 
-    # Profile keys use "category:subcategory" format (e.g. "loisir:equitation").
-    # Match any profile key whose category prefix is in _INTEREST_KEYS.
+    Strategy:
+    - Stable profile `intérêts` field (clean comma-separated keywords) seeded first.
+    - Redis keys with format "category:subcategory": the subcategory is used as the
+      search term (e.g. "loisir:equitation" → "equitation"). Profile values can be
+      verbose AI descriptions unsuitable for news queries.
+    - Plain Redis keys (no subcategory): value parsed for short terms as before.
+    """
+    interests: list[str] = []
+
+    # 1. Stable profile interests — always clean, comma-separated keywords
+    stable = USERS.get(user_code, {}).get("profile", {})
+    stable_interests_raw = stable.get("intérêts", "") or stable.get("interests", "")
+    for term in stable_interests_raw.split(","):
+        term = term.strip()
+        if len(term) > 2 and term.lower() not in _STOP_WORDS:
+            interests.append(term)
+
+    # 2. Redis dynamic profile — use subcategory name, not verbose values
+    profile = get_user_profile(user_code)
     _interest_key_set = set(_INTEREST_KEYS)
-    matched_keys = [
-        k for k in profile
-        if k.split(":")[0] in _interest_key_set
-    ]
+    matched_keys = [k for k in profile if k.split(":")[0] in _interest_key_set]
     for key in matched_keys:
-        val = profile.get(key, "").strip()
-        if not val:
-            continue
-        # Split on commas or spaces; take multi-word values as a phrase
-        parts = [p.strip() for p in val.replace(",", ";").split(";") if p.strip()]
-        for part in parts:
-            words = part.split()
-            if len(words) >= 2:
-                # Keep multi-word phrases as-is (e.g. "cybersécurité réseau")
-                phrase = part[:40]
-                if phrase.lower() not in _STOP_WORDS:
-                    interests.append(phrase)
-            elif words:
-                w = words[0].lower()
-                if len(w) > 2 and w not in _STOP_WORDS:
-                    interests.append(words[0])
+        parts = key.split(":", 1)
+        if len(parts) == 2:
+            # Use the subcategory as the search term (clean, topic-level keyword)
+            subcategory = parts[1].strip().replace("-", " ").replace("_", " ")
+            if len(subcategory) > 2 and subcategory.lower() not in _STOP_WORDS:
+                interests.append(subcategory)
+        else:
+            # Plain key — fall back to value parsing for short single-word terms
+            val = profile.get(key, "").strip()
+            for part in val.replace(",", ";").split(";"):
+                part = part.strip()
+                words = part.split()
+                if len(words) == 1:
+                    w = words[0].lower()
+                    if len(w) > 2 and w not in _STOP_WORDS:
+                        interests.append(words[0])
 
     # Deduplicate
     seen, unique = set(), []

@@ -4,8 +4,8 @@ from fastapi import APIRouter, HTTPException
 
 from config import USER_CODES
 from deps import REDIS_CLIENT
+import emotional_state
 from memory import (
-    get_emotional_state,
     get_recent_conversations,
     get_self_memory,
     get_user_preferences,
@@ -29,7 +29,7 @@ async def memory_profile(user_code: str):
 
 @router.get("/memory/emotional-state")
 async def memory_emotion():
-    return get_emotional_state()
+    return emotional_state.get_state()
 
 
 @router.get("/memory/recent/{user_code}")

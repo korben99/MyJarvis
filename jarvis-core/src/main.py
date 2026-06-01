@@ -61,7 +61,8 @@ from embed_router import preload_embed_router
 from google_services import is_google_available
 from helpers import get_logger, setup_logging
 from llm_client import openai_headers
-from memory import get_embed_model, get_emotional_state
+import emotional_state
+from memory import get_embed_model
 from rag import search_documents
 from routes.briefing_routes import router as briefing_router
 from routes.briefing_routes import run_morning_briefings
@@ -241,10 +242,9 @@ async def status():
         },
     }
 
-    emotion = get_emotional_state()
     services["memory"] = {
         "status": "online",
-        "emotional_state": emotion.get("mood", "unknown"),
+        "emotional_state": emotional_state.describe(),
     }
 
     services["google"] = {

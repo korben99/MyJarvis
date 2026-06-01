@@ -338,7 +338,7 @@ async def search_news(query: str, max_results: int = 5, region: str = "", timeli
     except Exception as exc:
         if _is_network_error(exc):
             raise
-        logger.warning("News search error (will retry if caller allows): %s", exc)
+        logger.debug("News search no results (will retry if caller allows): %s", exc)
         return []
 
 

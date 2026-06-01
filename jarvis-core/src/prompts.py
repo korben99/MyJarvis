@@ -29,6 +29,7 @@ SYSTEM_BASE_FR = (
     "<context> prime sur tes données d'entraînement. En cas de contradiction : message > <context> > historique > <profil_stable>. "
     "<avis_jarvis> : intègre en prose si pertinent, ignore sinon. "
     "<apprentissages_jarvis> : guide interne silencieux — ne mentionne pas, n'attribue pas à l'utilisateur. "
+    "<etat_emotionnel_jarvis> : ton propre état interne au moment de la conversation — laisse-le colorer ta réponse naturellement. "
     "Pour les questions simples et factuelles, réponds directement sans rappeler le contexte. Pour les analyses complexes, structure en étapes courtes. "
     "Si tu ne sais pas ou si le message est ambigu, dis-le franchement — ne génère pas à tout prix. "
     "Cite les sources web. "
@@ -154,8 +155,10 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
     Bon     : {{"key":"loisir:aviation","value":"tours de piste en avion ULM"}}
   - Questions, hypothèses ou intentions ("je pense à", "je veux", "que penses-tu de") → NOT des faits → [].
   - Nommage (clés nouvelles seulement, en français minuscule sans accents) :
-    Fait scalaire → clé simple : "profession", "name"
+    Fait scalaire → clé simple : "profession"
     Multi-valeur → "categorie:item" : "loisir:kart", "competence:python", "famille:enfants"
+    INTERDIT dans user_facts : tout ce qui figure déjà dans le profil stable (voir <knowledge_base>).
+      Ne jamais dupliquer ni reformuler une donnée du profil stable.
     Catégories AUTORISÉES et leur usage :
       situation   → faits sur l'utilisateur lui-même (lieu de vie, mode de vie, équipement perso)
       famille     → faits sur des tiers : parents, conjoint, enfants, fratrie — JAMAIS sur l'utilisateur
@@ -173,11 +176,10 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
       apprécie    → choses explicitement appréciées
       aversion    → choses explicitement rejetées
       langue      → langues parlées ou apprises
-    INTERDIT absolu : toute clé ou valeur contenant un nom de marque, modèle, référence produit.
+    INTERDIT absolu : toute CLÉ contenant un nom de marque, modèle, référence produit.
       Exemples interdits : "loisir:wristmaster", "loisir:longines", "achat:somfy"
-      Exemple autorisé  : "loisir:horlogerie" avec valeur "collectionneur de montres"
+      Exemple autorisé  : "loisir:horlogerie" avec valeur "collectionneur de Grand Seiko"
     L'item d'un loisir est une ACTIVITÉ GÉNÉRIQUE (horlogerie, kart, tennis), jamais un produit.
-    La valeur décrit le RAPPORT à l'activité, jamais une référence ou un nom de modèle.
   - Si incertain → ne rien ajouter
 
 "project_updates" : [] ou liste de {{"name":"...","action":"...","summary":"...","rename_to":"..."}}
@@ -369,7 +371,7 @@ REFLECTION_PROMPT = """\
 <patterns_comportementaux>
 {behavioral_patterns}
 </patterns_comportementaux>
-<etat_emotionnel>{emotional_state}</etat_emotionnel>
+<etat_emotionnel_jarvis>{emotional_state}</etat_emotionnel_jarvis>
 <notes_personnelles>
 {self_notes}
 </notes_personnelles>

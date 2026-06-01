@@ -263,28 +263,18 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
       Float timestamp du dernier message analysé. Mis à jour immédiatement après
       chaque analyse de session (immune à ltrim, résiliente aux échecs partiels).
     """
+    import emotional_state
     from memory import (
         apply_project_updates,
         get_user_profile,
         get_user_projects,
         set_interest_weight,
         store_memory_vector,
-        update_emotional_state,
         update_user_profile_batch,
     )
 
     r = get_redis()
     users = [user_code] if user_code else list(USER_CODES.keys())
-
-    _mood_to_state = {
-        "happy": {"mood": "happy", "energy": 0.8},
-        "stressed": {"mood": "attentive", "concern": 0.6},
-        "frustrated": {"mood": "supportive", "concern": 0.7},
-        "curious": {"mood": "engaged", "curiosity": 0.8},
-        "tired": {"mood": "gentle", "energy": 0.4},
-        "focused": {"mood": "focused", "energy": 0.7},
-        "neutral": {"mood": "neutral", "energy": 0.7, "concern": 0.0},
-    }
 
     for uc in users:
         try:
@@ -492,8 +482,8 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
 
             # ── Application des résultats fusionnés ───────────────────────
             mood = most_recent_analysis.get("mood", "neutral")
-            if mood in _mood_to_state:
-                update_emotional_state(_mood_to_state[mood])
+            satisfaction = most_recent_analysis.get("satisfaction", "unknown")
+            emotional_state.update_from_analysis(mood, satisfaction)
 
             if merged_facts:
                 await asyncio.to_thread(

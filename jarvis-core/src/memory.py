@@ -83,6 +83,7 @@ from helpers import (
     redis_set_json,
     rel_time_fr,
 )
+import emotional_state as _es
 from prompts import get_prompt
 from qdrant_client.models import PointIdsList
 from sentence_transformers import SentenceTransformer
@@ -170,103 +171,6 @@ def set_working_memory(session_id: str, key: str, value: str, ttl: int = 86400):
     r.expire(f"working:{session_id}", ttl)
 
 
-_CONCERN_DECAY_PER_HOUR = 0.05  # concern loses 0.05/h → fully decayed in 20h
-_ENERGY_DECAY_PER_HOUR = 0.02  # energy drifts back to 0.7 baseline at 0.02/h
-_emotional_state_lock = Lock()  # guards the read-modify-write decay cycle
-
-
-def _apply_decay_unlocked(state: dict, elapsed_h: float) -> bool:
-    """Apply concern/energy time-decay to *state* in-place. Returns True if anything changed."""
-    changed = False
-    concern = state.get("concern", 0.0)
-    if concern > 0:
-        new_concern = max(0.0, concern - elapsed_h * _CONCERN_DECAY_PER_HOUR)
-        if abs(new_concern - concern) > 0.001:
-            state["concern"] = round(new_concern, 3)
-            changed = True
-    energy = state.get("energy", 0.7)
-    if abs(energy - 0.7) > 0.001:
-        direction = 1 if energy < 0.7 else -1
-        new_energy = energy + direction * elapsed_h * _ENERGY_DECAY_PER_HOUR
-        new_energy = min(0.7, new_energy) if direction == 1 else max(0.7, new_energy)
-        if abs(new_energy - energy) > 0.001:
-            state["energy"] = round(new_energy, 3)
-            changed = True
-    return changed
-
-
-def get_emotional_state() -> dict:
-    """Get Jarvis's current emotional state, with time-based decay applied.
-
-    concern decays toward 0.0 at 0.05/h (fully cleared in ~20h without new stress).
-    energy drifts toward 0.7 baseline at 0.02/h.
-    Decay is applied lazily on read — no scheduler needed.
-    """
-    _default = {
-        "mood": "neutral",
-        "energy": 0.7,
-        "confidence": 0.8,
-        "curiosity": 0.6,
-        "concern": 0.0,
-        "last_updated": datetime.now(timezone.utc).isoformat(),
-    }
-    with _emotional_state_lock:
-        state = redis_get_json("jarvis:emotional_state")
-        if not state:
-            return _default
-
-        last_updated = state.get("last_updated")
-        if last_updated:
-            try:
-                elapsed_h = max(
-                    0.0,
-                    (
-                        datetime.now(timezone.utc)
-                        - datetime.fromisoformat(last_updated)
-                    ).total_seconds()
-                    / 3600,
-                )
-                if _apply_decay_unlocked(state, elapsed_h):
-                    state["last_updated"] = datetime.now(timezone.utc).isoformat()
-                    redis_set_json("jarvis:emotional_state", state)
-
-            except (ValueError, TypeError):
-                pass
-
-    return state
-
-
-def update_emotional_state(updates: dict):
-    """Update emotional state atomically — decay applied then updates merged, all under lock."""
-    with _emotional_state_lock:
-        state = redis_get_json("jarvis:emotional_state") or {
-            "mood": "neutral",
-            "energy": 0.7,
-            "confidence": 0.8,
-            "curiosity": 0.6,
-            "concern": 0.0,
-            "last_updated": datetime.now(timezone.utc).isoformat(),
-        }
-        last_updated = state.get("last_updated")
-        if last_updated:
-            try:
-                elapsed_h = max(
-                    0.0,
-                    (
-                        datetime.now(timezone.utc)
-                        - datetime.fromisoformat(last_updated)
-                    ).total_seconds()
-                    / 3600,
-                )
-                _apply_decay_unlocked(state, elapsed_h)
-            except (ValueError, TypeError):
-                pass
-        state.update(updates)
-        state["last_updated"] = datetime.now(timezone.utc).isoformat()
-        for key in ["energy", "confidence", "curiosity", "concern"]:
-            if key in state and isinstance(state[key], (int, float)):
-                state[key] = max(0.0, min(1.0, state[key]))
-        redis_set_json("jarvis:emotional_state", state)
 
 
 # ══════════════════════════════════════════════════
@@ -361,6 +265,15 @@ def _profile_key_fast_match(new_key: str, existing_keys: list[str]) -> str | Non
     for k in existing_keys:
         if normalize_key(k) == new_key_norm and k != new_key:
             return k
+    # Stage 0.5: namespaced key whose subkey resolves to an existing scalar
+    # e.g. situation:name → name, situation:prenom → name
+    if ":" in new_key:
+        subkey_norm = normalize_key(new_key.split(":", 1)[1])
+        if subkey_norm in existing_keys:
+            return subkey_norm
+        sub_canonical = _SCALAR_CANONICAL.get(subkey_norm)
+        if sub_canonical and sub_canonical in existing_keys:
+            return sub_canonical
     # Stage 1: scalar canonical alias (new_key_norm already lowercased + normalised)
     canonical = _SCALAR_CANONICAL.get(new_key_norm)
     if canonical and canonical in existing_keys:
@@ -1844,17 +1757,15 @@ def build_memory_context(
     pipe.hgetall(f"user:{user_code}:profile")  # 0
     pipe.hgetall(f"user:{user_code}:preferences")  # 1
     pipe.get(f"user:{user_code}:projects")  # 2
-    pipe.get("jarvis:emotional_state")  # 3
-    pipe.get(f"jarvis:{user_code}:tomorrow_suggestions")  # 4
-    pipe.get(f"cache:timeline:{user_code}")  # 5 — avoids 2nd Redis RTT
+    pipe.get(f"jarvis:{user_code}:tomorrow_suggestions")  # 3
+    pipe.get(f"cache:timeline:{user_code}")  # 4 — avoids 2nd Redis RTT
     _pipe_results = pipe.execute()
 
     profile = _pipe_results[0] or {}
     prefs = _pipe_results[1] or {}
     _proj_raw = _pipe_results[2]
-    _emotion_raw = _pipe_results[3]
-    _sugg_raw = _pipe_results[4]
-    _timeline_cached = _pipe_results[5]
+    _sugg_raw = _pipe_results[3]
+    _timeline_cached = _pipe_results[4]
 
     # Context-aware profile filtering: keep always-inject keys + top-N by keyword overlap.
     # Only applied when user_message is provided and profile is large enough to be worth filtering.
@@ -1920,59 +1831,13 @@ def build_memory_context(
             + "\n</projets_actifs>"
         )
 
-    # Emotional state — read-only decay applied inline (no Redis write, no lock)
-    try:
-        emotion = json.loads(_emotion_raw) if _emotion_raw else {}
-    except Exception:
-        emotion = {}
-    if not emotion:
-        emotion = {
-            "mood": "neutral",
-            "energy": 0.7,
-            "confidence": 0.8,
-            "curiosity": 0.6,
-            "concern": 0.0,
-        }
-    else:
-        _last = emotion.get("last_updated")
-        if _last:
-            try:
-                _eh = max(
-                    0.0,
-                    (
-                        datetime.now(timezone.utc) - datetime.fromisoformat(_last)
-                    ).total_seconds()
-                    / 3600,
-                )
-                _apply_decay_unlocked(emotion, _eh)
-            except (ValueError, TypeError):
-                pass
     # Injection etat emotionnel
-    _MOOD_FR = {
-        "happy": "joyeux",
-        "attentive": "attentif",
-        "supportive": "bienveillant",
-        "engaged": "curieux",
-        "gentle": "calme",
-        "focused": "concentré",
-        "neutral": "neutre",
-    }
-    _mood = emotion.get("mood", "neutral")
-    _concern = emotion.get("concern", 0.0)
-    _energy = emotion.get("energy", 0.7)
-    _emotion_lines = []
-    if _mood != "neutral":
-        _emotion_lines.append(f"Humeur : {_MOOD_FR.get(_mood, _mood)}")
-    if _concern > 0.3:
-        _emotion_lines.append(f"Préoccupation : {_concern:.1f}")
-    if abs(_energy - 0.7) > 0.15:
-        _energy_label = "élevée" if _energy > 0.7 else "basse"
-        _emotion_lines.append(f"Énergie : {_energy_label} ({_energy:.1f})")
+    _emotion_lines = _es.render_prompt_lines()
     if _emotion_lines:
         parts.append(
-            "<etat_emotionnel>\n"
+            "<etat_emotionnel_jarvis>\n"
             + "\n".join(f"- {l}" for l in _emotion_lines)
-            + "\n</etat_emotionnel>"
+            + "\n</etat_emotionnel_jarvis>"
         )
 
     # Self identity — apprentissages de Jarvis (guide interne, pas des faits sur l'utilisateur)
@@ -2029,6 +1894,19 @@ def build_memory_context(
         "interaction_style": "direct",
         "average_interaction_mood": "measured",
     }
+    _STYLE_FR = {
+        "direct": "direct",
+        "gentle": "doux",
+        "formal": "formel",
+        "playful": "joueur",
+    }
+    _REL_MOOD_FR = {
+        "warm": "chaleureux",
+        "enthusiastic": "enthousiaste",
+        "measured": "posé",
+        "playful": "joueur",
+        "professional": "professionnel",
+    }
     rel = {**_default_rel, **self_mem.get("user_relations", {}).get(user_code, {})}
     _aff = rel["affinity"]
     _aff_label = (
@@ -2043,8 +1921,8 @@ def build_memory_context(
     parts.append(
         f"<relation_avec_utilisateur>\n"
         f"- Affinité : {_aff_label}\n"
-        f"- Style de communication préféré : {rel['interaction_style']}\n"
-        f"- Humeur moyenne des échanges : {rel['average_interaction_mood']}\n"
+        f"- Style de communication préféré : {_STYLE_FR.get(rel['interaction_style'], rel['interaction_style'])}\n"
+        f"- Humeur moyenne des échanges : {_REL_MOOD_FR.get(rel['average_interaction_mood'], rel['average_interaction_mood'])}\n"
         f"</relation_avec_utilisateur>"
     )
 

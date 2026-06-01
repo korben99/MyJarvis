@@ -89,6 +89,7 @@ from helpers import (
     get_qdrant,
     get_redis,
 )
+import emotional_state
 from memory import (
     append_conversation_message,
     archive_autobiographical_event,
@@ -97,7 +98,6 @@ from memory import (
     curative_profile_cleanup,
     get_autobiographical_facts,
     get_embed_model,
-    get_emotional_state,
     get_self_memory,
     get_user_projects,
     retract_autobiographical_event,
@@ -602,7 +602,7 @@ def gather_global_context() -> dict:
         "reflection_count": self_data.get("reflection_count", 0),
         "user_relations": self_data.get("user_relations", {}),
         "behavioral_patterns": _extract_behavioral_patterns(20),
-        "emotional_state": get_emotional_state(),
+        "emotional_state": emotional_state.get_state(),
         "self_notes": self_data.get("self_notes", [])[-5:],
         "opinions": self_data.get("opinions", [])[-5:],
     }
@@ -2563,14 +2563,7 @@ async def generate_proactive_push(user_code: str) -> str:
     if not conv_lines and not project_lines:
         return "no recent conversations and no active projects"
 
-    # Get current mood from Redis emotional state
-    mood = "measured"
-    try:
-        mood_raw = r.get("jarvis:emotional_state")
-        if mood_raw:
-            mood = json.loads(mood_raw).get("mood", "measured")
-    except Exception:
-        pass
+    mood = emotional_state.describe()
 
     user_name = USER_CODES.get(user_code, user_code)
     conv_text = (

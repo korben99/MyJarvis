@@ -1182,16 +1182,21 @@ async def chat(req: ChatRequest):
         _total = int(REDIS_CLIENT.llen(f"chat:{user_code}:{req.session_id}"))
         _uncovered_n = max(0, _total - _summary_data["msg_count"])
         _uncovered_hist = list(hist[-_uncovered_n:]) if _uncovered_n > 0 else []
-        # Prepend last assistant message from covered history if not already present,
-        # so Jarvis always knows what he said before the current user reply.
+        # Prepend the last user+assistant exchange from covered history if not already
+        # present, so the model sees the full prior turn, not just its own last response.
         has_assistant = any(m["role"] == "assistant" for m in _uncovered_hist)
         if not has_assistant:
             _covered = hist[:-_uncovered_n] if _uncovered_n > 0 else hist
-            last_asst = next(
-                (m for m in reversed(_covered) if m["role"] == "assistant"), None
+            last_asst_idx = next(
+                (i for i, m in enumerate(reversed(_covered)) if m["role"] == "assistant"),
+                None,
             )
-            if last_asst:
-                _uncovered_hist = [last_asst] + _uncovered_hist
+            if last_asst_idx is not None:
+                asst_pos = len(_covered) - 1 - last_asst_idx
+                # Include the user turn immediately before the assistant turn so the
+                # model sees the full exchange, not just its own previous response.
+                anchor = _covered[asst_pos - 1 : asst_pos + 1] if asst_pos > 0 else [_covered[asst_pos]]
+                _uncovered_hist = anchor + _uncovered_hist
         hist_slice = _trim_history_to_budget(_uncovered_hist, HIST_CONV_TOKEN_BUDGET)
     else:
         hist_slice = _trim_history_to_budget(hist, HIST_CONV_TOKEN_BUDGET)
