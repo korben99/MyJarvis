@@ -205,6 +205,7 @@ _PUSH_COOLDOWN_PREFIX = (
     "jarvis:push:cooldown"  # prevent push flooding (1 push per 2h per user)
 )
 _PUSH_COOLDOWN_TTL = 72000  # 20h
+_IOS_SESSION_ID = "iphone-main"  # session used by the iOS app (hardcoded in Swift)
 
 
 # ── Redis / Qdrant singletons ─────────────────────────────────────────────
@@ -1108,7 +1109,7 @@ def _action_queue_push(params: dict) -> str:
 
     # Also inject into the persistent iOS conversation so the message is visible
     # when the user opens the app — even if the notification was missed.
-    append_conversation_message(user_code, "iphone-main", "assistant", message)
+    append_conversation_message(user_code, _IOS_SESSION_ID, "assistant", message)
 
     # Fire APNs immediately when device has a real token (instant delivery, app can be killed).
     if is_real_apns_token(device_token):

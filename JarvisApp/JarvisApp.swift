@@ -31,25 +31,20 @@ struct JarvisApp: App {
                 .environmentObject(speechEngine)
                 .environmentObject(wakeWord)
                 .onAppear {
-                    api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL, sessionID: settings.sessionID)
+                    api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL)
                 }
                 .onChange(of: settings.localServerURL) { _, _ in
-                    api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL, sessionID: settings.sessionID)
+                    api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL)
                     syncNotificationService()
                 }
                 .onChange(of: settings.vpnServerURL) { _, _ in
-                    api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL, sessionID: settings.sessionID)
+                    api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL)
                     syncNotificationService()
                 }
                 .onChange(of: settings.userCode) { _, _ in
                     // userCode is the polling identity — sync immediately so
                     // NotificationService doesn't keep polling the old endpoint.
                     syncNotificationService()
-                }
-                .onChange(of: settings.sessionID) { _, _ in
-                    // Keep api.sessionID consistent with settings — without this,
-                    // the session only updates when the Done button is pressed.
-                    api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL, sessionID: settings.sessionID)
                 }
                 .onChange(of: settings.wakeWordEnabled) { _, enabled in
                     if enabled { wakeWord.start(language: settings.language) } else { wakeWord.stop() }

@@ -533,6 +533,14 @@ def embed_route(message: str, google_available: bool = True) -> RouterResult | N
             result.use_reasoning = True
         return result
 
+    # Mention explicite du mot RAG → rag direct (le jargon métier noie le signal embedding)
+    if re.search(r"\brag\b", msg_lower):
+        logger.debug("Embed router: RAG keyword → rag direct")
+        result = _build_result("rag", msg, google_available)
+        if force_reasoning:
+            result.use_reasoning = True
+        return result
+
     # Commandes de gestion des propositions de prompt → self direct
     _proposal_explicit = (
         any(kw in msg_lower for kw in ("proposition", "proposals", "propositions"))

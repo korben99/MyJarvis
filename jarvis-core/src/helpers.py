@@ -145,6 +145,12 @@ def setup_logging(log_file: str = "/opt/jarvis/logs/jarvis-api.log") -> None:
     ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
+    # Suppress known-spurious warnings that are harmless but noisy
+    for suppress in (
+        "ddgs.engines.yahoo_news",  # IndexError in post-processing — library catches it, results still returned
+    ):
+        logging.getLogger(suppress).setLevel(logging.ERROR)
+
 
 def get_logger(name: str) -> logging.Logger:
     """Return a named Jarvis logger. Thin wrapper around logging.getLogger."""

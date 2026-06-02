@@ -56,10 +56,9 @@ class JarvisAPI: ObservableObject {
 
     private var configureTask: Task<Void, Never>?
 
-    func configure(localURL: String, vpnURL: String, sessionID: String = "iphone-main") {
+    func configure(localURL: String, vpnURL: String) {
         self.localServerURL = localURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         self.vpnServerURL   = vpnURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        self.sessionID      = sessionID
         configureTask?.cancel()
         configureTask = Task {
             await checkConnection()

@@ -93,6 +93,9 @@ use_reasoning=true pour réaliser un diagnostic, calcul multi-étapes, conseil m
 "Tu peux retrouver mon document sur le brevet mixture-of-expert ?"
 {"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"brevet mixture-of-expert","project_name":null,"use_reasoning":false}
 
+"Regarde dans mon RAG si tu trouves la fréquence de vesting de mes SRU."
+{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"fréquence vesting SRU","project_name":null,"use_reasoning":false}
+
 "Montre-moi mon planning de demain et vérifie mes mails non lus."
 {"intents":["calendar","gmail"],"weather_location":null,"gmail_query":"is:unread is:important","calendar_days":2,"rag_query":null,"project_name":null,"use_reasoning":false}
 

@@ -175,9 +175,7 @@ struct SettingsView: View {
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled(true)
                     
-                    TextField("Session ID", text: $settings.sessionID)
-                        .font(.system(size: 14, design: .monospaced))
-                } header: {
+} header: {
                     Text("Identity")
                 }
 
@@ -208,7 +206,7 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") {
-                        api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL, sessionID: settings.sessionID)
+                        api.configure(localURL: settings.localServerURL, vpnURL: settings.vpnServerURL)
                         dismiss()
                     }.fontWeight(.semibold)
                 }
