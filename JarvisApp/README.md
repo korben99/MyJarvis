@@ -1,8 +1,8 @@
-# Jarvis iOS App v3 — On-Device Speech Processing
+# Jarvis iOS App — On-Device Speech Processing
 
 ```
 ┌─────────────────────────────────┐
-│  iPhone 13 (A15 Neural Engine)  │
+│  iPhone (A-series Neural Engine)│
 │                                 │
 │  AirPods → Mic                  │
 │      ↓                          │
@@ -10,19 +10,16 @@
 │      ↓                          │
 │  TEXT query                     │
 │      ↓ WiFi / Tailscale         │
-│  ┌──────────────────┐           │
-│  │   Mini PC (N150) │           │
-│  │   • Jarvis API   │           │
-│  │   • Qdrant (RAG) │           │
-│  │   • Redis (mem)  │           │
-│  └────────┬─────────┘           │
-│           ↓ Internet             │
-│  ┌──────────────────┐           │
-│  │  RunPod RTX 5090 │           │
-│  │  Llama 70B       │           │
-│  └────────┬─────────┘           │
-│           ↓                      │
-│  TEXT response                  │
+│  ┌──────────────────────────┐   │
+│  │  Mac Mini M4 Pro         │   │
+│  │  • Jarvis API (port 8000)│   │
+│  │  • Qdrant (RAG, port 6333│   │
+│  │  • Redis (mem, port 6379)│   │
+│  │  • Local MLX inference   │   │
+│  │    Qwen3.6-35B (no cloud)│   │
+│  └────────────┬─────────────┘   │
+│               ↓                  │
+│  TEXT response (streaming SSE)  │
 │      ↓                          │
 │  iOS TTS (on-device, instant)   │  ← No audio from network
 │      ↓                          │
@@ -30,72 +27,49 @@
 └─────────────────────────────────┘
 ```
 
-## What Changed from v2
+All LLM inference runs locally on the Mac Mini M4 Pro via MLX — no external API, no cloud.
 
-| Component | v2 (old) | v3 (new) |
-|-----------|----------|----------|
-| STT | Mini PC Whisper (CPU, ~1.5s) | **iPhone WhisperKit (Neural Engine, ~0.5s)** |
-| TTS | Mini PC Piper or iOS fallback | **iPhone iOS TTS (instant)** |
-| Audio over network | Yes (WAV upload to mini PC) | **No — only text crosses the network** |
-| Whisper Docker container | Required on mini PC | **Not needed — saves RAM** |
-| Piper Docker container | Required on mini PC | **Not needed — saves RAM** |
-| Mini PC API | /chat + /voice endpoints | **Only /chat (simpler)** |
-| Privacy | Audio went to mini PC | **Audio never leaves iPhone** |
-| Latency | ~4-6 seconds end-to-end | **~1.5-3 seconds** |
+## Swift Project Files
 
-## iPhone 13 (A15 Bionic) WhisperKit Performance
+```
+JarvisApp/
+├── JarvisApp.swift            # App entry point, lifecycle, notification wiring
+├── AppSettings.swift          # @AppStorage persistent settings (URLs, user code, voice, whisper model)
+├── Models.swift               # Shared data models (ChatMessage, ChatRequest, etc.)
+├── JarvisAPI.swift            # API client: streaming SSE chat, history, polling
+├── SpeechEngine.swift         # WhisperKit STT + AVSpeech TTS
+├── WakeWordEngine.swift       # On-device wake word detection ("Hey Jarvis")
+├── NotificationService.swift  # Push polling (BGAppRefreshTask + foreground timer)
+├── ContentView.swift          # Root tab navigation
+├── ChatView.swift             # Text chat with streaming
+├── VoiceView.swift            # Voice mode UI
+└── SettingsView.swift         # Server URLs, user code, whisper model, voice settings
+```
 
-| Model | Size | Download | Transcription Speed | Accuracy | RAM Usage |
-|-------|------|----------|-------------------|----------|-----------|
-| tiny | ~75 MB | ~10s | ~0.2s/sentence | Basic | ~200 MB |
-| **base** | ~140 MB | ~20s | **~0.5s/sentence** | Good | ~350 MB |
-| **small** | ~460 MB | ~60s | **~1.0s/sentence** | Very good | ~700 MB |
-| medium | ~1.5 GB | ~3min | ~3s/sentence | Excellent | ~2 GB |
-| large-v3 | ~3 GB | ~6min | Not recommended | Best | Too much RAM |
+## Key Design Decisions
 
-**Recommendation for iPhone 13**: Start with `base`, upgrade to `small` if you need better accuracy (especially for accented speech or noisy environments). The `small` model still fits comfortably in 4GB RAM.
+**Session ID** — hardcoded to `iphone-main` in `AppSettings.swift` (`let sessionID = "iphone-main"`). Not user-configurable. Jarvis uses this fixed key to inject proactive push messages into the conversation history.
 
-## Setup Guide
+**Network routing** — the app probes `localServerURL` first (2 s timeout), then falls back to `vpnServerURL` (Tailscale). Resolved URL displayed in the status bar, reused until a failure triggers a fresh probe.
 
-### Step 1: Create Xcode Project
+**Streaming** — responses arrive as SSE events. Thinking tokens (`{"think": "..."}`) are stripped from display but drive a progress indicator.
 
-1. Open Xcode 15+ → File → New → Project
-2. Select **App** (iOS)
-3. Product Name: **JarvisApp**
-4. Interface: **SwiftUI**, Language: **Swift**
-5. Minimum deployment: **iOS 17.0**
+## Xcode Setup
 
-### Step 2: Add WhisperKit Package
+### Required Capabilities (manual steps in Xcode)
 
-1. File → Add Package Dependencies
-2. Enter URL: `https://github.com/argmaxinc/whisperkit`
-3. Version: **Up to Next Major** from `0.9.0`
-4. When prompted, select the **WhisperKit** library product
-5. Click Add Package
+1. **Signing & Capabilities** → **Background Modes** → tick **Background App Refresh**
+2. **Info.plist** → add key `BGTaskSchedulerPermittedIdentifiers` (Array) → item `fr.jarvis.push-poll`
 
-### Step 3: Add Source Files
-
-Copy all `.swift` files from `ios-app/JarvisApp/` into your Xcode project:
-
-- `JarvisApp.swift` (replace default)
-- `AppSettings.swift`
-- `Models.swift`
-- `JarvisAPI.swift`
-- `SpeechEngine.swift` ← NEW: WhisperKit + TTS engine
-- `ContentView.swift`
-- `ChatView.swift`
-- `VoiceView.swift`
-- `SettingsView.swift`
-
-### Step 4: Configure Info.plist
-
-Add these keys:
+### Info.plist permissions
 
 ```xml
 <key>NSMicrophoneUsageDescription</key>
 <string>Jarvis needs microphone access for voice commands</string>
 <key>NSLocalNetworkUsageDescription</key>
 <string>Jarvis connects to your local AI server</string>
+<key>NSSpeechRecognitionUsageDescription</key>
+<string>Used for on-device wake word detection</string>
 <key>NSAppTransportSecurity</key>
 <dict>
     <key>NSAllowsLocalNetworking</key>
@@ -105,88 +79,49 @@ Add these keys:
 </dict>
 ```
 
-### Step 5: Build and Run
+### Package Dependencies
 
-1. Connect iPhone 13 via USB or wireless debugging
-2. Select your iPhone as build target
-3. ⌘R to build and run
-4. On first launch, WhisperKit will download the `base` model (~140MB, once)
-5. Go to Settings → enter your mini PC IP
-6. Start chatting or speaking!
+- **WhisperKit** — `https://github.com/argmaxinc/whisperkit` (Up to Next Major from 0.9.0)
 
-## Mini PC API (Simplified)
+## WhisperKit Model Selection
 
-Since the iPhone handles all audio, the mini PC API is now text-only:
+| Model | Size | Transcription | Accuracy | Recommendation |
+|-------|------|--------------|----------|----------------|
+| tiny | ~75 MB | ~0.2 s/sentence | Basic | Dev only |
+| **base** | ~140 MB | **~0.5 s/sentence** | Good | Default |
+| **small** | ~460 MB | **~1.0 s/sentence** | Very good | Best quality |
+| medium | ~1.5 GB | ~3 s/sentence | Excellent | Too slow |
 
-```bash
-# Add to your docker-compose.yml
-cp mini-pc-api/ /opt/jarvis/jarvis-core/
-docker compose up -d --build jarvis-api
+Recommended: `base` for daily use, `small` for accented speech or noisy environments.
 
-# Test
-curl http://MINI_PC_IP:8000/status
-curl -X POST http://MINI_PC_IP:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Hello Jarvis", "stream": false}'
-```
+## Settings
 
-### Updated docker-compose.yml
-
-You can now **remove** the Whisper and Piper containers from your compose file, freeing ~3-4 GB RAM on the N150:
-
-```yaml
-# REMOVE these services (no longer needed):
-# whisper:
-#   image: onerahmet/openai-whisper-asr-webservice:latest-cpu
-# piper:
-#   image: rhasspy/wyoming-piper:latest
-```
-
-## Project Files
-
-```
-jarvis-ios-v3/
-├── README.md                          # This file
-├── mini-pc-api/
-│   ├── main.py                        # Simplified text-only API
-│   └── Dockerfile
-└── ios-app/
-    └── JarvisApp/
-        ├── JarvisApp.swift            # App entry, initializes WhisperKit
-        ├── AppSettings.swift          # Settings with Whisper model selection
-        ├── Models.swift               # Data models (simplified)
-        ├── JarvisAPI.swift            # Text-only API client
-        ├── SpeechEngine.swift         # WhisperKit STT + iOS TTS (on-device)
-        ├── ContentView.swift          # Tab navigation
-        ├── ChatView.swift             # Text chat with streaming
-        ├── VoiceView.swift            # Voice with on-device processing
-        └── SettingsView.swift         # Config + Whisper model picker
-```
+| Setting | Description |
+|---------|-------------|
+| Local Server URL | Direct LAN IP (e.g. `http://192.168.1.50:8000`) |
+| VPN / Tailscale URL | Tailscale IP for remote access |
+| User Code | Authentication code (e.g. `KORBEN99`) |
+| User Name | Display name |
+| Whisper Model | `tiny` / `base` / `small` |
+| Speak responses | Toggle AVSpeech TTS output |
+| Speech rate | AVSpeech rate (0.3–0.7) |
+| Wake Word | Enable "Hey Jarvis" on-device detection |
+| Language | `fr` (French) or `en` (English) — affects STT + TTS + wake word |
 
 ## Troubleshooting
 
 **WhisperKit model won't download:**
 - Needs internet for first download only (cached after)
-- Check available storage (base = 140MB, small = 460MB)
-- Try `tiny` model first to verify everything works
-
-**Transcription is inaccurate:**
-- Switch from `base` to `small` in Settings
-- Speak clearly and closer to the mic
-- Reduce background noise
-- WhisperKit works best with 1+ seconds of speech
+- Check available storage (`base` = 140 MB, `small` = 460 MB)
 
 **Slow response after transcription:**
-- Transcription is instant (~0.5s) — the delay is network + LLM
-- Check RunPod pod is running
-- Check mini PC API connection in Settings
+- Transcription is instant (~0.5 s) — the delay is network + LLM prefill (~3–5 s TTFT on Mac Mini M4 Pro)
+
+**Push notifications not appearing:**
+- Verify Background App Refresh is enabled in iOS Settings → Jarvis
+- Check `fr.jarvis.push-poll` is in `BGTaskSchedulerPermittedIdentifiers`
+- Device token must be registered: the app calls `POST /device/register` on launch
 
 **AirPods not working for recording:**
 - iOS routes audio automatically when AirPods are connected
 - If issues: Settings → Bluetooth → forget and re-pair AirPods
-- The app sets `.allowBluetooth` on the audio session
-
-**Build error: "No such module 'WhisperKit'":**
-- File → Packages → Reset Package Caches
-- Product → Clean Build Folder (⇧⌘K)
-- Verify package was added with WhisperKit product selected

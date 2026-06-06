@@ -108,7 +108,7 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
 | **`llm_client.py`** | Python module | LLM HTTP client: streaming SSE, model tier selection, vision pipeline |
 | **`rag.py`** | Python module | Two-stage RAG: Stage 1 identifies the target document (title keyword match → semantic confirmation, or global semantic fallback); Stage 2 does focused semantic retrieval within that document. Doc-name cache lazy-loaded in memory. |
 | **`pipeline.py`** | Python module | System prompt construction, 7-source context assembly, post-exchange logging |
-| **`analyzer.py`** | Python module | Scheduled batch analysis (every 30 min): fact extraction, ESS scoring, Qdrant vectorisation |
+| **`analyzer.py`** | Python module | Scheduled batch analysis (every 60 min): fact extraction, ESS scoring, Qdrant vectorisation |
 | **`embed_router.py`** | Python module | Fast-path intent classifier via cosine similarity — bypasses LLM router for ~80 % of requests |
 | **`routes/chat.py`** | Python module | Main chat pipeline: routing → context gather → auto-web fallback → LLM → SSE stream |
 | **`routes/proxy.py`** | Python module | OpenAI-compatible proxy `/v1/*` for Open WebUI — strips OWUI RAG templates, handles OWUI system calls (title generation, follow-up suggestions) at proxy level without touching the Jarvis pipeline |
@@ -239,7 +239,7 @@ The router returns a structured JSON decision consumed by the chat pipeline:
 
 `memory_scope` and `conversation_type` were removed — the intent system already encodes these decisions cleanly. RAG fires when the router includes `rag` in intents; memory always searches both episodic and autobiographical layers.
 
-If the LLM router is unavailable or fails (timeout / parse error), all `use_*` flags default to `False` — no context is fetched and the LLM answers from the system prompt alone. This is the safe fallback; the embedding-based semantic router (Tier 0) is still active but only used when the LLM router is unavailable.
+If the LLM router is unavailable or fails (timeout / parse error), all `use_*` flags default to `False` — no context is fetched and the LLM answers from the system prompt alone. Note: the embedding-based router (Tier 0) always runs first — if it already classified the request, the LLM router was never reached and this fallback does not apply.
 
 ### Five-Layer Memory System
 
@@ -269,7 +269,7 @@ Dimensions stay silent when `abs(value) < 0.25` (`_THRESHOLD`). The `<etat_emoti
 
 | Source | When | Effect |
 |--------|------|--------|
-| `analyzer.py` → `update_from_analysis(mood, sat)` | Every 30 min, post-exchange | Sums mood + satisfaction deltas, calls `update()` |
+| `analyzer.py` → `update_from_analysis(mood, sat)` | Every 60 min, post-exchange | Sums mood + satisfaction deltas, calls `update()` |
 | `self.py` — `_action_flag_knowledge_gap` | Each gap flag | `confiance −0.15` |
 | `self.py` — successful reflection action (phases 1 & 2) | Per-cycle | `confiance +0.10` |
 | `self.py` — failed reflection action (phase 2) | Per-cycle | `confiance −0.10` |
@@ -468,7 +468,7 @@ REAL-TIME — per chat message
           └── Redis chat:{user}:{session}  (conversation history, ltrim at CHAT_MAX_MESSAGES)
               [importance=0 default → store_memory_vector/store_autobiographical never triggered here]
 
-EVERY 30 MIN — analyzer.py → analyse_recent_conversations()
+EVERY 60 MIN — analyzer.py → analyse_recent_conversations()
   ├── analyze_exchange()  [LLM: ANALYSIS_PROMPT]
   │     extracts: user_facts, projects, mood, topics, memory_summary, importance (LLM 0–1)
   │     logs: [IMPORTANCE] llm=X.XXX ess=X.XXX  (ESS kept for diagnostic comparison)
@@ -479,11 +479,11 @@ EVERY 30 MIN — analyzer.py → analyse_recent_conversations()
   ├── set_interest_weight()             → Redis user:{code}:interests
   └── store_memory_vector()             → Qdrant episodic     [if importance > 0.35 and summary present]
 
-EVERY 2H — self.py → run_self_reflection()
+EVERY 5H (défaut 6h — configurable via REFLECTION_INTERVAL_HOURS) — self.py → run_self_reflection()
   ├── search_memory()                  [read Qdrant — memory context assembled for LLM]
   │     └── reconsolidation: +0.05 importance on every recalled point (capped at 0.95)
   ├── _action_store_insight()
-  │     └── store_autobiographical_event()  → Qdrant autobio  (importance=0.80)
+  │     └── store_autobiographical_event()  → Qdrant autobio  (importance=0.70 par défaut, 0.5–0.9 selon le LLM)
   ├── _action_correct_profile()
   │     └── Redis user:{code}:profile  (update/delete existing keys only — no new key creation)
   └── generate_proactive_push()
@@ -526,8 +526,8 @@ EVERY 2H — self.py → run_self_reflection()
 | `update_user_profile_batch()` | memory.py | Every 30 min | Redis profile hash | batch dedup via 3-stage pipeline |
 | `_normalize_profile_keys_batch()` | memory.py | Inside batch update | — | groups by NS prefix; 1 LLM call/group |
 | `apply_project_updates()` | memory.py | Every 30 min | Redis projects | fuzzy name match ≥ 60% |
-| `update_from_analysis(mood, sat)` | emotional_state.py | Every 30 min (analyzer) | Redis `jarvis:emotional_state` | mood + satisfaction deltas; lazy decay on read |
-| `store_memory_vector()` | memory.py | Every 30 min (LLM importance > 0.35 + summary) | Qdrant episodic | — |
+| `update_from_analysis(mood, sat)` | emotional_state.py | Every 60 min (analyzer) | Redis `jarvis:emotional_state` | mood + satisfaction deltas; lazy decay on read |
+| `store_memory_vector()` | memory.py | Every 60 min (LLM importance > 0.35 + summary) | Qdrant episodic | — |
 | `store_autobiographical_event()` | memory.py | Nightly (durables) / reflect / monthly | Qdrant autobio | dedup + reinforce check before write |
 | `archive_autobiographical_event()` | memory.py | Nightly cleaning | Qdrant autobio payload | status="past"; invalidates timeline cache |
 | `retract_autobiographical_event()` | memory.py | Nightly cleaning (errors/dupes) | Qdrant delete | threshold 0.88; invalidates timeline cache |
@@ -818,7 +818,7 @@ Les prompts 5bit étaient ~400 tok plus longs (session avancée) — prefill nor
 | RotorQuant 6bit | ~3.8–5.1 s | ~1.2–2.6 s | ~2.5–2.7 s |
 | RotorQuant 5bit | ~4.5–5.4 s | ~1.2–2.6 s | ~3.2–3.3 s |
 
-Le router (Hermes 3.2B) représente 30–50 % du TTFT selon le cache hit. Le prefill RotorQuant ≈ 2.5 s est incompressible pour ~1700–1900 remaining tokens.
+L'ancien router (Hermes 3.2B, remplacé par Qwen2.5-1.5B LoRA) représentait 30–50 % du TTFT selon le cache hit. Le prefill RotorQuant ≈ 2.5 s est incompressible pour ~1700–1900 remaining tokens.
 
 **Mise à jour 2026-05-30 — router LoRA Qwen2.5-1.5B :**
 
@@ -867,7 +867,7 @@ Cartographie de tous les appels LLM de la codebase. Chaque ligne indique si le t
 
 | Fonction | Modèle | Think | Budget | Processor | Justification |
 |---|---|---|---|---|---|
-| `analyze_exchange` | PRIMARY | `no_think` | 900 | — | Extraction structurée (topics, mood, facts, projects). Task de classification pure — thinking génère ~1500 tok d'anglais verbeux sans clore `</think>`, prouvé par test. no_think produit le même résultat en <5 s. |
+| `analyze_exchange` | PRIMARY | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Extraction structurée (topics, mood, facts, projects). Task de classification pure — thinking génère ~1500 tok d'anglais verbeux sans clore `</think>`, prouvé par test. no_think produit le même résultat en <5 s. |
 
 ### Background — Mémoire (memory.py)
 
@@ -1153,7 +1153,7 @@ All variables go in `/opt/jarvis/.env`.
 | `BRIEFING_ENABLED` | `true` | Enable daily morning briefing |
 | `BRIEFING_TIME` | `07:30` | Briefing delivery time (HH:MM) |
 | `BRIEFING_TIMEZONE` | `Europe/Paris` | Timezone for scheduling |
-| `REFLECTION_INTERVAL_HOURS` | `2` | Hours between self-reflection cycles |
+| `REFLECTION_INTERVAL_HOURS` | `6` | Hours between self-reflection cycles |
 | `ENABLE_ANALYSIS` | `true` | Enable post-response conversation analysis |
 | `REFINE_PROMPT_THRESHOLD` | `3` | Times a knowledge gap must be flagged before a prompt refinement is proposed |
 
@@ -1280,7 +1280,7 @@ The morning briefing aggregates: calendar events, unread emails, weather, news h
 
 Jarvis maintains two autonomous cognitive cycles:
 
-**Reflection loop** (every 2 h) — global self-observation. Jarvis reviews system health, user activity, and knowledge gaps, then picks one action from the catalog. At the end of each cycle Jarvis also runs a per-user **proactive push** check. Outcome and new focus are persisted to `jarvis-self.json`.
+**Reflection loop** (configurable via `REFLECTION_INTERVAL_HOURS`, défaut 6h) — global self-observation. Jarvis reviews system health, user activity, and knowledge gaps, then picks one action from the catalog. At the end of each cycle Jarvis also runs a per-user **proactive push** check. Outcome and new focus are persisted to `jarvis-self.json`.
 
 **Nightly review** (23:00) — per-user conversation review using **4 sequential calls** per user:
 

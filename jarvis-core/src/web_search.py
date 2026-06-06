@@ -218,6 +218,7 @@ async def search_weather(query: str) -> list[dict]:
                     "longitude": lon,
                     "current":   "temperature_2m,apparent_temperature,weather_code,"
                                  "wind_speed_10m,relative_humidity_2m",
+                    "hourly":    "weather_code",
                     "daily":     "weather_code,temperature_2m_max,temperature_2m_min,"
                                  "precipitation_sum,wind_speed_10m_max",
                     "timezone":  "auto",
@@ -230,12 +231,23 @@ async def search_weather(query: str) -> list[dict]:
             daily = data.get("daily",   {})
 
             condition = WEATHER_CODES.get(cur.get("weather_code", -1), "")
-            # Today's daily forecast (index 0) merged into the current-conditions entry
-            # so the LLM can't skip it when it sees current conditions describe the same day.
+            # Today's outlook uses the 13:00 hourly code (not daily max) so that
+            # morning fog doesn't make the whole day appear as "Brouillard".
             today_outlook = ""
             daily_times = daily.get("time", [])
             if daily_times:
-                today_condition = WEATHER_CODES.get(daily["weather_code"][0], "")
+                hourly = data.get("hourly", {})
+                hourly_times = hourly.get("time", [])
+                hourly_codes = hourly.get("weather_code", [])
+                # Find the 13:00 code for today as representative afternoon condition
+                today_str = daily_times[0]
+                afternoon_code = next(
+                    (code for t, code in zip(hourly_times, hourly_codes)
+                     if t == f"{today_str}T13:00"),
+                    None,
+                )
+                rep_code = afternoon_code if afternoon_code is not None else daily["weather_code"][0]
+                today_condition = WEATHER_CODES.get(rep_code, "")
                 today_outlook = (
                     f" Prévisions du jour : {today_condition} "
                     f"{daily['temperature_2m_min'][0]}–{daily['temperature_2m_max'][0]}°C, "
