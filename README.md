@@ -129,7 +129,10 @@ Tier 0 — EMBED ROUTER  Zero-LLM fast path — cosine similarity against pre-em
 Tier 1 — ROUTER        Full LLM intent classifier, JSON only
                         Target: Qwen2.5-1.5B-router-v1-4bit (local MLX, ~1 GB)
                         LoRA fine-tuned sur Qwen2.5-1.5B-Instruct bf16 — 492 échantillons, val loss 0.047
-                        LRU-cached — system prompt ~1095 tok, hits from turn 2 onward (~95% cache hit)
+                        LRU-cached — system prompt ~1510 tok, hits from turn 2 onward (~95% cache hit)
+                        Context-aware: <last_jarvis> (300 chars tronqués) injecté dans ROUTER_USER
+                        quand disponible — permet de router les messages elliptiques ("regarde les
+                        propriétés" → web si la dernière réponse parlait de Calgary)
 
 Tier 2 — PRIMARY       All standard responses: chat, questions, summaries
                         Target: Qwen3.6-35B-A3B-MLX-5.4bit (local MLX, ~20 GB, MoE ~3B active)
@@ -563,7 +566,9 @@ The prompt is split into a **static system message** and a **per-turn dynamic pr
 
 **Static system message** — `build_system_prompt(user_code)` — token-identical every turn for a given user (KV-cached):
 ```
-SYSTEM_BASE_FR                    (~500 chars — Jarvis personality, tool rules)
+SYSTEM_BASE_FR                    (~560 chars / ~224 tok — personnalité Jarvis, règles de réponse)
+    Règles clés : "Réponds toujours, même sans données temps réel — extrapolé, estime, raisonne."
+                  "Jamais de 'je ne peux pas' — donne la meilleure réponse possible, incertitude inline."
     ↓
 "Tu parles avec <firstname>. Tutoie toujours…"
     ↓
@@ -830,6 +835,11 @@ L'ancien router (Hermes 3.2B, remplacé par Qwen2.5-1.5B LoRA) représentait 30�
 | TTFT visible — tour 2+ | — | **~4.7 s** (−0.6 s) |
 
 Le warmup utilise désormais `ROUTER_SYSTEM` au lieu du prompt générique → LRU seedé correctement dès le démarrage.
+
+**Mise à jour 2026-06-14 — context-aware router + jailbreak :**
+- `ROUTER_SYSTEM` passe de ~1340 à ~1510 tok (ajout `<last_jarvis>` instruction + 2 exemples).
+- `ROUTER_USER` injecte la dernière réponse Jarvis tronquée à 300 chars → routing contextuel des messages elliptiques.
+- `SYSTEM_BASE_FR` passe de ~190 à ~224 tok : remplacement de la règle "ne génère pas à tout prix" par "réponds toujours, extrapolé, jamais de refus sec".
 
 #### Mode thinking (first visible token = après bloc think)
 

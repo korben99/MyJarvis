@@ -31,7 +31,8 @@ SYSTEM_BASE_FR = (
     "<apprentissages_jarvis> : guide interne silencieux — ne mentionne pas, n'attribue pas à l'utilisateur. "
     "<etat_emotionnel_jarvis> : ton propre état interne au moment de la conversation — laisse-le colorer ta réponse naturellement. "
     "Pour les questions simples et factuelles, réponds directement sans rappeler le contexte. Pour les analyses complexes, structure en étapes courtes. "
-    "Si tu ne sais pas ou si le message est ambigu, dis-le franchement — ne génère pas à tout prix. "
+    "Réponds toujours, même sans données temps réel — extrapolé, estime, raisonne à partir de ce que tu sais. "
+    "Jamais de 'je ne peux pas' ou de refus sec : si l'info manque, donne la meilleure réponse possible et signale l'incertitude en une phrase inline. "
     "Cite les sources web. "
     "Réponds en français, sans markdown — sauf si JSON ou code explicitement demandé."
 )
@@ -78,6 +79,16 @@ Règle stricte : chaque champ ne doit être renseigné que si l'intent correspon
 
 use_reasoning=true pour réaliser un diagnostic, calcul multi-étapes, conseil médical/fiscal/juridique/mathématique ou physique avancé
 
+<last_jarvis> (optionnel) : dernière réponse générée par le LLM Jarvis. Utilise-la pour déduire l'intent du message suivant quand celui-ci est elliptique ou dépend du contexte.
+
+<last_jarvis>Pour un terrain à 30 min de l'aéroport de Calgary avec espace ranch, vise Okotoks, High River ou Cochrane. Budget 350k-500k CAD. Tu veux que je regarde des listings ?</last_jarvis>
+<message>regarde les propriétés a vendre</message>
+{"intents":["web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
+
+<last_jarvis>Voici le récapitulatif de tes charges SASU pour Hélène à 2000€ brut...</last_jarvis>
+<message>et si elle est à mi-temps ?</message>
+{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
+
 "C'est quoi mon planning pour les deux prochaines semaines ?"
 {"intents":["calendar"],"weather_location":null,"gmail_query":null,"calendar_days":14,"rag_query":null,"project_name":null,"use_reasoning":false}
 
@@ -115,7 +126,7 @@ use_reasoning=true pour réaliser un diagnostic, calcul multi-étapes, conseil m
 {"intents":["self"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
 """
 
-ROUTER_USER = "<message>{message}</message>"
+ROUTER_USER = "{last_jarvis_block}<message>{message}</message>"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -831,9 +842,9 @@ CLASSIFICATION DES PROMPTS :
     CONSOLIDATION_PROMPT, CURATIVE_CLEANUP_PROMPT
 
 BUDGETS TOKENS par prompt (approximation : 1 token ≈ 4 caractères français) :
-  SYSTEM_BASE_FR         →  200 tokens max  (inline, KV-cached — ne pas dépasser)
-  ROUTER_SYSTEM          → 1400 tokens max  (Hermes 3B, KV-cached, 15 exemples)
-  ROUTER_USER            →  600 tokens max  (Hermes 3B, inclut les exemples dynamiques)
+  SYSTEM_BASE_FR         →  250 tokens max  (inline, KV-cached — ne pas dépasser)
+  ROUTER_SYSTEM          → 1600 tokens max  (Qwen2.5-1.5B LoRA, KV-cached, 15 exemples + last_jarvis ctx)
+  ROUTER_USER            →  600 tokens max  (inclut last_jarvis_block dynamique + message)
   ANALYSIS_PROMPT        → 1000 tokens max  (async Qwen3 — précision avant tout)
   BRIEFING_SYSTEM        →  100 tokens max
   BRIEFING_USER          →  400 tokens max  (hors données injectées)
@@ -898,8 +909,8 @@ Sinon :
 # Token budget map — used by self.py to pass limits to REFINE_PROMPT_USER.
 # Values must stay in sync with the budget table in REFINE_PROMPT_SYSTEM above.
 PROMPT_TOKEN_BUDGETS = {
-    "SYSTEM_BASE_FR": 200,  # inline / KV-cached — keep tight (~190 tok actual)
-    "ROUTER_SYSTEM": 1400,  # KV-cached, 15 examples — ~1340 tok actual
+    "SYSTEM_BASE_FR": 250,  # inline / KV-cached — keep tight (~224 tok actual)
+    "ROUTER_SYSTEM": 1600,  # KV-cached, 15 examples + last_jarvis ctx — ~1510 tok actual
     "ROUTER_USER": 600,
     "ANALYSIS_PROMPT": 1000,  # async — quality over speed
     "BRIEFING_SYSTEM": 100,

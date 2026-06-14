@@ -900,6 +900,19 @@ async def chat(req: ChatRequest):
         )
     else:
         # Fallback: LLM router 3B + dynamic prefix + history + memory in parallel.
+        # Quick Redis fetch of last assistant turn for context-aware routing (< 1ms local).
+        _last_jarvis_for_router: str | None = None
+        try:
+            _tail = REDIS_CLIENT.lrange(f"chat:{user_code}:{req.session_id}", -4, -1)
+            _last_jarvis_for_router = next(
+                (json.loads(m).get("content", "")[:300]
+                 for m in reversed(_tail)
+                 if json.loads(m).get("role") == "assistant"),
+                None,
+            )
+        except Exception:
+            pass
+
         _gather1 = await asyncio.gather(
             asyncio.to_thread(
                 build_dynamic_prefix,
@@ -909,7 +922,7 @@ async def chat(req: ChatRequest):
                 req.voice_mode,
                 user_message=_history_user_msg,
             ),
-            llm_route(_history_user_msg, google_available=_google_available),
+            llm_route(_history_user_msg, google_available=_google_available, last_jarvis=_last_jarvis_for_router),
             asyncio.to_thread(
                 get_conversation, user_code, req.session_id, _HIST_FETCH_N
             ),

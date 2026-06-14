@@ -143,15 +143,21 @@ def _log_routing_sample(
 # ── Core call ─────────────────────────────────────────────────────────────
 
 
-async def llm_route(message: str, google_available: bool = True) -> RouterResult | None:
+async def llm_route(message: str, google_available: bool = True, last_jarvis: str | None = None) -> RouterResult | None:
     """
     Call the router model (OpenAI-compatible /v1/chat/completions).
     Returns RouterResult on success, None on any failure → caller falls back
     to the embedding router automatically.
+    last_jarvis: last assistant response (truncated) — injected as <last_jarvis> for context-aware routing.
     """
     # Truncate to 400 chars — enough to classify intent without risking the router answering.
     routing_message = message[:400]
-    prompt = get_prompt("ROUTER_USER").format(message=routing_message)
+    last_jarvis_block = (
+        f"<last_jarvis>{last_jarvis[:300]}</last_jarvis>\n" if last_jarvis else ""
+    )
+    prompt = get_prompt("ROUTER_USER").format(
+        message=routing_message, last_jarvis_block=last_jarvis_block
+    )
 
     try:
         # response_format is supported by OpenAI and mlx-lm ≥ 0.21.
