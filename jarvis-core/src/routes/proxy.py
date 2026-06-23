@@ -8,6 +8,7 @@ Session: derived from user_code + first user message (stable per thread).
 
 import hashlib
 import json
+import os
 import re
 import time
 import uuid
@@ -15,6 +16,7 @@ from typing import Optional
 
 from config import (
     EMAIL_TO_CODE,
+    LLM_LOCAL,
     OWUI_MAX_DOC_CHARS,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
@@ -294,6 +296,113 @@ async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
         f"data: {json.dumps({'id': req_id, 'object': 'chat.completion.chunk', 'created': created, 'model': 'jarvis', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
     )
     yield "data: [DONE]\n\n"
+
+
+class _RawChatRequest(_OAIChatRequest):
+    no_think: Optional[bool] = None          # override explicite depuis le proxy
+    thinking_budget: Optional[int] = None    # transmis par le proxy depuis /effort
+
+
+@router.post("/v1/raw/chat/completions")
+async def raw_chat(req: _RawChatRequest):
+    """
+    Bypass endpoint — appel direct à stream_local() sur PRIMARY_MODEL.
+    Aucun routage Jarvis, aucune injection mémoire/RAG/état émotionnel.
+    Réservé à des clients locaux de confiance (ex: proxy Anthropic pour Claude Code).
+    Uniquement disponible quand LLM_LOCAL=True.
+    Les blocs <think>…</think> sont strippés avant d'être envoyés au client.
+
+    Contrôle du thinking (priorité décroissante) :
+      1. no_think + thinking_budget dans le body (déduits par le proxy depuis /effort)
+      2. Variable d'env RAW_NO_THINK (défaut=true)
+    Mapping /effort → thinking_budget effectué dans le proxy :
+      low   → no_think=true  (pas de thinking)
+      medium → no_think=false, budget=2048
+      high  → no_think=false, budget=4000
+      max   → no_think=false, budget=10000
+    """
+    if not LLM_LOCAL:
+        raise HTTPException(503, "LLM_LOCAL non activé — endpoint raw indisponible")
+
+    from llm_local import stream_local as _stream_local  # import tardif : mlx non chargé si LLM_LOCAL=False
+
+    messages = [
+        {"role": m.role, "content": m.content if isinstance(m.content, str) else _extract_content_parts(m.content)[0]}
+        for m in req.messages
+    ]
+
+    # Priorité : body > env var
+    if req.no_think is not None:
+        no_think = req.no_think
+    else:
+        no_think = os.getenv("RAW_NO_THINK", "true").lower() in ("yes", "true", "1")
+    thinking_budget = req.thinking_budget or 0
+    max_tokens = req.max_tokens or int(os.getenv("RAW_MAX_TOKENS", "8000"))
+    req_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    created = int(time.time())
+
+    def _sse(text: str) -> str:
+        return (
+            f"data: {json.dumps({'id': req_id, 'object': 'chat.completion.chunk', 'created': created, 'model': PRIMARY_MODEL, 'choices': [{'index': 0, 'delta': {'content': text}, 'finish_reason': None}]})}\n\n"
+        )
+
+    async def _generate():
+        buffer = ""
+        think_done = no_think  # True → stream direct sans buffering
+
+        async for chunk in _stream_local(
+            messages,
+            model=PRIMARY_MODEL,
+            no_think=no_think,
+            max_tokens=max_tokens,
+            temperature=req.temperature,
+            thinking_budget=thinking_budget,
+        ):
+            if think_done:
+                yield _sse(chunk)
+                continue
+
+            buffer += chunk
+
+            if "</think>" in buffer:
+                after = buffer.split("</think>", 1)[1]
+                think_done = True
+                buffer = ""
+                if after:
+                    yield _sse(after)
+            elif len(buffer) > 100_000:  # garde-fou si </think> n'arrive jamais
+                think_done = True
+                yield _sse(buffer)
+                buffer = ""
+
+        yield (
+            f"data: {json.dumps({'id': req_id, 'object': 'chat.completion.chunk', 'created': created, 'model': PRIMARY_MODEL, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+        )
+        yield "data: [DONE]\n\n"
+
+    if req.stream:
+        return StreamingResponse(
+            _generate(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # Non-streaming : collecte puis strip thinking
+    full = ""
+    async for chunk in _stream_local(
+        messages, model=PRIMARY_MODEL, no_think=no_think,
+        max_tokens=max_tokens, temperature=req.temperature,
+        thinking_budget=thinking_budget,
+    ):
+        full += chunk
+    if not no_think and "</think>" in full:
+        full = full.split("</think>", 1)[1].strip()
+    return {
+        "id": req_id, "object": "chat.completion", "created": created,
+        "model": PRIMARY_MODEL,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": full}, "finish_reason": "stop"}],
+        "usage": {},
+    }
 
 
 @router.get("/v1/models")

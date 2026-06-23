@@ -4,7 +4,7 @@
 
 LOG="/opt/jarvis/logs/cron-index.log"
 VENV="/opt/jarvis/venv/bin/python3"
-SCRIPT="/opt/jarvis/scripts/upload-to-openwebui.py"
+SCRIPT="/opt/jarvis/scripts/uploadrag.py"
 LOCK="/tmp/jarvis-indexing.lock"
 
 # Prevent concurrent runs

@@ -9,8 +9,6 @@ struct ThinkingBanner: View {
 
     let text: String
 
-    // Anchor for elapsed-time computation — reset on every appear.
-    @State private var startTime: Date = .now
     // Gear rotation angle, driven by a repeating SwiftUI animation.
     @State private var gearAngle: Double = 0
 
@@ -53,40 +51,27 @@ struct ThinkingBanner: View {
                 .frame(width: 1, height: 14)
 
             // ── Scrolling ticker ──────────────────────────────────────────
-            // TimelineView drives the offset from wall-clock time so that:
-            //   • text updates (new think chunks) never restart the animation
-            //   • the scroll speed is constant regardless of text length
+            // Text is end-anchored: always shows the latest tokens at the right
+            // edge. When the text is short enough to fit, it starts from x=0
+            // (beginning visible). As thinking grows, the view shifts left to
+            // keep the newest content visible — no looping animation.
             GeometryReader { geo in
-                TimelineView(.animation(minimumInterval: 1.0 / 30, paused: displayText.isEmpty)) { tl in
-                    let elapsed = tl.date.timeIntervalSince(startTime)
-                    // Fixed frame width = worst-case 120 chars × 6.8 pt (SF Mono 11 pt).
-                    // Using a constant here prevents the cycle from changing as tokens
-                    // arrive (displayText grows 0→120), which would cause phase jumps
-                    // and make the container appear to resize.
-                    let textW  = 120.0 * 6.8          // 816 pt — constant
-                    let contW  = max(Double(geo.size.width), 1.0)  // guard against 0 on first pass
-                    let cycle  = textW + contW
-                    let speed  = 80.0
-                    let phase  = (elapsed * speed).truncatingRemainder(dividingBy: cycle)
-                    let xOff   = contW - phase
+                let charW: CGFloat = 6.8
+                let textWidth = CGFloat(displayText.count) * charW
+                let xOff = min(0.0, geo.size.width - textWidth)
 
-                    Text(displayText)
-                        .font(.system(size: 11, weight: .light, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.45))
-                        .lineLimit(1)
-                        // Explicit fixed frame instead of fixedSize(horizontal:).
-                        // fixedSize propagates the text's ideal width up through
-                        // TimelineView → GeometryReader → HStack, making the
-                        // clipping window appear to change size on each layout pass.
-                        .frame(width: CGFloat(textW), alignment: .leading)
-                        .offset(x: xOff)
-                }
+                Text(displayText)
+                    .font(.system(size: 11, weight: .light, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.45))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(width: max(textWidth, 1), alignment: .leading)
+                    .offset(x: xOff)
             }
             .clipped()
             .padding(.trailing, 10)
         }
         .frame(height: 28)
         .background(Color.jarvisBar)
-        .onAppear { startTime = .now }
     }
 }
