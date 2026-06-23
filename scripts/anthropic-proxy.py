@@ -37,8 +37,10 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-JARVIS_URL = os.getenv("PROXY_JARVIS_URL", "http://localhost:8000")
-PORT       = int(os.getenv("PROXY_PORT", "8090"))
+JARVIS_URL   = os.getenv("PROXY_JARVIS_URL",  "http://localhost:8000")
+PORT         = int(os.getenv("PROXY_PORT",        "8090"))
+# ~32K tokens × 4 chars/token — garde une marge pour le system prompt et la réponse
+MAX_CTX_CHARS = int(os.getenv("PROXY_MAX_CTX_CHARS", str(28_000 * 4)))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [proxy] %(message)s")
 log = logging.getLogger("anthropic-proxy")
@@ -109,6 +111,48 @@ def _content_to_text(content) -> str:
     return str(content)
 
 
+def _truncate_messages(messages: list[dict]) -> list[dict]:
+    """
+    Tronque l'historique pour rester sous MAX_CTX_CHARS.
+    Stratégie : garde toujours le system prompt + le dernier message user,
+    puis remplit en partant de la fin (messages les plus récents en priorité).
+    """
+    if not messages:
+        return messages
+
+    total = sum(len(m["content"]) for m in messages)
+    if total <= MAX_CTX_CHARS:
+        return messages
+
+    system = [m for m in messages if m["role"] == "system"]
+    convs  = [m for m in messages if m["role"] != "system"]
+
+    sys_chars  = sum(len(m["content"]) for m in system)
+    budget     = MAX_CTX_CHARS - sys_chars
+    kept       = []
+    used       = 0
+
+    # Dernier message obligatoire (la question courante)
+    if convs:
+        last = convs[-1]
+        kept.append(last)
+        used += len(last["content"])
+        convs = convs[:-1]
+
+    # Remplit l'historique en remontant du plus récent
+    for msg in reversed(convs):
+        if used + len(msg["content"]) > budget:
+            break
+        kept.insert(0, msg)
+        used += len(msg["content"])
+
+    dropped = len(convs) - (len(kept) - 1)
+    if dropped > 0:
+        log.warning("Contexte tronqué : %d message(s) anciens supprimés (%d → %d chars)", dropped, total, used + sys_chars)
+
+    return system + kept
+
+
 def _build_jarvis_payload(body: dict, no_think: bool, thinking_budget: int) -> dict:
     """Construit le payload pour /v1/raw/chat/completions."""
     messages = []
@@ -120,6 +164,8 @@ def _build_jarvis_payload(body: dict, no_think: bool, thinking_budget: int) -> d
 
     for msg in body.get("messages", []):
         messages.append({"role": msg["role"], "content": _content_to_text(msg["content"])})
+
+    messages = _truncate_messages(messages)
 
     payload: dict = {
         "messages":       messages,
