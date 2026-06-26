@@ -42,7 +42,24 @@ PORT         = int(os.getenv("PROXY_PORT",        "8090"))
 # ~32K tokens × 4 chars/token — garde une marge pour le system prompt et la réponse
 MAX_CTX_CHARS = int(os.getenv("PROXY_MAX_CTX_CHARS", str(28_000 * 4)))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [proxy] %(message)s")
+LOG_FILE  = os.getenv("PROXY_LOG_FILE",  "/opt/jarvis/logs/anthropic-proxy.log")
+LOG_DEBUG = os.getenv("PROXY_LOG_DEBUG", "/opt/jarvis/logs/anthropic-proxy-debug.log")
+
+_fmt = logging.Formatter("%(asctime)s [proxy] %(levelname)s %(message)s")
+
+_file_info = logging.FileHandler(LOG_FILE,  encoding="utf-8")
+_file_info.setLevel(logging.INFO)
+_file_info.setFormatter(_fmt)
+
+_file_debug = logging.FileHandler(LOG_DEBUG, encoding="utf-8")
+_file_debug.setLevel(logging.DEBUG)
+_file_debug.setFormatter(_fmt)
+
+_console = logging.StreamHandler()
+_console.setLevel(logging.INFO)
+_console.setFormatter(_fmt)
+
+logging.basicConfig(level=logging.DEBUG, handlers=[_file_info, _file_debug, _console])
 log = logging.getLogger("anthropic-proxy")
 
 app = FastAPI(title="Anthropic→Jarvis raw proxy")
@@ -222,6 +239,8 @@ async def messages(request: Request):
         "→ stream=%s no_think=%s budget=%d msgs=%d",
         payload["stream"], no_think, thinking_budget, len(payload["messages"]),
     )
+    log.debug("body reçu: %s", json.dumps(body)[:500])
+    log.debug("payload Jarvis: %s", json.dumps({**payload, "messages": f"[{len(payload['messages'])} msgs]"}))
 
     client = httpx.AsyncClient(timeout=300)
     target = f"{JARVIS_URL}/v1/raw/chat/completions"
@@ -229,6 +248,10 @@ async def messages(request: Request):
     if payload["stream"]:
         req  = client.build_request("POST", target, json=payload)
         resp = await client.send(req, stream=True)
+        log.debug("Jarvis stream status: %d", resp.status_code)
+        if resp.status_code != 200:
+            body_err = await resp.aread()
+            log.error("Jarvis stream error %d: %s", resp.status_code, body_err[:300])
         return StreamingResponse(
             _stream_anthropic(resp),
             media_type="text/event-stream",
@@ -236,6 +259,9 @@ async def messages(request: Request):
         )
 
     resp    = await client.post(target, json=payload)
+    log.debug("Jarvis sync status: %d", resp.status_code)
+    if resp.status_code != 200:
+        log.error("Jarvis sync error %d: %s", resp.status_code, resp.text[:300])
     data    = resp.json()
     content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
     usage   = data.get("usage", {})

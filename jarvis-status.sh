@@ -137,8 +137,34 @@ else
 fi
 
 echo ""
+echo "── Anthropic Proxy (Claude Code local) ──"
+PROXY_PID=$(launchctl list | awk '/com.jarvis.anthropic-proxy/ {print $1}')
+if [ -n "$PROXY_PID" ] && [ "$PROXY_PID" != "-" ]; then
+    PROXY_HEALTH=$(curl -s --connect-timeout 2 http://localhost:8090/health 2>/dev/null)
+    if [ -n "$PROXY_HEALTH" ]; then
+        echo "  ✅ anthropic-proxy — PID $PROXY_PID, écoute :8090"
+        # Vérifie que l'endpoint raw de Jarvis répond
+        RAW_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 2 \
+            -X POST http://localhost:8000/v1/raw/chat/completions \
+            -H "Content-Type: application/json" \
+            -d '{"messages":[{"role":"user","content":"ping"}],"stream":false}')
+        if [ "$RAW_CODE" = "200" ]; then
+            echo "  ✅ /v1/raw/chat/completions — OK"
+        else
+            echo "  ❌ /v1/raw/chat/completions — HTTP $RAW_CODE (Jarvis redémarré ?)"
+        fi
+    else
+        echo "  ❌ anthropic-proxy — process $PROXY_PID mais ne répond pas sur :8090"
+    fi
+else
+    echo "  ⬜ anthropic-proxy — non démarré"
+    echo "     launchctl start com.jarvis.anthropic-proxy"
+fi
+
+echo ""
 echo "── Access ──"
 IP=$(hostname -I | awk '{print $1}')
 echo "  Open WebUI:  http://${IP}:3000"
 echo "  Jarvis API:  http://${IP}:8000"
+echo "  Proxy CC:    http://${IP}:8090  (ANTHROPIC_BASE_URL)"
 echo "  Qdrant:      http://${IP}:6333/dashboard"
