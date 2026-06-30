@@ -94,8 +94,8 @@ LRU_KV_MAX_BYTES = int(float(os.getenv("LRU_KV_GB", "4.0")) * 1024**3)
 
 # ── Debug logging ─────────────────────────────────────────────────────────
 
-def _debug_log(model_short: str, no_think: bool, prompt: str, raw_output: str) -> None:
-    if not LLM_DEBUG_PROMPTS:
+def _debug_log(model_short: str, no_think: bool, prompt: str, raw_output: str, skip: bool = False) -> None:
+    if not LLM_DEBUG_PROMPTS or skip:
         return
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sep = "=" * 80
@@ -838,6 +838,7 @@ def _generate_sync(
     session_id: str = "",
     json_response: bool = False,
     thinking_budget: int = 0,
+    skip_debug_log: bool = False,
 ) -> str:
     """Blocking generation. Always call via asyncio.to_thread from async code."""
     model, tokenizer = _load_model(model_path)
@@ -877,7 +878,7 @@ def _generate_sync(
                 result = result.split(st, 1)[0]
         seen_end_think = not no_think
 
-    _debug_log(model_short, no_think, prompt_text, result)
+    _debug_log(model_short, no_think, prompt_text, result, skip=skip_debug_log)
     resp_tokens = len(result) // 4
     _log_stats(model_short, "json" if json_response else "text", no_think,
                "early-stop" if early_stopped else "eos/limit",
@@ -1032,6 +1033,7 @@ async def stream_local(
     no_think: bool = False,
     session_id: str = "",
     thinking_budget: int = 0,
+    skip_debug_log: bool = False,
     **_kwargs,
 ) -> AsyncGenerator[str, None]:
     """Token-by-token streaming via mlx_lm.stream_generate."""
@@ -1100,7 +1102,7 @@ async def stream_local(
             _generation_ok = False
         finally:
             raw_resp = "".join(raw_chunks)
-            _debug_log(model_short, no_think, prompt_text, raw_resp)
+            _debug_log(model_short, no_think, prompt_text, raw_resp, skip=skip_debug_log)
             resp_tokens = len(raw_resp) // 4
             thinking_active = "</think>" in raw_resp or "</think >" in raw_resp
             _log_stats(model_short, "stream", no_think, "eos/limit",

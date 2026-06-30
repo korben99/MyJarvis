@@ -357,6 +357,7 @@ async def raw_chat(req: _RawChatRequest):
             max_tokens=max_tokens,
             temperature=req.temperature,
             thinking_budget=thinking_budget,
+            skip_debug_log=True,
         ):
             if think_done:
                 yield _sse(chunk)
@@ -393,6 +394,7 @@ async def raw_chat(req: _RawChatRequest):
         messages, model=PRIMARY_MODEL, no_think=no_think,
         max_tokens=max_tokens, temperature=req.temperature,
         thinking_budget=thinking_budget,
+        skip_debug_log=True,
     ):
         full += chunk
     if not no_think and "</think>" in full:

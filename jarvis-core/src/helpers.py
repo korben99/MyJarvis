@@ -390,7 +390,7 @@ _SESSION_SUMMARY_PREFIX = "session:summary:"
 
 
 def get_session_summary_data(user_code: str, session_id: str) -> dict | None:
-    """Return {text, msg_count} for the session conversation summary, or None."""
+    """Return {text, last_ts} for the session conversation summary, or None."""
     raw = get_redis().get(f"{_SESSION_SUMMARY_PREFIX}{user_code}:{session_id}")
     if not raw:
         return None
@@ -400,9 +400,9 @@ def get_session_summary_data(user_code: str, session_id: str) -> dict | None:
         return None
 
 
-def set_session_summary_data(user_code: str, session_id: str, text: str, msg_count: int) -> None:
-    """Persist conversation summary with its coverage watermark."""
-    data = json.dumps({"text": text, "msg_count": msg_count}, ensure_ascii=False)
+def set_session_summary_data(user_code: str, session_id: str, text: str, last_ts: float) -> None:
+    """Persist conversation summary with the timestamp of the last covered message."""
+    data = json.dumps({"text": text, "last_ts": last_ts}, ensure_ascii=False)
     get_redis().setex(
         f"{_SESSION_SUMMARY_PREFIX}{user_code}:{session_id}",
         CHAT_LOG_TTL,

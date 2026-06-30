@@ -96,6 +96,7 @@ from memory import (
     atomic_json_write,
     consolidate_memories,
     curative_profile_cleanup,
+    update_profile_narrative,
     get_autobiographical_facts,
     get_embed_model,
     get_self_memory,
@@ -202,9 +203,9 @@ _DEVICE_TOKEN_PREFIX = (
     "jarvis:device:token"  # device token per user (set by /device/register)
 )
 _PUSH_COOLDOWN_PREFIX = (
-    "jarvis:push:cooldown"  # prevent push flooding (1 push per 2h per user)
+    "jarvis:push:cooldown"  # prevent push flooding (1 push per 48h per user)
 )
-_PUSH_COOLDOWN_TTL = 72000  # 20h
+_PUSH_COOLDOWN_TTL = 172800  # 48h
 _IOS_SESSION_ID = "iphone-main"  # session used by the iOS app (hardcoded in Swift)
 
 
@@ -1093,6 +1094,10 @@ def _action_queue_push(params: dict) -> str:
 
     cooldown_key = f"{_PUSH_COOLDOWN_PREFIX}:{user_code}"
 
+    # Enforce cooldown in code — the reflection LLM may ignore the prompt constraint.
+    if r.exists(cooldown_key):
+        return f"queue_push: cooldown active for {user_code}"
+
     # Always queue to Redis — polling fallback if APNs fails or app is in foreground.
     pending_key = f"{_PUSH_PENDING_PREFIX}:{user_code}"
     r.rpush(
@@ -1209,7 +1214,7 @@ def _action_ask_user(params: dict) -> str:
     """
     Queue a short clarification question as an iOS push notification.
     The user answers naturally in the next chat message; the analyzer captures the reply.
-    Uses the same push cooldown as queue_push (max 1 per 2h per user).
+    Uses the same push cooldown as queue_push (max 1 per 48h per user).
     """
     user_code = params.get("user_code", "")
     question = params.get("question", "").strip()
@@ -1464,11 +1469,12 @@ async def run_nightly_interaction_review() -> None:
     """
     Nightly per-user conversation review. Called by APScheduler at 23:00.
 
-    For each user with conversations yesterday (4 sequential LLM calls):
+    For each user with conversations yesterday (5 sequential LLM calls):
       Call 1 — NIGHTLY_FACTS  : user insights → Qdrant autobio + relation update + suggestions
       Call 2 — NIGHTLY_SELF   : Jarvis self-reflection → learnings, opinions, growth_log
       Call 3 — NIGHTLY_CLEANING: Qdrant autobio curation (archive outdated, delete errors)
       Call 4 — profile dedup  : curative_profile_cleanup() → Redis profile hash (sync, no LLM if < 5 keys)
+      Call 5 — profile narrative: update_profile_narrative() → Redis user:{code}:profile_narrative (7-day TTL)
 
     Each user's write to jarvis-self.json is done under self_memory_lock
     immediately after the LLM call — no data is held across await points.
@@ -1651,6 +1657,7 @@ async def run_nightly_interaction_review() -> None:
         # ── Call 4: profile dedup (Redis profile hash) ────────────────────
         stable_profile = USERS.get(user_code, {}).get("profile", {})
         await asyncio.to_thread(curative_profile_cleanup, user_code, stable_profile)
+        await asyncio.to_thread(update_profile_narrative, user_code, stable_profile)
 
         logger.info("Nightly review done for %s — %s", user_code, summary[:80])
 

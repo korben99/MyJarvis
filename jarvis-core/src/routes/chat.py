@@ -123,19 +123,21 @@ async def _update_session_summary(user_code: str, session_id: str) -> None:
 
     Self-contained: fetches state from Redis, checks threshold, generates if needed.
     Uses the PRIMARY model — runs after response is sent, no GPU conflict.
-    Trigger: uncovered messages (since last summary) exceed HIST_CONV_SUMMARIZE_THRESHOLD.
+    Trigger: uncovered messages (ts > last_ts) exceed HIST_CONV_SUMMARIZE_THRESHOLD chars.
+    Tracks coverage by timestamp so it works correctly with LTRIM-capped lists.
     """
     try:
         summary_data = get_session_summary_data(user_code, session_id)
-        covered_count = summary_data["msg_count"] if summary_data else 0
+        # last_ts=0.0 covers legacy summaries (msg_count-based) — treats all as uncovered,
+        # which forces a fresh summary with correct last_ts on the next run.
+        last_ts = summary_data.get("last_ts", 0.0) if summary_data else 0.0
         existing_text = summary_data["text"] if summary_data else ""
 
-        total_count = REDIS_CLIENT.llen(f"chat:{user_code}:{session_id}")
-        uncovered_n = max(0, int(total_count) - covered_count)
-        if uncovered_n == 0:
+        all_messages = get_conversation(user_code, session_id)
+        uncovered = [m for m in all_messages if m.get("ts", 0.0) > last_ts]
+        if not uncovered:
             return
 
-        uncovered = get_conversation(user_code, session_id, limit=uncovered_n)
         uncovered_chars = sum(len(m.get("content", "")) for m in uncovered)
         if uncovered_chars <= HIST_CONV_SUMMARIZE_THRESHOLD * 4:
             return
@@ -164,14 +166,14 @@ async def _update_session_summary(user_code: str, session_id: str) -> None:
             timeout=llm_timeout(SESSION_SUMMARY_TOKENS),
         )
         if content and content.strip():
-            set_session_summary_data(
-                user_code, session_id, content.strip(), int(total_count)
-            )
+            new_last_ts = uncovered[-1].get("ts", 0.0)
+            set_session_summary_data(user_code, session_id, content.strip(), new_last_ts)
             logger.debug(
-                "session summary updated: %s/%s (covers %d msgs)",
+                "session summary updated: %s/%s (%d uncovered msgs, last_ts=%.3f)",
                 user_code,
                 session_id,
-                total_count,
+                len(uncovered),
+                new_last_ts,
             )
     except Exception as exc:
         logger.warning("session summary update failed: %s", exc)
@@ -511,13 +513,16 @@ async def _sse_stream(ctx: _SseCtx):
                 ],
             }
         )
-        yield f"data: {_done_payload}\n\n"
+        # Schedule background tasks BEFORE the final yield — after it, the consumer
+        # (e.g. OpenWebUI) may close the connection, which sends GeneratorExit into
+        # this generator and skips any code that follows the yield.
         asyncio.create_task(
             post_analysis(
                 ctx.session_id, ctx.user_code, ctx.history_user_content, response_text
             )
         )
         asyncio.create_task(_update_session_summary(ctx.user_code, ctx.session_id))
+        yield f"data: {_done_payload}\n\n"
     except asyncio.CancelledError:
         logger.info("Client disconnected")
         _saved = False
@@ -1190,24 +1195,21 @@ async def chat(req: ChatRequest):
     _session_summary = _summary_data["text"] if _summary_data else ""
 
     # When a session summary exists, inject only the messages NOT yet covered by it.
-    # The summary replaces everything up to msg_count; new messages are still injected raw.
+    # Coverage tracked by timestamp (last_ts) — immune to LTRIM-capped list rotation.
     if _session_summary:
-        _total = int(REDIS_CLIENT.llen(f"chat:{user_code}:{req.session_id}"))
-        _uncovered_n = max(0, _total - _summary_data["msg_count"])
-        _uncovered_hist = list(hist[-_uncovered_n:]) if _uncovered_n > 0 else []
+        _last_ts = _summary_data.get("last_ts", 0.0)
+        _uncovered_hist = [m for m in hist if m.get("ts", 0.0) > _last_ts]
         # Prepend the last user+assistant exchange from covered history if not already
         # present, so the model sees the full prior turn, not just its own last response.
         has_assistant = any(m["role"] == "assistant" for m in _uncovered_hist)
         if not has_assistant:
-            _covered = hist[:-_uncovered_n] if _uncovered_n > 0 else hist
+            _covered = [m for m in hist if m.get("ts", 0.0) <= _last_ts]
             last_asst_idx = next(
                 (i for i, m in enumerate(reversed(_covered)) if m["role"] == "assistant"),
                 None,
             )
             if last_asst_idx is not None:
                 asst_pos = len(_covered) - 1 - last_asst_idx
-                # Include the user turn immediately before the assistant turn so the
-                # model sees the full exchange, not just its own previous response.
                 anchor = _covered[asst_pos - 1 : asst_pos + 1] if asst_pos > 0 else [_covered[asst_pos]]
                 _uncovered_hist = anchor + _uncovered_hist
         hist_slice = _trim_history_to_budget(_uncovered_hist, HIST_CONV_TOKEN_BUDGET)

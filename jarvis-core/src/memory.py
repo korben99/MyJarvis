@@ -58,6 +58,7 @@ from config import (
     PRIMARY_API_URL,
     PRIMARY_MODEL,
     PRIMARY_TIMEOUT,
+    PROFILE_NARRATIVE_TOKENS,
     QDRANT_COLLECTION,
     QDRANT_MEMORY_COLLECTION,
     RAG_SCORE_THRESHOLD,
@@ -69,6 +70,7 @@ from config import (
     ROUTER_TIMEOUT,
     SELF_MEMORY_PATH,
     USER_CODES,
+    USERS,
     llm_timeout,
 )
 from helpers import (
@@ -1759,6 +1761,7 @@ def build_memory_context(
     pipe.get(f"user:{user_code}:projects")  # 2
     pipe.get(f"jarvis:{user_code}:tomorrow_suggestions")  # 3
     pipe.get(f"cache:timeline:{user_code}")  # 4 — avoids 2nd Redis RTT
+    pipe.get(f"user:{user_code}:profile_narrative")  # 5
     _pipe_results = pipe.execute()
 
     profile = _pipe_results[0] or {}
@@ -1766,6 +1769,7 @@ def build_memory_context(
     _proj_raw = _pipe_results[2]
     _sugg_raw = _pipe_results[3]
     _timeline_cached = _pipe_results[4]
+    _profile_narrative = _pipe_results[5]
 
     # Context-aware profile filtering: keep always-inject keys + top-N by keyword overlap.
     # Only applied when user_message is provided and profile is large enough to be worth filtering.
@@ -1793,8 +1797,13 @@ def build_memory_context(
             user_message[:40],
         )
 
-    # User profile — namespaced keys (hobby:kart) are grouped by category for readability
-    if profile:
+    # Narrative profile (generated nightly) — replaces k/v hash rendering.
+    # Falls back to raw k/v if narrative not yet generated.
+    if _profile_narrative:
+        parts.append(
+            "<profil_narratif>\n" + _profile_narrative + "\n</profil_narratif>"
+        )
+    elif profile:
         grouped: dict[str, list[str]] = {}
         scalars: list[tuple[str, str]] = []
         for k, v in profile.items():
@@ -1806,7 +1815,7 @@ def build_memory_context(
         plines = [f"- {k}: {v}" for k, v in scalars]
         plines += [f"- {cat}: {', '.join(vals)}" for cat, vals in grouped.items()]
         parts.append(
-            "<profil_utilisateur>\n" + "\n".join(plines) + "\n</profil_utilisateur>"
+            "<profil_narratif>\n" + "\n".join(plines) + "\n</profil_narratif>"
         )
 
     # User preferences
@@ -2138,6 +2147,65 @@ def curative_profile_cleanup(user_code: str, stable_profile: dict | None = None)
 
     except Exception as exc:
         logger.error("curative_profile_cleanup failed for %s: %s", user_code, exc)
+
+
+def update_profile_narrative(user_code: str, stable_profile: dict | None = None) -> bool:
+    """Generate a ~300-token narrative profile and store it in Redis.
+
+    Synthesises profile hash + interest_weights + autobiographical facts into prose.
+    The stable_profile (profil_utilisateur) is passed explicitly so the LLM knows
+    what NOT to repeat. Stored at user:{user_code}:profile_narrative with 7-day TTL.
+    Called nightly after curative_profile_cleanup — cross-session, per user.
+    Returns True if the narrative was generated and stored.
+    """
+    r = get_redis()
+    profile = r.hgetall(f"user:{user_code}:profile")
+    interests = get_interest_weights(user_code)
+    autobio = get_autobiographical_facts(user_code, limit=5, newest_first=True)
+
+    if not profile and not interests and not autobio:
+        logger.debug("[%s] update_profile_narrative: no data, skipping", user_code)
+        return False
+
+    name = profile.get("name") or USERS.get(user_code, {}).get("firstname", user_code)
+
+    profile_str = (
+        "\n".join(f"- {k}: {v}" for k, v in profile.items() if k != "name")
+        or "aucun fait enregistré"
+    )
+    top_interests = sorted(interests.items(), key=lambda x: x[1], reverse=True)[:15]
+    interests_str = ", ".join(f"{k} ({v:.1f})" for k, v in top_interests) or "aucun"
+    autobio_str = "\n".join(f"- {f}" for f in autobio[:5]) or "aucun souvenir disponible"
+
+    _stable = stable_profile or USERS.get(user_code, {}).get("profile", {})
+    stable_profile_str = (
+        "\n".join(f"- {k}: {v}" for k, v in _stable.items() if v)
+        or "aucune"
+    )
+
+    prompt = get_prompt("PROFILE_NARRATIVE_PROMPT").format(
+        name=name,
+        profile_str=profile_str,
+        interests_str=interests_str,
+        autobio_str=autobio_str,
+        stable_profile_str=stable_profile_str,
+    )
+
+    content = call_llm(
+        [{"role": "user", "content": prompt}],
+        model=PRIMARY_MODEL,
+        api_url=PRIMARY_API_URL,
+        api_key=PRIMARY_API_KEY,
+        temperature=DEFAULT_TEMP,
+        max_tokens=PROFILE_NARRATIVE_TOKENS,
+        no_think=True,
+    )
+
+    if content and content.strip():
+        r.setex(f"user:{user_code}:profile_narrative", 7 * 86400, content.strip())
+        logger.info("[%s] profile narrative updated (%d chars)", user_code, len(content))
+        return True
+    return False
 
 
 def _decay_autobiographical_memories(user_code: str) -> int:

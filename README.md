@@ -492,7 +492,7 @@ EVERY 5H (défaut 6h — configurable via REFLECTION_INTERVAL_HOURS) — self.py
   └── generate_proactive_push()
         └── Redis jarvis:push:pending:{code}  (TTL, 2h cooldown per user)
 
-23:00 NIGHTLY — self.py → run_nightly_interaction_review()  [4 sequential calls/user]
+23:00 NIGHTLY — self.py → run_nightly_interaction_review()  [5 sequential calls/user]
   ├── Call 1 — NIGHTLY_FACTS  (user insight + relation update)
   │     ├── store_autobiographical_event()   → Qdrant autobio  (importance=0.70, insights_durables only)
   │     │     insights_evenements passed to cleaning context but NOT stored in autobio
@@ -506,7 +506,11 @@ EVERY 5H (défaut 6h — configurable via REFLECTION_INTERVAL_HOURS) — self.py
   │     │     sets status="past", archived_date — recalled at ×0.4, excluded from timeline
   │     └── retract_autobiographical_event()   → Qdrant hard delete
   │           reserved for factual errors and exact duplicates only
-  └── Call 4 — curative_profile_cleanup()  (Redis profile hash dedup — sync LLM call)
+  ├── Call 4 — curative_profile_cleanup()  (Redis profile hash dedup — sync LLM call)
+  └── Call 5 — update_profile_narrative()  (Redis profile_narrative — LLM prose ~300 tokens, 7-day TTL)
+        reads: profile hash + interest_weights + autobiographical facts (top 5)
+        excludes: profil_utilisateur fields (already in system prompt — not repeated)
+        writes: Redis user:{code}:profile_narrative  (TTL 7 days)
         └── Redis user:{code}:profile  — merge-before-delete: updates then deletes duplicates
               skip if profile < 5 keys
 
@@ -572,13 +576,13 @@ SYSTEM_BASE_FR                    (~560 chars / ~224 tok — personnalité Jarvi
     ↓
 "Tu parles avec <firstname>. Tutoie toujours…"
     ↓
-<profil_stable>                   (~60–80 tokens — données biographiques constantes depuis users_list.json)
+<profil_utilisateur>                   (~60–80 tokens — données biographiques constantes depuis users_list.json)
 famille / taille / poids / année de naissance / habitation / travail / intérêts / voiture
-</profil_stable>
+</profil_utilisateur>
 ```
 
 Le système prompt est **per-user** mais reste token-identique d'un tour à l'autre → LRU cache hit garanti.
-Le `<profil_stable>` contient uniquement des faits constants (≥ 6 mois de stabilité). Les données dynamiques restent dans le prefix.
+Le `<profil_utilisateur>` contient uniquement des faits constants (≥ 6 mois de stabilité). Les données dynamiques restent dans le prefix.
 
 **Dynamic prefix** — `build_dynamic_prefix()` — prepended to each user message (run in thread alongside the LLM router, via `asyncio.to_thread`):
 ```
@@ -612,16 +616,18 @@ The final user message = `dynamic_prefix + [conversation_summary] + assembled_co
 
 **Session conversation compression** (`_update_session_summary` in `routes/chat.py`):
 
-Triggered as a background task after each response (post-LLM, GPU free). When the uncovered conversation since the last summary exceeds `HIST_CONV_SUMMARIZE_THRESHOLD` tokens, the PRIMARY model generates a rolling summary capped at `SESSION_SUMMARY_TOKENS`. The summary and its coverage watermark (`msg_count`) are stored in Redis under `session:summary:{user_code}:{session_id}` with `CHAT_LOG_TTL`.
+Triggered as a background task after each response (post-LLM, GPU free). When uncovered messages since the last summary exceed `HIST_CONV_SUMMARIZE_THRESHOLD` chars, the PRIMARY model generates a rolling summary capped at `SESSION_SUMMARY_TOKENS`. The summary and its coverage watermark (`last_ts` — Unix timestamp of the last covered message) are stored in Redis under `session:summary:{user_code}:{session_id}` with `CHAT_LOG_TTL`.
+
+Watermarking is timestamp-based, not count-based: comparing against message count fails once the Redis list is capped at `CHAT_MAX_MESSAGES` (100) because `llen = total_covered` → `uncovered = 0` forever. With `last_ts`, any message with `ts > last_ts` is uncovered regardless of list capacity.
 
 **Injection cycle:**
 
 | State | `hist_slice` injected | Summary block |
 |---|---|---|
 | No summary yet | Last N messages trimmed to `HIST_CONV_TOKEN_BUDGET` | — |
-| Summary exists | Messages since `msg_count` (uncovered), trimmed to `HIST_CONV_TOKEN_BUDGET` | `<conversation_summary>` injected before context |
+| Summary exists | Messages with `ts > last_ts` (uncovered), trimmed to `HIST_CONV_TOKEN_BUDGET` | `<conversation_summary>` injected before context |
 
-When a new summary is generated, `msg_count` advances to the current total. On the next turn, `uncovered_n = total − msg_count = 0` → no raw history, only the summary block. Accumulation restarts from there.
+When a new summary is generated, `last_ts` advances to the timestamp of the newest covered message. On the next turn, all messages with `ts ≤ last_ts` are covered → no raw history for those, only the summary block. Accumulation restarts from there. If the uncovered slice has no assistant turn, the last covered user+assistant exchange is prepended as an anchor.
 
 The cumulative prompt overhead is bounded at `HIST_CONV_TOKEN_BUDGET + SESSION_SUMMARY_TOKENS` regardless of session length.
 
@@ -629,7 +635,7 @@ The cumulative prompt overhead is bounded at `HIST_CONV_TOKEN_BUDGET + SESSION_S
 
 | Section | Source | Always injected? |
 |---------|--------|-----------------|
-| `PROFIL UTILISATEUR` | Redis hash `user:{code}:profile` — grouped by namespace | Only if profile exists |
+| `profil_narratif` | Redis string `user:{code}:profile_narrative` (LLM prose, 7-day TTL) — falls back to k/v hash if absent | Only if profile exists |
 | `PRÉFÉRENCES` | Redis hash `user:{code}:preferences` | Only if prefs exist |
 | `PROJETS ACTIFS` | Redis `user:{code}:projects` — status `in_progress` only | Only if projects exist |
 | `SUJETS RÉCENTS (24h)` | Topics from last 10 conversations in Redis | Only if topics exist |
@@ -766,12 +772,12 @@ User message (via /chat or /v1/chat/completions)
 | **KV cache prefix caching** | −1 à −3 s dès le tour 2 | Cache KV MLX par session (LRU ×8). Seuls les nouveaux tokens sont calculés à chaque tour. |
 | **Vision resize 1024 px** | ~3–5× sur inférence VLM | Photo iPhone (12 MP) redimensionnée avant `vlm_generate` — de 8–10 tiles à 2–4 tiles. `max_tokens` 1200 → 700. |
 | **Router LoRA Qwen2.5-1.5B** | −0.5 à −1.2 s vs Hermes-3B | Fine-tuned sur 492 échantillons (val loss 0.047). Warmup avec `ROUTER_SYSTEM` → LRU hit dès le 1er appel. Tour 2+ : 95% cache hit (1044/1093 tok). |
-| **Profil stable dans system prompt** | ~0.1 s / tour | `<profil_stable>` (~80 tokens) injecté dans le system prompt per-user — jamais reprocessé après le warmup. |
+| **Profil stable dans system prompt** | ~0.1 s / tour | `<profil_utilisateur>` (~80 tokens) injecté dans le system prompt per-user — jamais reprocessé après le warmup. |
 
 ### Architecture KV cache
 
 ```
-Tour 1 : [SYS+profil_stable ~310 tok] + [CTX dynamique + msg1 ~600 tok]
+Tour 1 : [SYS+profil_utilisateur ~310 tok] + [CTX dynamique + msg1 ~600 tok]
           ↑ tout calculé                   ↑ tout calculé
           └── mis en cache ────────────────┘
 
@@ -781,9 +787,9 @@ Tour 2 : [SYS+profil ~310 tok] + [CTX1+msg1+rep1 ~900 tok] + [CTX2+msg2 ~600 tok
 Tour N : skip de (N-1) × ~900 tokens → seulement ~600 tokens nouveaux
 ```
 
-Le `<profil_stable>` (~80 tokens : famille, taille, job…) est inclus dans le système prompt per-user — jamais reprocessé.
+Le `<profil_utilisateur>` (~80 tokens : famille, taille, job…) est inclus dans le système prompt per-user — jamais reprocessé.
 
-Le système prompt est **token-identique** à chaque tour pour un utilisateur donné (SYSTEM_BASE_FR + nom + `<profil_stable>`). Le contexte dynamique (mémoires, opinions, date) est préfixé dans le message utilisateur courant. Le préfixe est strippé à l'affichage dans `/history`.
+Le système prompt est **token-identique** à chaque tour pour un utilisateur donné (SYSTEM_BASE_FR + nom + `<profil_utilisateur>`). Le contexte dynamique (mémoires, opinions, date) est préfixé dans le message utilisateur courant. Le préfixe est strippé à l'affichage dans `/history`.
 
 ### Mesures de référence — Mac Mini M4 Pro 48 GB (2026-05-23)
 
@@ -905,6 +911,7 @@ Cartographie de tous les appels LLM de la codebase. Chaque ligne indique si le t
 | `_nightly_self_facts` | REASONING | `no_think` | `MAX_TOKENS_NO_THINK` (1 500) | — | Extraction de faits depuis les conversations — tâche de parsing structuré, thinking n'apporte pas de valeur mesurable |
 | `_nightly_self_user` | REASONING | `no_think` | `MAX_TOKENS_NO_THINK` (1 500) | — | Extraction mise à jour profil utilisateur — idem |
 | `_nightly_cleaning` | REASONING | `no_think` | `MAX_TOKENS_COMPACT` (600) | — | Nettoyage/déduplication — classification pure |
+| `update_profile_narrative` | PRIMARY | `no_think` | `PROFILE_NARRATIVE_TOKENS` (400) | — | Portrait narratif ~300 tokens — génération prose fluide, thinking superflu |
 | `_action_refine_prompt` (+ retry) | REASONING | `think` | `MAX_TOKENS_REASONING` (10 000) | ✅ `THINKING_BUDGET_DEEP` (4 000) | **Créativité** : réécriture de prompt système. Thinking essentiel. ~6 000 tok libres pour le prompt réécrit + rationale. |
 
 ### Routing & Web search (llm_router.py, web_search.py)
@@ -969,7 +976,8 @@ Ne pas utiliser thinking_budget=0 en production
 | `MAX_TOKENS_HARD_CAP` | 16 000 | Kill switch absolu tous appels locaux |
 | `HIST_CONV_TOKEN_BUDGET` | 800 | Budget tokens pour l'historique brut injecté par tour |
 | `SESSION_SUMMARY_TOKENS` | 600 | Budget tokens du résumé de session (~2 400 chars) |
-| `HIST_CONV_SUMMARIZE_THRESHOLD` | 1 500 | Tokens de conversation non-couverts déclenchant la compression |
+| `HIST_CONV_SUMMARIZE_THRESHOLD` | 1 500 | Chars de conversation non-couverts déclenchant la compression de session |
+| `PROFILE_NARRATIVE_TOKENS` | 600 | Budget tokens du portrait narratif généré par `update_profile_narrative` (nightly, 7-day TTL) |
 
 ---
 
@@ -1201,18 +1209,19 @@ Users are defined in `jarvis-core/JarvisData/users_list.json`. Each entry contai
 - `language` — `fr` or `en`
 - `briefing_enabled` — boolean
 - `trading` — boolean — set to `true` to enable hourly portfolio surveillance for this user
-- `profile` — object of stable biographical facts injected into the cached system prompt (never in the dynamic prefix). Fields: `famille`, `taille`, `poids`, `année de naissance`, `habitation`, `travail`, `intérêts`, `voiture`. Add/remove keys freely — all non-empty values are rendered as `k : v` in `<profil_stable>`. Update here, not via the analyzer (which tracks dynamic facts in Redis).
+- `profile` — object of stable biographical facts injected into the cached system prompt (never in the dynamic prefix). Fields: `famille`, `taille`, `poids`, `année de naissance`, `habitation`, `travail`, `intérêts`, `voiture`. Add/remove keys freely — all non-empty values are rendered as `k : v` in `<profil_utilisateur>`. Update here, not via the analyzer (which tracks dynamic facts in Redis).
 
 Only users with `"trading": true` participate in scheduled trade checks (CSV import, price fetch, alert evaluation). Users without this flag are never included, regardless of whether a CSV exists in `TradeData/`.
 
-**Profile split — stable vs dynamic:**
+**Profile split — three layers:**
 
-| Layer | Storage | Updated by | Content |
-|-------|---------|-----------|---------|
-| `profile` (users_list.json) | File | Human manually | Constant facts: identity, family, physique, location, job, interests. Never changes except via file edit. |
-| Redis `user:{code}:profile` | Redis hash | `analyzer.py` (conversation analysis) | Dynamic facts learned from conversations: skills, preferences, current habits, etc. |
+| Layer | Storage | Updated by | Content | Injected as |
+|-------|---------|-----------|---------|-------------|
+| `profile` (users_list.json) | File | Human manually | Constant facts: identity, family, physique, location, job, interests. Never changes except via file edit. | `<profil_utilisateur>` in system prompt (KV-cache safe) |
+| Redis `user:{code}:profile` | Redis hash | `analyzer.py` (conversation analysis) | Dynamic facts learned from conversations: skills, preferences, current habits, etc. | Feeds `update_profile_narrative` — not injected raw |
+| Redis `user:{code}:profile_narrative` | Redis string | `update_profile_narrative()` nightly | LLM-generated prose portrait (~300 tokens) synthesising profile hash + interests + autobio — explicitly excludes `profil_utilisateur` fields | `<profil_narratif>` in dynamic prefix |
 
-The analyzer receives the stable profile at each analysis run and is instructed not to recreate keys already covered by `profil_stable`.
+The analyzer receives the stable profile at each analysis run and is instructed not to recreate keys already covered by `profil_utilisateur`. The nightly `update_profile_narrative` call similarly receives the stable profile as "permanent information to not include" to avoid repetition.
 
 ---
 
@@ -1292,12 +1301,13 @@ Jarvis maintains two autonomous cognitive cycles:
 
 **Reflection loop** (configurable via `REFLECTION_INTERVAL_HOURS`, défaut 6h) — global self-observation. Jarvis reviews system health, user activity, and knowledge gaps, then picks one action from the catalog. At the end of each cycle Jarvis also runs a per-user **proactive push** check. Outcome and new focus are persisted to `jarvis-self.json`.
 
-**Nightly review** (23:00) — per-user conversation review using **4 sequential calls** per user:
+**Nightly review** (23:00) — per-user conversation review using **5 sequential calls** per user:
 
 1. **`NIGHTLY_FACTS`** — extracts durable user insights (→ Qdrant autobiographical, dedup-checked at importance 0.70), updates the per-user relation in `jarvis-self.json`, and writes `tomorrow_suggestions` to Redis (TTL 24 h) for injection in the next day's system prompt.
 2. **`NIGHTLY_SELF`** — Jarvis self-reflection on the day's interactions: self-improvement notes (→ `learnings[]`), formed opinions (→ `opinions[]`), day diary entry (→ `growth_log[]`).
 3. **`NIGHTLY_CLEANING`** — Qdrant autobio curation. Receives the full list of current autobiographical facts plus `user_insights` from call 1 as a signal for what is now superseded. Outputs `to_archive` (outdated facts → `archive_autobiographical_event`) and `to_delete` (errors/duplicates → `retract_autobiographical_event`). Very conservative by design.
 4. **`curative_profile_cleanup()`** — Redis profile hash dedup. Sync LLM call that identifies semantic duplicates and obsolete keys, applies consolidation updates (merge-before-delete), then deletes redundant keys. Skipped if profile has fewer than 5 keys. Previously monthly — now nightly so duplicate keys are caught within 24 h.
+5. **`update_profile_narrative()`** — generates a ~300-token LLM prose portrait of the user (cross-conversation, per-user). Synthesises the profile hash, top-15 interest weights, and the 5 most recent autobiographical facts. The `profil_utilisateur` fields (static biographical data already in the system prompt) are explicitly excluded to avoid repetition. Stored at `user:{code}:profile_narrative` with a 7-day TTL; injected in `build_memory_context()` as `<profil_narratif>` in place of the raw k/v block.
 
 Conversations from the day are sorted by importance score descending before being passed to each LLM call (up to 6 000 chars), so the most significant exchanges are always visible even on high-volume days.
 

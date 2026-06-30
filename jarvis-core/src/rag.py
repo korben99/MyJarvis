@@ -111,6 +111,10 @@ def _extract_chunk(hit) -> dict | None:
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     if not text:
         return None
+    # Reject encoded/binary content (e.g. 2D barcode raw data extracted from PDFs).
+    # Valid text always has ~15-20% spaces; < 2% space ratio on a long string → garbage.
+    if len(text) > 80 and text.count(" ") / len(text) < 0.02:
+        return None
     meta = payload.get("metadata") or {}
     source = (
         meta.get("name") or meta.get("source") or payload.get("file_name") or "unknown"

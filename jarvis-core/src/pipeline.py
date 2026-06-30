@@ -59,9 +59,9 @@ logger = get_logger("jarvis-pipeline")
 
 def build_system_prompt(user_code: str = "") -> str:
     """
-    Return the per-user system prompt: SYSTEM_BASE_FR + nom + profil_stable.
+    Return the per-user system prompt: SYSTEM_BASE_FR + nom + profil_utilisateur.
     Token-identical across all turns for a given user → KV cache hit every time.
-    Profil_stable only contains constant facts (family, location, job, interests).
+    Profil_utilisateur only contains constant biographical facts (family, location, job).
     Dynamic content (date, memory, projects, mood) stays in build_dynamic_prefix().
     """
     base = get_prompt("SYSTEM_BASE_FR")
@@ -76,7 +76,7 @@ def build_system_prompt(user_code: str = "") -> str:
         )
     if profile:
         fields = " — ".join(f"{k} : {v}" for k, v in profile.items() if v)
-        parts.append(f"<profil_stable>\n{fields}\n</profil_stable>")
+        parts.append(f"<profil_utilisateur>\n{fields}\n</profil_utilisateur>")
 
     return "\n\n".join(parts)
 
