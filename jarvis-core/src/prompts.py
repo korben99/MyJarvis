@@ -744,14 +744,19 @@ Tu examines la liste complète des souvenirs autobiographiques actuels d'un util
 ainsi que les nouveaux faits extraits ce soir, pour identifier ce qui doit être nettoyé.
 
   • to_archive : faits devenus passés mais historiquement valides.
-                 Critère STRICT : un nouveau fait ce soir contredit ou remplace explicitement
+                 Critère STRICT : un nouveau fait ce soir contredit ou remplace EXPLICITEMENT
                  un souvenir existant (ex : "travaille maintenant chez Y" → archive "travaillait chez X").
+                 NE PAS archiver un projet ou activité parce que l'utilisateur mentionne un objectif suivant
+                 (ex : "veut passer galop 7" n'archive PAS tous les souvenirs galop 6 — les compétences acquises restent).
+                 NE PAS archiver un projet si les nouveaux faits le mentionnent positivement ou qu'aucun fait
+                 contradictoire explicite n'est présent.
                  En cas de doute → ne pas archiver.
-  • to_delete  : doublons stricts (même fait, formulations quasi-identiques)
-                 OU erreurs factuelles évidentes dans les souvenirs existants.
-                 Critère STRICT : contenu identique à 90%+. En cas de doute → ne pas supprimer.
+  • to_delete  : doublons stricts (même fait, formulations quasi-identiques à 90%+)
+                 OU erreurs factuelles évidentes (dates impossibles, confusion de prénom…).
+                 En cas de doute → ne pas supprimer.
 
-Règle absolue : être très conservateur. Mieux vaut garder trop que supprimer à tort.
+Limites absolues : maximum 3 archives et 2 suppressions par exécution.
+Règle absolue : mieux vaut des doublons que des souvenirs perdus à tort.
 JSON valide uniquement, en français."""
 
 NIGHTLY_CLEANING_PROMPT = """\
@@ -766,6 +771,7 @@ Utilisateur : {user_name} — {review_date}
 </nouveaux_faits>
 
 Identifie ce qui doit être nettoyé. Sois très conservateur — en cas de doute, ne rien faire.
+Rappel : max 3 archives, max 2 suppressions. Les listes vides sont une réponse valide et souvent correcte.
 
 Réponds avec ce JSON :
 {{
@@ -797,18 +803,27 @@ CURATIVE_CLEANUP_PROMPT = """\
 Voici le profil Redis d'un utilisateur ({profile_count} clés) :
 {profile_str}
 
-Profil stable (données constantes déjà présentes dans le system prompt — supprimer toute clé Redis qui double ces données) :
+Profil stable (données constantes déjà présentes dans le system prompt) :
 {stable_profile}
 
-Identifie les doublons sémantiques (même information sous deux noms différents), \
-les entrées obsolètes (contredites par une clé plus récente), \
-et les clés dont l'information est déjà couverte par le profil stable.
+Identifie les doublons sémantiques (même fait précis sous deux clés différentes) \
+et les entrées contredites par une clé plus récente dans le profil Redis.
 
 RÈGLE OBLIGATOIRE pour les doublons :
   étape 1 — consolide la valeur sur la clé à conserver dans 'updates'
   étape 2 — liste la clé à supprimer dans 'keys_to_delete'
   En cas de doute sur laquelle garder, préfère la plus récente (date dans le profil).
   Ne jamais mettre les DEUX clés du même concept dans 'keys_to_delete'.
+
+ATTENTION — profil stable vs profil Redis :
+  Le profil stable couvre des faits GÉNÉRAUX (famille, travail, intérêts globaux).
+  Les clés Redis couvrent des détails DYNAMIQUES (santé d'un animal, projet en cours,
+  compétence spécifique, situation administrative ponctuelle) — ces détails NE sont PAS
+  couverts par le profil stable même si le sujet général y figure.
+  Exemple : profil stable dit "animaux: cheval Quadidja" → NE PAS supprimer "sante:quadidja"
+  Exemple : profil stable dit "intérêts: équitation" → NE PAS supprimer "competence:galop6"
+
+Limite absolue : maximum 2 suppressions par exécution. En cas de doute → ne rien supprimer.
 
 Format JSON strict :
 {{"updates": {{"cle_a_garder": "valeur_consolidee"}}, "keys_to_delete": ["cle_doublon"]}}

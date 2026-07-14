@@ -1635,12 +1635,16 @@ async def run_nightly_interaction_review() -> None:
             user_code, user_name, user_insights, review_date
         )
         if cleaning:
-            for text in cleaning.get("to_archive", []):
+            # Hard cap: trust the prompt constraint but enforce it in code too.
+            # A runaway LLM should not wipe out more than 3 memories in one night.
+            to_archive = cleaning.get("to_archive", [])[:3]
+            to_delete = cleaning.get("to_delete", [])[:2]
+            for text in to_archive:
                 if isinstance(text, str) and text.strip():
                     await asyncio.to_thread(
                         archive_autobiographical_event, user_code, text
                     )
-            for text in cleaning.get("to_delete", []):
+            for text in to_delete:
                 if isinstance(text, str) and text.strip():
                     await asyncio.to_thread(
                         retract_autobiographical_event, user_code, text
@@ -1649,8 +1653,8 @@ async def run_nightly_interaction_review() -> None:
             logger.info(
                 "Nightly cleaning for %s — archive:%d delete:%d — %s",
                 user_code,
-                len(cleaning.get("to_archive", [])),
-                len(cleaning.get("to_delete", [])),
+                len(to_archive),
+                len(to_delete),
                 rationale[:80],
             )
 
@@ -2344,11 +2348,10 @@ def _action_prune_self_memory(params: dict) -> str:
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=DEFAULT_TEMP,
-            max_tokens=MAX_TOKENS_THINK_COMPACT,
-            thinking_budget=THINKING_BUDGET_COMPACT,
+            max_tokens=MAX_TOKENS_COMPACT,
             json_response=True,
-            no_think=False,
-            timeout=llm_timeout(MAX_TOKENS_THINK_COMPACT),
+            no_think=True,  # classification task — thinking loops indefinitely, never emits JSON
+            timeout=llm_timeout(MAX_TOKENS_COMPACT),
         )
     except Exception as exc:
         logger.error(

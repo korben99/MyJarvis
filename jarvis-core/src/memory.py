@@ -2127,6 +2127,9 @@ def curative_profile_cleanup(user_code: str, stable_profile: dict | None = None)
         # Safety: never delete a key that was just updated (merge target)
         keys_to_delete = [k for k in keys_to_delete if k not in updates]
 
+        # Hard cap: max 2 deletions per run — prompt constraint enforced in code
+        keys_to_delete = keys_to_delete[:2]
+
         if keys_to_delete:
             for key in keys_to_delete:
                 old_val = r.hget(profile_redis_key, key)
