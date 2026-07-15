@@ -985,9 +985,11 @@ Ne pas utiliser thinking_budget=0 en production
 
 ### Prerequisites
 
-- Docker & Docker Compose
-- OpenAI API key (or compatible endpoint)
-- Google OAuth credentials (for Gmail / Calendar)
+- **macOS on Apple Silicon** — `jarvis-core/src/helpers.py` unconditionally imports `llm_local.py`, which imports `mlx` at module level. This is required even in cloud-API mode (`LLM_LOCAL=no`); Jarvis does not currently run on Linux/Windows/Intel Mac.
+- Python 3.13
+- Docker & Docker Compose (for Qdrant, Redis, Open WebUI)
+- OpenAI API key (or compatible endpoint) — unless you run fully local via `LLM_LOCAL=yes`
+- Google OAuth credentials (for Gmail / Calendar) — optional
 
 ### 1. Clone and configure
 
@@ -997,7 +999,26 @@ cd /opt/jarvis
 cp .env.example .env   # then edit .env (see Variables section below)
 ```
 
-### 2. Download local models (Mac Mini / Apple Silicon only)
+### 2. Install Python dependencies
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 3. Create your user list
+
+`jarvis-core/JarvisData/` is gitignored — it holds personal data, not sample content. Create it from the template:
+
+```bash
+mkdir -p jarvis-core/JarvisData
+cp DOCS/examples/users_list.example.json jarvis-core/JarvisData/users_list.json
+# edit it: one entry per user, "code" is that user's API access secret —
+# generate a random string per user, don't ship the example values.
+```
+
+### 4. Download local models (Mac Mini / Apple Silicon only, `LLM_LOCAL=yes`)
 
 ```bash
 source venv/bin/activate
@@ -1006,7 +1027,7 @@ python scripts/download_models.py   # downloads to HF_HOME/hub (standard HF cach
 
 Models are stored in `HF_HOME` (default `/opt/jarvis/models`). The script skips models already present and detects interrupted downloads via `.incomplete` blobs.
 
-### 3. Start all services
+### 5. Start all services
 
 ```bash
 ./start.sh
@@ -1016,13 +1037,13 @@ This starts:
 - `docker compose up -d` — Qdrant, Redis, Open WebUI (port 3000)
 - `uvicorn main:app` — Jarvis API on port 8000, running **natively** (not in Docker) for direct Metal GPU access via MLX
 
-### 4. Verify
+### 6. Verify
 
 ```bash
 curl http://localhost:8000/status
 ```
 
-### 5. Index documents (optional)
+### 7. Index documents (optional)
 
 Place documents in `RAGData/` subdirectories (`personal/`, `work/`, `documents/`, `company/`, `reflexions/`), then run:
 
@@ -1030,7 +1051,7 @@ Place documents in `RAGData/` subdirectories (`personal/`, `work/`, `documents/`
 python3 scripts/upload-to-openwebui.py
 ```
 
-### 6. Import trading portfolio (optional)
+### 8. Import trading portfolio (optional)
 
 Export your Boursorama positions as CSV (*Mes comptes → Exporter*) and drop the file in `TradeData/`. Jarvis imports it automatically on the next hourly tick, or immediately on restart.
 
