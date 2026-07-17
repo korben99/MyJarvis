@@ -8,33 +8,42 @@ from huggingface_hub import hf_hub_download, snapshot_download
 load_dotenv()
 
 # ---- CONFIG ----
+# Les modèles à télécharger sont ceux réellement configurés pour le mode local
+# (mêmes variables et mêmes defaults que jarvis-core/src/config.py) — modifier
+# .env pour changer de modèle, pas ce fichier.
 MODELS = [
-    # "inferencerlabs/Qwen3.5-30B-A3B-MLX-5.5bit",
-    # "mlx-community/Qwen2.5-3B-Instruct-8bit",
-    # "Qwen/Qwen3-30B-A3B-MLX-6bit",
-    # "Qwen/Qwen3-14B-MLX-4bit",
-    # "mlx-community/Qwen3-30B-A3B-4bit-DWQ-0508",
-    # "spicyneuron/Qwen3.6-35B-A3B-MLX-4.8bit"
-    # "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit",
-    # "NousResearch/Hermes-3-Llama-3.2-3B",
-    "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-5bit",
-    # "majentik/Qwen3.6-35B-A3B-RotorQuant-MLX-6bit",
-    "majentik/Qwen3.6-35B-A3B-RotorQuant-MLX-5bit",
-    "mlx-community/Qwen2.5-1.5B-Instruct-bf16",
+    m
+    for m in {
+        os.getenv("ROUTER_MODEL_LOCAL", "mlx-community/Qwen2.5-1.5B-Instruct-4bit"),
+        os.getenv("PRIMARY_MODEL_LOCAL", "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit"),
+        os.getenv("REASONING_MODEL_LOCAL", "")
+        or os.getenv("PRIMARY_MODEL_LOCAL", "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit"),
+        os.getenv(
+            "VISION_MODEL_LOCAL", "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-5bit"
+        ),
+    }
+    if m and not m.startswith("/")  # skip local filesystem paths (e.g. a custom
+    # fused/quantized router built via scripts/router_lora_adapterv1.py — not an
+    # HF repo id, nothing to download)
 ]
 
 # Fichiers de template à télécharger séparément (indépendants du cache HF).
 # local_path doit correspondre à QWEN36_NINJA_TEMPLATE dans config.py.
-TEMPLATES = [
-    {
-        "repo_id": "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit",
-        "filename": "chat_template.optional.jinja",
-        "local_path": os.getenv(
-            "QWEN36_NINJA_TEMPLATE",
-            "/opt/jarvis/models/templates/qwen36_ninja.jinja",
-        ),
-    },
-]
+# Uniquement nécessaire si le primary/reasoning model est le Qwen3.6 "ninja template".
+TEMPLATES = (
+    [
+        {
+            "repo_id": "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit",
+            "filename": "chat_template.optional.jinja",
+            "local_path": os.getenv(
+                "QWEN36_NINJA_TEMPLATE",
+                "/opt/jarvis/models/templates/qwen36_ninja.jinja",
+            ),
+        },
+    ]
+    if "spicyneuron/Qwen3.6" in "".join(MODELS)
+    else []
+)
 
 # Récup variables
 HF_HOME = os.getenv("HF_HOME", os.path.expanduser("~/models"))
@@ -115,6 +124,7 @@ def download_template(entry: dict) -> None:
 def main():
     print(f"[HF_HOME] {HF_HOME}")
     print(f"[TOKEN] {'OK' if HF_TOKEN else 'MISSING'}")
+    print(f"[MODELS] {', '.join(MODELS) if MODELS else '(none — all local paths)'}")
 
     for model in MODELS:
         if model_exists(model):

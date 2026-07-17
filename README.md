@@ -986,48 +986,46 @@ Ne pas utiliser thinking_budget=0 en production
 ### Prerequisites
 
 - **macOS on Apple Silicon** — `jarvis-core/src/helpers.py` unconditionally imports `llm_local.py`, which imports `mlx` at module level. This is required even in cloud-API mode (`LLM_LOCAL=no`); Jarvis does not currently run on Linux/Windows/Intel Mac.
-- Python 3.13
-- Docker & Docker Compose (for Qdrant, Redis, Open WebUI)
-- OpenAI API key (or compatible endpoint) — unless you run fully local via `LLM_LOCAL=yes`
+- Python 3.13 (`brew install python@3.13`)
+- Docker or OrbStack (for Qdrant, Redis, Open WebUI)
 - Google OAuth credentials (for Gmail / Calendar) — optional
+- Cloud API key (OpenAI or compatible) — only if you set `LLM_LOCAL=no`; the default is fully local, no key required
 
-### 1. Clone and configure
+### Quick install
 
 ```bash
 git clone <repo> /opt/jarvis
 cd /opt/jarvis
-cp .env.example .env   # then edit .env (see Variables section below)
+./install.sh
 ```
 
-### 2. Install Python dependencies
+`install.sh` is idempotent (safe to re-run after a `git pull`) and gets you all the way to "just fill in `.env`":
+- checks prerequisites (macOS/arm64, Python 3.13, Docker)
+- creates the venv and installs `requirements.txt`
+- creates every gitignored runtime directory (`RAGData/*`, `TradeData/`, `logs/`, `keys/`, `models/`, `jarvis-core/JarvisData/`)
+- copies `.env.example` → `.env` and `DOCS/examples/users_list.example.json` → `jarvis-core/JarvisData/users_list.json` (never overwrites existing files)
+- installs the `com.jarvis.api` launchd service from `DOCS/examples/com.jarvis.api.plist.template` and adds the `jarvis-start`/`jarvis-stop`/`jarvis-reload` aliases to your shell rc
 
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+What's left, by hand:
 
-### 3. Create your user list
+### 1. Configure `.env`
 
-`jarvis-core/JarvisData/` is gitignored — it holds personal data, not sample content. Create it from the template:
+Full local mode is the default (`LLM_LOCAL=yes`) — no API key required. Pick your models by uncommenting/editing the `*_MODEL_LOCAL` lines (defaults work out of the box), or set `HF_TOKEN` if a chosen model is gated. Prefer a cloud API instead? Set `LLM_LOCAL=no` and `OPENAI_API_KEY`. See the Variables section below for everything else.
 
-```bash
-mkdir -p jarvis-core/JarvisData
-cp DOCS/examples/users_list.example.json jarvis-core/JarvisData/users_list.json
-# edit it: one entry per user, "code" is that user's API access secret —
-# generate a random string per user, don't ship the example values.
-```
+### 2. Fill in your user list
 
-### 4. Download local models (Mac Mini / Apple Silicon only, `LLM_LOCAL=yes`)
+Edit `jarvis-core/JarvisData/users_list.json` (created by `install.sh`, gitignored — holds personal data): one entry per user, `code` is that user's API access secret — generate a random string per user, don't ship the example values.
+
+### 3. Download local models (only if `LLM_LOCAL=yes`, the default)
 
 ```bash
 source venv/bin/activate
-python scripts/download_models.py   # downloads to HF_HOME/hub (standard HF cache)
+python scripts/download_models.py   # downloads whatever *_MODEL_LOCAL points to in .env
 ```
 
 Models are stored in `HF_HOME` (default `/opt/jarvis/models`). The script skips models already present and detects interrupted downloads via `.incomplete` blobs.
 
-### 5. Start all services
+### 4. Start all services
 
 ```bash
 ./start.sh
@@ -1037,13 +1035,15 @@ This starts:
 - `docker compose up -d` — Qdrant, Redis, Open WebUI (port 3000)
 - `uvicorn main:app` — Jarvis API on port 8000, running **natively** (not in Docker) for direct Metal GPU access via MLX
 
-### 6. Verify
+For an always-on setup use the launchd service instead (`jarvis-start`, see below).
+
+### 5. Verify
 
 ```bash
 curl http://localhost:8000/status
 ```
 
-### 7. Index documents (optional)
+### 6. Index documents (optional)
 
 Place documents in `RAGData/` subdirectories (`personal/`, `work/`, `documents/`, `company/`, `reflexions/`), then run:
 
@@ -1051,7 +1051,7 @@ Place documents in `RAGData/` subdirectories (`personal/`, `work/`, `documents/`
 python3 scripts/upload-to-openwebui.py
 ```
 
-### 8. Import trading portfolio (optional)
+### 7. Import trading portfolio (optional)
 
 Export your Boursorama positions as CSV (*Mes comptes → Exporter*) and drop the file in `TradeData/`. Jarvis imports it automatically on the next hourly tick, or immediately on restart.
 
@@ -1059,25 +1059,18 @@ Export your Boursorama positions as CSV (*Mes comptes → Exporter*) and drop th
 
 The Jarvis API runs as a launchd agent (`com.jarvis.api`) on macOS. Useful commands:
 
+The plist and the `jarvis-start`/`jarvis-stop`/`jarvis-reload` aliases below are installed automatically by `./install.sh` (template: `DOCS/examples/com.jarvis.api.plist.template`, aliases: `DOCS/examples/jarvis-aliases.sh`).
+
 ```bash
-# Arrêter
-launchctl stop com.jarvis.api
-
-# Redémarrer après un update
-launchctl kickstart -k gui/$(id -u)/com.jarvis.api
-
-# Désactiver définitivement
-launchctl unload ~/Library/LaunchAgents/com.jarvis.api.plist
-
 # Logs en live
 tail -f /opt/jarvis/logs/jarvis-service.log
 ```
 
 | Alias | Commande |
 |-------|---------|
-| `jarvis-start` | `kickstart` — démarre le service |
-| `jarvis-stop` | `kill SIGTERM` — arrêt propre (launchd ne relance pas) |
-| `jarvis-reload` | `kickstart -k` — stop + redémarre immédiatement |
+| `jarvis-start` | `launchctl bootstrap` — démarre le service |
+| `jarvis-stop` | `launchctl bootout` — arrêt propre (launchd ne relance pas) |
+| `jarvis-reload` | `bootout` + `bootstrap` — stop + redémarre immédiatement |
 
 ### Common Commands
 

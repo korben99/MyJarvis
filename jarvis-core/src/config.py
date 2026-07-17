@@ -67,8 +67,11 @@ if LLM_LOCAL:
     # Mode import direct MLX — pas de serveurs HTTP mlx-lm.
     # helpers.py route vers call_llm_local / call_llm_local_async directement.
     # Les API_URL / API_KEY ne sont pas utilisées pour l'inférence en mode local.
+    # Stock default — downloadable by scripts/download_models.py out of the box.
+    # A custom LoRA-fine-tuned router (see scripts/router_lora_adapterv1.py) is a
+    # later optional upgrade, not required for a working install.
     ROUTER_MODEL = os.getenv(
-        "ROUTER_MODEL_LOCAL", "/opt/jarvis/models/hub/Hermes-3-Llama-3.2-3B-q6-affine"
+        "ROUTER_MODEL_LOCAL", "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
     )
     PRIMARY_MODEL = os.getenv(
         "PRIMARY_MODEL_LOCAL", "spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit"
