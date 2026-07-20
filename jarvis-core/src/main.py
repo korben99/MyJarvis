@@ -51,6 +51,7 @@ from config import (
 )
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from qdrant_client.models import Distance, HnswConfigDiff, VectorParams
 
 if LLM_LOCAL:
     from llm_local import preload_models
@@ -101,6 +102,22 @@ async def lifespan(app: FastAPI):
 
     deps.EMBED_MODEL = get_embed_model()
     await asyncio.to_thread(preload_embed_router)
+
+    try:
+        QDRANT_CLIENT.get_collection(QDRANT_MEMORY_COLLECTION)
+    except Exception:
+        logger.info(
+            "Qdrant collection %r missing — creating it (fresh install)",
+            QDRANT_MEMORY_COLLECTION,
+        )
+        QDRANT_CLIENT.create_collection(
+            collection_name=QDRANT_MEMORY_COLLECTION,
+            vectors_config=VectorParams(
+                size=deps.EMBED_MODEL.get_sentence_embedding_dimension(),
+                distance=Distance.DOT,
+                hnsw_config=HnswConfigDiff(m=24, ef_construct=256, payload_m=24),
+            ),
+        )
 
     scheduler = None
     try:
