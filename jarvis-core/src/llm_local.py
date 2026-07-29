@@ -186,6 +186,20 @@ _chat_waiters: int = 0
 _chat_waiters_lock = threading.Lock()
 
 _bg_wakeup: asyncio.Event | None = None
+_bg_loop: asyncio.AbstractEventLoop | None = None  # loop that owns _bg_wakeup
+
+
+def _wake_bg_waiters() -> None:
+    """Wake background-priority waiters from any thread.
+
+    asyncio.Event is not thread-safe: setting it from a worker thread must go
+    through call_soon_threadsafe on the loop that owns the event."""
+    if _bg_wakeup is None or _bg_loop is None:
+        return
+    try:
+        _bg_loop.call_soon_threadsafe(_bg_wakeup.set)
+    except RuntimeError:
+        pass  # loop closed (shutdown)
 
 # LRU prompt cache: one LRUPromptCache per model-path.
 # Replaces the old _sys_kv dict (single system-prompt entry per model).
@@ -413,9 +427,13 @@ def _lru_get_cache(
 
     remaining = prompt_token_ids[len(sys_token_ids):]
     if not remaining:
-        # Prompt is exactly the system prompt — no user message tokens yet.
-        logger.warning("LRU: prompt has no tokens beyond system prompt")
-        return sys_cache, prompt_token_ids
+        # Prompt is exactly the system prompt — the cache already covers every
+        # prompt token; reusing it while re-feeding the full prompt would process
+        # the system tokens twice (misaligned positions). Store the entry for
+        # future calls and bypass the cache for this one.
+        lru.insert_cache(model_path, sys_token_ids, sys_cache, cache_type="system")
+        logger.warning("LRU: prompt has no tokens beyond system prompt — cache bypassed")
+        return None, prompt_token_ids
 
     # Store system entry in LRU so it can seed the next call's prefix lookup.
     # This entry is superseded by the fuller assistant entry inserted post-generation.
@@ -861,6 +879,7 @@ def _generate_sync(
     )
 
     early_stopped = False
+    truncated_by_stop = False
 
     if json_response:
         result, seen_end_think, early_stopped = _stream_to_json(
@@ -876,6 +895,7 @@ def _generate_sync(
         for st in profile.stop_tokens:
             if st in result:
                 result = result.split(st, 1)[0]
+                truncated_by_stop = True
         seen_end_think = not no_think
 
     _debug_log(model_short, no_think, prompt_text, result, skip=skip_debug_log)
@@ -886,7 +906,11 @@ def _generate_sync(
 
     # Insert full sequence into LRU for future prefix reuse.
     # result is the raw LLM output (including think block if any) — inserted before stripping.
-    if lru_cache is not None and result:
+    # Skipped after early-stop or stop-token truncation: the KV cache then contains
+    # generated tokens that the re-encoded key would not declare, and a future
+    # partial hit on that entry would misalign positions. The system-prefix entry
+    # stored by _lru_get_cache keeps system-level caching working in those cases.
+    if lru_cache is not None and result and not early_stopped and not truncated_by_stop:
         _lru_insert(model_path, model, tok_ids, result, lru_cache, tokenizer)
     mx.clear_cache()
     metal = _metal_mem_str()
@@ -913,11 +937,17 @@ def _generate_sync(
     if "</think>" in result:
         return _strip_thinking(result.rsplit("</think>", 1)[-1].strip())
     if "<think>" in result:
-        return _strip_thinking(result.split("<think>", 1)[0].strip())
+        # Unclosed explicit <think>: only the text BEFORE the tag is usable.
+        before_think = _strip_thinking(result.split("<think>", 1)[0].strip())
+        if before_think or no_think:
+            return before_think
+        # Think mode with nothing before the tag → same fallback as truncation below
+        # (previously returned "" silently).
+        logger.warning("_generate_sync: unclosed <think>, no visible text (model=%s)", model_short)
+        return "⚠️ Réponse incomplète (budget de réflexion dépassé). Reformule ou augmente max_tokens."
     if not no_think:
         logger.warning("_generate_sync: thinking truncated before </think> (model=%s)", model_short)
-        partial = result.split("<think>", 1)[0].strip() if "<think>" in result else ""
-        return partial or "⚠️ Réponse incomplète (budget de réflexion dépassé). Reformule ou augmente max_tokens."
+        return "⚠️ Réponse incomplète (budget de réflexion dépassé). Reformule ou augmente max_tokens."
     return _strip_thinking(result)
 
 
@@ -937,10 +967,50 @@ def call_llm_local(
 ) -> str:
     """Sync inference. From async code always call via asyncio.to_thread."""
     with _infer_lock:
+        result = _generate_sync(
+            model, messages, temperature, max_tokens, no_think,
+            session_id, json_response, thinking_budget,
+        )
+    _wake_bg_waiters()
+    return result
+
+
+def call_llm_local_bg(
+    messages: list[dict],
+    *,
+    model: str,
+    temperature: float | None = None,
+    max_tokens: int = 3000,
+    no_think: bool = False,
+    session_id: str = "",
+    json_response: bool = False,
+    thinking_budget: int = 0,
+    **_kwargs,
+) -> str:
+    """Sync background-priority inference: yields the GPU to chat callers.
+
+    Thread-safe counterpart of call_llm_local_async_bg for sync background tasks
+    (analyzer profile dedup, nightly jobs). Polls instead of waiting on the
+    asyncio event — a plain thread cannot await _bg_wakeup. Falls back to a
+    blocking acquire after 300 s so a busy chat session cannot starve it forever."""
+    _t0 = time.time()
+    while True:
+        with _chat_waiters_lock:
+            if _chat_waiters == 0 and _infer_lock.acquire(blocking=False):
+                break
+        if time.time() - _t0 > 300.0:
+            logger.warning("[BG-INFER-SYNC] 300 s of chat priority — acquiring anyway")
+            _infer_lock.acquire()
+            break
+        time.sleep(0.25)
+    try:
         return _generate_sync(
             model, messages, temperature, max_tokens, no_think,
             session_id, json_response, thinking_budget,
         )
+    finally:
+        _infer_lock.release()
+        _wake_bg_waiters()
 
 
 async def call_llm_local_async(
@@ -990,9 +1060,10 @@ async def call_llm_local_async_bg(
     **_kwargs,
 ) -> str:
     """Async non-streaming, background priority: yields GPU when a chat caller is waiting."""
-    global _bg_wakeup
+    global _bg_wakeup, _bg_loop
     if _bg_wakeup is None:
         _bg_wakeup = asyncio.Event()
+        _bg_loop = asyncio.get_running_loop()
         _bg_wakeup.set()
     _t0 = time.time()
     while True:
@@ -1047,27 +1118,37 @@ async def stream_local(
         _t_infer = time.time()
         logger.debug("[TTFT] stream_local: inference started (lock held %.3fs)",
                      _t_infer - _t_lock_wait)
-        mlx_model, tokenizer = _load_model(model)
-        prompt_text = _build_prompt(messages, tokenizer, model, no_think, thinking_budget)
-
-        # Tokenize for LRU lookup
-        tok_ids = _prompt_token_ids(prompt_text, tokenizer)
-        prompt_tokens = len(tok_ids)
-        model_short = model.split("/")[-1]
-
-        sys_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
-        lru_cache, remaining = _lru_get_cache(model, mlx_model, tokenizer, sys_content, tok_ids)
-        cache_kwarg = {"prompt_cache": lru_cache} if lru_cache is not None else {}
-
-        profile = _model_profile(model)
-        sampler, stream_procs, quant_kwargs, budget = _setup_gen(
-            profile, tokenizer, no_think, thinking_budget, temperature, max_tokens
-        )
-
+        # Sentinels first: the finally below must be safe to run even if setup
+        # (_load_model, _build_prompt, _lru_get_cache) fails — it releases the
+        # GPU lock and unblocks the consumer, so it must ALWAYS execute.
         raw_chunks: list[str] = []
         first = True
         _generation_ok = True
+        _truncated_by_stop = False
+        model_short = model.split("/")[-1]
+        prompt_text = ""
+        prompt_tokens = 0
+        budget = 0
+        tok_ids: list[int] = []
+        lru_cache = None
+        mlx_model = tokenizer = None
         try:
+            mlx_model, tokenizer = _load_model(model)
+            prompt_text = _build_prompt(messages, tokenizer, model, no_think, thinking_budget)
+
+            # Tokenize for LRU lookup
+            tok_ids = _prompt_token_ids(prompt_text, tokenizer)
+            prompt_tokens = len(tok_ids)
+
+            sys_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
+            lru_cache, remaining = _lru_get_cache(model, mlx_model, tokenizer, sys_content, tok_ids)
+            cache_kwarg = {"prompt_cache": lru_cache} if lru_cache is not None else {}
+
+            profile = _model_profile(model)
+            sampler, stream_procs, quant_kwargs, budget = _setup_gen(
+                profile, tokenizer, no_think, thinking_budget, temperature, max_tokens
+            )
+
             for chunk in stream_generate(
                 mlx_model, tokenizer, prompt=remaining, max_tokens=budget,
                 sampler=sampler, logits_processors=stream_procs,
@@ -1084,6 +1165,7 @@ async def stream_local(
                     acc = joined + text
                     for st in profile.stop_tokens:
                         if st in acc:
+                            _truncated_by_stop = True
                             text = acc.split(st, 1)[0][len(joined):]
                             if text:
                                 raw_chunks.append(text)
@@ -1111,8 +1193,13 @@ async def stream_local(
                 logger.debug("[LLM-STATS] thinking active in stream response")
 
             # Insert full sequence into LRU for future prefix reuse.
-            # Only insert on clean completion (not on error or stop_flag abort).
-            if lru_cache is not None and raw_resp and _generation_ok and not stop_flag.is_set():
+            # Only insert on clean completion (not on error, stop_flag abort, or
+            # stop-token truncation — truncation leaves tokens in the KV cache that
+            # the re-encoded key would not declare → misaligned future partial hits).
+            if (
+                lru_cache is not None and raw_resp and _generation_ok
+                and not stop_flag.is_set() and not _truncated_by_stop
+            ):
                 _lru_insert(model, mlx_model, tok_ids, raw_resp, lru_cache, tokenizer)
 
             # Free MLX compute buffers accumulated during inference.
@@ -1123,6 +1210,14 @@ async def stream_local(
             if metal:
                 logger.debug("Metal after clear_cache (stream): %s", metal)
 
+            # Release the GPU lock HERE, once inference and clear_cache are truly
+            # finished. Releasing from the generator's finally (previous behaviour)
+            # opened a race on client disconnect: a new request could start inference
+            # while this worker was still mid-step. It also required the event loop
+            # to run for the lock to be freed — a sync LLM call blocking the loop
+            # could then deadlock against a stream holding the lock.
+            _infer_lock.release()
+            _wake_bg_waiters()
             loop.call_soon_threadsafe(queue.put_nowait, None)
 
     with _chat_waiters_lock:
@@ -1135,19 +1230,24 @@ async def stream_local(
             _chat_waiters -= 1
     logger.debug("[TTFT] stream_local: lock acquired — waited %.3fs", time.time() - _t_lock_wait)
 
+    # From here the worker owns the lock release (in its finally). Only guard the
+    # window where the thread could fail to start.
     try:
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()
+    except BaseException:
+        _infer_lock.release()
+        _wake_bg_waiters()
+        raise
+
+    try:
         while True:
             chunk = await queue.get()
             if chunk is None:
                 break
             yield chunk
     finally:
-        stop_flag.set()
-        _infer_lock.release()
-        if _bg_wakeup is not None:
-            _bg_wakeup.set()
+        stop_flag.set()  # worker exits at next chunk and releases the lock itself
 
 
 # ── Vision model (mlx_vlm) ────────────────────────────────────────────────

@@ -88,11 +88,12 @@ class AnalysisResult(BaseModel):
 
 async def analyze_exchange(
     conversation: str,
-    existing_projects: list = None,
-    existing_profile_keys: list = None,
-    stable_profile: dict = None,
+    existing_projects: list | None = None,
+    existing_profile_keys: list | None = None,
+    stable_profile: dict | None = None,
 ) -> dict:
     """Analyze a conversation exchange using the LLM."""
+    existing_projects = existing_projects or []
     try:
         # Show in_progress projects clearly + recent done projects (last 90 days)
         # so the LLM can avoid re-creating finished or versioned projects.

@@ -50,7 +50,11 @@ def openai_headers() -> dict:
 
 
 def trim_chunks(chunks, char_budget, text_key="text", max_item_chars=800):
-    """Generic chunk limiter for RAG or web results."""
+    """Generic chunk limiter for RAG or web results.
+
+    Stops at the FIRST item that would overflow the budget (no skip-and-continue):
+    callers in pipeline.build_context rely on the selection being a prefix of
+    `chunks` to zip texts back with their metadata by index."""
     total = 0
     selected = []
     for c in chunks:
@@ -88,6 +92,8 @@ async def stream_openai(
         return
 
     # ── Remote path (OpenAI-compatible APIs) ───────────────────────
+    # NOTE: no_think / thinking_budget ne sont honorés que sur le chemin local
+    # (contrôle au niveau du template MLX) — le chemin HTTP les ignore.
     try:
         client = get_stream_client(timeout)
 
@@ -122,9 +128,14 @@ async def stream_openai(
             json=payload,
         ) as response:
             if response.status_code != 200:
+                try:
+                    err_body = (await response.aread())[:500]
+                except Exception:
+                    err_body = b""
                 logger.error(
-                    "OpenAI streaming error: %s",
+                    "OpenAI streaming error: %s — %s",
                     response.status_code,
+                    err_body.decode("utf-8", errors="replace"),
                 )
                 return
 
@@ -169,7 +180,10 @@ async def _resolve_image_part(part: dict, client: httpx.AsyncClient) -> dict:
     those internally and re-encode as base64.
     """
     url = part.get("image_url", {}).get("url", "")
-    logger.info("Vision._resolve: url=%s", url[:url.index(",")] if url.startswith("data:") else (url[:80] or "(empty)"))
+    # split(",", 1)[0] — never url.index(","): a malformed data: URL without comma
+    # would raise ValueError here and abort resolution for ALL images of the message.
+    _url_head = url.split(",", 1)[0] if url.startswith("data:") else (url[:80] or "(empty)")
+    logger.info("Vision._resolve: url=%s", _url_head)
     if url.startswith("data:") or url.startswith("https://"):
         return part
 

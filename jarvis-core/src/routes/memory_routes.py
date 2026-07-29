@@ -44,6 +44,23 @@ async def memory_self():
     return get_self_memory()
 
 
+@router.post("/memory/analyze/{user_code}")
+async def memory_analyze_now(user_code: str):
+    """Déclenche analyse_recent_conversations à la demande pour un utilisateur.
+
+    L'extraction de faits/projets est normalement planifiée (toutes les
+    CONV_ANALYSIS_INTERVAL_MINUTES). Cette route permet de forcer une passe
+    immédiate — utilisée par la suite d'intégration (test_quality.py) et
+    utile en debug pour ne pas attendre le prochain tick du scheduler.
+    """
+    if user_code not in USER_CODES:
+        raise HTTPException(403)
+    from analyzer import analyse_recent_conversations
+
+    await analyse_recent_conversations(user_code)
+    return {"status": "analyzed", "user_code": user_code}
+
+
 @router.delete("/memory/reset")
 async def memory_reset():
     r = REDIS_CLIENT

@@ -75,6 +75,7 @@ from config import (
 )
 from helpers import (
     call_llm,
+    call_llm_bg,
     extract_llm_json,
     get_logger,
     get_qdrant,
@@ -361,7 +362,9 @@ def _normalize_profile_keys_batch(
                 "Si le moindre doute → null.\n"
                 'Réponds : {"matches": [{"new": "clé", "match": "existante_ou_null"}, ...]}'
             )
-            raw = call_llm(
+            # Priorité background : ces dedups tournent depuis l'analyzer planifié —
+            # call_llm prendrait le lock GPU en priorité chat et retarderait l'utilisateur.
+            raw = call_llm_bg(
                 [
                     {
                         "role": "system",
@@ -475,7 +478,8 @@ def _normalize_profile_key(
             f'Est-ce un doublon ? Réponds : {{"match": "clé_existante"}} ou {{"match": null}}'
         )
 
-        raw = call_llm(
+        # Priorité background — voir _normalize_profile_keys_batch.
+        raw = call_llm_bg(
             [
                 {
                     "role": "system",
@@ -849,11 +853,15 @@ def log_conversation(
 
 
 def get_recent_conversations(user_code: str, hours: int = 24, limit: int = 20) -> list:
-    """Get recent conversation exchanges."""
+    """Get recent conversation exchanges (the most recent `limit`, oldest first).
+
+    zrevrangebyscore takes the NEWEST entries of the window — zrangebyscore with
+    num=limit returned the oldest ones, silently dropping recent exchanges on
+    busy days. The list is then reversed to keep chronological order for callers."""
     r = get_redis()
     cutoff = time.time() - (hours * 3600)
-    entries = r.zrangebyscore(
-        f"convlog:{user_code}", cutoff, "+inf", start=0, num=limit
+    entries = r.zrevrangebyscore(
+        f"convlog:{user_code}", "+inf", cutoff, start=0, num=limit
     )
     result = []
     for e in entries:
@@ -861,6 +869,7 @@ def get_recent_conversations(user_code: str, hours: int = 24, limit: int = 20) -
             result.append(json.loads(e))
         except (json.JSONDecodeError, ValueError):
             logger.warning("Skipping corrupted convlog entry for %s", user_code)
+    result.reverse()
     return result
 
 
@@ -2201,6 +2210,7 @@ def update_profile_narrative(user_code: str, stable_profile: dict | None = None)
         api_key=PRIMARY_API_KEY,
         temperature=DEFAULT_TEMP,
         max_tokens=PROFILE_NARRATIVE_TOKENS,
+        json_response=False,  # prose attendue — le défaut True active l'early-stop JSON
         no_think=True,
     )
 

@@ -38,15 +38,18 @@ Connections
   redis_set_json(key, data, ttl)    -> None
 
 LLM calls
-  call_llm(messages, *, model, api_url, api_key, ...)        -> str  (sync)
-  call_llm_async(messages, *, model, api_url, api_key, ...)  -> str  (async)
-  Both share a persistent, connection-pooled httpx client.
-  no_think_suffix is applied automatically for Qwen models.
+  call_llm(messages, *, model, api_url, api_key, ...)        -> str  (sync, chat priority)
+  call_llm_bg(messages, *, model, api_url, api_key, ...)     -> str  (sync, background priority)
+  call_llm_async(messages, *, model, api_url, api_key, ...)  -> str  (async, chat priority)
+  call_llm_async_bg(messages, *, model, api_url, api_key, ...) -> str (async, background priority)
+  All share a persistent, connection-pooled httpx client.
+  no_think / thinking_budget are handled at the MLX prompt level for local models;
+  they are ignored on the remote HTTP path.
   API keys are never logged.
 
 LLM parsing
-  extract_llm_json(raw)             -> dict  (raises json.JSONDecodeError on failure)
-  filter_think_chunk(chunk, in_think) -> (visible_text, new_in_think)  (streaming)
+  extract_llm_json(raw)             -> dict  (raises ValueError on failure)
+  filter_think_chunk(chunk, in_think) -> (visible_text, think_fragment, new_in_think)
 
 Weather
   WEATHER_CODES                     -> dict[int, str]
@@ -76,7 +79,12 @@ from config import (
     USERS,
     tokens_param,
 )
-from llm_local import call_llm_local, call_llm_local_async, call_llm_local_async_bg
+from llm_local import (
+    call_llm_local,
+    call_llm_local_async,
+    call_llm_local_async_bg,
+    call_llm_local_bg,
+)
 from qdrant_client import QdrantClient
 
 _LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL, REASONING_MODEL} if LLM_LOCAL else set()
@@ -480,16 +488,6 @@ def redis_set_json(key: str, data, ttl: int | None = None) -> None:
 # ══════════════════════════════════════════════════
 
 
-def _repair_json(text: str) -> str:
-    """Best-effort repair of common LLM JSON generation mistakes.
-
-    Currently handles:
-    - Missing opening quote on object keys:  action": "x"  →  "action": "x"
-      Pattern: a bare word followed by `":` that is NOT already preceded by `"`.
-    """
-    return re.sub(r'(?<!")\b([a-zA-Z_]\w*)(":\s*)', r'"\1\2', text)
-
-
 def filter_think_chunk(chunk: str, in_think: bool) -> tuple[str, str, bool]:
     """Split a single SSE chunk into visible text and think-block content.
 
@@ -543,10 +541,20 @@ def extract_llm_json(text: str) -> dict:
     - reasoning avant/après
     - texte parasite
     - multiples blocs JSON
+    - backticks parasites ({`"key"`: …}) — en fallback uniquement, pour ne pas
+      corrompre des backticks légitimes dans les valeurs (ex: code dans proposed_text)
     """
-
     if not text:
         raise ValueError("Empty LLM response")
+    try:
+        return _extract_llm_json_once(text)
+    except ValueError:
+        if "`" in text:
+            return _extract_llm_json_once(text.replace("`", ""))
+        raise
+
+
+def _extract_llm_json_once(text: str) -> dict:
 
     def _fix_invalid_escapes(s: str) -> str:
         # Qwen3.6 (RotorQuant quant) occasionally emits a bare "\ " (backslash
@@ -567,11 +575,6 @@ def extract_llm_json(text: str) -> dict:
 
     if "Thinking Process:" in text:
         text = text.split("Thinking Process:")[-1]
-
-    # Strip backtick quote-wrappers that some models emit instead of double-quotes.
-    # e.g. {`"key"`: `"value"`}  →  {"key": "value"}  — backticks are never valid JSON.
-    if "`" in text:
-        text = text.replace("`", "")
 
     text = text.strip()
 
@@ -755,6 +758,44 @@ def call_llm(
     """
     if LLM_LOCAL and model in _LOCAL_MODELS:
         return call_llm_local(
+            messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens or _LOCAL_DEFAULT_MAX_TOKENS,
+            no_think=no_think,
+            json_response=json_response,
+            thinking_budget=thinking_budget,
+        )
+    resp = _get_llm_sync_client().post(
+        f"{api_url}/chat/completions",
+        headers=_llm_headers(api_key),
+        json=_llm_body(messages, model, temperature, max_tokens, json_response),
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+def call_llm_bg(
+    messages: list[dict],
+    *,
+    model: str,
+    api_url: str,
+    api_key: str,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    json_response: bool = True,
+    no_think: bool = False,
+    timeout: float = 30.0,
+    thinking_budget: int = 0,
+) -> str:
+    """Synchronous background-priority LLM call — yields GPU to chat callers.
+
+    Use from sync background tasks (analyzer dedup, nightly jobs) instead of
+    call_llm, which takes the GPU lock at chat priority and can delay user
+    requests. Falls back to the normal HTTP path for cloud models."""
+    if LLM_LOCAL and model in _LOCAL_MODELS:
+        return call_llm_local_bg(
             messages,
             model=model,
             temperature=temperature,

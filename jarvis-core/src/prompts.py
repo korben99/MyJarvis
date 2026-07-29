@@ -51,7 +51,7 @@ VOICE_SUFFIX_FR = (
 # ══════════════════════════════════════════════════════════════════════════
 #  LLM ROUTER  —  cible : Hermes3B-Instruct Q8
 # ══════════════════════════════════════════════════════════════════════════
-# Optimisé pour un 3B : prompt KV-cached (~1340 tokens, 15 exemples),
+# Optimisé pour un 3B : prompt KV-cached (~1450 tokens, 17 exemples),
 # pas de jugement de complexité, pas de memory_scope/conversation_type
 # (inférés en aval par le Primary).
 
@@ -64,7 +64,7 @@ Tu es un routeur JSON. Ton seul rôle : analyser l'intention du message et produ
 Schéma exact — 7 clés, ni plus ni moins :
 {"intents":[...],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
 
-Valeurs autorisées pour intents : "memory" "rag" "web" "weather" "gmail" "calendar" "self"
+Valeurs autorisées pour intents : "memory" "rag" "web" "weather" "gmail" "calendar" "briefing" "portfolio" "self"
 Clés autorisées : intents, weather_location, gmail_query, calendar_days, rag_query, project_name, use_reasoning
 Toute autre clé est INTERDITE.
 
@@ -74,6 +74,8 @@ web      → news, recherches, infos (si URL http(s) dans le message → memory 
 weather  → météo  →  weather_location=ville ou null
 gmail    → emails  →  gmail_query=syntaxe Gmail
 calendar → agenda  →  calendar_days=1-90
+briefing → briefing quotidien (point complet du matin / de la journée)
+portfolio→ portefeuille boursier de l'utilisateur (actions, PEA, positions)
 self     → état interne de Jarvis
 
 Règle stricte : chaque champ ne doit être renseigné que si l'intent correspondant est présent. rag_query=null si "rag" absent. gmail_query=null si "gmail" absent. weather_location=null si "weather" absent.
@@ -94,7 +96,7 @@ use_reasoning=true pour réaliser un diagnostic, calcul multi-étapes, conseil m
 {"intents":["calendar"],"weather_location":null,"gmail_query":null,"calendar_days":14,"rag_query":null,"project_name":null,"use_reasoning":false}
 
 "Est-ce que j'ai reçu des mails de la banque cette semaine ?"
-{"intents":["gmail"],"weather_location":null,"gmail_query":"from:comptable newer_than:7d","calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
+{"intents":["gmail"],"weather_location":null,"gmail_query":"banque newer_than:7d","calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
 
 "Il fait quel temps à Bordeaux ce week-end ? On pense partir samedi."
 {"intents":["weather"],"weather_location":"Bordeaux","gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
@@ -122,6 +124,12 @@ use_reasoning=true pour réaliser un diagnostic, calcul multi-étapes, conseil m
 
 "Mon script Python plante aléatoirement en prod mais jamais en local."
 {"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
+
+"Tu peux me faire le point complet de ce matin ?"
+{"intents":["briefing"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
+
+"Comment se comportent mes actions aujourd'hui ?"
+{"intents":["portfolio"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
 
 "C'est quoi tes dernières réflexions Jarvis ?"
 {"intents":["self"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
@@ -870,7 +878,7 @@ CLASSIFICATION DES PROMPTS :
 
 BUDGETS TOKENS par prompt (approximation : 1 token ≈ 4 caractères français) :
   SYSTEM_BASE_FR         →  250 tokens max  (inline, KV-cached — ne pas dépasser)
-  ROUTER_SYSTEM          → 1600 tokens max  (Qwen2.5-1.5B LoRA, KV-cached, 15 exemples + last_jarvis ctx)
+  ROUTER_SYSTEM          → 1800 tokens max  (Qwen2.5-1.5B LoRA, KV-cached, 17 exemples + last_jarvis ctx)
   ROUTER_USER            →  600 tokens max  (inclut last_jarvis_block dynamique + message)
   ANALYSIS_PROMPT        → 1000 tokens max  (async Qwen3 — précision avant tout)
   BRIEFING_SYSTEM        →  100 tokens max
@@ -958,7 +966,7 @@ Sinon :
 # Values must stay in sync with the budget table in REFINE_PROMPT_SYSTEM above.
 PROMPT_TOKEN_BUDGETS = {
     "SYSTEM_BASE_FR": 250,  # inline / KV-cached — keep tight (~224 tok actual)
-    "ROUTER_SYSTEM": 1600,  # KV-cached, 15 examples + last_jarvis ctx — ~1510 tok actual
+    "ROUTER_SYSTEM": 1800,  # KV-cached, 17 examples + last_jarvis ctx — ~1600 tok actual
     "ROUTER_USER": 600,
     "ANALYSIS_PROMPT": 1000,  # async — quality over speed
     "BRIEFING_SYSTEM": 100,
@@ -1093,6 +1101,11 @@ def get_prompt(name: str) -> str:
                 _override_mtime = mtime
         except Exception:
             pass
+    elif _override_cache:
+        # Overrides file deleted (manual rollback) — drop the stale cache so the
+        # module constants take effect again without a restart.
+        _override_cache = {}
+        _override_mtime = -1.0
     if name in _override_cache:
         return _override_cache[name]
     return globals().get(name, "")

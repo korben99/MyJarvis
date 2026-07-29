@@ -1,5 +1,5 @@
 """
-test_lru_cache.py — Valide LRUPromptCache dans llm_localLRU.py
+test_lru_cache.py — Valide LRUPromptCache dans llm_local.py
 
 Simule une conversation de 6 échanges et mesure à chaque tour :
   • tokens du prompt déjà cachés (prefix hit) vs tokens restants à traiter
@@ -41,8 +41,10 @@ os.environ.setdefault("USE_THINKING_BUDGET_PROCESSOR", "yes")
 
 # ── Garde GPU ─────────────────────────────────────────────────────────────
 def _check_jarvis_not_running() -> None:
+    # Pattern précis (uvicorn main:app) — "pgrep -f jarvis" matchait n'importe quel
+    # process dont la ligne de commande contient /opt/jarvis (shells, éditeurs…).
     try:
-        out = subprocess.check_output(["pgrep", "-f", "jarvis"], text=True)
+        out = subprocess.check_output(["pgrep", "-f", "uvicorn main:app"], text=True)
         pids = [p for p in out.strip().splitlines() if p != str(os.getpid())]
         if pids:
             print(f"ERREUR : Jarvis tourne (pids {pids}).")
@@ -54,9 +56,8 @@ def _check_jarvis_not_running() -> None:
 
 _check_jarvis_not_running()
 
-# Import depuis llm_localLRU (pas llm_local — c'est le but du test)
-import llm_localLRU as lru_mod  # noqa: E402
-from llm_localLRU import (  # noqa: E402
+import llm_local as lru_mod  # noqa: E402
+from llm_local import (  # noqa: E402
     LRU_KV_MAX_BYTES,
     LRU_KV_MAX_SIZE,
     _generate_sync,
@@ -176,7 +177,8 @@ def run_turn(
 
 # ── Assertions de validation ───────────────────────────────────────────────
 
-def validate_results(results: list[dict], no_think: bool) -> None:
+def validate_results(results: list[dict], no_think: bool, model_path: str = "") -> None:
+    from config import is_qwen36
     print(f"\n{'=' * 72}")
     print("VALIDATION")
     errors = []
@@ -207,7 +209,13 @@ def validate_results(results: list[dict], no_think: bool) -> None:
 
     # Hit-rate doit être non-décroissant à partir du tour 3
     # (au tour 2 le dénominateur saute, ce qui peut faire baisser le %)
-    if len(results) >= 3:
+    # Qwen3.6 : cache multi-tours désactivé par design (ArraysCache non trimmable —
+    # voir l'en-tête de llm_local.py). Seul le préfixe système est réutilisé, donc
+    # le hit-rate % décroît mécaniquement quand le prompt grandit — pas une erreur.
+    if is_qwen36(model_path):
+        print("  ⏭️  Hit-rate % : check sauté (Qwen3.6 — multi-tours désactivé par design, "
+              "préfixe système seul réutilisé)")
+    elif len(results) >= 3:
         pcts_3plus = [r["hit_pct"] for r in results[2:]]
         if all(pcts_3plus[i] <= pcts_3plus[i + 1] + 5 for i in range(len(pcts_3plus) - 1)):
             print(f"  ✅ Hit-rate non-décroissant dès tour 3 : {pcts_3plus}")
@@ -261,7 +269,7 @@ def main():
     max_tokens = args.max_tokens if args.max_tokens > 0 else (800 if no_think else thinking_budget + 800)
 
     print(f"{'=' * 72}")
-    print(f"TEST LRU CACHE — llm_localLRU.py")
+    print(f"TEST LRU CACHE — llm_local.py")
     print(f"{'=' * 72}")
     print(f"Modèle         : {model_path.split('/')[-1]}")
     print(f"no_think       : {no_think}")
@@ -326,7 +334,7 @@ def main():
     total_prompt = sum(r["prompt_len"] for r in results)
     print(f"  Total   {total_time:>6.1f}s   {total_prompt:>7} tok   {total_saved:>7} tok économisés")
 
-    validate_results(results, no_think)
+    validate_results(results, no_think, model_path)
 
 
 if __name__ == "__main__":

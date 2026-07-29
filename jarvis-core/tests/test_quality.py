@@ -126,6 +126,26 @@ def _make_config_module():
     m.MAX_CHAIN_ITERATIONS = 5
     m.MAX_REFLECTION_TOKENS = 1000
     m.REFINE_PROMPT_THRESHOLD = 3
+    # ── Names added to config.py after this bootstrap was written ──────────
+    m.LLM_LOCAL = False
+    m.DEFAULT_TEMP = None
+    m.MAX_TOKENS_SHORT = 300
+    m.MAX_TOKENS_COMPACT = 600
+    m.MAX_TOKENS_MEDIUM = 1000
+    m.MAX_TOKENS_NO_THINK = 1500
+    m.MAX_TOKENS_REASONING = 10000
+    m.MAX_TOKENS_THINK_COMPACT = 2048
+    m.MAX_TOKENS_THINK_MEDIUM = 5048
+    m.THINKING_BUDGET_COMPACT = 1024
+    m.THINKING_BUDGET_MEDIUM = 2048
+    m.THINKING_BUDGET_DEEP = 4000
+    m.PROFILE_NARRATIVE_TOKENS = 600
+    m.llm_timeout = lambda max_tokens: 30.0
+    m.APNS_KEY_ID = ""
+    m.APNS_TEAM_ID = ""
+    m.APNS_BUNDLE_ID = "com.test.JarvisApp"
+    m.APNS_KEY_PATH = ""
+    m.APNS_ENV = "sandbox"
     return m
 
 
@@ -185,6 +205,10 @@ def _import_pipeline():
 # ── SECTION A : UNIT TESTS ───────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
+@unittest.skip(
+    "obsolète : _detect_satisfaction (heuristique) a été supprimé — la satisfaction "
+    "est désormais jugée par le LLM dans analyzer.analyze_exchange"
+)
 class TestDetectSatisfaction(unittest.TestCase):
 
     def sat(self, msg):
@@ -358,6 +382,10 @@ class TestRetractAutobiographicalEvent(unittest.TestCase):
         self.assertEqual(type_clause["match"]["value"], "autobiographical")
 
 
+@unittest.skip(
+    "obsolète : log_conversation stocke satisfaction='unknown' (back-fillée ensuite "
+    "par l'analyzer LLM) — l'heuristique testée ici n'existe plus"
+)
 class TestLogConversationSatisfaction(unittest.TestCase):
 
     def _log_and_capture(self, user_msg):
@@ -504,6 +532,10 @@ class TestGetUserActivitySatisfaction(unittest.TestCase):
         self.assertIn("-1", line)
 
 
+@unittest.skip(
+    "obsolète : le champ 'retractions' a été retiré d'ANALYSIS_PROMPT — l'archivage "
+    "autobio est géré exclusivement par la nightly review"
+)
 class TestAnalysisPromptRetractions(unittest.TestCase):
 
     def test_retractions_field_in_prompt(self):
@@ -523,6 +555,10 @@ class TestAnalysisPromptRetractions(unittest.TestCase):
         self.assertTrue("phrase" in prompt_lower or "liste" in prompt_lower)
 
 
+@unittest.skip(
+    "obsolète : post_analysis ne traite plus de 'retractions' (champ supprimé du "
+    "pipeline d'analyse)"
+)
 class TestPostAnalysisRetractions(unittest.TestCase):
 
     @classmethod
@@ -733,9 +769,18 @@ def _get_profile_keys() -> dict:
 
 
 def _wait_analysis(label: str = ""):
-    """Attend que post_analysis ait le temps de s'exécuter."""
-    log.info("⏳ attente post_analysis %s(%.0fs)…", f"[{label}] " if label else "", _ANALYSIS_WAIT)
-    time.sleep(_ANALYSIS_WAIT)
+    """Force l'extraction de faits/projets pour TEST_USER puis attend la fin.
+
+    Historique : post_analysis extrayait les faits en ligne — un simple sleep
+    suffisait. L'extraction est désormais faite par le job planifié
+    analyse_recent_conversations (toutes les CONV_ANALYSIS_INTERVAL_MINUTES) ;
+    ce helper appelle la route POST /memory/analyze/{user} qui exécute une
+    passe immédiate (synchrone côté serveur, inférence LLM incluse).
+    """
+    log.info("⏳ analyse à la demande %s(POST /memory/analyze)…", f"[{label}] " if label else "")
+    r = _httpx.post(f"{BASE_URL}/memory/analyze/{TEST_USER}", timeout=300)
+    assert r.status_code == 200, f"/memory/analyze → HTTP {r.status_code}: {r.text[:200]}"
+    time.sleep(1)  # laisse les écritures Redis/Qdrant se déposer
 
 
 # ── Marker pytest ─────────────────────────────────────────────────────────────
@@ -856,8 +901,12 @@ class TestIntegrationMemory(unittest.TestCase):
     # Clé/valeur de test — choisie pour être reconnaissable et inoffensive
     _FACT_KEY = "qa_couleur_preferee"
     _FACT_VAL = "bleu_indigo_qa"
-    _SESSION_WRITE = "qa_mem_write"
-    _SESSION_READ  = "qa_mem_read"
+    # Suffixe horodaté : les sessions Redis persistent 90 jours — réutiliser un
+    # session_id fixe accumule les artefacts QA des runs précédents dans le
+    # contexte (historique + réponses de Jarvis), ce qui pousse l'analyzer à
+    # rejeter les faits ("si incertain → ne rien ajouter"). Constaté empiriquement.
+    _SESSION_WRITE = f"qa_mem_write_{int(time.time())}"
+    _SESSION_READ  = f"qa_mem_read_{int(time.time())}"
 
     @_integration
     def test_07_memory_write(self):
@@ -874,7 +923,9 @@ class TestIntegrationMemory(unittest.TestCase):
         log.info("PROFILE après write: %s", {k: v for k, v in profile.items() if "qa" in k.lower()})
 
         # Cherche la valeur dans n'importe quelle clé du profil
-        profile_dump = json.dumps(profile).lower()
+        # ensure_ascii=False : sinon les accents sont échappés (\u00e9) et le test
+        # de sous-chaîne échoue silencieusement sur toute valeur accentuée.
+        profile_dump = json.dumps(profile, ensure_ascii=False).lower()
         self.assertIn(
             self._FACT_VAL.lower(),
             profile_dump,
@@ -909,8 +960,9 @@ class TestIntegrationProjects(unittest.TestCase):
     """Cycle de vie d'un projet : ajout → vérification → clôture."""
 
     _PROJECT_NAME = "QA_PROJET_AUTOTEST"
-    _SESSION_ADD  = "qa_proj_add"
-    _SESSION_DONE = "qa_proj_done"
+    # Sessions uniques par run — voir commentaire TestIntegrationMemory.
+    _SESSION_ADD  = f"qa_proj_add_{int(time.time())}"
+    _SESSION_DONE = f"qa_proj_done_{int(time.time())}"
 
     @_integration
     def test_09_project_add(self):
@@ -922,8 +974,13 @@ class TestIntegrationProjects(unittest.TestCase):
         )
         _wait_analysis("cleanup")
 
+        # Formulation alignée sur ANALYSIS_PROMPT : un "create" exige une initiative
+        # annoncée explicitement, multi-étapes, sur plusieurs semaines — une commande
+        # sèche ("ajoute le projet X") est volontairement rejetée par l'analyzer.
         _chat(
-            f"Ajoute le projet '{self._PROJECT_NAME}' à ma liste de projets en cours.",
+            f"Je démarre un nouveau projet qui va me prendre plusieurs semaines : "
+            f"le projet {self._PROJECT_NAME}. Première étape : préparer le plan de test, "
+            f"ensuite j'écrirai les scénarios, et je finirai par l'automatisation complète.",
             session_id=self._SESSION_ADD,
         )
         _wait_analysis("project_add")
@@ -948,8 +1005,11 @@ class TestIntegrationProjects(unittest.TestCase):
     @_integration
     def test_10_project_done(self):
         """Clôture du projet → statut doit passer à 'done'."""
+        # Mention explicite du projet par son nom + fin annoncée — requis par
+        # ANALYSIS_PROMPT pour émettre une action "done" sans confabulation.
         _chat(
-            f"Marque le projet {self._PROJECT_NAME} comme terminé.",
+            f"Bonne nouvelle : j'ai terminé le projet {self._PROJECT_NAME}, "
+            f"l'automatisation est en place, tout est fini.",
             session_id=self._SESSION_DONE,
         )
         _wait_analysis("project_done")
@@ -980,9 +1040,16 @@ class TestIntegrationProfileKeys(unittest.TestCase):
     """Update et suppression de clé de profil via conversation."""
 
     _KEY_HINT = "qa_test_preference"
-    _VAL = "valeur_qa_42"
-    _SESSION_SET = "qa_profile_set"
-    _SESSION_DEL = "qa_profile_del"
+    # Fait calqué sur l'exemple "Bon" d'ANALYSIS_PROMPT (loisir:tennis → "joue le
+    # week-end en club"). Pièges vérifiés empiriquement sur le 35B :
+    #  1. jetons artificiels ("valeur_qa_42") rejetés (prior anti-artefact) ;
+    #  2. faits dégénérés clé≈valeur ("parfum préféré = pistache") rejetés
+    #     (règle "la valeur doit apporter une info que la clé ne contient pas") ;
+    #  3. l'orthographe est normalisée en clé (sans accents) — assertion tolérante.
+    _VAL = "accordéon"
+    # Sessions uniques par run — voir commentaire TestIntegrationMemory.
+    _SESSION_SET = f"qa_profile_set_{int(time.time())}"
+    _SESSION_DEL = f"qa_profile_del_{int(time.time())}"
 
     @_integration
     def test_11_profile_key_update(self):
@@ -990,25 +1057,38 @@ class TestIntegrationProfileKeys(unittest.TestCase):
         Information spécifique transmise en conversation →
         post_analysis doit créer/mettre à jour une clé dans le profil.
         """
+        # Formulation "préférence durable" — ANALYSIS_PROMPT n'extrait que des faits
+        # durables dans des namespaces autorisés (preference:…). Une valeur "méta"
+        # ("mon paramètre X vaut Y", "pour les tests automatiques") est volontairement
+        # rejetée par l'analyzer ; on décrit donc une préférence de vie plausible,
+        # sur un domaine distinct de test_07 (couleur) pour éviter le dedup de clés.
         _chat(
-            f"Note que mon paramètre qa_test_preference vaut '{self._VAL}'.",
+            f"Je joue de l'{self._VAL} en amateur tous les dimanches, "
+            f"depuis une dizaine d'années.",
             session_id=self._SESSION_SET,
         )
         _wait_analysis("profile_key_update")
 
         profile = _get_profile_keys()
-        profile_dump = json.dumps(profile).lower()
+        # ensure_ascii=False : sinon les accents sont échappés (\u00e9) et le test
+        # de sous-chaîne échoue silencieusement sur toute valeur accentuée.
+        profile_dump = json.dumps(profile, ensure_ascii=False).lower()
         log.info("PROFIL clés: %s", list(profile.keys()))
 
-        self.assertIn(
-            self._VAL.lower(),
-            profile_dump,
-            f"Valeur '{self._VAL}' non trouvée dans le profil.\n"
+        self.assertTrue(
+            "accordeon" in profile_dump or "accordéon" in profile_dump,
+            f"'{self._VAL}' non trouvé dans le profil (clé ou valeur).\n"
             f"Profil: {json.dumps(profile, indent=2, ensure_ascii=False)[:500]}",
         )
-        log.info("✓ clé de profil mise à jour, valeur '%s' présente", self._VAL)
+        log.info("✓ clé de profil mise à jour, '%s' présent", self._VAL)
 
     @_integration
+    @unittest.skip(
+        "obsolète : la suppression de profil via conversation n'est pas une "
+        "fonctionnalité du pipeline actuel — l'analyzer n'émet pas de deletions "
+        "(user_facts sans valeur) ; les suppressions sont gérées par la nightly "
+        "review (curative_profile_cleanup) et la réflexion Phase 2 l'interdit aussi"
+    )
     def test_12_profile_key_delete(self):
         """
         Demande de suppression d'une info → la valeur doit disparaître du profil.
@@ -1021,7 +1101,9 @@ class TestIntegrationProfileKeys(unittest.TestCase):
         _wait_analysis("profile_key_delete")
 
         profile = _get_profile_keys()
-        profile_dump = json.dumps(profile).lower()
+        # ensure_ascii=False : sinon les accents sont échappés (\u00e9) et le test
+        # de sous-chaîne échoue silencieusement sur toute valeur accentuée.
+        profile_dump = json.dumps(profile, ensure_ascii=False).lower()
         log.info("PROFIL après delete: clés = %s", list(profile.keys()))
 
         self.assertNotIn(
@@ -1112,29 +1194,42 @@ class TestIntegrationRouter(unittest.TestCase):
     @_integration
     def test_16_router_samples_written(self):
         """
-        Après un échange, routing_samples.jsonl doit avoir reçu au moins une entrée récente.
-        Vérifie que le routeur LLM n'est pas en panne silencieuse.
+        Après un échange routé par le LLM router, routing_samples.jsonl doit avoir
+        reçu une entrée. Vérifie que le routeur LLM n'est pas en panne silencieuse.
+
+        Note : l'embed router (fast-path) court-circuite le LLM router pour les
+        formulations proches de ses exemples ("Quel est le temps à Lyon ?" → météo
+        directe, aucun échantillon écrit). On envoie donc des formulations
+        inhabituelles/ambiguës qui retombent sur le LLM router — plusieurs
+        tentatives pour rester robuste aux évolutions du seuil embedding.
         """
-        # Compte les lignes avant
-        before = 0
-        if os.path.exists(self._SAMPLES_FILE):
+
+        def _count() -> int:
+            if not os.path.exists(self._SAMPLES_FILE):
+                return 0
             with open(self._SAMPLES_FILE) as f:
-                before = sum(1 for _ in f)
+                return sum(1 for _ in f)
 
-        _chat("Quel est le temps à Lyon ?", session_id="qa_router_check")
-        time.sleep(2)  # le routeur est synchrone — pas besoin d'attendre longtemps
+        before = _count()
+        attempts = [
+            "Un truc me chiffonne depuis hier soir au sujet du contrat d'assurance de la voiture.",
+            "Entre ce qu'on s'était dit sur mes placements et les taux actuels, je devrais m'inquiéter ?",
+            "J'aimerais creuser la question des panneaux solaires pour la grange, par où commencer ?",
+        ]
+        after = before
+        for i, msg in enumerate(attempts, 1):
+            _chat(msg, session_id="qa_router_check")
+            time.sleep(2)  # le routeur est synchrone — pas besoin d'attendre longtemps
+            after = _count()
+            log.info("routing_samples tentative %d: avant=%d après=%d", i, before, after)
+            if after > before:
+                break
 
-        after = 0
-        if os.path.exists(self._SAMPLES_FILE):
-            with open(self._SAMPLES_FILE) as f:
-                after = sum(1 for _ in f)
-
-        log.info("routing_samples: avant=%d après=%d", before, after)
         self.assertGreater(
             after, before,
-            f"Aucune entrée ajoutée dans {self._SAMPLES_FILE}.\n"
+            f"Aucune entrée ajoutée dans {self._SAMPLES_FILE} après {len(attempts)} messages.\n"
             f"Vérifier: llm_router.py syntaxiquement valide ? ROUTER_MODEL défini ? "
-            f"Hermes génère du JSON valide ?",
+            f"le routeur génère du JSON valide ? (ou l'embed router capte tout — élargir les formulations)",
         )
 
         # Lire la dernière entrée et afficher pour diagnostic
@@ -1429,6 +1524,17 @@ class TestIntegrationPerformance(unittest.TestCase):
 
     _TTFT_SIMPLE_MAX  = float(os.getenv("JARVIS_TTFT_SIMPLE_MAX",  "10")) * 1000
     _TTFT_CONTEXT_MAX = float(os.getenv("JARVIS_TTFT_CONTEXT_MAX", "40")) * 1000
+
+    @classmethod
+    def setUpClass(cls):
+        # Fenêtre de stabilisation : les 25 tests précédents laissent des analyses
+        # background (post_analysis, résumés de session, analyzer 35B) en vol — une
+        # génération bg en cours n'est pas préemptée et peut retarder un TTFT de
+        # ~20 s. On mesure ici le TTFT nominal (GPU au repos), pas la contention
+        # artificielle de la suite ; les seuils restent stricts.
+        settle = float(os.getenv("JARVIS_TTFT_SETTLE_S", "30"))
+        log.info("⏳ stabilisation GPU avant mesures TTFT (%.0fs)…", settle)
+        time.sleep(settle)
 
     def _perf(self, label: str, message: str, session_id: str) -> dict:
         result = _measure_ttft(message, session_id)

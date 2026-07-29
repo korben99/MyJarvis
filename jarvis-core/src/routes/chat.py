@@ -52,6 +52,7 @@ from google_services import (
 from helpers import (
     build_iso_dt,
     call_llm_async,
+    call_llm_async_bg,
     filter_think_chunk,
     fmt_now_fr,
     get_logger,
@@ -99,6 +100,17 @@ router = APIRouter()
 _background_tasks: set = set()
 
 
+def _spawn_bg(coro) -> None:
+    """Fire-and-forget task with a strong reference until completion.
+
+    Every background asyncio.create_task in this module MUST go through here —
+    a bare create_task can be garbage-collected before running (see comment above),
+    silently losing post_analysis / session-summary work."""
+    t = asyncio.create_task(coro)
+    _background_tasks.add(t)
+    t.add_done_callback(_background_tasks.discard)
+
+
 def _trim_history_to_budget(hist: list[dict], budget_tokens: int) -> list[dict]:
     """Keep the most recent messages within token budget, always preserving the last exchange."""
     if not hist:
@@ -139,7 +151,12 @@ async def _update_session_summary(user_code: str, session_id: str) -> None:
             return
 
         uncovered_chars = sum(len(m.get("content", "")) for m in uncovered)
-        if uncovered_chars <= HIST_CONV_SUMMARIZE_THRESHOLD * 4:
+        # Trigger as soon as the uncovered text exceeds the INJECTION budget:
+        # anything beyond HIST_CONV_TOKEN_BUDGET is dropped by _trim_history_to_budget,
+        # so it must be summarized or it becomes invisible to the model (context hole
+        # between the 4000-char injection cap and the old 6000-char trigger).
+        _trigger_chars = min(HIST_CONV_SUMMARIZE_THRESHOLD, HIST_CONV_TOKEN_BUDGET) * 4
+        if uncovered_chars <= _trigger_chars:
             return
 
         dropped_text = "\n".join(
@@ -155,13 +172,19 @@ async def _update_session_summary(user_code: str, session_id: str) -> None:
             existing_block=existing_block,
             dropped_text=dropped_text,
         )
-        content = await call_llm_async(
+        # call_llm_async_bg : cède le GPU si l'utilisateur enchaîne un message
+        # (call_llm_async prenait le lock en priorité chat malgré le commentaire
+        # « no GPU conflict »). json_response=False : prose attendue — le défaut
+        # True active l'early-stop au premier objet {...} et tronquait le résumé
+        # dès que la conversation contenait du JSON ou du code.
+        content = await call_llm_async_bg(
             [{"role": "user", "content": prompt}],
             model=PRIMARY_MODEL,
             api_url=PRIMARY_API_URL,
             api_key=PRIMARY_API_KEY,
             temperature=DEFAULT_TEMP,
             max_tokens=SESSION_SUMMARY_TOKENS,
+            json_response=False,
             no_think=True,
             timeout=llm_timeout(SESSION_SUMMARY_TOKENS),
         )
@@ -346,10 +369,10 @@ async def _complete_after_disconnect(ctx: _SseCtx) -> None:
             if len(clean) > 120:
                 preview += "…"
             await send_apns_push(device_token, body=preview, title="Jarvis")
-        asyncio.create_task(
+        _spawn_bg(
             post_analysis(ctx.session_id, ctx.user_code, ctx.history_user_content, clean)
         )
-        asyncio.create_task(_update_session_summary(ctx.user_code, ctx.session_id))
+        _spawn_bg(_update_session_summary(ctx.user_code, ctx.session_id))
     except Exception as exc:
         logger.warning("post-disconnect completion failed: %s", exc)
 
@@ -491,7 +514,13 @@ async def _sse_stream(ctx: _SseCtx):
             )
             # Budget-forced </think> mid-sentence can cause Qwen3.6 to emit EOS
             # immediately — give the iOS client a visible fallback instead of silence.
-            yield f"data: {json.dumps({'content': '⚠️ Réponse incomplète — budget de réflexion dépassé. Reformule ta question.'})}\n\n"
+            # Zero chunks received means the LLM call itself failed (API/infra error),
+            # not a thinking truncation — don't blame the reasoning budget for it.
+            if raw_chunks:
+                _fallback = "⚠️ Réponse incomplète — budget de réflexion dépassé. Reformule ta question."
+            else:
+                _fallback = "⚠️ Aucune réponse du modèle (erreur d'inférence ou d'API). Réessaie dans un instant."
+            yield f"data: {json.dumps({'content': _fallback})}\n\n"
         if response_text:
             append_conversation_message(
                 ctx.user_code, ctx.session_id, "user", ctx.history_user_content
@@ -516,12 +545,12 @@ async def _sse_stream(ctx: _SseCtx):
         # Schedule background tasks BEFORE the final yield — after it, the consumer
         # (e.g. OpenWebUI) may close the connection, which sends GeneratorExit into
         # this generator and skips any code that follows the yield.
-        asyncio.create_task(
+        _spawn_bg(
             post_analysis(
                 ctx.session_id, ctx.user_code, ctx.history_user_content, response_text
             )
         )
-        asyncio.create_task(_update_session_summary(ctx.user_code, ctx.session_id))
+        _spawn_bg(_update_session_summary(ctx.user_code, ctx.session_id))
         yield f"data: {_done_payload}\n\n"
     except asyncio.CancelledError:
         logger.info("Client disconnected")
@@ -536,7 +565,7 @@ async def _sse_stream(ctx: _SseCtx):
                     append_conversation_message(
                         ctx.user_code, ctx.session_id, "assistant", response_text
                     )
-                    asyncio.create_task(
+                    _spawn_bg(
                         post_analysis(
                             ctx.session_id,
                             ctx.user_code,
@@ -559,9 +588,7 @@ async def _sse_stream(ctx: _SseCtx):
             # the result via APNS to wake the iOS app.
             reason = "mid-think disconnect" if raw_chunks else "no tokens received"
             logger.info("post-disconnect completion triggered (%s)", reason)
-            _t = asyncio.create_task(_complete_after_disconnect(ctx))
-            _background_tasks.add(_t)
-            _t.add_done_callback(_background_tasks.discard)
+            _spawn_bg(_complete_after_disconnect(ctx))
 
 
 # ── Pipeline helpers ───────────────────────────────────────────────────────────
@@ -615,8 +642,17 @@ async def _handle_calendar_pending(
     Retourne None si le message n'est ni "confirme" ni "annule" → pipeline normal.
     """
     msg_lower = req.message.lower().strip()
-    if re.match(r"^(oui[,\s]*)?(confirme[sz]?|ok|yes)\s*[!.]?$", msg_lower):
-        pending = json.loads(pending_raw)
+    # "oui" seul confirme aussi — réponse naturelle à « Confirmes ? » (la regex
+    # d'origine exigeait confirme/ok/yes et laissait "oui" retomber dans le pipeline).
+    if re.match(r"^(oui[,\s]*)?(confirme[sz]?|ok|yes)\s*[!.]?$|^oui\s*[!.]?$", msg_lower):
+        try:
+            pending = json.loads(pending_raw)
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            logger.warning(
+                "pending_calendar_action corrupted for %s — clearing", user_code
+            )
+            REDIS_CLIENT.delete(f"jarvis:{user_code}:pending_calendar_action")
+            return None  # fall through to the normal pipeline
         REDIS_CLIENT.delete(f"jarvis:{user_code}:pending_calendar_action")
         try:
             event_id = await asyncio.wait_for(
@@ -827,10 +863,10 @@ async def chat(req: ChatRequest):
     # Guard: skip for very short messages (< 15 chars) — almost always small-talk
     # ("ok", "merci", "oui"). asyncio cancel() doesn't stop the underlying thread,
     # so avoiding the launch entirely is the only way to prevent wasted CPU.
+    _spec_mem_skipped = len(_history_user_msg.strip()) < 15
     _spec_mem_task: asyncio.Task = asyncio.ensure_future(
-        async_search_memory(user_code, _history_user_msg, 5)
-        if len(_history_user_msg.strip()) >= 15
-        else _empty()
+        _empty() if _spec_mem_skipped
+        else async_search_memory(user_code, _history_user_msg, 5)
     )
 
     if _embed_result is not None:
@@ -1060,7 +1096,14 @@ async def chat(req: ChatRequest):
         search_documents(_llm_rag_query or req.message)
         if (req.use_rag or use_rag)
         else _empty(),
-        _prefetched_or_empty(_prefetched_memory) if use_memory else _empty(),
+        # Si la recherche spéculative a été sautée (message < 15 chars) mais que le
+        # routeur veut la mémoire (ex. « et mon vélo ? »), on la lance ici — sinon
+        # le recall était silencieusement perdu pour les messages courts.
+        async_search_memory(user_code, _history_user_msg, 5)
+        if (use_memory and _spec_mem_skipped)
+        else _prefetched_or_empty(_prefetched_memory)
+        if use_memory
+        else _empty(),
         search_weather(_weather_query)
         if use_weather_auto
         else search_web(optimize_web_query(req.message), original_message=req.message)
@@ -1137,10 +1180,12 @@ async def chat(req: ChatRequest):
     # STEP 6 — MESSAGE ASSEMBLY — context + prefix + history → final prompt
     # ════════════════════════════════════════════════════════════════════════
 
-    # Write user name once per process lifetime — skips Redis hget on every request
+    # Write user name once per process lifetime — skips Redis hget on every request.
+    # to_thread : update_user_profile peut déclencher un appel LLM sync de dedup de
+    # clé — exécuté inline il bloquerait l'event loop (et donc le streaming en cours).
     if user_name and user_code not in _profile_initialised:
         if not REDIS_CLIENT.hget(f"user:{user_code}:profile", "name"):
-            update_user_profile(user_code, "name", user_name)
+            await asyncio.to_thread(update_user_profile, user_code, "name", user_name)
         _profile_initialised.add(user_code)
 
     assembled = build_context(
@@ -1328,8 +1373,8 @@ async def chat(req: ChatRequest):
     append_conversation_message(user_code, req.session_id, "assistant", resp)
     ms = int((time.time() - start) * 1000)
 
-    asyncio.create_task(post_analysis(req.session_id, user_code, _history_user_msg, resp))
-    asyncio.create_task(_update_session_summary(user_code, req.session_id))
+    _spawn_bg(post_analysis(req.session_id, user_code, _history_user_msg, resp))
+    _spawn_bg(_update_session_summary(user_code, req.session_id))
 
     return {
         "response": resp,

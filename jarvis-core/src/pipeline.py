@@ -369,9 +369,10 @@ def build_context(
 
     assembled = "\n\n".join(context_parts)
     if len(assembled) > TOTAL_CONTEXT_BUDGET:
-        # Drop complete sections from the front (lowest priority first: memory →
-        # RAG → calendar → … → web) instead of slicing at a char boundary — a raw
-        # cut leaves unclosed XML tags that confuse Qwen3.6's context parsing.
+        # Drop complete sections from the front, in context_parts order (documents →
+        # memory → calendar → gmail → portfolio → alerts → self), web always last —
+        # instead of slicing at a char boundary: a raw cut leaves unclosed XML tags
+        # that confuse Qwen3.6's context parsing.
         _original_count = len(context_parts)
         while len(context_parts) > 1 and len("\n\n".join(context_parts)) > TOTAL_CONTEXT_BUDGET:
             context_parts.pop(0)
