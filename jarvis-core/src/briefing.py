@@ -417,7 +417,7 @@ async def _assemble_with_llm(
         result = extract_llm_json(content)
         return result.get("text", ""), result.get("html", "")
     except Exception as exc:
-        logger.error("Briefing LLM assembly failed: %s", type(exc).__name__)
+        logger.error("Briefing LLM assembly failed: %s: %s", type(exc).__name__, exc)
         # Minimal fallback
         fallback = f"Bonjour {user_name} ! Voici ton briefing du {date_str}.\n\n"
         fallback += f"Agenda: {calendar_text}\n\nMétéo: {weather_text}"

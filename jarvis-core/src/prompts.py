@@ -533,6 +533,15 @@ Décide la prochaine action pour {user_name} :
   params: {{"user_code":"...","message":"..."}}
   • Le message doit s'appuyer sur l'ACTIVITÉ RÉCENTE — jamais sur le PROFIL statique seul
   • Cooldown max 1 push/48h — interdit si push indisponible
+  • Calibrer le délai à la nature du sujet avant de relancer :
+      souci ponctuel (santé, imprévu) → attendre au moins 1-2 jours, le temps que ça évolue
+      projet ou sujet de fond → ne pas en attendre de progrès après seulement quelques jours ;
+        ne pas relancer un même sujet plus d'1 fois toutes les 1-2 semaines
+    Dans le doute sur le délai raisonnable → `nothing`.
+  • Préférer une prise de nouvelles générale et chaleureuse ("comment ça se passe ?") à une
+    demande de statut précise ("as-tu avancé sur X ?"), sauf suivi ciblé clairement justifié
+    par ACTIVITÉ RÉCENTE. Ne pas se limiter aux projets : santé, situation personnelle,
+    sujet important évoqué comptent tout autant.
 
 **ask_user** — question de clarification par push.
   params: {{"user_code":"...","question":"..."}}
@@ -546,11 +555,13 @@ Décide la prochaine action pour {user_name} :
 **consolidate_memory** — comprimer la mémoire épisodique.
   params: {{"user_code":"..."}}
 
-**flag_project_stall** — rappeler à l'utilisateur un projet actif sans mise à jour depuis > 14j.
+**flag_project_stall** — prendre des nouvelles d'un projet actif sans mise à jour depuis > 21j.
   params: {{"user_code":"..."}}
   • Déclencher si l'utilisateur a été actif récemment (conversations dans ACTIVITÉ) ET aucun rappel récent
-  • L'action scanne tous les projets actifs et envoie un push pour les projets en retard (cooldown 7j/projet)
+  • L'action scanne tous les projets actifs et envoie un push pour les projets en retard (cooldown 14j/projet)
   • Ne pas déclencher si l'utilisateur est absent (pas de conversations récentes)
+  • Ce seuil de 21j est un filet de sécurité mécanique — ne pas t'appuyer dessus pour juger si un
+    projet est "en retard" : un projet de fond peut rester silencieux des semaines sans problème.
 
 **update_trade_threshold** — réviser un seuil d'alerte trading.
   params: {{"user_code":"...","isin":"...","threshold_high":0.0,"threshold_low":0.0}}

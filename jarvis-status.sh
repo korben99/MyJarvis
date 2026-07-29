@@ -5,13 +5,22 @@ echo ""
 source /opt/jarvis/.env
 
 echo "── Local Services ──"
-for svc in jarvis-qdrant jarvis-redis jarvis-webui jarvis-api; do
+for svc in jarvis-qdrant jarvis-redis jarvis-webui; do
     if docker ps --format '{{.Names}}' | grep -q "$svc"; then
         echo "  ✅ $svc"
     else
         echo "  ⬜ $svc (not running)"
     fi
 done
+
+# jarvis-api runs natively via launchd/uvicorn, never as a Docker container —
+# check the launchd job + an actual HTTP response, not `docker ps`.
+API_PID=$(launchctl list | awk '/com.jarvis.api/ {print $1}')
+if [ -n "$API_PID" ] && [ "$API_PID" != "-" ] && curl -s --connect-timeout 2 http://localhost:8000/status > /dev/null 2>&1; then
+    echo "  ✅ jarvis-api — PID $API_PID, écoute :8000"
+else
+    echo "  ⬜ jarvis-api (not running)"
+fi
 
 echo ""
 echo "── LLM Providers ──"
@@ -163,7 +172,7 @@ fi
 
 echo ""
 echo "── Access ──"
-IP=$(hostname -I | awk '{print $1}')
+IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "localhost")
 echo "  Open WebUI:  http://${IP}:3000"
 echo "  Jarvis API:  http://${IP}:8000"
 echo "  Proxy CC:    http://${IP}:8090  (ANTHROPIC_BASE_URL)"

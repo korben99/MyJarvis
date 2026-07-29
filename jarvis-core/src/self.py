@@ -88,6 +88,7 @@ from helpers import (
     get_logger,
     get_qdrant,
     get_redis,
+    rel_time_fr,
 )
 import emotional_state
 from memory import (
@@ -2280,7 +2281,7 @@ _PRUNE_COOLDOWN_TTL = 86400  # 24h
 _CONSOLIDATE_COOLDOWN_PREFIX = "jarvis:self:last_consolidate"
 _CONSOLIDATE_COOLDOWN_TTL = 48 * 3600  # 48h
 _STALL_COOLDOWN_PREFIX = "jarvis:self:stall"
-_STALL_COOLDOWN_TTL = 7 * 86400  # 7j par projet
+_STALL_COOLDOWN_TTL = 14 * 86400  # 14j par projet — évite l'effet "relance en boucle"
 _HEALTH_ALERT_KEY = "jarvis:self:health_alert"
 _HEALTH_ALERT_TTL = 4 * 3600  # 4h — évite le spam en cas de service instable
 
@@ -2412,8 +2413,12 @@ def _get_active_projects(user_code: str) -> list[dict]:
 
 def _action_flag_project_stall(params: dict) -> str:
     """
-    Détecte les projets actifs sans mise à jour depuis > 14j et envoie un
-    push de rappel. Cooldown 7j par projet pour éviter le harcèlement.
+    Détecte les projets actifs sans mise à jour depuis > 21j et envoie un
+    push de prise de nouvelles. Cooldown 14j par projet pour éviter le harcèlement.
+
+    21j (et non 14) car un projet de fond peut légitimement rester silencieux
+    plusieurs semaines sans être "à la traîne" — voir generate_proactive_push
+    pour le raisonnement au cas par cas basé sur l'âge réel du projet.
     """
     user_code = params.get("user_code", "")
     if not user_code or user_code not in USER_CODES:
@@ -2442,7 +2447,7 @@ def _action_flag_project_stall(params: dict) -> str:
             continue
 
         days = int((now - ts) / 86400)
-        if days <= 14:
+        if days <= 21:
             continue
 
         cooldown_key = f"{_STALL_COOLDOWN_PREFIX}:{user_code}:{name.lower()[:30]}"
@@ -2450,7 +2455,9 @@ def _action_flag_project_stall(params: dict) -> str:
             skipped.append(name)
             continue
 
-        msg = f"Où en est « {name} » ? Ça fait {days} jours sans mise à jour."
+        # Prise de nouvelles générale, pas une demande de statut chiffrée —
+        # évite le ton "surveillance" d'un décompte de jours explicite.
+        msg = f"Ça fait un moment qu'on n'a pas reparlé de « {name} » — il y a du nouveau ?"
         result = _action_queue_push({"user_code": user_code, "message": msg})
         if "push queued" in result:
             r.setex(cooldown_key, _STALL_COOLDOWN_TTL, "1")
@@ -2459,7 +2466,7 @@ def _action_flag_project_stall(params: dict) -> str:
             return f"flag_project_stall: push indisponible — {result}"
 
     if not sent and not skipped:
-        return "flag_project_stall: aucun projet en retard (> 14j)"
+        return "flag_project_stall: aucun projet en retard (> 21j)"
     if not sent:
         return f"flag_project_stall: {len(skipped)} projet(s) en retard mais tous en cooldown"
     return f"flag_project_stall: rappel envoyé pour {', '.join(sent)}"
@@ -2499,6 +2506,14 @@ def _execute_action(action: str, params: dict) -> str:
 # ══════════════════════════════════════════════════
 
 
+def _iso_to_ts(iso_str: str) -> float | None:
+    """Parse a project's first_mentioned/last_update ISO string to a Unix timestamp."""
+    try:
+        return datetime.fromisoformat(iso_str).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
 def _last_conversation_ts(user_code: str) -> float:
     """Return Unix timestamp of the most recent episodic conversation, or 0."""
     r = get_redis()
@@ -2519,14 +2534,22 @@ async def generate_proactive_push(user_code: str) -> str:
     decide if there is something worth checking on proactively.
 
     Two trigger paths:
-      A) Recent conversation (last 24h) — reactive follow-up on what was discussed
-      B) Active project + silence > 48h — proactive check-in on ongoing work
-         even when the user hasn't talked to Jarvis recently
+      A) Recent conversation (last 24h) — reactive follow-up on what was discussed.
+         Each exchange is timestamped ("il y a 1h", "il y a 2 jours", …) so the
+         LLM can judge whether *enough time has actually passed* for the topic
+         at hand, instead of following up on e.g. a minor health complaint an
+         hour after it was mentioned.
+      B) Active project + silence > 96h — proactive check-in on ongoing work
+         even when the user hasn't talked to Jarvis recently. Each project is
+         annotated with its own age (first_mentioned) and last real update, so
+         the LLM can gauge whether the elapsed time is even plausible given
+         the project's apparent scope (a few days silence on a months-long
+         initiative is not "stalled").
 
     Guards:
       - Device must be registered (jarvis:device:token:{user_code})
-      - Cooldown 2h between pushes per user (jarvis:push:cooldown:{user_code})
-      - At least one of: recent conversation OR active project with silence > 48h
+      - Cooldown 48h between pushes per user (jarvis:push:cooldown:{user_code})
+      - At least one of: recent conversation OR active project with silence > 96h
     """
     r = get_redis()
 
@@ -2540,36 +2563,47 @@ async def generate_proactive_push(user_code: str) -> str:
 
     now = time.time()
 
-    # ── Path A: recent conversations (last 24h) ──────────────────────────
+    # ── Path A: recent conversations (last 24h), timestamped ────────────
     cutoff = now - 24 * 3600
-    entries_raw = r.zrangebyscore(f"convlog:{user_code}", cutoff, "+inf")
+    entries_raw = r.zrangebyscore(
+        f"convlog:{user_code}", cutoff, "+inf", withscores=True
+    )
 
     conv_lines: list[str] = []
-    for raw in entries_raw[-10:]:
+    for raw, score in entries_raw[-10:]:
         try:
             e = json.loads(raw)
             user_msg = e.get("user", "")[:150]
             asst_msg = e.get("assistant", "")[:150]
             topics = ", ".join(e.get("topics", []))
+            elapsed = rel_time_fr(score)
             if user_msg:
-                conv_lines.append(f"User: {user_msg}")
+                conv_lines.append(f"[{elapsed}] User: {user_msg}")
             if asst_msg:
-                conv_lines.append(f"Jarvis: {asst_msg}")
+                conv_lines.append(f"[{elapsed}] Jarvis: {asst_msg}")
             if topics:
                 conv_lines.append(f"Topics: {topics}")
             conv_lines.append("")
         except Exception:
             pass
 
-    # ── Path B: active projects + silence > 48h ──────────────────────────
+    # ── Path B: active projects + silence > 96h ──────────────────────────
     active_projects = _get_active_projects(user_code)
     last_ts = _last_conversation_ts(user_code)
     silence_hours = (now - last_ts) / 3600 if last_ts else 999
 
     project_lines: list[str] = []
-    if active_projects and silence_hours > 48:
+    if active_projects and silence_hours > 96:
         for p in active_projects[:5]:
-            project_lines.append(f"- {p['name']}: {p.get('description', '')[:120]}")
+            age_bits = []
+            first_ts = _iso_to_ts(p.get("first_mentioned", ""))
+            update_ts = _iso_to_ts(p.get("last_update", ""))
+            if first_ts:
+                age_bits.append(f"mentionné pour la 1ère fois {rel_time_fr(first_ts)}")
+            if update_ts:
+                age_bits.append(f"dernière mise à jour {rel_time_fr(update_ts)}")
+            age_str = f" ({', '.join(age_bits)})" if age_bits else ""
+            project_lines.append(f"- {p['name']}{age_str}: {p.get('description', '')[:120]}")
 
     # Neither path has anything to work with → skip
     if not conv_lines and not project_lines:
@@ -2585,19 +2619,32 @@ async def generate_proactive_push(user_code: str) -> str:
     projects_section = ""
     if project_lines:
         projects_section = (
-            f"\nProjets actifs de {user_name} (silence depuis {silence_hours:.0f}h) :\n"
+            f"\nProjets actifs de {user_name} (aucun échange avec Jarvis depuis {silence_hours:.0f}h) :\n"
             + "\n".join(project_lines)
             + "\n"
         )
 
     prompt = (
-        f"Voici les échanges récents avec {user_name} :\n\n{conv_text}\n"
+        f"Voici les échanges récents avec {user_name}, chacun horodaté (temps écoulé depuis) :\n\n{conv_text}\n"
         f"{projects_section}\n"
         f"Humeur actuelle de Jarvis : {mood}\n\n"
-        f"En tant que Jarvis, y a-t-il quelque chose qui mérite de reprendre contact de façon proactive ? "
-        f"Par exemple : prendre des nouvelles d'un projet en cours, d'une situation mentionnée, "
-        f"s'enquérir de la santé, relancer un sujet important. "
-        f"Si oui, écris un message court (1 phrase max, en français, naturel et chaleureux). "
+        f"En tant que Jarvis, y a-t-il quelque chose qui mérite de reprendre contact de façon proactive ?\n\n"
+        f"CALIBRAGE DU DÉLAI — le point le plus important : le temps écoulé (indiqué entre crochets, ou "
+        f"via les dates de projet) doit être cohérent avec la nature du sujet avant de relancer.\n"
+        f"  • Un souci ponctuel (santé, imprévu, désagrément passager) : laisser au moins 1 à 2 jours avant "
+        f"d'en reparler — le temps que ça évolue naturellement. Revenir dessus après seulement 1h ou quelques "
+        f"heures n'a aucun sens et donne l'impression d'être surveillé.\n"
+        f"  • Un projet ou sujet de fond (dont l'ampleur se devine via sa description — installation, dossier "
+        f"administratif, projet professionnel, apprentissage long...) : ne pas en attendre de progrès après "
+        f"seulement quelques jours de silence. Ne relancer un même projet qu'une fois toutes les 1-2 semaines "
+        f"au minimum, et seulement si le délai écoulé est plausible compte tenu de son ampleur apparente.\n"
+        f"  • Dans le doute sur le délai raisonnable, préférer NE PAS relancer (réponds null).\n\n"
+        f"TON — privilégier une prise de nouvelles générale et chaleureuse ('comment ça se passe, il y a du "
+        f"nouveau ?') plutôt qu'une demande de statut précise ('as-tu avancé sur X ?'), sauf si la conversation "
+        f"récente appelle clairement un suivi ciblé (ex : {user_name} a dit qu'il saurait quelque chose à une "
+        f"date précise, déjà passée). Ne pas se limiter aux projets : un souci de santé, une situation "
+        f"personnelle ou un sujet important évoqué comptent tout autant.\n\n"
+        f"Si un message est justifié : écris-le court (1 phrase max, en français, naturel et chaleureux). "
         f"Si non, réponds null.\n\n"
         f"RÈGLE ABSOLUE : ne jamais supposer qu'une action a été accomplie (achat, décision, voyage, démarche...) "
         f"si elle n'est pas explicitement confirmée dans la conversation. "

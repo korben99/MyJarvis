@@ -548,6 +548,14 @@ def extract_llm_json(text: str) -> dict:
     if not text:
         raise ValueError("Empty LLM response")
 
+    def _fix_invalid_escapes(s: str) -> str:
+        # Qwen3.6 (RotorQuant quant) occasionally emits a bare "\ " (backslash
+        # followed by a non-escape char, e.g. space) inside a string value where
+        # it clearly meant a line break. That's not valid JSON (valid escapes are
+        # only " \ / b f n r t u) and json.loads rejects the whole payload for it.
+        # Escaping the stray backslash keeps the rest of the (valid) JSON intact.
+        return re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", s)
+
     # ── 1. Nettoyage agressif ─────────────────────────────
 
     # remove <think> blocks (Qwen3)
@@ -608,19 +616,20 @@ def extract_llm_json(text: str) -> dict:
 
             if depth == 0:
                 candidate = text[start : i + 1]
+                hook = lambda pairs: {k: v for k, v in reversed(list(pairs))}
                 try:
                     # object_pairs_hook keeps the FIRST value when a model emits
                     # duplicate keys (e.g. Hermes router repeating its JSON 3× inside
                     # one {…}).  reversed() + dict-comp: later duplicates overwrite
                     # earlier ones, so after reversal the first occurrence wins.
-                    return json.loads(
-                        candidate,
-                        object_pairs_hook=lambda pairs: {
-                            k: v for k, v in reversed(list(pairs))
-                        },
-                    )
+                    return json.loads(candidate, object_pairs_hook=hook)
                 except json.JSONDecodeError:
-                    break  # fallback
+                    try:
+                        return json.loads(
+                            _fix_invalid_escapes(candidate), object_pairs_hook=hook
+                        )
+                    except json.JSONDecodeError:
+                        break  # fallback
 
     # ── 3. Retry with malformed-key fixes ────────────────────
     # Pattern A: fully unquoted key — action: "nothing" → "action": "nothing"
@@ -640,7 +649,10 @@ def extract_llm_json(text: str) -> dict:
                 lambda m: m.group(1) + '"' + m.group(2) + '"' + m.group(3),
                 fixed,
             )
-            return json.loads(fixed)
+            try:
+                return json.loads(fixed)
+            except json.JSONDecodeError:
+                return json.loads(_fix_invalid_escapes(fixed))
         except json.JSONDecodeError:
             continue
 
