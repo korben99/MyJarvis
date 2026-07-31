@@ -71,10 +71,18 @@ from mlx_lm.sample_utils import make_logits_processors, make_sampler
 #
 # Without the patch, LRUPromptCache.fetch_nearest_cache skips partial-hit entries
 # that require trimming (since ArraysCache is not trimmable) and falls back to the
-# system-only prefix.  System-level caching is preserved; multi-turn caching is
-# disabled for Qwen3.6.  This is correct: the raw-output LRU key (including <think>)
-# never matches the next turn's prompt (which uses the clean response), so multi-turn
-# hits were always triggering a short-prefix match that required a large trim.
+# system-only prefix.
+#
+# In thinking mode that fallback still applies, and it is correct: the raw-output LRU
+# key (including <think>) never matches the next turn's prompt (which uses the clean
+# response), so a multi-turn hit would always need a large trim.
+#
+# In no_think mode, _build_prompt passes preserve_thinking=True so the template renders
+# past assistant turns exactly as they were generated (empty think block included).  The
+# stored key is then a true *prefix* of the next turn's prompt, which fetch_nearest_cache
+# serves without any trim — so multi-turn reuse works despite the hybrid cache.
+# Measured on the 6-turn scripts/test_lru_cache.py conversation (Qwen3.6, --no-think):
+# tokens reused per turn 46/46/46/46/46/46 → 46/154/265/444/623/833 (turn 6: 5% → 96%).
 
 HF_HOME = os.getenv("HF_HOME", "/opt/jarvis/models")
 os.environ["HF_HOME"] = HF_HOME
@@ -675,7 +683,20 @@ def _build_prompt(
         return tokenizer.apply_chat_template(messages, **base_kwargs)
 
     if no_think:
-        think_kwargs: dict[str, Any] = {"enable_thinking": False, "thinking_budget": 0}
+        # preserve_thinking makes the template render *past* assistant turns with their
+        # (empty) think block, matching the `<think>\n\n</think>\n\n` scaffolding appended
+        # below at generation time. Without it the two renderings differ by 4 tokens right
+        # after `<|im_start|>assistant\n`, so every stored LRU entry stops being a prefix
+        # of the next turn's prompt and needs a trim the hybrid Qwen3.6 cache cannot do
+        # (ArraysCache is not trimmable) — multi-turn reuse collapses to the system prefix.
+        # Only correct under no_think: in thinking mode the KV holds the real reasoning
+        # text while history stores the stripped response, so alignment is impossible.
+        # No-op for templates without the flag (Qwen2.5, Hermes, Qwen3-VL: verified).
+        think_kwargs: dict[str, Any] = {
+            "enable_thinking": False,
+            "thinking_budget": 0,
+            "preserve_thinking": True,
+        }
     elif thinking_budget > 0 and not is_qwen36(model_path):
         think_kwargs = {"enable_thinking": True, "thinking_budget": thinking_budget}
     else:
