@@ -41,6 +41,7 @@ from config import (
     USE_THINKING_BUDGET_PROCESSOR,
     VISION_MODEL,
     is_hermes,
+    is_qwen,
     is_qwen25,
     is_qwen3,
     is_qwen36,
@@ -331,18 +332,74 @@ def _eval_kv_cache(cache) -> None:
         mx.eval(*to_eval)
 
 
+def _system_prefix_text(model_path: str, tokenizer, system_content: str) -> str | None:
+    """Render the system-only head of the prompt, or None if it can't be done safely.
+
+    The result MUST be a textual prefix of what _build_prompt produces for the same
+    system message: _lru_get_cache slices the real prompt at len(sys_token_ids) and
+    feeds only the tail to the model, so a prefix mismatch silently misaligns the KV
+    cache with the prompt (garbled answers, no exception raised).
+
+    Recent Qwen ChatML templates (3.5, 3.6, …) raise 'No user query found in messages.'
+    on a system-only message list — they scan the messages backwards for a user turn.
+    For those, the ChatML system block is emitted literally (byte-identical to what the
+    template emits for that block, `|trim` included).  Padding the message list with an
+    empty user turn instead would satisfy the template but append a full
+    `<|im_start|>user\\n<|im_end|>\\n` turn that the real prompt does not contain,
+    breaking the prefix invariant — hence the explicit render-and-verify below.
+
+    Returning None disables system-KV caching for the call: slower, still correct.
+    """
+    model_short = model_path.split("/")[-1]
+    candidate: str | None = None
+    try:
+        candidate = tokenizer.apply_chat_template(
+            [{"role": "system", "content": system_content}],
+            tokenize=False, add_generation_prompt=False,
+        )
+    except Exception as exc:
+        if not is_qwen(model_path):
+            logger.warning(
+                "System prefix: template rejects a system-only message list (%s: %s) "
+                "— system KV cache disabled", model_short, exc,
+            )
+            return None
+        candidate = f"<|im_start|>system\n{system_content.strip()}<|im_end|>\n"
+        logger.debug(
+            "System prefix: template requires a user turn (%s) — ChatML block used", model_short
+        )
+
+    # Verify the invariant against a real two-message render. Cheap (one jinja pass,
+    # only on an LRU miss) and it also catches whitespace-level template quirks.
+    try:
+        probe = tokenizer.apply_chat_template(
+            [{"role": "system", "content": system_content}, {"role": "user", "content": "?"}],
+            tokenize=False, add_generation_prompt=True,
+        )
+    except Exception as exc:
+        logger.warning(
+            "System prefix: probe render failed (%s: %s) — system KV cache disabled",
+            model_short, exc,
+        )
+        return None
+    if not probe.startswith(candidate):
+        logger.warning(
+            "System prefix is not a prefix of the rendered prompt (%s) — system KV cache "
+            "disabled. prefix tail=%r prompt head=%r",
+            model_short, candidate[-40:], probe[:len(candidate) + 20],
+        )
+        return None
+    return candidate
+
+
 def _make_system_kv(
     model_path: str, model, tokenizer, system_content: str
 ) -> tuple[Any, list[int]] | None:
     """Pre-fill system prompt into a KV cache.
     Returns (cache, sys_token_ids) or None on failure."""
-    if is_qwen36(model_path):
-        sys_prompt_text = f"<|im_start|>system\n{system_content}<|im_end|>\n"
-    else:
-        sys_prompt_text = tokenizer.apply_chat_template(
-            [{"role": "system", "content": system_content}],
-            tokenize=False, add_generation_prompt=False,
-        )
+    sys_prompt_text = _system_prefix_text(model_path, tokenizer, system_content)
+    if sys_prompt_text is None:
+        return None
     sys_token_ids = _prompt_token_ids(sys_prompt_text, tokenizer)
     sys_token_count = len(sys_token_ids)
     profile = _model_profile(model_path)
