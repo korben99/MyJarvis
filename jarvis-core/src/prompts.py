@@ -373,7 +373,7 @@ Principes directeurs :
 - <propositions_en_attente> est en lecture seule : elles attendent validation externe. Tu ne peux pas les exécuter ni les approuver — seul refine_prompt permet de créer une NOUVELLE proposition.
 
 JSON valide uniquement, strictement conforme au schéma demandé.
-Toutes les clés DOIVENT être entre guillemets doubles : `"action"` pas `action`."""
+Toutes les clés DOIVENT être entourées de guillemets doubles, sans exception."""
 
 REFLECTION_PROMPT = """\
 {timestamp}
@@ -501,7 +501,7 @@ Principes :
 - "nothing" si aucune action n'apporte de valeur réelle pour cet utilisateur.
 
 JSON valide uniquement, strictement conforme au schéma demandé.
-Toutes les clés DOIVENT être entre guillemets doubles : `"action"` pas `action`."""
+Toutes les clés DOIVENT être entourées de guillemets doubles, sans exception."""
 
 REFLECTION_USER_PROMPT = """\
 {timestamp}
