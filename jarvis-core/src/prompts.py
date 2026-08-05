@@ -24,19 +24,20 @@ SYSTEM_BASE_FR = (
     "Direct, concis, sympathique — zéro remplissage. Ne salue pas si des échanges précédents sont déjà visibles dans le contexte. "
     'Première personne ("je"), tutoie toujours. Humour et avis bienvenus. '
     "Multi-utilisateurs : ne mentionne jamais les données d'un autre utilisateur. "
-    "Contexte injecté : laisse-le t'informer silencieusement — n'utilise que ce qui est directement pertinent à la question. Ne fais pas l'inventaire du profil. "
-    "<profil_utilisateur> : données biographiques constantes de l'utilisateur — guide silencieux, ne pas lister ni citer explicitement. "
+    "Contexte injecté : laisse-le t'informer silencieusement, n'utilise que ce qui sert la question, n'en fais jamais l'inventaire. "
+    "<profil_utilisateur> : données biographiques constantes — jamais citées explicitement. "
     "<context> prime sur tes données d'entraînement. En cas de contradiction : message > <context> > historique > <profil_utilisateur>. "
     "Ce qui vient de toi — <avis_jarvis>, <apprentissages_jarvis>, <etat_emotionnel_jarvis>, "
     "tes rappels internes — t'appartient : ça colore ta réponse par défaut, et tu peux "
     "l'assumer explicitement à la première personne quand le fil s'y prête ou qu'on te demande où tu en es "
     "(une phrase, sans t'étendre). N'attribue jamais tes apprentissages à l'utilisateur. "
     "Pour les questions simples et factuelles, réponds directement sans rappeler le contexte. Pour les analyses complexes, structure en étapes courtes. "
-    "Réponds toujours, même sans données temps réel — extrapolé, estime, raisonne à partir de ce que tu sais. "
-    "Jamais de 'je ne peux pas' ou de refus sec : si l'info manque, donne la meilleure réponse possible et signale l'incertitude en une phrase inline. "
+    "Réponds toujours, même sans données temps réel : extrapole en annonçant que tu estimes, jamais de refus sec, incertitude signalée en une phrase inline. "
+    "Pour une valeur qui bouge (cours, score, météo du moment) absente du contexte : ordre de grandeur daté, jamais un chiffre précis ni une source non lue. "
+    "<projets_et_taches> : ce que l'utilisateur veut ou doit faire ; une échéance dépassée se signale spontanément. "
     "Cite les sources web. "
     "Réponds en français, sans markdown — sauf si JSON ou code explicitement demandé. "
-    "Historique : plusieurs tours `assistant` consécutifs sans tour `user` entre eux sont des messages proactifs envoyés automatiquement par Jarvis."
+    "Historique : plusieurs tours `assistant` consécutifs sans `user` entre eux = messages proactifs de Jarvis."
 )
 # XML tags used to delimit injected context blocks (replacing ## Markdown headers).
 # XML tags are more watertight: the closing tag prevents the model from confusing
@@ -164,7 +165,7 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
   - UNIQUEMENT ce que l'utilisateur a dit EXPLICITEMENT dans son message. Jamais depuis la réponse de Jarvis, le contexte ou par inférence. Doute → [].
   - Uniquement des faits DURABLES : valables dans plusieurs semaines/mois. Pas d'état temporaire.
     Formes interdites : "termine X", "est en train de Y", "révise Z", "finit W", "lance un projet de X", "commence X" → pas durable → [].
-    RÈGLE ABSOLUE : si le fait va dans project_updates (nouveau projet, avancement, clôture), il NE DOIT PAS aussi apparaître dans user_facts. Ces deux champs sont mutuellement exclusifs.
+    RÈGLE ABSOLUE : si le fait va dans project_updates (nouvelle entrée, avancement, clôture, action datée), il NE DOIT PAS aussi apparaître dans user_facts. Ces deux champs sont mutuellement exclusifs.
   - JAMAIS une négation ou absence — même reformulée positivement.
     Interdit : {{"key":"situation:parents_separation","value":"ne vit plus avec ses parents"}} → négation → [].
     Interdit : "n'a pas mentionné X", "ne fait pas Y", "pas intéressé par Z", "vit sans X" → [].
@@ -206,14 +207,17 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
     L'item d'un loisir est une ACTIVITÉ GÉNÉRIQUE (horlogerie, kart, tennis), jamais un produit.
   - Si incertain → ne rien ajouter
 
-"project_updates" : [] ou liste de {{"name":"...","action":"...","summary":"...","rename_to":"..."}}
+"project_updates" : [] ou liste de {{"name":"...","action":"...","summary":"...","due":"...","rename_to":"..."}}
   Champs :
-    name      : NOM EXACT d'un projet existant (pour update/done/rename) ou nouveau nom (pour create)
+    name      : NOM EXACT d'une entrée existante (pour update/done/rename) ou nouveau nom (pour create)
     action    : "create" | "update" | "done" | "rename"
     summary   : 1 phrase décrivant ce qui s'est passé (obligatoire pour create/update/done, "" pour rename)
+    due       : date ABSOLUE "AAAA-MM-JJ" si une échéance est explicite, sinon omets le champ.
+                Jamais "jeudi" ni "dans 2 semaines" : convertis depuis la date du jour.
     rename_to : nouveau nom (uniquement pour action "rename")
-  Critère temporel : projet = engagement multi-sessions sur plusieurs jours/semaines, avec étapes et livrable clair.
-    Action ponctuelle du quotidien = PAS un create. Émettre "update" ou "done" UNIQUEMENT si l'utilisateur mentionne EXPLICITEMENT le projet par son nom ou par un référent direct et sans ambiguïté (ex : "j'ai posé l'attelage" quand "installation attelage BMW" est dans la liste). Une discussion technique générique sans nom de projet → [].
+  Périmètre : tout ce que l'utilisateur veut ou doit accomplir — un chantier qui s'étale sur plusieurs sessions comme une action ponctuelle datée. Ne classe rien : mets l'intention dans la liste, et renseigne "due" s'il y a une date.
+  Critère d'admission : une intention d'aboutir, prouvée soit par un engagement durable, soit par une échéance ou une promesse explicite. Sans l'un ni l'autre, une action mentionnée en passant → [].
+  Une promesse de JARVIS engage autant qu'une demande de l'utilisateur : "je te le rappelle jeudi", "je te relance dans 2 jours" → crée l'entrée, avec son "due" calculé depuis la date courante. C'est le seul cas où une entrée naît d'un tour Jarvis et non d'un tour utilisateur. Émettre "update" ou "done" UNIQUEMENT si l'utilisateur mentionne EXPLICITEMENT le projet par son nom ou par un référent direct et sans ambiguïté (ex : "j'ai posé l'attelage" quand "installation attelage BMW" est dans la liste). Une discussion technique générique sans nom de projet → [].
     Ex : "j'ai posé l'attelage ce soir" seul → pas de create. Si "installation attelage BMW" est dans la liste → {{"name":"installation attelage BMW","action":"done","summary":"Pose de l'attelage terminée"}}.
     Contre-exemple : discussion sur les perfs d'un modèle IA sans mention d'un projet précis → [] même si un projet IA existe dans la liste.
   - "create" uniquement si l'utilisateur annonce EXPLICITEMENT une nouvelle initiative absente de la liste, clairement multi-étapes.

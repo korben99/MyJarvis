@@ -2446,8 +2446,24 @@ def _action_flag_project_stall(params: dict) -> str:
         except (ValueError, TypeError):
             continue
 
+        # A task with a passed due date is chased on its date, not on staleness:
+        # "revenir vers James le 12" is an appointment, not a stalled project. Naive dates
+        # are read as UTC — day granularity, so the drift is irrelevant.
+        due = p.get("due_at", "")
+        overdue = False
+        if due:
+            try:
+                d = datetime.fromisoformat(due)
+                overdue = (
+                    d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d
+                ).timestamp() <= now
+            except (ValueError, TypeError):
+                logger.warning(
+                    "flag_project_stall: unreadable due_at on '%s' (%r) — ignored", name, due
+                )
+
         days = int((now - ts) / 86400)
-        if days <= 21:
+        if not overdue and days <= 21:
             continue
 
         cooldown_key = f"{_STALL_COOLDOWN_PREFIX}:{user_code}:{name.lower()[:30]}"
@@ -2457,11 +2473,14 @@ def _action_flag_project_stall(params: dict) -> str:
 
         # Prise de nouvelles générale, pas une demande de statut chiffrée —
         # évite le ton "surveillance" d'un décompte de jours explicite.
-        msg = f"Ça fait un moment qu'on n'a pas reparlé de « {name} » — il y a du nouveau ?"
+        if overdue:
+            msg = f"Petit rappel : « {name} », c'était prévu pour le {due[:10]}. Où ça en est ?"
+        else:
+            msg = f"Ça fait un moment qu'on n'a pas reparlé de « {name} » — il y a du nouveau ?"
         result = _action_queue_push({"user_code": user_code, "message": msg})
         if "push queued" in result:
             r.setex(cooldown_key, _STALL_COOLDOWN_TTL, "1")
-            sent.append(f"{name} ({days}j)")
+            sent.append(f"{name} (échéance {due[:10]})" if overdue else f"{name} ({days}j)")
         else:
             return f"flag_project_stall: push indisponible — {result}"
 
@@ -2687,9 +2706,19 @@ async def generate_proactive_push(user_code: str) -> str:
 #  ACTION SELF-REVIEW
 # ══════════════════════════════════════════════════
 
-# Actions that require a self-challenge LLM call before execution.
-_REVIEW_REQUIRED_ACTIONS: frozenset[str] = frozenset(
-    {"refine_prompt", "queue_push", "ask_user", "send_notification"}
+# Actions that require a self-challenge LLM call before execution, per phase.
+# Split in two: Phase 1 can only emit _GLOBAL_ACTIONS and Phase 2 only _USER_ACTIONS, so a
+# single shared set advertised a coverage that did not exist — 3 of its 4 entries were
+# unreachable from Phase 1.
+#
+# refine_prompt is deliberately NOT reviewed: it only *proposes* a change that already waits
+# for human approval, so it cannot alter anything on its own. Its real guardrails are
+# mechanical and live in _action_refine_prompt — no second proposal while one is pending for
+# the same prompt, plus the 30-day topic cooldown set on approval. Reviewing it on top cost
+# 19 vetoes out of 19 over the 4 days measured, and strangled the self-improvement loop.
+_P1_REVIEW_REQUIRED: frozenset[str] = frozenset()
+_P2_REVIEW_REQUIRED: frozenset[str] = frozenset(
+    {"queue_push", "ask_user", "send_notification"}
 )
 
 
@@ -2899,7 +2928,7 @@ async def run_self_reflection() -> dict:
             "reason", reason
         )  # forward top-level reason into _action_nothing
 
-        if action in _REVIEW_REQUIRED_ACTIONS:
+        if action in _P1_REVIEW_REQUIRED:
             approved, rev_reason = await _llm_review_before_action(
                 action, params, global_ctx, None, global_steps
             )
@@ -3015,7 +3044,7 @@ async def run_self_reflection() -> dict:
                     "reason": f"previous {_prev_action} hit a system constraint — not retrying"
                 }
 
-            if action in _REVIEW_REQUIRED_ACTIONS:
+            if action in _P2_REVIEW_REQUIRED:
                 approved, rev_reason = await _llm_review_before_action(
                     action, params, global_ctx, user_ctx, user_steps
                 )

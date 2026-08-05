@@ -768,6 +768,10 @@ def update_user_projects(user_code: str, projects: list):
             entry["description"] = p["description"]
         if p.get("updates"):
             entry["updates"] = p["updates"][-20:]
+        # due_at MUST stay in this whitelist: the entry is rebuilt field by field on every
+        # write, so any field omitted here is silently dropped at the next nightly merge.
+        if p.get("due_at"):
+            entry["due_at"] = p["due_at"]
         result.append(entry)
     redis_set_json(f"user:{user_code}:projects", result)
 
@@ -948,6 +952,7 @@ def apply_project_updates(user_code: str, project_events: list[dict]):
         action = event.get("action", "").strip()
         name = _normalize_project_name(event.get("name", "").strip())
         summary = (event.get("summary") or "").strip()
+        due = (event.get("due") or "").strip()
         if not name or action not in ("create", "update", "done", "rename"):
             continue
 
@@ -1026,6 +1031,24 @@ def apply_project_updates(user_code: str, project_events: list[dict]):
                     new_name,
                 )
             continue  # rename has no summary entry
+
+        # Due date (tasks): absolute ISO date only. A relative date ("jeudi", "dans 2
+        # semaines") would be resolved against the wrong day, so it is rejected rather
+        # than guessed. Logged either way — this is the signal to watch when observing
+        # whether the extractor dates tasks correctly.
+        if due and action in ("create", "update") and resolved in project_map:
+            try:
+                datetime.fromisoformat(due)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Task due date ignored (not absolute ISO): %s / '%s' → %r",
+                    user_code, resolved, due,
+                )
+            else:
+                project_map[resolved]["due_at"] = due
+                logger.info(
+                    "Task due date set: %s / '%s' → %s", user_code, resolved, due
+                )
 
         # Append summary to updates timeline (all actions except rename)
         if summary and resolved in project_map:
@@ -1841,12 +1864,18 @@ def build_memory_context(
         p for p in projects if isinstance(p, dict) and p.get("status") != "done"
     ]
     if active_projects:
-        plines = [f"- {p.get('name', 'sans nom')}" for p in active_projects]
+        # Tasks and projects share one list: a due date is what distinguishes them, so the
+        # model reads an "échéance" or it doesn't — nothing to classify on its own.
+        plines = [
+            f"- {p.get('name', 'sans nom')}"
+            + (f" (échéance : {p['due_at'][:10]})" if p.get("due_at") else "")
+            for p in active_projects
+        ]
         parts.append(
-            "<projets_actifs>\n"
-            "[Exhaustif — absent = clôturé]\n"
+            "<projets_et_taches>\n"
+            "[Exhaustif — absent = clôturé. Une échéance = à faire pour cette date.]\n"
             + "\n".join(plines)
-            + "\n</projets_actifs>"
+            + "\n</projets_et_taches>"
         )
 
     # Injection etat emotionnel
