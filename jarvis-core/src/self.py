@@ -2942,6 +2942,21 @@ async def run_self_reflection() -> dict:
 
     for user_code in USER_CODES:
         user_ctx = gather_user_context(user_code)
+
+        # Skip users with no conversation in the activity window. Measured over 95 Phase 2
+        # calls (4 days): all 69 zero-activity cycles answered "nothing" with the reason
+        # "aucune activité récente", while every one of the 9 proposed actions came from a
+        # user with 7+ conversations. Reflecting on a silent user costs ~1800 prompt tokens
+        # for a foregone conclusion. Trade-off: flag_project_stall can no longer fire for a
+        # fully silent user — it never fired in the measured window, and Phase 1 still runs.
+        if not user_ctx["user_activity"].get("conversations"):
+            logger.info(
+                "--- User: %s (%s) — skipped (no activity) ---",
+                user_code,
+                user_ctx["user_name"],
+            )
+            continue
+
         user_steps: list[dict] = []
         _failed_actions: set[str] = (
             set()

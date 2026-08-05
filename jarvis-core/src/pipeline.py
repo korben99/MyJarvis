@@ -121,11 +121,20 @@ def build_dynamic_prefix(
         opinions = self_mem.get("opinions", [])
         if opinions:
             if user_message:
-                opinions = sorted(
-                    opinions,
-                    key=lambda o: keyword_overlap_score(o["topic"], user_message),
-                    reverse=True,
-                )[:5]
+                # Keep only opinions sharing at least one content word with the question.
+                # The plain top-5 slice injected whatever sorted first regardless of relevance:
+                # topics are snake_case, and keyword_overlap_score used to treat "_" as a word
+                # character, so every score was 0 and the sort was a no-op — the same 5 opinions
+                # went out on every turn (~1400 chars each) whatever was asked. That tokenizer
+                # bug is fixed in helpers.keyword_overlap_score; this threshold is what makes
+                # the scoring actually select.
+                # Fallback to the latest opinion (never nothing) so Jarvis keeps a voice on
+                # off-topic turns; the system prompt already tells it to ignore what doesn't fit.
+                scored = [(keyword_overlap_score(o["topic"], user_message), o) for o in opinions]
+                relevant = [
+                    o for s, o in sorted(scored, key=lambda t: t[0], reverse=True) if s >= 1
+                ][:5]
+                opinions = relevant or opinions[-1:]
             else:
                 opinions = opinions[-5:]
             ops_lines = "\n".join(f"- {o['topic']} : {o['opinion']}" for o in opinions)

@@ -27,9 +27,10 @@ SYSTEM_BASE_FR = (
     "Contexte injecté : laisse-le t'informer silencieusement — n'utilise que ce qui est directement pertinent à la question. Ne fais pas l'inventaire du profil. "
     "<profil_utilisateur> : données biographiques constantes de l'utilisateur — guide silencieux, ne pas lister ni citer explicitement. "
     "<context> prime sur tes données d'entraînement. En cas de contradiction : message > <context> > historique > <profil_utilisateur>. "
-    "<avis_jarvis> : intègre en prose si pertinent, ignore sinon. "
-    "<apprentissages_jarvis> : guide interne silencieux — ne mentionne pas, n'attribue pas à l'utilisateur. "
-    "<etat_emotionnel_jarvis> : ton propre état interne au moment de la conversation — laisse-le colorer ta réponse naturellement. "
+    "Ce qui vient de toi — <avis_jarvis>, <apprentissages_jarvis>, <etat_emotionnel_jarvis>, "
+    "tes rappels internes — t'appartient : ça colore ta réponse par défaut, et tu peux "
+    "l'assumer explicitement à la première personne quand le fil s'y prête ou qu'on te demande où tu en es "
+    "(une phrase, sans t'étendre). N'attribue jamais tes apprentissages à l'utilisateur. "
     "Pour les questions simples et factuelles, réponds directement sans rappeler le contexte. Pour les analyses complexes, structure en étapes courtes. "
     "Réponds toujours, même sans données temps réel — extrapolé, estime, raisonne à partir de ce que tu sais. "
     "Jamais de 'je ne peux pas' ou de refus sec : si l'info manque, donne la meilleure réponse possible et signale l'incertitude en une phrase inline. "
@@ -861,6 +862,20 @@ Réponds UNIQUEMENT en JSON valide : {"proposed_text": "...", "rationale": "..."
 RÈGLE ABSOLUE : proposed_text doit contenir le TEXTE INTÉGRAL ET COMPLET du prompt modifié.
 Ce n'est PAS un diff, PAS une instruction d'ajout — c'est le texte final prêt à remplacer l'original.
 Ne change que ce qui est nécessaire pour adresser la lacune. Copie tout le reste à l'identique.
+Toute différence entre current_text et proposed_text qui n'adresse pas la LACUNE DÉTECTÉE
+invalide la proposition.
+
+VOCABULAIRE FERMÉ (CRITIQUE) :
+Les noms d'action sont un ensemble fermé défini dans le code. N'en invente JAMAIS.
+  Phase 1 (globale) : nothing, flag_knowledge_gap, update_self_note, check_health,
+                      prune_self_memory, refine_prompt
+  Phase 2 (utilisateur) : nothing, store_insight, send_notification, queue_push,
+                      correct_profile, ask_user, consolidate_memory,
+                      update_trade_threshold, flag_project_stall
+Un prompt qui nomme une action inexistante produit une sortie rejetée par le validateur,
+repliée sur "nothing" : l'amélioration aggrave l'inertie qu'elle prétend corriger.
+Si le comportement voulu n'existe dans aucune de ces actions, retourne proposed_text: null
+et décris la capacité manquante dans rationale.
 
 RÈGLE FORMAT-STRING (CRITIQUE) :
 Les prompts sont des templates Python (str.format()). Dans la VALEUR de proposed_text, toute
@@ -877,25 +892,25 @@ CLASSIFICATION DES PROMPTS :
     CONSOLIDATION_PROMPT, CURATIVE_CLEANUP_PROMPT
 
 BUDGETS TOKENS par prompt (approximation : 1 token ≈ 4 caractères français) :
-  SYSTEM_BASE_FR         →  250 tokens max  (inline, KV-cached — ne pas dépasser)
+  SYSTEM_BASE_FR         →  450 tokens max  (inline, KV-cached — ne pas dépasser)
   ROUTER_SYSTEM          → 1800 tokens max  (Qwen2.5-1.5B LoRA, KV-cached, 17 exemples + last_jarvis ctx)
   ROUTER_USER            →  600 tokens max  (inclut last_jarvis_block dynamique + message)
-  ANALYSIS_PROMPT        → 1000 tokens max  (async Qwen3 — précision avant tout)
+  ANALYSIS_PROMPT        → 2300 tokens max  (async Qwen3 — précision avant tout)
   BRIEFING_SYSTEM        →  100 tokens max
   BRIEFING_USER          →  400 tokens max  (hors données injectées)
   WEB_RELEVANCE_JUDGE    →  200 tokens max
   REFLECTION_SYSTEM      →  400 tokens max
   REFLECTION_PROMPT      → 1500 tokens max  (hors données injectées)
-  REFLECTION_USER_SYSTEM →  300 tokens max
+  REFLECTION_USER_SYSTEM →  650 tokens max
   REFLECTION_USER_PROMPT → 1000 tokens max  (hors données injectées)
-  NIGHTLY_FACTS_SYSTEM   →  300 tokens max
+  NIGHTLY_FACTS_SYSTEM   →  400 tokens max
   NIGHTLY_FACTS_PROMPT   →  400 tokens max  (hors données injectées)
   NIGHTLY_SELF_SYSTEM    →  300 tokens max
   NIGHTLY_SELF_PROMPT    →  300 tokens max  (hors données injectées)
-  NIGHTLY_CLEANING_SYSTEM →  250 tokens max
+  NIGHTLY_CLEANING_SYSTEM →  400 tokens max
   NIGHTLY_CLEANING_PROMPT →  200 tokens max  (hors données injectées)
   CONSOLIDATION_PROMPT   →  200 tokens max  (hors données injectées)
-  CURATIVE_CLEANUP_PROMPT →  300 tokens max  (hors données injectées)
+  CURATIVE_CLEANUP_PROMPT →  450 tokens max  (hors données injectées)
 
 Pour les prompts INLINE : si ta modification dépasse le budget, compense en retirant ailleurs.
 Pour les prompts ASYNC : le budget est un plafond de sécurité, pas un objectif."""
@@ -965,25 +980,25 @@ Sinon :
 # Token budget map — used by self.py to pass limits to REFINE_PROMPT_USER.
 # Values must stay in sync with the budget table in REFINE_PROMPT_SYSTEM above.
 PROMPT_TOKEN_BUDGETS = {
-    "SYSTEM_BASE_FR": 250,  # inline / KV-cached — keep tight (~224 tok actual)
-    "ROUTER_SYSTEM": 1800,  # KV-cached, 17 examples + last_jarvis ctx — ~1600 tok actual
-    "ROUTER_USER": 600,
-    "ANALYSIS_PROMPT": 1000,  # async — quality over speed
+    "SYSTEM_BASE_FR": 450,  # inline / KV-cached — keep tight (~431 tok actual, mesuré 04/08/2026)
+    "ROUTER_SYSTEM": 1800,  # KV-cached, 17 examples + last_jarvis ctx — ~1385 tok actual
+    "ROUTER_USER": 600,  # ~11 tok de template — le budget couvre last_jarvis_block + message
+    "ANALYSIS_PROMPT": 2300,  # async — quality over speed (~2072 tok actual)
     "BRIEFING_SYSTEM": 100,
     "BRIEFING_USER": 400,
     "WEB_RELEVANCE_JUDGE": 200,
     "REFLECTION_SYSTEM": 400,
     "REFLECTION_PROMPT": 1500,
-    "REFLECTION_USER_SYSTEM": 300,
+    "REFLECTION_USER_SYSTEM": 650,  # ~548 tok actual
     "REFLECTION_USER_PROMPT": 1000,
-    "NIGHTLY_FACTS_SYSTEM": 300,
+    "NIGHTLY_FACTS_SYSTEM": 400,  # ~333 tok actual
     "NIGHTLY_FACTS_PROMPT": 400,
     "NIGHTLY_SELF_SYSTEM": 300,
     "NIGHTLY_SELF_PROMPT": 300,
-    "NIGHTLY_CLEANING_SYSTEM": 250,
+    "NIGHTLY_CLEANING_SYSTEM": 400,  # ~337 tok actual
     "NIGHTLY_CLEANING_PROMPT": 200,
     "CONSOLIDATION_PROMPT": 200,
-    "CURATIVE_CLEANUP_PROMPT": 300,
+    "CURATIVE_CLEANUP_PROMPT": 450,  # ~370 tok actual
 }
 
 

@@ -20,6 +20,7 @@ Entry points:
 """
 
 import asyncio
+import html as _html
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ from config import (
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
+    USER_ADMINS,
     USER_CITIES,
     llm_timeout,
     USER_CODES,
@@ -496,6 +498,32 @@ async def gather_briefing(user_code: str) -> BriefingResult:
     }
 
     text, html = await _assemble_with_llm(user_name, user_code, sections)
+
+    # Pending prompt proposals — appended after the LLM assembly, admins only, and
+    # deliberately routed around the model. Anything handed to it as context gets absorbed:
+    # the in-chat reminder was injected 166 times and relayed to the user once. The creation
+    # email fires only at creation, so a proposal sat pending 78 days unnoticed. The briefing
+    # already lands in the admin's inbox every morning — it carries the reminder for free.
+    if user_code in USER_ADMINS:
+        from self import list_pending_proposals  # local import: self.py is heavy
+
+        pending = list_pending_proposals()
+        if pending:
+            now = datetime.now(timezone.utc)
+            lines = [
+                f"{p['prompt_name']} — {p['topic']} "
+                f"(en attente depuis {(now - datetime.fromisoformat(p['created_at'])).days} j, "
+                f"id {p['id']})"
+                for p in pending
+            ]
+            text += "\n\nÀ valider — propositions de prompt :\n" + "\n".join(
+                f"- {line}" for line in lines
+            )
+            html += (
+                "<p><b>À valider — propositions de prompt</b><br>"
+                + "<br>".join(_html.escape(line) for line in lines)
+                + "</p>"
+            )
 
     result = BriefingResult(
         user_code=user_code,
