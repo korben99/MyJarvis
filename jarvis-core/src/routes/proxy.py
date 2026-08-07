@@ -175,10 +175,32 @@ def _strip_owui_rag(message: str) -> str:
     # Strip OWUI default-template <query>…</query> wrapper (present when no custom template)
     query = re.sub(r"^\s*<query>\s*|\s*</query>\s*$", "", query, flags=re.DOTALL).strip()
 
-    # Extract <source>…</source> blocks (OpenWebUI may inject multiple chunks)
-    sources = re.findall(r"<source[^>]*>(.*?)</source>", message, re.DOTALL)
-    # Collect filenames from name="…" attributes for context header
-    source_names = re.findall(r'<source[^>]*\bname="([^"]+)"', message)
+    # Extract <source>…</source> blocks with their attributes (OpenWebUI may inject
+    # multiple chunks). Name and content are paired in a single pass: a <source> without a
+    # name="…" attribute would otherwise shift the two lists out of alignment.
+    _blocks = re.findall(r"<source([^>]*)>(.*?)</source>", message, re.DOTALL)
+    _names = []
+    for _attrs, _ in _blocks:
+        _m = re.search(r'\bname="([^"]+)"', _attrs)
+        _names.append(_m.group(1) if _m else "")
+
+    # Drop sources whose extracted text is blank. OpenWebUI emits a <source> carrying the
+    # filename even when its extractor found nothing — a PDF made of images has no text
+    # layer and yields whitespace, with status "completed" and no error anywhere. Without
+    # this guard the prompt still carried "[Document injecté — fichier.pdf]" followed by
+    # nothing, so the model believed it had the document and answered confidently from the
+    # rest of the message. Observed 2026-08-07 on 'state OT cyber small.pdf' (14 spaces).
+    _blank = [n for (_, c), n in zip(_blocks, _names) if not c.strip()]
+    sources = [c for _, c in _blocks if c.strip()]
+    source_names = [n for (_, c), n in zip(_blocks, _names) if c.strip()]
+    if _blank:
+        logger.warning(
+            "_strip_owui_rag: %d source(s) sans texte exploitable — non injectée(s) : %s. "
+            "PDF sans couche texte ? (OCR désactivé côté OpenWebUI)",
+            len(_blank),
+            ", ".join(n or "sans nom" for n in _blank),
+        )
+
     if sources:
         n_total = len(sources)
         _MAX_DOC_CHARS = OWUI_MAX_DOC_CHARS
