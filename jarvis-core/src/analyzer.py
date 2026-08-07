@@ -72,6 +72,8 @@ class ProjectEvent(BaseModel):
     action: str  # create | update | done | rename
     summary: str = ""
     rename_to: str = ""
+    # Échéance ISO "AAAA-MM-JJ".
+    due: str | None = None
 
 
 class AnalysisResult(BaseModel):
@@ -400,12 +402,6 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                             merged_iw[t] = iw
 
                 # ── Back-fill convlog : satisfaction + importance + mood + résumé ──
-                # (#30 fix : filtre strict session_id — pas de contamination croisée)
-                # (#33 fix : importance + mood ajoutés au pipeline)
-                # memory_summary : post_analysis écrit l'entrée avec None (pas de LLM à
-                # chaud), et rien ne la remplissait ensuite — le résumé ne partait qu'en
-                # Qdrant. null_summary_7d (self.py) restait donc à 100% en permanence,
-                # et prompts.py sert ce taux à Jarvis comme indice de « bug d'analyse ».
                 # Résumé de session : recopié sur chaque échange de la session.
                 _sat = analysis.get("satisfaction", "unknown")
                 _imp = round(analysis.get("importance", 0.0), 3)
