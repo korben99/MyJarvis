@@ -399,14 +399,24 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                         ):
                             merged_iw[t] = iw
 
-                # ── Back-fill convlog : satisfaction + importance + mood ────
+                # ── Back-fill convlog : satisfaction + importance + mood + résumé ──
                 # (#30 fix : filtre strict session_id — pas de contamination croisée)
                 # (#33 fix : importance + mood ajoutés au pipeline)
+                # memory_summary : post_analysis écrit l'entrée avec None (pas de LLM à
+                # chaud), et rien ne la remplissait ensuite — le résumé ne partait qu'en
+                # Qdrant. null_summary_7d (self.py) restait donc à 100% en permanence,
+                # et prompts.py sert ce taux à Jarvis comme indice de « bug d'analyse ».
+                # Résumé de session : recopié sur chaque échange de la session.
                 _sat = analysis.get("satisfaction", "unknown")
                 _imp = round(analysis.get("importance", 0.0), 3)
                 _mood_s = analysis.get("mood", "neutral")
+                # Déjà normalisé par analyse_conversation : str non vide, ou None.
+                _mem_bf = analysis.get("memory_summary")
                 _should_backfill = (
-                    _sat in ("positive", "negative") or _imp > 0 or _mood_s != "neutral"
+                    _sat in ("positive", "negative")
+                    or _imp > 0
+                    or _mood_s != "neutral"
+                    or _mem_bf
                 )
                 if _should_backfill:
                     _ts_list = [m.get("ts", 0) for m in sd["msgs"] if m.get("ts")]
@@ -441,6 +451,9 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                                         "neutral",
                                     ):
                                         _e["mood"] = _mood_s
+                                        _changed = True
+                                    if _mem_bf and not _e.get("memory_summary"):
+                                        _e["memory_summary"] = _mem_bf
                                         _changed = True
                                     if _changed:
                                         _pipe.zrem(_clog_key, _raw)
