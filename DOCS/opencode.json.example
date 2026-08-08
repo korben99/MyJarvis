@@ -1,0 +1,21 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "jarvis": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Jarvis local",
+      "options": {
+        "baseURL": "http://jarvis:8000/v1/raw"
+      },
+      "models": {
+        "jarvis": {
+          "name": "Qwen3.6-35B (Mac Mini)",
+          "limit": {
+            "context": 32768,
+            "output": 8000
+          }
+        }
+      }
+    }
+  }
+}

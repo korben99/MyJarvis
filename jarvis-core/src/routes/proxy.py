@@ -40,7 +40,13 @@ router = APIRouter()
 
 class _OAIMessage(BaseModel):
     role: str
-    content: str | list  # list for multipart (image + text) from Open WebUI
+    # content optionnel : un message assistant porteur de tool_calls a content=null, et
+    # un message role="tool" porte son résultat + tool_call_id. Sans ça, tout agent de
+    # code se prend un 422 dès son second tour.
+    content: str | list | None = None  # list for multipart (image + text) from Open WebUI
+    tool_calls: Optional[list] = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
 
 
 class _OAIChatRequest(BaseModel):
@@ -321,37 +327,51 @@ async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
 
 
 class _RawChatRequest(_OAIChatRequest):
-    no_think: Optional[bool] = None          # override explicite depuis le proxy
-    thinking_budget: Optional[int] = None    # transmis par le proxy depuis /effort
+    no_think: Optional[bool] = None          # override explicite du client
+    thinking_budget: Optional[int] = None    # niveau d'effort demandé par le client
+    tools: Optional[list] = None             # schémas d'outils au format OpenAI
+    tool_choice: Optional[str | dict] = None  # accepté, non contraint côté template
 
 
 @router.post("/v1/raw/chat/completions")
 async def raw_chat(req: _RawChatRequest):
     """
     Bypass endpoint — appel direct à stream_local() sur PRIMARY_MODEL.
-    Aucun routage Jarvis, aucune injection mémoire/RAG/état émotionnel.
-    Réservé à des clients locaux de confiance (ex: proxy Anthropic pour Claude Code).
+    Aucun routage Jarvis, aucune injection mémoire/RAG/état émotionnel, aucune écriture
+    en mémoire. C'est l'endpoint des agents de code externes (OpenCode) : contrairement à
+    /v1/chat/completions, il conserve TOUS les messages et respecte le rôle system.
     Uniquement disponible quand LLM_LOCAL=True.
     Les blocs <think>…</think> sont strippés avant d'être envoyés au client.
 
+    Function calling : passer `tools` (schémas OpenAI) active le format natif du modèle.
+    Les appels sont retraduits en `tool_calls` OpenAI (voir tool_calls.py).
+
     Contrôle du thinking (priorité décroissante) :
-      1. no_think + thinking_budget dans le body (déduits par le proxy depuis /effort)
+      1. no_think + thinking_budget dans le body
       2. Variable d'env RAW_NO_THINK (défaut=true)
-    Mapping /effort → thinking_budget effectué dans le proxy :
-      low   → no_think=true  (pas de thinking)
-      medium → no_think=false, budget=2048
-      high  → no_think=false, budget=4000
-      max   → no_think=false, budget=10000
     """
     if not LLM_LOCAL:
         raise HTTPException(503, "LLM_LOCAL non activé — endpoint raw indisponible")
 
     from llm_local import stream_local as _stream_local  # import tardif : mlx non chargé si LLM_LOCAL=False
+    from tool_calls import normalise_messages_for_template, parse_tool_calls
 
-    messages = [
-        {"role": m.role, "content": m.content if isinstance(m.content, str) else _extract_content_parts(m.content)[0]}
-        for m in req.messages
-    ]
+    # Messages transmis intégralement : le template a besoin de tool_calls (tours passés
+    # de l'assistant) et de tool_call_id (résultats d'outil), pas seulement role+content.
+    messages = []
+    for m in req.messages:
+        content = m.content
+        if not isinstance(content, str):
+            content = _extract_content_parts(content)[0] if content else ""
+        message: dict = {"role": m.role, "content": content}
+        if m.tool_calls:
+            message["tool_calls"] = m.tool_calls
+        if m.tool_call_id:
+            message["tool_call_id"] = m.tool_call_id
+        if m.name:
+            message["name"] = m.name
+        messages.append(message)
+    messages = normalise_messages_for_template(messages)
 
     # Priorité : body > env var
     if req.no_think is not None:
@@ -367,6 +387,45 @@ async def raw_chat(req: _RawChatRequest):
         return (
             f"data: {json.dumps({'id': req_id, 'object': 'chat.completion.chunk', 'created': created, 'model': PRIMARY_MODEL, 'choices': [{'index': 0, 'delta': {'content': text}, 'finish_reason': None}]})}\n\n"
         )
+
+    def _final_chunk(finish_reason: str, delta: dict | None = None) -> str:
+        return (
+            f"data: {json.dumps({'id': req_id, 'object': 'chat.completion.chunk', 'created': created, 'model': PRIMARY_MODEL, 'choices': [{'index': 0, 'delta': delta or {}, 'finish_reason': finish_reason}]})}\n\n"
+        )
+
+    async def _generate_with_tools():
+        """Streaming bufferisé, utilisé uniquement quand des outils sont demandés.
+
+        Un appel d'outil ne peut pas être diffusé au fil de l'eau : tant que le bloc
+        <tool_call> n'est pas clos, on ne sait pas si le texte en cours est de la prose ou
+        le début d'un appel. On accumule donc tout, puis on émet le contenu et les
+        tool_calls en une fois. Un agent de code consomme la réponse complète de toute
+        façon — la perte de réactivité est sans effet, contrairement au chat.
+        """
+        full = ""
+        async for chunk in _stream_local(
+            messages,
+            model=PRIMARY_MODEL,
+            no_think=no_think,
+            max_tokens=max_tokens,
+            temperature=req.temperature,
+            thinking_budget=thinking_budget,
+            skip_debug_log=True,
+            tools=req.tools,
+        ):
+            full += chunk
+
+        if not no_think and "</think>" in full:
+            full = full.split("</think>", 1)[1]
+        text, tool_calls = parse_tool_calls(full.strip(), req.tools)
+
+        if text:
+            yield _sse(text)
+        if tool_calls:
+            yield _final_chunk("tool_calls", {"tool_calls": tool_calls})
+        else:
+            yield _final_chunk("stop")
+        yield "data: [DONE]\n\n"
 
     async def _generate():
         buffer = ""
@@ -398,14 +457,12 @@ async def raw_chat(req: _RawChatRequest):
                 yield _sse(buffer)
                 buffer = ""
 
-        yield (
-            f"data: {json.dumps({'id': req_id, 'object': 'chat.completion.chunk', 'created': created, 'model': PRIMARY_MODEL, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-        )
+        yield _final_chunk("stop")
         yield "data: [DONE]\n\n"
 
     if req.stream:
         return StreamingResponse(
-            _generate(),
+            _generate_with_tools() if req.tools else _generate(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -417,14 +474,27 @@ async def raw_chat(req: _RawChatRequest):
         max_tokens=max_tokens, temperature=req.temperature,
         thinking_budget=thinking_budget,
         skip_debug_log=True,
+        tools=req.tools,
     ):
         full += chunk
     if not no_think and "</think>" in full:
         full = full.split("</think>", 1)[1].strip()
+
+    text, tool_calls = parse_tool_calls(full.strip(), req.tools)
+    # content=null uniquement s'il y a des tool_calls (convention OpenAI). Sans outil, on
+    # renvoie la chaîne telle quelle, y compris vide : comportement inchangé pour les
+    # clients existants.
+    message: dict = {"role": "assistant", "content": (text or None) if tool_calls else text}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
     return {
         "id": req_id, "object": "chat.completion", "created": created,
         "model": PRIMARY_MODEL,
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": full}, "finish_reason": "stop"}],
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": "tool_calls" if tool_calls else "stop",
+        }],
         "usage": {},
     }
 

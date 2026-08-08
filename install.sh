@@ -106,26 +106,24 @@ fi
 # ── 5. launchd service ────────────────────────────────────────────────────
 bold "5/6 launchd service"
 
-PLIST_DEST="$HOME/Library/LaunchAgents/com.jarvis.api.plist"
-if [[ ! -f "$PLIST_DEST" ]]; then
-    EXTRA_PATH=""
-    [[ -d "/Applications/OrbStack.app" ]] && EXTRA_PATH="$HOME/.orbstack/bin:"
-    mkdir -p "$HOME/Library/LaunchAgents"
-    sed -e "s#__JARVIS_HOME__#$JARVIS_HOME#g" \
-        -e "s#__EXTRA_PATH__#$EXTRA_PATH#g" \
-        DOCS/examples/com.jarvis.api.plist.template > "$PLIST_DEST"
-    ok "Installed $PLIST_DEST (not loaded yet — see next steps)"
-else
-    ok "$PLIST_DEST already exists — left untouched"
-fi
+"$JARVIS_HOME/scripts/jarvis-launchd.sh" install
+ok "launchd service installed (start it with: jarvis-start)"
 
 ALIASES_LINE="source $JARVIS_HOME/DOCS/examples/jarvis-aliases.sh"
 SHELL_RC="$HOME/.zshrc"
-if [[ -f "$SHELL_RC" ]] && grep -qE "jarvis-aliases\.sh|alias jarvis-start=" "$SHELL_RC" 2>/dev/null; then
-    ok "jarvis-start/stop/reload aliases already in $SHELL_RC"
+# Le test ne porte QUE sur la ligne source. Il matchait aussi "alias jarvis-start=", donc
+# toute installation antérieure — celle qui définit les vieux alias launchctl bruts, non
+# idempotents — se voyait déclarée à jour et n'était jamais migrée.
+if [[ -f "$SHELL_RC" ]] && grep -q "jarvis-aliases\.sh" "$SHELL_RC" 2>/dev/null; then
+    ok "jarvis aliases already sourced from $SHELL_RC"
 elif [[ -f "$SHELL_RC" || "$SHELL" == *zsh ]]; then
+    # Ajout en fin de fichier : les alias sourcés écrasent d'éventuels homonymes définis
+    # plus haut, la migration est donc effective même sans nettoyage manuel.
     printf '\n# Jarvis launchd shortcuts\n%s\n' "$ALIASES_LINE" >> "$SHELL_RC"
-    ok "Added jarvis-start/stop/reload aliases to $SHELL_RC (run 'source $SHELL_RC' or open a new terminal)"
+    ok "Added jarvis aliases to $SHELL_RC (run 'source $SHELL_RC' or open a new terminal)"
+    if grep -qE '^\s*alias jarvis-(start|stop|reload)=.*launchctl' "$SHELL_RC" 2>/dev/null; then
+        warn "Anciens alias launchctl encore présents dans $SHELL_RC — désormais sans effet (surchargés), à supprimer quand tu veux"
+    fi
 else
     warn "Non-zsh shell — manually add to your rc file: $ALIASES_LINE"
 fi

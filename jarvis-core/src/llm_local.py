@@ -661,6 +661,7 @@ def _build_prompt(
     model_path: str,
     no_think: bool,
     thinking_budget: int = 0,
+    tools: list | None = None,
 ) -> str:
     """
     Build the final prompt via apply_chat_template.
@@ -678,6 +679,14 @@ def _build_prompt(
     at the template level; ThinkingBudgetProcessor handles the cap at logit level.
     """
     base_kwargs: dict[str, Any] = {"tokenize": False, "add_generation_prompt": True}
+
+    # Function calling : le template rend les outils en tête du bloc système et impose le
+    # format <tool_call><function=…><parameter=…> (qwen36_ninja.jinja:50-58). On ne passe
+    # la clé que si des outils sont réellement demandés — un `tools=None` explicite change
+    # le rendu de certains templates, donc le prompt, donc le cache LRU, pour tout le
+    # trafic normal qui n'en utilise pas.
+    if tools:
+        base_kwargs["tools"] = tools
 
     if not is_qwen3(model_path):
         return tokenizer.apply_chat_template(messages, **base_kwargs)
@@ -1183,9 +1192,15 @@ async def stream_local(
     session_id: str = "",
     thinking_budget: int = 0,
     skip_debug_log: bool = False,
+    tools: list | None = None,
     **_kwargs,
 ) -> AsyncGenerator[str, None]:
-    """Token-by-token streaming via mlx_lm.stream_generate."""
+    """Token-by-token streaming via mlx_lm.stream_generate.
+
+    `tools` : schémas d'outils au format OpenAI, rendus par le template de chat. Doit
+    rester un paramètre nommé explicite — **_kwargs l'avalerait en silence, et l'appelant
+    croirait avoir activé le function calling.
+    """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[str | None] = asyncio.Queue()
     stop_flag = threading.Event()
@@ -1212,7 +1227,7 @@ async def stream_local(
         mlx_model = tokenizer = None
         try:
             mlx_model, tokenizer = _load_model(model)
-            prompt_text = _build_prompt(messages, tokenizer, model, no_think, thinking_budget)
+            prompt_text = _build_prompt(messages, tokenizer, model, no_think, thinking_budget, tools)
 
             # Tokenize for LRU lookup
             tok_ids = _prompt_token_ids(prompt_text, tokenizer)

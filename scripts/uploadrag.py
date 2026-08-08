@@ -63,7 +63,7 @@ OPENWEBUI_API_KEY = os.getenv("OPENWEBUI_API_KEY", "")
 
 # no pdf at the begining no .py, .html, .yml...
 EXTS = {".xls", ".txt", ".md", ".csv", ".docx", ".pdf"}
-MAX_FILE_SIZE_MB = 1  # skip files larger than this
+MAX_FILE_SIZE_MB = 5  # skip files larger than this (1 → 5 le 08/08/2026 : 119 fichiers écartés)
 UPLOAD_TIMEOUT = 180  # seconds per upload
 ADD_TIMEOUT = 300  # seconds for knowledge add call (embedding pipeline can be slow)
 MAX_RETRIES = 3  # retries per API call
