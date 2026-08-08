@@ -5,15 +5,20 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "Jarvis local",
       "options": {
-        "baseURL": "http://jarvis:8000/v1/raw"
+        "baseURL": "http://jarvis.local:8000/v1/raw"
       },
       "models": {
         "jarvis": {
-          "name": "Qwen3.6-35B (Mac Mini)",
-          "limit": {
-            "context": 32768,
-            "output": 8000
-          }
+          "name": "Jarvis — normal (réflexion 3000)",
+          "limit": { "context": 32768, "output": 16000 }
+        },
+        "jarvis-fast": {
+          "name": "Jarvis — rapide (sans réflexion)",
+          "limit": { "context": 32768, "output": 8000 }
+        },
+        "jarvis-deep": {
+          "name": "Jarvis — approfondi (réflexion 8000)",
+          "limit": { "context": 32768, "output": 24000 }
         }
       }
     }

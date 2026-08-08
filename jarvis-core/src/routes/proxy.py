@@ -326,6 +326,19 @@ async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
     yield "data: [DONE]\n\n"
 
 
+# Paliers d'effort exposés comme des modèles distincts — équivalent du /effort de Claude
+# Code. Un client OpenAI-compatible n'a aucun champ standard pour demander plus ou moins de
+# raisonnement ; le champ `model`, lui, est envoyé à chaque requête et sélectionnable à la
+# volée dans OpenCode (/models, ou -m jarvis/jarvis-deep). C'est donc le seul canal propre,
+# sans extension propriétaire côté client.
+#   nom → (no_think, thinking_budget)
+RAW_EFFORT_MODELS: dict[str, tuple[bool, int]] = {
+    "jarvis-fast": (True, 0),      # aucun raisonnement — édition triviale, question factuelle
+    "jarvis": (False, 3000),       # défaut
+    "jarvis-deep": (False, 8000),  # refactor, diagnostic, enchaînement d'outils long
+}
+
+
 class _RawChatRequest(_OAIChatRequest):
     no_think: Optional[bool] = None          # override explicite du client
     thinking_budget: Optional[int] = None    # niveau d'effort demandé par le client
@@ -374,11 +387,17 @@ async def raw_chat(req: _RawChatRequest):
         messages.append(message)
     messages = normalise_messages_for_template(messages)
 
-    # Priorité : body > env var. Défaut passé à false le 08/08/2026 : le raisonnement est
-    # le principal levier de qualité pour un agent de code (choix de l'outil, enchaînement
-    # lecture → édition), et aucun client de cette route ne sait envoyer no_think.
+    # Priorité : body explicite > palier d'effort choisi via `model` > env var.
+    # Défaut sans thinking passé à false le 08/08/2026 : le raisonnement est le principal
+    # levier de qualité pour un agent de code (choix de l'outil, enchaînement lecture →
+    # édition), et aucun client de cette route ne sait envoyer no_think.
+    # "jarvis/jarvis-deep" → on ne garde que le nom du modèle.
+    effort = RAW_EFFORT_MODELS.get((req.model or "").split("/")[-1].strip())
+
     if req.no_think is not None:
         no_think = req.no_think
+    elif effort is not None:
+        no_think = effort[0]
     else:
         no_think = os.getenv("RAW_NO_THINK", "false").lower() in ("yes", "true", "1")
 
@@ -388,7 +407,10 @@ async def raw_chat(req: _RawChatRequest):
     # l'appel d'outil. Les clients OpenAI-compatibles n'envoient pas thinking_budget.
     thinking_budget = req.thinking_budget or 0
     if not no_think and thinking_budget <= 0:
-        thinking_budget = int(os.getenv("RAW_THINKING_BUDGET", "3000"))
+        thinking_budget = (
+            effort[1] if effort and effort[1] > 0
+            else int(os.getenv("RAW_THINKING_BUDGET", "3000"))
+        )
 
     # 16000 (et non 8000) car réflexion et réponse se partagent ce budget.
     max_tokens = req.max_tokens or int(os.getenv("RAW_MAX_TOKENS", "16000"))

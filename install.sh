@@ -53,7 +53,7 @@ fi
 if docker info >/dev/null 2>&1; then
     ok "Docker daemon running"
 else
-    warn "Docker daemon still not up — start it manually before running ./start.sh"
+    warn "Docker daemon still not up — start it manually before running jarvis-start"
 fi
 
 # ── 2. Python venv ───────────────────────────────────────────────────────

@@ -28,6 +28,7 @@ import logging
 import os
 import threading
 import time
+from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, List, Optional, Union
 
@@ -109,6 +110,38 @@ LRU_KV_MAX_BYTES = int(float(os.getenv("LRU_KV_GB", "4.0")) * 1024**3)
 
 # ── Debug logging ─────────────────────────────────────────────────────────
 
+# Rotation des journaux de prompts. Ils étaient écrits par open(…, "a") sans aucune
+# rotation : prompts.log avait atteint 42 Mo. On réutilise RotatingFileHandler, déjà employé
+# pour les autres journaux (helpers.py), plutôt qu'un renommage maison — verrouillage et
+# purge des anciens fichiers sont déjà traités. 20 Mo × 3 ≈ 80 Mo par journal au pire.
+_PROMPT_LOG_MAX_BYTES = int(float(os.getenv("PROMPT_LOG_MAX_MB", "20")) * 1024 * 1024)
+_PROMPT_LOG_BACKUPS = int(os.getenv("PROMPT_LOG_BACKUPS", "3"))
+_prompt_writers: dict[str, logging.Logger] = {}
+
+
+def _prompt_writer(path: str) -> logging.Logger:
+    """Logger à rotation dédié à un journal de prompts (un par chemin, créé à la demande).
+
+    Formatter réduit à %(message)s : ces entrées portent déjà leur propre en-tête horodaté.
+    propagate=False, sinon chaque prompt serait recopié dans le journal applicatif.
+    """
+    writer = _prompt_writers.get(path)
+    if writer is None:
+        writer = logging.getLogger(f"jarvis-prompts.{os.path.basename(path)}")
+        writer.setLevel(logging.INFO)
+        writer.propagate = False
+        handler = RotatingFileHandler(
+            path,
+            maxBytes=_PROMPT_LOG_MAX_BYTES,
+            backupCount=_PROMPT_LOG_BACKUPS,
+            encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        writer.addHandler(handler)
+        _prompt_writers[path] = writer
+    return writer
+
+
 def _debug_log(
     model_short: str,
     no_think: bool,
@@ -133,8 +166,7 @@ def _debug_log(
         f"--- PROMPT ---\n{prompt}\n--- RESPONSE (raw) ---\n{raw_output}\n{sep}\n"
     )
     try:
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(entry)
+        _prompt_writer(path).info(entry)
     except Exception as exc:
         logger.warning("_debug_log: cannot write %s: %s", path, exc)
 

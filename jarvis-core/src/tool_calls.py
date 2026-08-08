@@ -126,6 +126,23 @@ def _coerce(raw: str, json_type: str, function_name: str, param_name: str):
     return value
 
 
+def _resolve_name(name: str, declared: dict, by_lower: dict) -> str:
+    """Ramène un nom d'outil à l'orthographe exacte déclarée par le client.
+
+    Le modèle capitalise parfois : observé le 08/08/2026, `<function=Bash>` alors qu'OpenCode
+    déclare `bash`. Le client valide le nom au caractère près et rejette l'appel — l'agent
+    perd son tour pour une majuscule. On ne corrige QUE la casse : un nom réellement inventé
+    doit rester visible plutôt que d'être rapproché de force du plus ressemblant.
+    """
+    if not declared or name in declared:
+        return name
+    corrected = by_lower.get(name.lower())
+    if corrected:
+        logger.info("tool_calls: '%s' → '%s' (casse corrigée)", name, corrected)
+        return corrected
+    return name
+
+
 def parse_tool_calls(text: str, tools: list | None) -> tuple[str, list[dict]]:
     """Sépare le texte des appels d'outil dans la sortie brute du modèle.
 
@@ -143,10 +160,12 @@ def parse_tool_calls(text: str, tools: list | None) -> tuple[str, list[dict]]:
         function = tool.get("function") or tool
         if function.get("name"):
             types_by_function[function["name"]] = _param_types(tool)
+    # Index de repli sur la casse — voir _resolve_name.
+    names_by_lower = {name.lower(): name for name in types_by_function}
 
     tool_calls: list[dict] = []
     for match in _TOOL_CALL_RE.finditer(text):
-        function_name = match.group(1).strip()
+        function_name = _resolve_name(match.group(1).strip(), types_by_function, names_by_lower)
         param_types = types_by_function.get(function_name, {})
 
         arguments = {}

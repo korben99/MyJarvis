@@ -1028,8 +1028,11 @@ Models are stored in `HF_HOME` (default `/opt/jarvis/models`). The script skips 
 ### 4. Start all services
 
 ```bash
-./start.sh
+jarvis-start
 ```
+
+(alias posé par `install.sh` ; équivaut à `scripts/jarvis-launchd.sh start`, idempotent —
+rejouable sans erreur si le service tourne déjà. Docker est démarré par `jarvis-service.sh`.)
 
 This starts:
 - `docker compose up -d` — Qdrant, Redis, Open WebUI (port 3000)
@@ -1048,8 +1051,15 @@ curl http://localhost:8000/status
 Place documents in `RAGData/` subdirectories (`personal/`, `work/`, `documents/`, `company/`, `reflexions/`), then run:
 
 ```bash
-python3 scripts/upload-to-openwebui.py
+./venv/bin/python scripts/uploadrag.py --dry-run   # liste ce qui serait envoyé
+./venv/bin/python scripts/uploadrag.py             # indexe réellement
 ```
+
+L'indexation tourne aussi automatiquement via launchd (`com.moi.uploadrag`, 23:10).
+Elle exige `ENABLE_API_KEYS` **activé dans l'admin Open WebUI** : c'est un `PersistentConfig`,
+la variable du `docker-compose.yml` ne sert que de valeur d'amorçage à la première
+initialisation et est ignorée ensuite. Symptôme si désactivé :
+`403 — Use of API key is not enabled in the environment`.
 
 ### 7. Import trading portfolio (optional)
 
@@ -1075,11 +1085,11 @@ tail -f /opt/jarvis/logs/jarvis-service.log
 ### Common Commands
 
 ```bash
-# Restart Jarvis API after code change
-./start.sh
+# Restart Jarvis API after code change (le serveur ne recharge pas à chaud)
+jarvis-restart
 
 # Stream API logs
-tail -f /opt/jarvis/logs/jarvis.log
+tail -f /opt/jarvis/logs/jarvis-api.log
 
 # Restart only infra (Redis, Qdrant, Open WebUI)
 docker compose restart
@@ -1227,6 +1237,27 @@ Users are defined in `jarvis-core/JarvisData/users_list.json`. Each entry contai
 
 Only users with `"trading": true` participate in scheduled trade checks (CSV import, price fetch, alert evaluation). Users without this flag are never included, regardless of whether a CSV exists in `TradeData/`.
 
+Une entrée est chargée dès qu'elle possède un `code` : il n'existe pas de drapeau
+d'activation. Désactiver un utilisateur = retirer son entrée du fichier. `JarvisData/` étant
+gitignoré, ce fichier n'est pas versionné — garder une copie avant de retirer une entrée.
+
+### Coding agents (`/v1/raw`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RAW_NO_THINK` | `false` | Désactive le raisonnement. Le défaut est `false` : c'est le principal levier de qualité pour un agent de code. |
+| `RAW_THINKING_BUDGET` | `3000` | Plafond de raisonnement quand le client n'en impose pas. **Ne jamais laisser à 0** avec le thinking actif : rien ne bornerait alors la réflexion, qui partage `RAW_MAX_TOKENS` avec la réponse — le modèle peut épuiser son budget sans jamais émettre l'appel d'outil. |
+| `RAW_MAX_TOKENS` | `16000` | Réflexion **et** réponse se partagent cette enveloppe. |
+| `RAW_DEBUG_PROMPTS` | `true` | Journalisation vers `logs/opencode-prompts.log`. |
+
+### Prompt logs
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLM_DEBUG_PROMPTS` | `no` | Journalise le trafic conversationnel dans `logs/prompts.log`. |
+| `PROMPT_LOG_MAX_MB` | `20` | Seuil de rotation des deux journaux de prompts. |
+| `PROMPT_LOG_BACKUPS` | `3` | Nombre de sauvegardes conservées. |
+
 **Profile split — three layers:**
 
 | Layer | Storage | Updated by | Content | Injected as |
@@ -1249,6 +1280,7 @@ Base URL: `http://localhost:8000`
 |--------|------|-------------|
 | `POST` | `/chat` | Main chat endpoint (SSE streaming) |
 | `POST` | `/v1/chat/completions` | OpenAI-compatible endpoint (for Open WebUI) |
+| `POST` | `/v1/raw/chat/completions` | Bypass endpoint for external coding agents (OpenCode) |
 | `GET` | `/v1/models` | List models in OpenAI format |
 
 **`POST /chat` body:**
@@ -1276,6 +1308,45 @@ Base URL: `http://localhost:8000`
 ```
 Authorization: Bearer XXXX
 ```
+
+#### `/v1/raw/chat/completions` — agents de code
+
+Chemin volontairement dépouillé, à ne pas confondre avec la route précédente :
+
+| | `/v1/chat/completions` | `/v1/raw/chat/completions` |
+|---|---|---|
+| Clients | Open WebUI, iOS | OpenCode, agents externes |
+| Messages | dernier `user` seulement | tous |
+| `system` du client | écrasé par Jarvis | respecté |
+| Contexte injecté | profil, mémoire, RAG, Gmail, Calendar | aucun |
+| Écrit en mémoire | oui | **non** |
+| Function calling | non | **oui** (natif) |
+| Auth | Bearer = code/email | aucune |
+
+C'est cette étanchéité qui compte : un agent de code branché sur la route principale
+polluerait durablement le convlog et Qdrant avec du trafic de développement.
+
+**Function calling.** Les `tools` (schémas OpenAI) sont transmis au template de chat, qui
+impose au modèle son format natif `<tool_call><function=…><parameter=…>`. `tool_calls.py`
+retraduit dans les deux sens : appels du modèle → format OpenAI (avec typage des paramètres
+d'après le schéma), et historique OpenAI → template (`arguments` chaîne JSON → dict, sinon
+le second tour produit un prompt corrompu). Les blocs `<think>` ne sont jamais renvoyés au
+client.
+
+**Paliers d'effort.** Aucun champ OpenAI standard ne permet de doser le raisonnement ; on
+passe donc par le champ `model`, que tout client envoie et qu'OpenCode sait changer à la
+volée (`/models`, ou `-m jarvis/jarvis-deep`) :
+
+| `model` | Raisonnement | Budget |
+|---|---|---|
+| `jarvis-fast` | désactivé | — |
+| `jarvis` | actif | 3000 |
+| `jarvis-deep` | actif | 8000 |
+
+Un modèle inconnu retombe sur le défaut. Ces alias ne sont volontairement **pas** listés par
+`GET /v1/models`, qui sert le sélecteur d'Open WebUI où ils n'auraient aucun sens.
+
+Mise en place côté client : voir `DOCS/opencode-local.md`.
 
 ### Health & Status
 
@@ -1649,6 +1720,28 @@ All Jarvis modules share a single logging configuration defined in `helpers.py`.
 
 Both files are written to `/opt/jarvis/logs/` and are accessible directly on the host.
 
+### Journaux de prompts
+
+Deux journaux distincts enregistrent prompt + réponse **brute** du LLM, chacun avec sa
+propre bascule :
+
+| File | Gate | Contenu |
+|------|------|---------|
+| `prompts.log` | `LLM_DEBUG_PROMPTS` | tout le trafic conversationnel |
+| `opencode-prompts.log` | `RAW_DEBUG_PROMPTS` | uniquement `/v1/raw` (agents de code) |
+
+Fichiers séparés parce qu'un prompt d'agent de code embarque tout le contexte du dépôt et
+noierait le reste ; gates séparées pour pouvoir suivre OpenCode sans réactiver la
+journalisation complète.
+
+Rotation : `PROMPT_LOG_MAX_MB` × `PROMPT_LOG_BACKUPS` (20 Mo × 3 par défaut). Elle a été
+ajoutée en août 2026 — ces deux journaux écrivaient auparavant en `open(…, "a")` brut, sans
+rotation, et `prompts.log` avait atteint 42 Mo.
+
+> **Piège d'analyse.** Ces journaux montrent la sortie LLM **avant** validation pydantic.
+> Un champ visible ici n'est pas un champ arrivé en base — vérifier Redis/Qdrant, pas le
+> journal de prompts.
+
 ### Usage in modules
 
 Every module gets its named logger via `helpers.get_logger`:
@@ -1684,21 +1777,29 @@ This replaces the per-module `import logging` + `logging.getLogger(...)` pattern
 │   ├── SpeechEngine.swift     # WhisperKit STT + AVSpeech TTS
 │   ├── WakeWordEngine.swift   # On-device wake word detection
 │   └── Models.swift           # Shared data models
+├── AGENTS.md              # → DOCS/AGENTS.md (lien) — consignes lues par les agents de code
 ├── jarvis-core/
 │   ├── Dockerfile
-│   ├── main.py            # API routes + request orchestration
-│   ├── memory.py          # Memory system (Redis + Qdrant)
-│   ├── self.py            # Proto-self / reflection loop + autocoding actions
-│   ├── briefing.py        # Morning briefing generation
-│   ├── google_services.py # Gmail + Calendar
-│   ├── trading.py         # Boursorama portfolio surveillance
-│   ├── llm_router.py      # Intent classification (Tier 1)
-│   ├── analyzer.py        # Conversation analysis (Tier 2b)
-│   ├── web_search.py      # External search: weather (Open-Meteo), news (DDG), 3-stage deep web
-│   ├── prompts.py         # All LLM prompt constants + get_prompt() live override loader
-│   ├── helpers.py         # Shared: LLM clients, logging (setup_logging/get_logger), Redis/Qdrant singletons
-│   ├── trade_keys.py      # Redis key helpers for the trading module
-│   ├── config.py          # Configuration loader + model helpers
+│   ├── tests/
+│   │   └── test_quality.py    # Suite unitaire + intégration (pytest)
+│   ├── src/
+│   │   ├── main.py            # Démarrage app, scheduler, routes hors chat
+│   │   ├── routes/            # chat.py, proxy.py (/v1/*), memory_routes.py, self_routes.py…
+│   │   ├── llm_local.py       # Inférence MLX, cache LRU de prompts, journaux de prompts
+│   │   ├── tool_calls.py      # Function calling : format modèle ↔ OpenAI (agents de code)
+│   │   ├── pipeline.py        # Assemblage du prompt + post_analysis
+│   │   ├── memory.py          # Memory system (Redis + Qdrant)
+│   │   ├── self.py            # Proto-self / reflection loop + autocoding actions
+│   │   ├── briefing.py        # Morning briefing generation
+│   │   ├── google_services.py # Gmail + Calendar
+│   │   ├── trading.py         # Boursorama portfolio surveillance
+│   │   ├── llm_router.py      # Intent classification (Tier 1)
+│   │   ├── analyzer.py        # Conversation analysis (Tier 2b)
+│   │   ├── web_search.py      # External search: weather (Open-Meteo), news (DDG), 3-stage deep web
+│   │   ├── prompts.py         # All LLM prompt constants + get_prompt() live override loader
+│   │   ├── helpers.py         # Shared: LLM clients, logging (setup_logging/get_logger), Redis/Qdrant singletons
+│   │   ├── trade_keys.py      # Redis key helpers for the trading module
+│   │   └── config.py          # Configuration loader + model helpers
 │   └── JarvisData/
 │       ├── users_list.json
 │       ├── jarvis-self.json
@@ -1714,12 +1815,24 @@ This replaces the per-module `import logging` + `logging.getLogger(...)` pattern
 │   ├── company/
 │   └── reflexions/
 ├── scripts/
-│   ├── upload-to-openwebui.py   # Index documents into Qdrant
-│   └── search-qdrant.py         # Test RAG search
+│   ├── uploadrag.py             # Indexe RAGData/ dans OpenWebUI (job launchd 23:10)
+│   ├── jarvis-launchd.sh        # Gestion du service launchd — idempotente
+│   ├── search-qdrant.py         # Test RAG search
+│   ├── download_models.py       # Récupère modèles + template de chat
+│   └── backup-jarvis.sh         # Sauvegarde
 ├── logs/
-└── Jarvis project config/
-    ├── jarvis-system-prompt.md
-    └── jarvis_cheatsheet.md
+│   ├── jarvis-api.log / jarvis-debug.log
+│   ├── prompts.log              # Prompts LLM (conversationnel)
+│   └── opencode-prompts.log     # Prompts LLM (agents de code, /v1/raw)
+└── DOCS/
+    ├── AGENTS.md                # Consignes projet pour agents de code
+    ├── opencode-local.md        # Brancher OpenCode sur le LLM local
+    ├── opencode.json.example    # Config provider OpenCode (à copier)
+    ├── jarvis_cheatsheet.md
+    └── examples/
+        ├── com.jarvis.api.plist.template
+        ├── jarvis-aliases.sh    # Alias jarvis-start/stop/restart/status
+        └── users_list.example.json
 ```
 
 ---
