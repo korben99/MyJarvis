@@ -94,6 +94,12 @@ logger = logging.getLogger("jarvis-llm-local")
 LLM_DEBUG_PROMPTS = os.getenv("LLM_DEBUG_PROMPTS", "").lower() in ("yes", "true", "1")
 _PROMPTS_LOG_PATH = "/opt/jarvis/logs/prompts.log"
 
+# Journal dédié aux agents de code (/v1/raw). Fichier séparé : ces prompts embarquent
+# tout le contexte du dépôt et noieraient prompts.log. Gate indépendante, pour pouvoir
+# suivre OpenCode sans réactiver la journalisation de tout le trafic conversationnel.
+RAW_DEBUG_PROMPTS = os.getenv("RAW_DEBUG_PROMPTS", "true").lower() in ("yes", "true", "1")
+_RAW_PROMPTS_LOG_PATH = "/opt/jarvis/logs/opencode-prompts.log"
+
 QUANT_KV = os.getenv("QUANT_KV", "").lower() in ("yes", "true", "1")
 QUANT_KV_BITS = int(os.getenv("QUANT_KV_BITS", "4"))
 
@@ -103,8 +109,22 @@ LRU_KV_MAX_BYTES = int(float(os.getenv("LRU_KV_GB", "4.0")) * 1024**3)
 
 # ── Debug logging ─────────────────────────────────────────────────────────
 
-def _debug_log(model_short: str, no_think: bool, prompt: str, raw_output: str, skip: bool = False) -> None:
-    if not LLM_DEBUG_PROMPTS or skip:
+def _debug_log(
+    model_short: str,
+    no_think: bool,
+    prompt: str,
+    raw_output: str,
+    skip: bool = False,
+    log_path: str | None = None,
+) -> None:
+    """Journalise prompt + réponse brute.
+
+    `log_path` route vers un journal dédié (agents de code) avec sa propre gate ; sans lui,
+    comportement d'origine sur prompts.log.
+    """
+    path = log_path or _PROMPTS_LOG_PATH
+    enabled = RAW_DEBUG_PROMPTS if log_path else LLM_DEBUG_PROMPTS
+    if not enabled or skip:
         return
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sep = "=" * 80
@@ -113,10 +133,10 @@ def _debug_log(model_short: str, no_think: bool, prompt: str, raw_output: str, s
         f"--- PROMPT ---\n{prompt}\n--- RESPONSE (raw) ---\n{raw_output}\n{sep}\n"
     )
     try:
-        with open(_PROMPTS_LOG_PATH, "a", encoding="utf-8") as fh:
+        with open(path, "a", encoding="utf-8") as fh:
             fh.write(entry)
     except Exception as exc:
-        logger.warning("_debug_log: cannot write prompts.log: %s", exc)
+        logger.warning("_debug_log: cannot write %s: %s", path, exc)
 
 
 # ── Model profiles ────────────────────────────────────────────────────────
@@ -1193,6 +1213,7 @@ async def stream_local(
     thinking_budget: int = 0,
     skip_debug_log: bool = False,
     tools: list | None = None,
+    debug_log_path: str | None = None,
     **_kwargs,
 ) -> AsyncGenerator[str, None]:
     """Token-by-token streaming via mlx_lm.stream_generate.
@@ -1277,7 +1298,10 @@ async def stream_local(
             _generation_ok = False
         finally:
             raw_resp = "".join(raw_chunks)
-            _debug_log(model_short, no_think, prompt_text, raw_resp, skip=skip_debug_log)
+            _debug_log(
+                model_short, no_think, prompt_text, raw_resp,
+                skip=skip_debug_log, log_path=debug_log_path,
+            )
             resp_tokens = len(raw_resp) // 4
             thinking_active = "</think>" in raw_resp or "</think >" in raw_resp
             _log_stats(model_short, "stream", no_think, "eos/limit",

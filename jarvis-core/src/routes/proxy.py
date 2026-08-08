@@ -353,7 +353,8 @@ async def raw_chat(req: _RawChatRequest):
     if not LLM_LOCAL:
         raise HTTPException(503, "LLM_LOCAL non activé — endpoint raw indisponible")
 
-    from llm_local import stream_local as _stream_local  # import tardif : mlx non chargé si LLM_LOCAL=False
+    # import tardif : mlx non chargé si LLM_LOCAL=False
+    from llm_local import _RAW_PROMPTS_LOG_PATH, stream_local as _stream_local
     from tool_calls import normalise_messages_for_template, parse_tool_calls
 
     # Messages transmis intégralement : le template a besoin de tool_calls (tours passés
@@ -373,13 +374,24 @@ async def raw_chat(req: _RawChatRequest):
         messages.append(message)
     messages = normalise_messages_for_template(messages)
 
-    # Priorité : body > env var
+    # Priorité : body > env var. Défaut passé à false le 08/08/2026 : le raisonnement est
+    # le principal levier de qualité pour un agent de code (choix de l'outil, enchaînement
+    # lecture → édition), et aucun client de cette route ne sait envoyer no_think.
     if req.no_think is not None:
         no_think = req.no_think
     else:
-        no_think = os.getenv("RAW_NO_THINK", "true").lower() in ("yes", "true", "1")
+        no_think = os.getenv("RAW_NO_THINK", "false").lower() in ("yes", "true", "1")
+
+    # Budget de réflexion OBLIGATOIRE dès que le thinking est actif : ThinkingBudgetProcessor
+    # (llm_local.py) ne borne rien à 0, et le raisonnement partagerait alors max_tokens avec
+    # la réponse — le modèle peut épuiser son budget en réflexion sans jamais émettre
+    # l'appel d'outil. Les clients OpenAI-compatibles n'envoient pas thinking_budget.
     thinking_budget = req.thinking_budget or 0
-    max_tokens = req.max_tokens or int(os.getenv("RAW_MAX_TOKENS", "8000"))
+    if not no_think and thinking_budget <= 0:
+        thinking_budget = int(os.getenv("RAW_THINKING_BUDGET", "3000"))
+
+    # 16000 (et non 8000) car réflexion et réponse se partagent ce budget.
+    max_tokens = req.max_tokens or int(os.getenv("RAW_MAX_TOKENS", "16000"))
     req_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
 
@@ -410,7 +422,8 @@ async def raw_chat(req: _RawChatRequest):
             max_tokens=max_tokens,
             temperature=req.temperature,
             thinking_budget=thinking_budget,
-            skip_debug_log=True,
+            skip_debug_log=False,
+            debug_log_path=_RAW_PROMPTS_LOG_PATH,
             tools=req.tools,
         ):
             full += chunk
@@ -438,7 +451,8 @@ async def raw_chat(req: _RawChatRequest):
             max_tokens=max_tokens,
             temperature=req.temperature,
             thinking_budget=thinking_budget,
-            skip_debug_log=True,
+            skip_debug_log=False,
+            debug_log_path=_RAW_PROMPTS_LOG_PATH,
         ):
             if think_done:
                 yield _sse(chunk)
@@ -473,7 +487,8 @@ async def raw_chat(req: _RawChatRequest):
         messages, model=PRIMARY_MODEL, no_think=no_think,
         max_tokens=max_tokens, temperature=req.temperature,
         thinking_budget=thinking_budget,
-        skip_debug_log=True,
+        skip_debug_log=False,
+        debug_log_path=_RAW_PROMPTS_LOG_PATH,
         tools=req.tools,
     ):
         full += chunk
