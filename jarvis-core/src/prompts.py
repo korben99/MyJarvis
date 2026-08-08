@@ -260,6 +260,15 @@ Clés profil dynamique existantes : [{existing_profile_keys}]
   → Réutilise EXACTEMENT ces clés si le fait correspond. Nouvelle clé uniquement si réellement absent du profil stable ET du profil dynamique.
 Projets connus : {existing_projects}
 </knowledge_base>
+<historique_deja_analyse>
+Tours antérieurs de la MÊME session, déjà analysés lors d'une passe précédente.
+Ils servent UNIQUEMENT à résoudre les références de l'échange ci-dessous : « ça »,
+« c'est terminé », « ce projet », « on en était où ». Sans eux, un « considère que
+c'est terminé » n'a pas d'antécédent et serait rattaché au hasard à un projet connu.
+N'en extrais RIEN : aucun user_fact, aucun project_update, aucun topic, aucun résumé.
+Si l'échange ci-dessous ne réfère à rien d'antérieur, ignore complètement ce bloc.
+{analysed_history}
+</historique_deja_analyse>
 <echange>
 {conversation}
 </echange>"""

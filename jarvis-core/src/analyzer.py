@@ -53,6 +53,55 @@ from pydantic import BaseModel, Field, ValidationError
 
 logger = get_logger("jarvis-analyzer")
 
+# Historique déjà analysé joint à chaque analyse de session.
+#
+# Le budget global seul ne suffit pas : au plafond normal de 800 car./message, 2000 car.
+# ne tiennent que deux tours — et le référent recherché est presque toujours plus haut.
+# Constaté sur le cas du 07/08/2026 : « Je dois préparer un Webinar Fortinet » était le
+# 1er des 4 tours antérieurs, donc le premier évincé, ce qui annulait tout l'intérêt.
+#
+# On coupe donc les tours d'historique bien plus court : pour lever un « ça », il faut
+# savoir DE QUOI on parle, pas les détails. Le sujet tient dans les premiers caractères,
+# et couper court limite aussi la tentation de ré-extraire des faits déjà traités.
+# 300 × ~6 tours ≈ 500 tokens sur un prompt d'environ 2500, appel en priorité bg.
+ANALYSED_HISTORY_BUDGET_CHARS = 2000
+ANALYSED_HISTORY_CHARS_PER_TURN = 300
+
+
+def _format_turns(messages: list[dict], chars_per_turn: int = 800) -> list[str]:
+    """Rend des messages de chat en lignes « Rôle : contenu », du plus ancien au plus récent.
+
+    Les slash-commands utilisateur (/briefing, /agenda…) sont écartées : aucun fait à
+    en extraire.
+    """
+    lines: list[str] = []
+    for message in sorted(messages, key=lambda m: m.get("ts", 0)):
+        role = "Utilisateur" if message.get("role") == "user" else "Jarvis"
+        content = message.get("content", "").strip()[:chars_per_turn]
+        if content and not (message.get("role") == "user" and content.startswith("/")):
+            lines.append(f"{role} : {content}")
+    return lines
+
+
+def _build_analysed_history(messages: list[dict], budget_chars: int) -> str:
+    """Tours déjà analysés à joindre en lecture seule, dans un budget de caractères.
+
+    On garde les plus RÉCENTS (ce sont eux qui portent le référent d'un « ça »), mais on
+    les restitue dans l'ordre chronologique pour que le modèle lise une conversation et
+    non une pile inversée. Un budget plutôt qu'un nombre de tours fixe : un N constant
+    laisse ressortir le référent dès que les tours s'allongent.
+    """
+    lines = _format_turns(messages, ANALYSED_HISTORY_CHARS_PER_TURN)
+    kept: list[str] = []
+    used = 0
+    for line in reversed(lines):
+        if used + len(line) + 1 > budget_chars:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    kept.reverse()
+    return "\n".join(kept)
+
 
 class UserFact(BaseModel):
     model_config = {"extra": "ignore"}
@@ -93,8 +142,15 @@ async def analyze_exchange(
     existing_projects: list | None = None,
     existing_profile_keys: list | None = None,
     stable_profile: dict | None = None,
+    analysed_history: str = "",
 ) -> dict:
-    """Analyze a conversation exchange using the LLM."""
+    """Analyze a conversation exchange using the LLM.
+
+    `analysed_history` : tours antérieurs de la même session, déjà analysés lors d'une
+    passe précédente. Joints en lecture seule pour que le modèle puisse résoudre les
+    références ("ça", "c'est terminé") au lieu de les rattacher au hasard à un projet
+    connu. Le prompt lui interdit explicitement d'en extraire quoi que ce soit.
+    """
     existing_projects = existing_projects or []
     try:
         # Show in_progress projects clearly + recent done projects (last 90 days)
@@ -167,6 +223,7 @@ async def analyze_exchange(
             existing_projects=projects_context,
             existing_profile_keys=profile_keys_str,
             stable_profile=stable_str,
+            analysed_history=analysed_history or "aucun",
         )
 
         # Appel LLM : priorité basse (bg) pour ne pas bloquer le chat.
@@ -306,21 +363,24 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                 wm_key = f"analysis_wm:{uc}:{session_id}"
                 wm_ts = float(r.get(wm_key) or 0)
 
-                session_new: list[dict] = []
+                new_messages: list[dict] = []
+                already_analysed_messages: list[dict] = []
                 for raw in r.lrange(chat_key, 0, -1):
                     try:
-                        msg = json.loads(raw)
-                        if msg.get("ts", 0) > wm_ts:
-                            msg["_session_id"] = session_id
-                            session_new.append(msg)
+                        message = json.loads(raw)
                     except (json.JSONDecodeError, ValueError):
-                        pass
+                        continue
+                    if message.get("ts", 0) > wm_ts:
+                        message["_session_id"] = session_id
+                        new_messages.append(message)
+                    else:
+                        already_analysed_messages.append(message)
 
-                if not session_new:
+                if not new_messages:
                     continue
 
                 user_parts = [
-                    m["content"] for m in session_new if m.get("role") == "user"
+                    m["content"] for m in new_messages if m.get("role") == "user"
                 ]
                 if not user_parts:
                     continue
@@ -329,13 +389,20 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                     {
                         "session_id": session_id,
                         "wm_key": wm_key,
-                        "new_wm_ts": max(m["ts"] for m in session_new),
-                        "max_ts": max(m["ts"] for m in session_new),
-                        "msgs": session_new,
+                        "new_wm_ts": max(m["ts"] for m in new_messages),
+                        "max_ts": max(m["ts"] for m in new_messages),
+                        "msgs": new_messages,
+                        # Tours antérieurs, joints au prompt en lecture seule pour
+                        # résoudre les références. DÉLIBÉRÉMENT hors de "msgs" : ce
+                        # dernier définit la fenêtre de back-fill du convlog
+                        # (new_message_timestamps plus bas), qui ne doit couvrir que les
+                        # nouveaux messages — l'élargir réécrirait des entrées déjà
+                        # renseignées, et satisfaction s'y écrase sans garde.
+                        "already_analysed_messages": already_analysed_messages,
                         "user_parts": user_parts,
                         "asst_parts": [
                             m["content"]
-                            for m in session_new
+                            for m in new_messages
                             if m.get("role") == "assistant"
                         ],
                     }
@@ -345,7 +412,7 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                 logger.debug("[SCHEDULER] no new messages for %s", uc)
                 continue
 
-            total_new_msgs = sum(len(sd["msgs"]) for sd in sessions_data)
+            total_new_msgs = sum(len(s["msgs"]) for s in sessions_data)
 
             # ── Analyse par session — ordre chronologique ─────────────────
             # Résultats à fusionner après toutes les sessions
@@ -356,34 +423,33 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
             merged_iw: dict[str, dict] = {}  # term → iw (poids max)
             most_recent_analysis: dict | None = None
 
-            for sd in sorted(sessions_data, key=lambda x: x["max_ts"]):
-                turns = []
-                for m in sorted(sd["msgs"], key=lambda x: x.get("ts", 0)):
-                    role = "Utilisateur" if m.get("role") == "user" else "Jarvis"
-                    content = m.get("content", "").strip()[:800]
-                    # Skip slash-commands (/briefing, /agenda…) — no extractable facts
-                    if content and not (
-                        m.get("role") == "user" and content.startswith("/")
-                    ):
-                        turns.append(f"{role} : {content}")
-                conversation = "\n".join(turns)[:6000]
+            for session in sorted(sessions_data, key=lambda s: s["max_ts"]):
+                conversation = "\n".join(_format_turns(session["msgs"]))[:6000]
+                analysed_history = _build_analysed_history(
+                    session["already_analysed_messages"],
+                    ANALYSED_HISTORY_BUDGET_CHARS,
+                )
 
                 try:
                     analysis = await analyze_exchange(
-                        conversation, existing_projects, existing_profile_keys, stable_profile
+                        conversation,
+                        existing_projects,
+                        existing_profile_keys,
+                        stable_profile,
+                        analysed_history,
                     )
                 except Exception as exc:
                     logger.error(
                         "[SCHEDULER] analyze_exchange failed for %s/%s: %s",
                         uc,
-                        sd["session_id"],
+                        session["session_id"],
                         exc,
                     )
                     continue
 
                 # Watermark mis à jour immédiatement — si la session suivante échoue,
                 # celle-ci est déjà marquée comme analysée (pas de double-analyse).
-                r.set(sd["wm_key"], sd["new_wm_ts"], ex=CHAT_LOG_TTL)
+                r.set(session["wm_key"], session["new_wm_ts"], ex=CHAT_LOG_TTL)
                 most_recent_analysis = analysis  # la dernière réussie en ordre chrono
 
                 # ── Fusion incrémentale ───────────────────────────────────
@@ -403,85 +469,98 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
 
                 # ── Back-fill convlog : satisfaction + importance + mood + résumé ──
                 # Résumé de session : recopié sur chaque échange de la session.
-                _sat = analysis.get("satisfaction", "unknown")
-                _imp = round(analysis.get("importance", 0.0), 3)
-                _mood_s = analysis.get("mood", "neutral")
+                session_satisfaction = analysis.get("satisfaction", "unknown")
+                session_importance = round(analysis.get("importance", 0.0), 3)
+                session_mood = analysis.get("mood", "neutral")
                 # Déjà normalisé par analyse_conversation : str non vide, ou None.
-                _mem_bf = analysis.get("memory_summary")
-                _should_backfill = (
-                    _sat in ("positive", "negative")
-                    or _imp > 0
-                    or _mood_s != "neutral"
-                    or _mem_bf
+                session_summary = analysis.get("memory_summary")
+                has_something_to_backfill = (
+                    session_satisfaction in ("positive", "negative")
+                    or session_importance > 0
+                    or session_mood != "neutral"
+                    or session_summary
                 )
-                if _should_backfill:
-                    _ts_list = [m.get("ts", 0) for m in sd["msgs"] if m.get("ts")]
-                    if _ts_list:
-                        _min_ts = min(_ts_list) - 1
-                        _max_ts_bf = max(_ts_list) + 1
-                        _clog_key = f"convlog:{uc}"
-                        _raw_entries = r.zrangebyscore(
-                            _clog_key, _min_ts, _max_ts_bf, withscores=True
+                if has_something_to_backfill:
+                    # Fenêtre volontairement restreinte aux NOUVEAUX messages : les tours
+                    # déjà analysés ont leur propre entrée convlog, déjà renseignée.
+                    new_message_timestamps = [
+                        m.get("ts", 0) for m in session["msgs"] if m.get("ts")
+                    ]
+                    if new_message_timestamps:
+                        window_start = min(new_message_timestamps) - 1
+                        window_end = max(new_message_timestamps) + 1
+                        convlog_key = f"convlog:{uc}"
+                        convlog_entries = r.zrangebyscore(
+                            convlog_key, window_start, window_end, withscores=True
                         )
-                        if _raw_entries:
-                            _pipe = r.pipeline()
-                            for _raw, _score in _raw_entries:
+                        if convlog_entries:
+                            pipe = r.pipeline()
+                            for raw_entry, score in convlog_entries:
                                 try:
-                                    _e = json.loads(_raw)
+                                    entry = json.loads(raw_entry)
                                     # Strict : ne toucher que les entrées de CETTE session
-                                    if _e.get("session_id") != sd["session_id"]:
+                                    if entry.get("session_id") != session["session_id"]:
                                         continue
-                                    _changed = False
+                                    changed = False
                                     if (
-                                        _sat in ("positive", "negative")
-                                        and _e.get("satisfaction") != _sat
+                                        session_satisfaction in ("positive", "negative")
+                                        and entry.get("satisfaction")
+                                        != session_satisfaction
                                     ):
-                                        _e["satisfaction"] = _sat
-                                        _changed = True
-                                    if _imp > 0 and _e.get("importance", 0.0) == 0.0:
-                                        _e["importance"] = _imp
-                                        _changed = True
-                                    if _mood_s != "neutral" and _e.get("mood") in (
-                                        None,
-                                        "",
-                                        "neutral",
+                                        entry["satisfaction"] = session_satisfaction
+                                        changed = True
+                                    if (
+                                        session_importance > 0
+                                        and entry.get("importance", 0.0) == 0.0
                                     ):
-                                        _e["mood"] = _mood_s
-                                        _changed = True
-                                    if _mem_bf and not _e.get("memory_summary"):
-                                        _e["memory_summary"] = _mem_bf
-                                        _changed = True
-                                    if _changed:
-                                        _pipe.zrem(_clog_key, _raw)
-                                        _pipe.zadd(
-                                            _clog_key,
+                                        entry["importance"] = session_importance
+                                        changed = True
+                                    if session_mood != "neutral" and entry.get(
+                                        "mood"
+                                    ) in (None, "", "neutral"):
+                                        entry["mood"] = session_mood
+                                        changed = True
+                                    if session_summary and not entry.get(
+                                        "memory_summary"
+                                    ):
+                                        entry["memory_summary"] = session_summary
+                                        changed = True
+                                    if changed:
+                                        pipe.zrem(convlog_key, raw_entry)
+                                        pipe.zadd(
+                                            convlog_key,
                                             {
                                                 json.dumps(
-                                                    _e, ensure_ascii=False
-                                                ): _score
+                                                    entry, ensure_ascii=False
+                                                ): score
                                             },
                                         )
                                 except (json.JSONDecodeError, ValueError):
                                     pass
-                            _pipe.execute()
+                            pipe.execute()
 
                 # ── Qdrant par session (importance-gated) ─────────────────
-                _imp_s = analysis.get("importance", 0.0)
-                _mem_s = analysis.get("memory_summary")
-                _has_durable = bool(
+                # Importance non arrondie ici, contrairement au back-fill ci-dessus :
+                # c'est elle qui est comparée au seuil et stockée dans le vecteur.
+                raw_importance = analysis.get("importance", 0.0)
+                has_durable_content = bool(
                     analysis.get("user_facts") or analysis.get("project_updates")
                 )
-                if (_imp_s > IMPORTANCE_THRESHOLD or _has_durable) and _mem_s:
-                    entry = {
-                        "session_id": sd["session_id"],
-                        "timestamp": sd["max_ts"],
+                if (
+                    raw_importance > IMPORTANCE_THRESHOLD or has_durable_content
+                ) and session_summary:
+                    memory_vector_entry = {
+                        "session_id": session["session_id"],
+                        "timestamp": session["max_ts"],
                         "conversation": conversation[:500],
-                        "mood": _mood_s,
+                        "mood": session_mood,
                         "topics": analysis.get("topics", []),
-                        "importance": _imp_s,
-                        "memory_summary": _mem_s,
+                        "importance": raw_importance,
+                        "memory_summary": session_summary,
                     }
-                    await asyncio.to_thread(store_memory_vector, uc, entry)
+                    await asyncio.to_thread(
+                        store_memory_vector, uc, memory_vector_entry
+                    )
 
                 # Autobio writes are handled exclusively by the nightly review,
                 # which has full-day context and is the sole authoritative writer.
