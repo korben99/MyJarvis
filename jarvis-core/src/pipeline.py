@@ -59,17 +59,25 @@ logger = get_logger("jarvis-pipeline")
 
 def build_system_prompt(user_code: str = "") -> str:
     """
-    Return the per-user system prompt: SYSTEM_BASE_FR + nom + profil_utilisateur.
+    Return the per-user system prompt:
+    SYSTEM_BASE_FR + IDENTITY_FR + nom + profil_utilisateur.
     Token-identical across all turns for a given user → KV cache hit every time.
     Profil_utilisateur only contains constant biographical facts (family, location, job).
     Dynamic content (date, memory, projects, mood) stays in build_dynamic_prefix().
+
+    IDENTITY_FR sits *before* the per-user block on purpose. _lru_get_cache walks a
+    token trie (fetch_nearest_cache) and reuses the longest cached prefix, so what
+    matters is the prefix shared *between users*, not just across turns. Placed after
+    <profil_utilisateur>, its ~770 tokens would fall on the diverging side and every
+    family member would pay that prefill on their first turn — with only 4 LRU slots,
+    that is a TTFT regression. Before the block, one cached entry serves everyone.
     """
     base = get_prompt("SYSTEM_BASE_FR")
     user = USERS.get(user_code, {})
     firstname = user.get("firstname", "")
     profile: dict = user.get("profile", {})
 
-    parts = [base]
+    parts = [base, get_prompt("IDENTITY_FR")]
     if firstname:
         parts.append(
             f"Tu parles avec {firstname}. Tutoie toujours, quelle que soit la langue du contexte injecté."

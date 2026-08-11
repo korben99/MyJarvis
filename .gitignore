@@ -24,3 +24,4 @@ DerivedData/
 #SECRETS#
 .env
 scripts/client_secret.json
+RESEARCH/
