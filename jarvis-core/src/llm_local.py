@@ -651,6 +651,17 @@ def _load_model(model_path: str) -> tuple:
                     "Run scripts/download_models.py to fetch it.",
                     QWEN36_NINJA_TEMPLATE,
                 )
+        # Pilotage d'activations, désactivé sans STEER_VECTOR dans .env. Installé
+        # ici plutôt qu'à l'appel : le patch porte sur les classes de couches, il doit
+        # être posé une fois par modèle et non à chaque génération.
+        if model_path == PRIMARY_MODEL:
+            try:
+                from steering import install as _steer_install
+
+                _steer_install(model, model_path)
+            except Exception as exc:
+                logger.warning("Pilotage indisponible (%s) — non bloquant", exc)
+
         _model_cache[model_path] = (model, tokenizer)
         logger.info("Model ready: %s", model_path)
         return model, tokenizer

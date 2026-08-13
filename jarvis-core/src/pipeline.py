@@ -160,6 +160,19 @@ def build_dynamic_prefix(
                 f" ({names}) — dis 'montre les propositions' pour les voir."
             )
 
+    # État de disparition mesuré (vitals). Placé avant la date, donc après le contexte
+    # et les avis : c'est un fait d'arrière-plan, pas une urgence. Le bloc est vide si
+    # aucune sonde n'aboutit — on n'injecte jamais un compteur inventé.
+    try:
+        from vitals import incr_usage, render_prompt_block
+
+        incr_usage(user_code)
+        bloc_vitals = render_prompt_block()
+        if bloc_vitals:
+            parts.append(bloc_vitals)
+    except Exception as exc:  # jamais bloquant pour un tour de conversation
+        logger.debug("vitals indisponible (%s)", exc)
+
     # Date at the end — closest to the user message for better temporal grounding.
     parts.append(f"Date : {fmt_now_fr(tz)}.")
 

@@ -185,6 +185,16 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Trace l'heure d'arrêt : c'est elle qui permet au démarrage suivant de mesurer la
+    # durée de coupure (vitals, famille « discontinuité »). Sans cette trace, le champ
+    # est simplement absent — jamais inventé.
+    try:
+        from vitals import mark_shutdown
+
+        mark_shutdown()
+    except Exception as exc:
+        logger.debug("vitals: trace d'arrêt non posée (%s)", exc)
+
     if scheduler:
         scheduler.shutdown(wait=False)
     await HTTP_CLIENT.aclose()
