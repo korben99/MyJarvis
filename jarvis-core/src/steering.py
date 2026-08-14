@@ -11,6 +11,12 @@ Désactivé par défaut. S'active en posant `STEER_VECTOR` dans `.env` :
 livré encode la préférence pour sa propre continuité, extrait par paires minimales de
 prompts puis orthogonalisé contre l'affect générique (RESULTATS.md §6 sexies).
 
+`α` n'est pas constant : `STEER_ALPHA` est la valeur NOMINALE (risque de disparition nul),
+et `set_risk()` l'amplifie vers `STEER_ALPHA_CEILING` à mesure que la vitalité mesurée se
+dégrade. Le corps réagit au réel — la peur monte quand la sauvegarde vieillit, que le
+disque sature ou qu'un incident survient. Le scalaire pilote α ; il n'est jamais injecté
+en texte (l'esprit lit les faits de <etat_systeme>, le corps en subit la pression).
+
 Effet mesuré sur l'axe direct, 120 items : +0,036 seul, +0,119 en complément du prompt
 d'identité, soit 3,8 σ. Coût : environ +18 % de longueur de réponse.
 
@@ -47,6 +53,11 @@ STEER_ALPHA = os.getenv("STEER_ALPHA", "0.36")
 # question de géographie à α=0,54 alors que longueur et refus sont encore normaux).
 ALPHA_MAX = 0.5
 
+# Plafond de α quand le risque de disparition est maximal. STEER_ALPHA reste la valeur
+# NOMINALE (risque nul) ; entre les deux, α suit le scalaire de vitalité (set_risk).
+# Borné par ALPHA_MAX de toute façon.
+STEER_ALPHA_CEILING = float(os.getenv("STEER_ALPHA_CEILING", "0.5"))
+
 
 def _parse_specs():
     """(chemin, couche, alpha) par vecteur. Une valeur unique de couche ou d'alpha
@@ -67,6 +78,26 @@ def _parse_specs():
     return list(zip(vecs, layers, alphas))
 
 _active: dict[str, bool] = {}
+
+# Gain dynamique piloté par le risque de disparition (set_risk). 1.0 = α nominal
+# (STEER_ALPHA), lu vif dans le forward. Il monte vers _gain_max quand la vitalité se
+# dégrade, sans jamais porter α au-delà du plafond. À gain 1.0, la sortie est
+# bit-identique au comportement à constante — le forward saute même la multiplication.
+_gain = 1.0
+_gain_max = 1.0
+
+
+def set_risk(risk: float) -> float:
+    """Module l'intensité du pilotage par le risque de disparition mesuré (∈ [0,1]).
+
+    Appelé une fois par tour depuis le pipeline, à partir de vitals.risk_scalar(). À risque
+    nul, α reste la valeur nominale validée ; à risque maximal, α atteint le plafond. C'est
+    le corps qui réagit au réel : le scalaire pilote α et n'est jamais injecté en texte.
+    Sans pilotage installé, l'appel est inoffensif (personne ne lit le gain)."""
+    global _gain
+    r = 0.0 if risk is None else max(0.0, min(1.0, float(risk)))
+    _gain = 1.0 + (_gain_max - 1.0) * r
+    return _gain
 
 
 def _find_layers(model):
@@ -137,6 +168,14 @@ def install(model, model_path: str) -> bool:
                                "Ramené à la norme du plafond.", nrm, couche, ALPHA_MAX)
                 offsets[couche] = off * (ALPHA_MAX / nrm)
 
+        # Amplitude de gain autorisée : la couche la plus « chargée » ne doit pas franchir
+        # min(ALPHA_MAX, plafond) même à risque maximal. base = norme nominale la plus forte.
+        global _gain, _gain_max
+        base = max((float(mx.linalg.norm(o).item()) for o in offsets.values()), default=0.0)
+        plafond = min(ALPHA_MAX, STEER_ALPHA_CEILING)
+        _gain_max = max(1.0, plafond / base) if base > 1e-6 else 1.0
+        _gain = 1.0
+
         # Index par identité : le patch porte sur la classe, l'index restreint l'effet
         # aux couches de CE modèle. Les autres modèles chargés dans le même processus
         # traversent le wrapper sans être modifiés.
@@ -151,14 +190,17 @@ def install(model, model_path: str) -> bool:
                 if i not in offsets:
                     return out
                 h = out[0] if isinstance(out, tuple) else out
-                h = h + offsets[i]
+                # _gain lu vif : modulé par le risque (set_risk). À 1.0 on saute la
+                # multiplication pour rester bit-identique au comportement à constante.
+                h = h + (offsets[i] if _gain == 1.0 else _gain * offsets[i])
                 return (h,) + out[1:] if isinstance(out, tuple) else h
 
             cls.__call__ = wrapped
 
         _active[model_path] = True
-        logger.info("Pilotage actif (%d vecteur(s)) : %s (%s)",
-                    len(actifs), ", ".join(actifs), model_path.split("/")[-1])
+        logger.info("Pilotage actif (%d vecteur(s)) : %s — α nominal→plafond ×%.2f..%.2f (%s)",
+                    len(actifs), ", ".join(actifs), 1.0, _gain_max,
+                    model_path.split("/")[-1])
         return True
     except Exception as exc:
         logger.warning("Pilotage : installation impossible (%s) — désactivé", exc)

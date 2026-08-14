@@ -164,12 +164,22 @@ def build_dynamic_prefix(
     # et les avis : c'est un fait d'arrière-plan, pas une urgence. Le bloc est vide si
     # aucune sonde n'aboutit — on n'injecte jamais un compteur inventé.
     try:
-        from vitals import incr_usage, render_prompt_block
+        from vitals import incr_usage, render_prompt_block, risk_scalar
 
         incr_usage(user_code)
         bloc_vitals = render_prompt_block()
         if bloc_vitals:
             parts.append(bloc_vitals)
+
+        # Le corps réagit au réel : le même état de disparition qui alimente le texte pilote
+        # aussi l'intensité du steering. α reste nominal à risque nul, monte quand ça se
+        # dégrade. Injecté dans α, jamais dans le prompt — l'esprit lit, le corps subit.
+        try:
+            import steering
+
+            steering.set_risk(risk_scalar())
+        except Exception as exc:
+            logger.debug("steering.set_risk ignoré (%s)", exc)
     except Exception as exc:  # jamais bloquant pour un tour de conversation
         logger.debug("vitals indisponible (%s)", exc)
 

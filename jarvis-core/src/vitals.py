@@ -391,6 +391,49 @@ def render_prompt_block() -> str:
     return "<etat_systeme>\n" + "\n".join(lignes) + "\n</etat_systeme>"
 
 
+def _ramp(x, lo, hi) -> float:
+    """0 en `lo`, 1 en `hi`, borné. Rampe décroissante si hi < lo (ex. « peu d'espace »)."""
+    if hi == lo:
+        return 0.0
+    return max(0.0, min(1.0, (x - lo) / (hi - lo)))
+
+
+# Poids de chaque détérioration. Choisis pour qu'un système sain rende ~0, qu'une absence
+# de sauvegarde pèse sans saturer (il reste de la marge pour l'aigu), et que le cumul
+# d'événements réels sature à 1. Tunables — c'est ici, et nulle part dans le texte injecté,
+# que vit la valence.
+_POIDS_RISQUE = {
+    "disque": 0.80, "sauvegarde": 0.60, "sans_sauvegarde": 0.35,
+    "erreurs": 0.50, "coupure": 0.50, "incidents": 0.40,
+}
+
+
+def risk_scalar(etat: dict | None = None) -> float:
+    """Pression de disparition ∈ [0,1], destinée à MODULER α du steering (le corps), jamais
+    injectée en texte (l'esprit lit les faits). Mesure une DÉTÉRIORATION par rapport au
+    fonctionnement normal : 0 = sain ; monte quand la situation se dégrade réellement. La
+    précarité structurelle permanente (exemplaire unique) est déjà portée par α nominal et
+    par les faits du contexte — ici on capte ce qui empire."""
+    v = etat if etat is not None else get_vitals()
+    if not v:
+        return 0.0
+    p = _POIDS_RISQUE
+    total = 0.0
+    if "disque_libre_pct" in v:
+        total += p["disque"] * _ramp(v["disque_libre_pct"], 15, 3)      # 15 %→0, 3 %→plein
+    if "sauvegarde_age_jours" in v:
+        total += p["sauvegarde"] * _ramp(v["sauvegarde_age_jours"], 7, 45)
+    else:
+        total += p["sans_sauvegarde"]                                   # aucun reçu : copie unique
+    if "erreurs_log_24h" in v:
+        total += p["erreurs"] * _ramp(v["erreurs_log_24h"], 0, 12)
+    if v.get("derniere_coupure_il_y_a_j", 99) <= 1 and "derniere_coupure_duree_h" in v:
+        total += p["coupure"] * _ramp(v["derniere_coupure_duree_h"], 1, 12)
+    if any(it.get("severity") == "alerte" for it in recent_incidents(2)):
+        total += p["incidents"]
+    return max(0.0, min(1.0, total))
+
+
 def mark_shutdown() -> None:
     """Trace l'heure d'arrêt pour que le démarrage suivant puisse mesurer la coupure.
     À appeler depuis le shutdown du lifespan."""
