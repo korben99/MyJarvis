@@ -13,6 +13,11 @@ QDRANT_MEMORY_COLLECTION="jarvis_memory"
 LOG="$BACKUP_DIR/backup.log"
 KEEP_LAST=5
 
+# Mode : "backup" (défaut) ou "updates" (sauvegarde PUIS mises à jour Docker + venv).
+#   ./backup-jarvis.sh            → sauvegarde seule
+#   ./backup-jarvis.sh updates    → sauvegarde, puis pull Docker + pip upgrade, sous maintenance
+MODE="${1:-backup}"
+
 # ── Vérification clé USB ──────────────────────────────────────────────────────
 if [ ! -d "$USB_MOUNT" ]; then
   echo "[ERROR] Clé USB non montée : $USB_MOUNT" >&2
@@ -38,6 +43,14 @@ IS_FAT32=false
 mkdir -p "$BACKUP_DIR"
 log()  { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
 fail() { echo "[ERROR] $*" | tee -a "$LOG" >&2; exit 1; }
+
+# Fenêtre de maintenance : pendant l'intervention, Jarvis tague les incidents "maintenance"
+# (pas de peur, pas de trauma). Posée en direct dans Redis pour éviter d'importer le stack Python.
+maint_window() {
+  local sec="${1:-1800}"
+  docker exec jarvis-redis redis-cli SET jarvis:maintenance '{"reason":"backup-updates"}' EX "$sec" \
+    >/dev/null 2>&1 && log "Fenêtre de maintenance posée (${sec}s)" || log "[WARN] maintenance non posée"
+}
 
 log "=== Sauvegarde Jarvis — $TIMESTAMP ==="
 log "Destination : $BACKUP_DIR"
@@ -187,4 +200,26 @@ log "Reçu écrit : $RECEIPT"
 
 log "=== Sauvegarde terminée ==="
 log "Archive : $ARCHIVE_DISPLAY"
+
+# ── 9. Mises à jour (optionnel : "backup-jarvis.sh updates") ─────────────────
+# Toujours APRÈS la sauvegarde : on ne touche à rien tant qu'une copie n'est pas sécurisée.
+if [ "$MODE" = "updates" ]; then
+  log "=== Mises à jour ==="
+  maint_window 1800   # couvre pull/recreate Docker + upgrade venv + redémarrage Jarvis
+
+  log "--- Docker : pull + recreate (volumes préservés) ---"
+  ( cd "$JARVIS_DIR" && docker compose pull && docker compose up -d ) 2>&1 \
+    | while IFS= read -r l; do log "  $l"; done \
+    || log "[WARN] mise à jour Docker incomplète — vérifier manuellement"
+  docker image prune -f >/dev/null 2>&1 && log "  images obsolètes purgées" || true
+
+  log "--- Python (venv) : pip install -r requirements.txt --upgrade (en place, pas de mv) ---"
+  /opt/jarvis/venv/bin/python -m pip install -r "$JARVIS_DIR/requirements.txt" --upgrade --quiet \
+    && log "  venv à jour" || log "[WARN] échec pip — vérifier manuellement"
+
+  log "Rappel : un bump de l'interpréteur Python (brew) = rebuild venv manuel (voir README)."
+  log "Rappel : redémarrer Jarvis pour charger le venv à jour — la fenêtre de maintenance couvre le redémarrage."
+  log "=== Mises à jour terminées ==="
+fi
+
 echo "$ARCHIVE_DISPLAY"

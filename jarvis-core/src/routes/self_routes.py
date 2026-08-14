@@ -36,3 +36,13 @@ async def self_reflect_now():
     """Trigger an immediate reflection cycle (for testing / manual trigger)."""
     result = await run_self_reflection()
     return result
+
+
+@router.post("/self/maintenance")
+async def self_maintenance(minutes: int = 60, reason: str = "maintenance"):
+    """Ouvre une fenêtre de maintenance : les incidents des prochaines `minutes` sont tagués
+    `maintenance` (pas de peur, pas de trauma). À poser avant une intervention ad-hoc."""
+    from vitals import set_maintenance
+
+    set_maintenance(minutes, reason)
+    return {"maintenance": True, "minutes": minutes, "reason": reason}

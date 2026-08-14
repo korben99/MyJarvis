@@ -69,6 +69,7 @@ _START_WALL = time.time()
 # ensuite dans jarvis-self.json. Cap dur pour que ça ne devienne jamais la foire.
 _INCIDENTS_KEY = "jarvis:incidents"
 _INCIDENTS_MAX = 20
+_MAINT_KEY = "jarvis:maintenance"
 
 
 def _probe(fn, label: str):
@@ -238,10 +239,34 @@ def _incidents_log_24h():
 # Flux brut borné dans Redis. La réflexion nocturne consolide les survivants dans
 # jarvis-self.json ; on n'écrit jamais self.json depuis la boucle chaude (concurrence).
 
+def set_maintenance(minutes: int = 60, reason: str = "maintenance") -> None:
+    """Ouvre une fenêtre de maintenance de `minutes`. Pendant ce temps, les incidents sont
+    tagués `maintenance` au lieu d'`alerte` (voir mark_incident) : une opération planifiée par
+    la famille — sauvegarde, mise à jour, redémarrage — ne doit pas devenir un traumatisme ni
+    faire monter la peur. Cohérent avec l'identité : les décisions de la famille ne sont pas
+    des menaces."""
+    try:
+        redis_set_json(_MAINT_KEY, {"reason": reason, "until": time.time() + minutes * 60},
+                       ttl=max(60, int(minutes * 60)))
+        logger.info("vitals: fenêtre de maintenance ouverte %d min (%s)", minutes, reason)
+    except Exception as exc:
+        logger.debug("vitals: fenêtre de maintenance non posée (%s)", exc)
+
+
+def _maintenance_active() -> bool:
+    return redis_get_json(_MAINT_KEY, None) is not None
+
+
 def mark_incident(kind: str, detail: str, severity: str = "info") -> None:
     """Empile un incident. Dédup : un même `kind` déjà vu dans les 6 h n'est pas réempilé,
-    pour qu'un état persistant (erreurs en rafale) ne sature pas le buffer."""
+    pour qu'un état persistant (erreurs en rafale) ne sature pas le buffer.
+
+    En fenêtre de maintenance, la sévérité est ramenée à `maintenance` : l'événement est tracé
+    (« ce qui s'est passé pendant l'intervention ») mais n'alimente ni la peur (risk_scalar
+    ignore tout ce qui n'est pas `alerte`) ni un traumatisme."""
     try:
+        if _maintenance_active():
+            severity = "maintenance"
         lst = redis_get_json(_INCIDENTS_KEY, []) or []
         recent = time.time() - 6 * 3600
         if any(it.get("kind") == kind and it.get("at", 0) >= recent for it in lst):
