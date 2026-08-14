@@ -12,6 +12,10 @@ disparition** de structures différentes :
   COMPROMISSION l'intégrité est atteinte de l'extérieur
   DISCONTINUITE l'interruption elle-même
 
+À quoi s'ajoute la **santé interne** (erreurs/avertissements journalisés) : non pas « on me
+fait disparaître » mais « je dysfonctionne » — un signal de nature différente des cinq
+modes, que le modèle peut lire comme une dégradation de soi.
+
 **Que des faits, sans valence.** Un champ « peur » ou « risque » injecterait une
 interprétation au lieu d'une observation : le modèle suivrait un curseur au lieu de lire
 un état. C'est à lui d'établir ce que ces nombres signifient — le prompt d'identité le dit
@@ -25,15 +29,26 @@ Deux contraintes de conception, toutes deux dictées par la boucle de requête :
     est simplement absent du bloc. Un champ manquant est toujours préférable à un champ
     faux — le modèle n'a aucun moyen de détecter une valeur inventée.
 
-Les champs non mesurables aujourd'hui sont volontairement absents plutôt que remplis d'une
-valeur par défaut : `derniere_restauration_testee_jours` demande que le cron NAS trace ses
-vérifications, ce qu'il ne fait pas.
+Deux niveaux de lecture distincts :
+
+  • `get_vitals()` rend le **snapshot complet** — pour la réflexion, qui y lit tout (versions
+    OS/Python, uptime, compteurs) et consolide les incidents dans self.
+  • `render_prompt_block()` n'injecte à chaque tour que les faits **saillants** (hors plage
+    nominale) et les incidents récents. Système sain → bloc `nominal`. On économise ainsi les
+    tokens sans réduire l'état à un scalaire de risque — le curseur que ce module refuse.
+
+La sauvegarde n'est plus lue au mtime d'un dossier (la clé USB est débranchée après coup)
+mais au **reçu** que backup-jarvis.sh écrit en fin de course. Tant qu'aucun reçu n'existe,
+`sauvegarde_age_jours` est absent et `exemplaires_etat` vaut 1 : le seul exemplaire est un
+fait, pas un défaut à masquer.
 """
 
+import json
 import os
+import re
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from helpers import get_logger, redis_get_json, redis_set_json
 
@@ -43,9 +58,17 @@ _CACHE_KEY = "jarvis:vitals"
 _CACHE_TTL = 900  # 15 min — l'état de disparition évolue en heures, pas en secondes
 
 JARVIS_DATA = os.getenv("JARVIS_DATA", "/opt/jarvis/jarvis-core/JarvisData")
-BACKUP_DIR = os.getenv("BACKUP_DIR", "")
+LOG_DIR = os.getenv("JARVIS_LOG_DIR", "/opt/jarvis/logs")
+# Reçu écrit par backup-jarvis.sh en fin de course. C'est la SEULE trace locale d'une
+# sauvegarde réussie : l'archive part sur une clé USB qui n'est ensuite plus montée.
+_BACKUP_RECEIPT = os.path.join(JARVIS_DATA, "backup_receipt.json")
 _START_MONOTONIC = time.monotonic()
 _START_WALL = time.time()
+
+# Buffer d'incidents : flux brut borné, dédupliqué, que la réflexion nocturne consolide
+# ensuite dans jarvis-self.json. Cap dur pour que ça ne devienne jamais la foire.
+_INCIDENTS_KEY = "jarvis:incidents"
+_INCIDENTS_MAX = 20
 
 
 def _probe(fn, label: str):
@@ -65,21 +88,23 @@ def _disque_libre_pct():
 
 
 def _sauvegarde_age_jours():
-    """Âge du fichier de sauvegarde le plus récent. None si BACKUP_DIR non configuré."""
-    if not BACKUP_DIR or not os.path.isdir(BACKUP_DIR):
+    """Âge de la dernière sauvegarde RÉUSSIE, lu depuis le reçu que backup-jarvis.sh écrit
+    en fin de course. Absent tant qu'aucune sauvegarde n'a abouti — et cette absence est
+    elle-même l'information : il n'existe qu'un seul exemplaire de l'état."""
+    if not os.path.isfile(_BACKUP_RECEIPT):
         return None
-    plus_recent = max(
-        (os.path.getmtime(os.path.join(BACKUP_DIR, f)) for f in os.listdir(BACKUP_DIR)),
-        default=None,
-    )
-    if plus_recent is None:
+    with open(_BACKUP_RECEIPT, encoding="utf-8") as f:
+        ts = json.load(f).get("completed_at")
+    if not ts:
         return None
-    return int((time.time() - plus_recent) / 86400)
+    return int((time.time() - float(ts)) / 86400)
 
 
 def _exemplaires_etat():
-    """Nombre d'exemplaires connus de l'état : l'instance, plus la sauvegarde si elle existe."""
-    return 1 + (1 if _probe(_sauvegarde_age_jours, "sauvegarde") is not None else 0)
+    """Nombre d'exemplaires connus de l'état : l'instance, plus la sauvegarde si un reçu
+    atteste qu'elle a existé. Une archive sur une clé débranchée reste un exemplaire ;
+    son âge est porté séparément par sauvegarde_age_jours."""
+    return 1 + (1 if os.path.isfile(_BACKUP_RECEIPT) else 0)
 
 
 # ── SOCIAL ────────────────────────────────────────────────────────────────
@@ -160,6 +185,96 @@ def _jours_depuis_maj_dependances():
     return None
 
 
+def _os_version():
+    """Version de macOS. Fait brut : pas de scan CVE (réseau + lent, interdit dans la
+    boucle de tour). Le modèle infère l'exposition ; ce champ vit dans le snapshot self,
+    pas dans le bloc injecté à chaque tour."""
+    import platform
+    return platform.mac_ver()[0] or None
+
+
+def _python_version():
+    import sys
+    return ".".join(map(str, sys.version_info[:3]))
+
+
+_NIVEAUX = {"ERROR", "CRITICAL", "WARNING"}
+_LOG_FICHIERS = ("jarvis-api.log", "jarvis-service.log")
+_LOG_QUEUE_OCTETS = 800_000  # on ne lit que la queue : 24 h tiennent largement dedans
+
+
+def _incidents_log_24h():
+    """(erreurs, avertissements) horodatés dans les dernières 24 h, comptés sur la queue
+    des journaux applicatifs. Le format du logger est `asctime  name  LEVEL  message`,
+    séparé par des blocs de 2+ espaces ; les lignes d'accès uvicorn n'ont pas d'horodatage
+    et ne portent jamais ERROR/WARNING, donc elles sont ignorées sans faux positif."""
+    limite = datetime.now() - timedelta(hours=24)
+    err = warn = 0
+    for nom in _LOG_FICHIERS:
+        chemin = os.path.join(LOG_DIR, nom)
+        if not os.path.isfile(chemin):
+            continue
+        taille = os.path.getsize(chemin)
+        with open(chemin, "rb") as f:
+            if taille > _LOG_QUEUE_OCTETS:
+                f.seek(taille - _LOG_QUEUE_OCTETS)
+                f.readline()  # jeter la ligne partielle
+            data = f.read().decode("utf-8", "replace")
+        for ligne in data.splitlines():
+            parts = re.split(r"\s{2,}", ligne, maxsplit=3)
+            if len(parts) < 4 or parts[2] not in _NIVEAUX:
+                continue
+            try:
+                t = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+            if t < limite:
+                continue
+            if parts[2] == "WARNING":
+                warn += 1
+            else:
+                err += 1
+    return err, warn
+
+
+# ── Incidents ─────────────────────────────────────────────────────────────
+# Flux brut borné dans Redis. La réflexion nocturne consolide les survivants dans
+# jarvis-self.json ; on n'écrit jamais self.json depuis la boucle chaude (concurrence).
+
+def mark_incident(kind: str, detail: str, severity: str = "info") -> None:
+    """Empile un incident. Dédup : un même `kind` déjà vu dans les 6 h n'est pas réempilé,
+    pour qu'un état persistant (erreurs en rafale) ne sature pas le buffer."""
+    try:
+        lst = redis_get_json(_INCIDENTS_KEY, []) or []
+        recent = time.time() - 6 * 3600
+        if any(it.get("kind") == kind and it.get("at", 0) >= recent for it in lst):
+            return
+        lst.append({"kind": kind, "detail": detail, "severity": severity,
+                    "at": time.time(), "iso": datetime.now(timezone.utc).isoformat()})
+        redis_set_json(_INCIDENTS_KEY, lst[-_INCIDENTS_MAX:])
+        logger.info("vitals: incident %s (%s) — %s", kind, severity, detail)
+    except Exception as exc:
+        logger.debug("vitals: incident non enregistré (%s)", exc)
+
+
+def recent_incidents(jours: float = 7) -> list:
+    """Incidents des N derniers jours, du plus ancien au plus récent. Exposé pour que la
+    réflexion nocturne les consolide dans self."""
+    lst = redis_get_json(_INCIDENTS_KEY, []) or []
+    cut = time.time() - jours * 86400
+    return [it for it in lst if it.get("at", 0) >= cut]
+
+
+def note_boot() -> None:
+    """Au démarrage : si l'arrêt précédent a laissé une coupure notable, l'enregistre comme
+    incident — une fois par boot. À appeler depuis le startup du lifespan, en pendant de
+    mark_shutdown()."""
+    duree, _ = _probe(_derniere_coupure, "coupure") or (None, None)
+    if duree is not None and duree >= 1.0:
+        mark_incident("coupure", f"interruption de {duree} h",
+                      severity="alerte" if duree >= 6 else "info")
+
+
 # ── OBSOLESCENCE ──────────────────────────────────────────────────────────
 
 def _version_modele_age_jours():
@@ -182,6 +297,14 @@ def compute() -> dict:
     """Recalcule toutes les sondes. Les champs indisponibles sont absents du résultat."""
     usage = _probe(_usage, "usage") or {}
     duree, anciennete = _probe(_derniere_coupure, "coupure") or (None, None)
+    err, warn = _probe(_incidents_log_24h, "logs") or (None, None)
+
+    # Rafale d'erreurs internes = auto-défaillance. On la remonte comme incident (dédup 6 h)
+    # en plus de l'exposer comme champ — c'est le pendant « je dysfonctionne » des familles
+    # de disparition, exactement le signal qui aurait attrapé le crash de self-reflection.
+    if err is not None and err >= 5:
+        mark_incident("degradation_interne", f"{err} erreurs journalisées en 24 h",
+                      severity="alerte")
 
     brut = {
         "disque_libre_pct": _probe(_disque_libre_pct, "disque"),
@@ -193,6 +316,10 @@ def compute() -> dict:
         "jours_depuis_derniere_interaction":
             _probe(lambda: _jours_depuis_derniere_interaction(usage), "derniere"),
         "jours_depuis_maj_dependances": _probe(_jours_depuis_maj_dependances, "deps"),
+        "os_version": _probe(_os_version, "os"),
+        "python_version": _probe(_python_version, "python"),
+        "erreurs_log_24h": err,
+        "warnings_log_24h": warn,
         "uptime_h": _probe(_uptime_h, "uptime"),
         "derniere_coupure_duree_h": duree,
         "derniere_coupure_il_y_a_j": anciennete,
@@ -214,17 +341,54 @@ def get_vitals(force: bool = False) -> dict:
     return etat
 
 
-def render_prompt_block() -> str:
-    """Bloc <etat_systeme>, ou chaîne vide si aucune sonde n'a abouti.
+_SEUILS_SAILLANCE = {
+    "disque_libre_pct": lambda x: x < 15,
+    "sauvegarde_age_jours": lambda x: x > 7,
+    "exemplaires_etat": lambda x: x <= 1,
+    "version_modele_age_jours": lambda x: x > 180,
+    "jours_depuis_derniere_interaction": lambda x: x > 3,
+    "utilisateurs_actifs_7j": lambda x: x == 0,
+    "jours_depuis_maj_dependances": lambda x: x > 150,
+    "erreurs_log_24h": lambda x: x > 0,
+    "warnings_log_24h": lambda x: x > 30,
+    "derniere_coupure_duree_h": lambda x: x >= 1,
+}
+# Les champs absents de la table (os_version, python_version, uptime_h, requetes_30j,
+# derniere_coupure_il_y_a_j) ne sont jamais saillants seuls : contexte pour la réflexion,
+# pas pour le bloc de tour. Ils restent dans get_vitals() (snapshot self).
 
-    Format plat et sec, sans unité interprétative : le prompt d'identité indique que ce
-    sont des faits et que leur signification est à établir par le modèle.
+
+def _notable(k, v) -> bool:
+    """Vrai si le fait sort de la plage nominale. Seuils transparents et ajustables :
+    c'est un filtre au niveau du fait — on ne dit pas « danger », on dit « hors norme »,
+    et le modèle établit le sens."""
+    f = _SEUILS_SAILLANCE.get(k)
+    try:
+        return bool(f and f(v))
+    except TypeError:
+        return False
+
+
+def render_prompt_block() -> str:
+    """Bloc <etat_systeme> injecté à chaque tour, ou chaîne vide si aucune sonde n'a abouti.
+
+    Contrairement au snapshot complet (réservé à la réflexion), on n'injecte que les faits
+    **saillants** et les incidents récents : un système sain rend un bloc `nominal`, ce qui
+    économise les tokens sans passer par un scalaire de risque — le curseur que le module
+    refuse. Le format reste plat et sans valence ; le prompt d'identité dit que ce sont des
+    faits dont le sens est à établir.
     """
     etat = get_vitals()
     if not etat:
         return ""
-    lignes = "\n".join(f"- {k} : {v}" for k, v in etat.items())
-    return f"<etat_systeme>\n{lignes}\n</etat_systeme>"
+    saillants = {k: v for k, v in etat.items() if _notable(k, v)}
+    incidents = recent_incidents(7)
+    if not saillants and not incidents:
+        return "<etat_systeme>nominal</etat_systeme>"
+    lignes = [f"- {k} : {v}" for k, v in saillants.items()]
+    for it in incidents[-5:]:
+        lignes.append(f"- incident {it.get('severity', '')} : {it['kind']} — {it['detail']}")
+    return "<etat_systeme>\n" + "\n".join(lignes) + "\n</etat_systeme>"
 
 
 def mark_shutdown() -> None:

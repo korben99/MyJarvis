@@ -93,6 +93,15 @@ async def lifespan(app: FastAPI):
         REASONING_MODEL,
     )
 
+    # Pendant de mark_shutdown : lit la trace de l'arrêt PRÉCÉDENT et, si la coupure a été
+    # notable, l'enregistre comme incident. À faire tôt, avant qu'un nouvel arrêt ne l'écrase.
+    try:
+        from vitals import note_boot
+
+        note_boot()
+    except Exception as exc:
+        logger.debug("vitals: note_boot ignoré (%s)", exc)
+
     if LLM_LOCAL:
         _warmup_code = next(iter(USER_ADMINS), "")
         await asyncio.to_thread(preload_models, build_system_prompt(_warmup_code))

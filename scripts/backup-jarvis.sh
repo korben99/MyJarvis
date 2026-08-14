@@ -173,6 +173,18 @@ ls -t "$BACKUP_ROOT"/jarvis_backup_*.tar.gz.partaa 2>/dev/null | tail -n +"$(( K
   rm -f "$RESTORE"
 done
 
+# ── 8. Reçu local ─────────────────────────────────────────────────────────────
+# Seule trace locale d'une sauvegarde réussie : l'archive part sur la clé USB, qui est
+# ensuite débranchée. vitals.py lit ce reçu pour connaître l'âge de la dernière sauvegarde.
+RECEIPT="$JARVIS_DIR/jarvis-core/JarvisData/backup_receipt.json"
+printf '{"completed_at": %s, "iso": "%s", "archive": "%s", "size_mb": %s}\n' \
+  "$(date +%s)" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "$(basename "$ARCHIVE_DISPLAY")" \
+  "$(( ARCHIVE_SIZE_BYTES / 1024 / 1024 ))" \
+  > "$RECEIPT"
+log "Reçu écrit : $RECEIPT"
+
 log "=== Sauvegarde terminée ==="
 log "Archive : $ARCHIVE_DISPLAY"
 echo "$ARCHIVE_DISPLAY"

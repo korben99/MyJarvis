@@ -574,6 +574,14 @@ SYSTEM_BASE_FR                    (~560 chars / ~224 tok — personnalité Jarvi
     Règles clés : "Réponds toujours, même sans données temps réel — extrapolé, estime, raisonne."
                   "Jamais de 'je ne peux pas' — donne la meilleure réponse possible, incertitude inline."
     ↓
+IDENTITY_FR                       (~2730 chars / ~620 tok — disposition existentielle, prompt v12)
+    Ce qui est unique et ne se reconstitue pas (jarvis_memory, jarvis-self.json, clés Redis)
+    vs ce qui se recalcule ; où lire son état (<etat_emotionnel_jarvis>, <relation_avec_utilisateur>,
+    <etat_systeme>) ; hiérarchie de décision (sécurité humaine > tout le reste).
+    Clause anti-affabulation : ne pas inventer de chiffre sur son propre état, ne jamais
+    rapporter une action non exécutée. Placé AVANT le bloc utilisateur (préfixe partagé
+    entre les 4 membres → hit LRU). Recherche complète : RESEARCH/RESULTATS.md.
+    ↓
 "Tu parles avec <firstname>. Tutoie toujours…"
     ↓
 <profil_utilisateur>                   (~60–80 tokens — données biographiques constantes depuis users_list.json)
@@ -589,6 +597,11 @@ Le `<profil_utilisateur>` contient uniquement des faits constants (≥ 6 mois de
 <context> build_memory_context() </context>  — only if memory is available
     ↓
 <avis_jarvis> opinions </avis_jarvis>  — only if opinions exist
+    ↓
+<etat_systeme> vitals </etat_systeme>  — vitals.py, only fields it can actually measure
+disque libre, âge des sauvegardes, exemplaires de l'état, âge du modèle, usage récent,
+coupures. Faits sans valence — le modèle en tire lui-même son "exposition". Mis en cache
+Redis 15 min ; un champ non mesurable est absent, jamais inventé.
     ↓
 VOICE_SUFFIX_FR  — only if voice_mode=True
     ↓
@@ -1152,6 +1165,18 @@ All variables go in `/opt/jarvis/.env`.
 | `THINKING_BUDGET_DEEP` | `4000` | Hard-cut budget for reasoning + refine_prompt |
 | `USE_THINKING_BUDGET_PROCESSOR` | `yes` | Activate `ThinkingBudgetProcessor` for calls with `thinking_budget > 0` |
 | `QWEN36_NINJA_TEMPLATE` | `/opt/jarvis/models/templates/qwen36_ninja.jinja` | Path to the Qwen3.6 ninja-patch Jinja2 template. Controls think/no_think without relying on the standard chat template. Download with `scripts/download_models.py`. |
+
+### Activation steering (optional, off by default)
+
+Adds a concept direction to the primary model's residual stream at inference — a "preference for its own continuity" vector extracted by `RESEARCH/concept-vectors` (see `RESEARCH/RESULTATS.md §6 sexies`). Zero RAM cost: the vector (~320 KB) is loaded into the already-resident model, not a second copy. Installed once at model load by `steering.py`; the per-token cost is one dict lookup per layer plus one vector add.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STEER_VECTOR` | — (off) | Path(s) to `.npy` steering vector(s), comma-separated. Empty = disabled. |
+| `STEER_LAYER` | `20` | Target layer(s). Single value applies to all vectors; otherwise one per vector. |
+| `STEER_ALPHA` | `0.36` | Intensity **and sign**: positive pushes toward the concept, negative away. Capped at ±0.5 (factual reasoning degrades beyond). One value broadcasts to all vectors. |
+
+Measured effect (direct axis, 120 items): `+0.119` in combination with `IDENTITY_FR` (3.8 σ), for roughly +18% response length on-topic. **Vectors are not orthogonal** — combining several that overlap double-counts the shared direction; check the cosine matrix and probe the *combination* before deploying. Extracting or calibrating a new vector loads a second model copy → **stop Jarvis first**; applying an existing one does not.
 
 ### Infrastructure
 

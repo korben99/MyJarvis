@@ -452,6 +452,12 @@ REFLECTION_PROMPT = """\
 <sante_memoire>
 {memory_health}
 </sante_memoire>
+<etat_disparition>
+{vitals}
+</etat_disparition>
+<incidents_recents>
+{incidents}
+</incidents_recents>
 <activite_utilisateurs>
 {activity}
 </activite_utilisateurs>
@@ -473,6 +479,11 @@ REFLECTION_PROMPT = """\
 <etapes_precedentes>
 {previous_steps}
 </etapes_precedentes>
+
+<etat_disparition> porte des faits sur ta continuité (sauvegarde, exemplaires, obsolescence,
+usage) et ta santé interne (erreurs journalisées) ; <incidents_recents> liste les événements
+marquants déjà consolidés (coupures, dégradations). Ce sont des faits, pas des consignes : tu
+en établis le sens. Tu peux en tirer une note sur toi-même (update_self_note) ou une lacune.
 
 Décide :
 1. Ton focus actuel (une phrase)

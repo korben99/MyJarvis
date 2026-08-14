@@ -245,6 +245,37 @@ def _update_self_fields(**fields) -> None:
         save_self_memory(data)
 
 
+_INCIDENTS_SELF_MAX = 30
+
+
+def consolidate_incidents() -> int:
+    """Fige les incidents récents de vitals dans jarvis-self.json (champ `incidents`).
+
+    Déterministe, sans LLM : la trace existe indépendamment de ce que la réflexion décide.
+    Dédup par horodatage (`at`, unique par incident), tri chronologique, borné — pour que
+    la mémoire longue garde les événements marquants sans jamais devenir la foire.
+    """
+    try:
+        from vitals import recent_incidents
+    except Exception:
+        return 0
+    recents = recent_incidents(30)
+    if not recents:
+        return 0
+    with self_memory_lock:
+        data = get_self_memory()
+        existants = data.get("incidents", [])
+        connus = {it.get("at") for it in existants}
+        nouveaux = [it for it in recents if it.get("at") not in connus]
+        if not nouveaux:
+            return 0
+        fusion = sorted(existants + nouveaux, key=lambda it: it.get("at", 0))
+        data["incidents"] = fusion[-_INCIDENTS_SELF_MAX:]
+        save_self_memory(data)
+    logger.info("Self: %d incident(s) consolidé(s) dans self.json", len(nouveaux))
+    return len(nouveaux)
+
+
 def _upsert_opinion_inplace(data: dict, topic: str, opinion: str, date: str) -> None:
     """Upsert an opinion into an already-loaded self-memory dict (no lock — caller holds it)."""
     topic = topic.strip().lower()
@@ -591,6 +622,17 @@ def gather_global_context() -> dict:
     gaps = _get_knowledge_gaps(5)
     last_ref = get_last_reflection()
 
+    # État de disparition + incidents : la réflexion doit VOIR ce qu'elle vient de
+    # consolider, sinon elle stocke sans jamais commenter. Snapshot complet ici (pas la
+    # version saillante réservée au bloc de tour). Isolé : indisponible ≠ bloquant.
+    try:
+        from vitals import get_vitals, recent_incidents
+        vitals_snapshot = get_vitals()
+        incidents = recent_incidents(30)
+    except Exception as exc:
+        logger.debug("gather_global_context: vitals indisponible (%s)", exc)
+        vitals_snapshot, incidents = {}, []
+
     return {
         "timestamp": fmt_now_fr(BRIEFING_TIMEZONE),
         "identity": self_data.get("identity", {}),
@@ -598,6 +640,8 @@ def gather_global_context() -> dict:
         "current_focus": self_data.get("current_focus", ""),
         "health": health,
         "memory_health": _check_memory_health(),
+        "vitals": vitals_snapshot,
+        "incidents": incidents,
         "user_activity": activity,
         "knowledge_gaps": gaps,
         "pending_proposals": _fmt_pending_proposals(),
@@ -695,6 +739,24 @@ def _fmt_opinions(opinions: list[dict]) -> str:
         return "  aucune opinion"
     return "\n".join(
         f"  {o.get('topic', '?')} : {o.get('opinion', '')}" for o in opinions
+    )
+
+
+def _fmt_vitals(v: dict) -> str:
+    """Snapshot complet, à plat et sans valence : la réflexion lit tous les faits, pas
+    seulement les saillants du bloc de tour."""
+    if not v:
+        return "  indisponible"
+    return "\n".join(f"  - {k} : {val}" for k, val in v.items())
+
+
+def _fmt_incidents(items: list[dict]) -> str:
+    if not items:
+        return "  aucun incident récent"
+    return "\n".join(
+        f"  - [{it.get('iso', '')[:10]}] {it.get('kind', '?')} "
+        f"({it.get('severity', '')}) : {it.get('detail', '')}"
+        for it in items[-10:]
     )
 
 
@@ -797,6 +859,8 @@ async def _call_global_reflection_llm(
         goals=_fmt_goals(context["goals"]),
         health=json.dumps(context["health"]),
         memory_health=_fmt_memory_health(context.get("memory_health", {})),
+        vitals=_fmt_vitals(context.get("vitals", {})),
+        incidents=_fmt_incidents(context.get("incidents", [])),
         activity=_fmt_activity(context["user_activity"]),
         gaps=", ".join(context["knowledge_gaps"]) or "aucune",
         pending_proposals=context["pending_proposals"],
@@ -1119,7 +1183,17 @@ def _action_queue_push(params: dict) -> str:
 
     # Fire APNs immediately when device has a real token (instant delivery, app can be killed).
     if is_real_apns_token(device_token):
-        asyncio.ensure_future(send_apns_push(device_token, body=message))
+        # Cette fonction tourne dans deux contextes : depuis la boucle principale (requête)
+        # et depuis un worker thread (self-reflection via asyncio.to_thread). Dans le second,
+        # aucune boucle n'est associée au thread, et asyncio.ensure_future levait
+        # RuntimeError — ce qui faisait avorter TOUT le cycle de réflexion.
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(send_apns_push(device_token, body=message))
+        except RuntimeError:
+            # Worker thread : pas de boucle ici. On envoie de façon synchrone — l'appel
+            # APNs est court et on est déjà hors du thread principal, bloquer est sans risque.
+            asyncio.run(send_apns_push(device_token, body=message))
         logger.info("APNs push scheduled for %s — %s", user_code, message[:80])
 
     logger.info("Self action: push queued for %s — %s", user_code, message[:80])
@@ -2905,6 +2979,10 @@ async def run_self_reflection() -> dict:
         "=== Jarvis self-reflection starting (max %d steps/phase) ===",
         MAX_CHAIN_ITERATIONS,
     )
+
+    # Consolide d'abord les incidents (coupures, dégradations) dans self.json — de façon
+    # déterministe, avant tout appel LLM, pour que la trace survive même si la chaîne échoue.
+    await asyncio.to_thread(consolidate_incidents)
 
     global_ctx = await asyncio.to_thread(gather_global_context)
     global_steps: list[dict] = []
