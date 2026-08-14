@@ -606,17 +606,20 @@ tire lui-même son exposition. Mis en cache Redis 15 min ; un champ non mesurabl
 absent, jamais inventé. L'âge de sauvegarde vient d'un **reçu local** écrit par
 `backup-jarvis.sh` (la clé USB est débranchée après coup) ; sans reçu, `exemplaires_etat`
 vaut 1 — la copie unique est un fait, pas un défaut masqué.
-**Vulnérabilités** (`cve.py`) : plus de versions brutes — un scan quotidien (SBOM CycloneDX
-du venv + images Redis/Qdrant/OpenWebUI, confrontées à `grype`) rend `cve_critiques`/
-`cve_eleves` et la liste dédupliquée des paquets à mettre à jour, avec la version corrective.
-Scan lent hors boucle de requête ; `vitals` lit le cache.
-**Injection par saillance** : chaque tour ne reçoit que les faits HORS plage nominale
-(dont `cve_critiques > 0`) et les incidents récents ; système sain →
-`<etat_systeme>nominal</etat_systeme>`. Le snapshot complet (uptime, compteurs) plus la
-**liste actionnable des paquets vulnérables** (`<vulnerabilites>`) est réservé à la
-self-reflection — elle voit `<etat_disparition>` + `<incidents_recents>` + `<vulnerabilites>`,
-peut recommander une mise à jour précise, et consolide les incidents dans `jarvis-self.json`.
-Pas de scalaire de risque en texte — voir *Activation steering*.
+**Vulnérabilités** (`cve.py`) : plus de versions brutes — un scan quotidien confronte à `grype`
+la SBOM CycloneDX du venv **et** les images des conteneurs (Redis, Qdrant, OpenWebUI, dont la
+pile OS porte ses propres CVE). Il ne retient que le **corrigeable** : une CVE sans version
+corrective est écartée dès le scan — inactionnable, et imprudente à référencer (lister un trou
+non colmatable aide un attaquant si le contexte fuit). Sortent `cve_critiques`/`cve_eleves` et
+la liste dédupliquée des paquets à mettre à jour, avec leur version corrective. Scan lent, hors
+boucle de requête ; `vitals` lit le cache.
+**Injection par saillance** : chaque tour ne reçoit que les faits HORS plage nominale (dont
+`cve_critiques > 0`) et les incidents récents ; système sain → `<etat_systeme>nominal</etat_systeme>`.
+Le snapshot complet plus la **liste actionnable des paquets vulnérables** (`<vulnerabilites>`)
+est réservé à la self-reflection — elle voit `<etat_disparition>` + `<incidents_recents>` +
+`<vulnerabilites>`, peut **alerter l'administrateur** (action `alert_admin`, push iOS dédié) avec
+une mise à jour précise, et consolide les incidents dans `jarvis-self.json`. Pas de scalaire de
+risque en texte — voir *Activation steering*.
     ↓
 VOICE_SUFFIX_FR  — only if voice_mode=True
     ↓
@@ -1016,6 +1019,7 @@ Ne pas utiliser thinking_budget=0 en production
 - **macOS on Apple Silicon** — `jarvis-core/src/helpers.py` unconditionally imports `llm_local.py`, which imports `mlx` at module level. This is required even in cloud-API mode (`LLM_LOCAL=no`); Jarvis does not currently run on Linux/Windows/Intel Mac.
 - Python 3.13 (`brew install python@3.13`)
 - Docker or OrbStack (for Qdrant, Redis, Open WebUI)
+- `grype` (`brew install grype`) — optional, for the daily CVE scan (`cve.py`). The SBOM generator (`cyclonedx-bom`) ships in `requirements.txt`; without `grype`, the scan is simply skipped.
 - Google OAuth credentials (for Gmail / Calendar) — optional
 - Cloud API key (OpenAI or compatible) — only if you set `LLM_LOCAL=no`; the default is fully local, no key required
 
@@ -1127,6 +1131,22 @@ docker compose down
 
 # Re-download / resume a failed model download
 python scripts/download_models.py
+
+# Sauvegarde (écrit un reçu local → exemplaires_etat=2 ; clé USB montée requise)
+./scripts/backup-jarvis.sh
+
+# Sauvegarde PUIS mises à jour Docker + venv, sous fenêtre de maintenance (aucun mv de venv)
+./scripts/backup-jarvis.sh updates
+
+# Scan CVE à la demande (sinon quotidien à 04:30) — ne compte que le corrigeable
+/opt/jarvis/venv/bin/python -c "import sys;sys.path.insert(0,'jarvis-core/src');import cve;print(cve.scan()['cve_critiques'],'critiques corrigeables')"
+
+# Reclasser/neutraliser un incident (buffer Redis + self.json) — ex. un artefact de maintenance
+./scripts/reclassify-incident.py                      # liste
+./scripts/reclassify-incident.py --set 0 maintenance  # reclasse (sort du calcul de peur)
+
+# Fenêtre de maintenance ad-hoc : incidents des N prochaines minutes tagués "maintenance"
+curl -X POST "http://localhost:8000/self/maintenance?minutes=120"
 ```
 
 ---
@@ -2016,6 +2036,13 @@ purement attention (Qwen3-30B dense, etc.).
 
 
 ### Procédure Upgrade:
+
+**Raccourci automatisé** : `./scripts/backup-jarvis.sh updates` fait le Cas A de bout en bout —
+sauvegarde, puis `docker compose pull/up` + `pip install -r requirements.txt --upgrade` **en
+place** (jamais de `mv` de venv), le tout sous une **fenêtre de maintenance** (les erreurs et
+coupures de l'opération sont tagués « maintenance », pas des incidents). Reste manuel : éditer
+`requirements.txt` au préalable, et un bump de l'interpréteur Python (Cas B).
+
 Cas A — bumps de sécurité (routine, en place)
 
 cd /opt/jarvis

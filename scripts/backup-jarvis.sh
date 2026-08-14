@@ -41,8 +41,8 @@ IS_FAT32=false
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 mkdir -p "$BACKUP_DIR"
-log()  { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
-fail() { echo "[ERROR] $*" | tee -a "$LOG" >&2; exit 1; }
+log()  { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG" 2>/dev/null || true; }
+fail() { echo "[ERROR] $*" | tee -a "$LOG" 2>/dev/null >&2; exit 1; }
 
 # Fenêtre de maintenance : pendant l'intervention, Jarvis tague les incidents "maintenance"
 # (pas de peur, pas de trauma). Posée en direct dans Redis pour éviter d'importer le stack Python.
@@ -65,14 +65,24 @@ rsync -a --stats \
   --exclude="models/"            \
   --exclude="RAGData/"           \
   --exclude="venv/"              \
+  --exclude="venv-*/"            \
   --exclude="logs/"              \
   --exclude="__pycache__/"       \
   --exclude="*.pyc"              \
   --exclude=".git/"              \
   --exclude="jarvis-core/JarvisData/model_cache/" \
-  "$JARVIS_DIR/" "$CODE_DEST/" 2>>"$LOG"
+  --exclude="RouterData/adapters/*/fused_*/" \
+  "$JARVIS_DIR/" "$CODE_DEST/" 2>>"$LOG" || RSYNC_RC=$?
 
-log "Code copié."
+# rsync 24 = des fichiers ont disparu pendant la copie (logs/caches d'un système vivant),
+# 23 = transfert partiel (permissions) : tous deux bénins pour une sauvegarde du code — mieux
+# vaut une copie quasi complète qu'un abandon total. Tout autre code est une vraie erreur.
+# (Sans ce garde, `set -e` tuait le script après le rsync, avant toute autre étape.)
+RSYNC_RC="${RSYNC_RC:-0}"
+if [ "$RSYNC_RC" -ne 0 ] && [ "$RSYNC_RC" -ne 23 ] && [ "$RSYNC_RC" -ne 24 ]; then
+  fail "rsync code source a échoué (code $RSYNC_RC)"
+fi
+[ "$RSYNC_RC" -eq 0 ] && log "Code copié." || log "Code copié (rsync code $RSYNC_RC toléré — fichiers vivants)."
 
 # ── 2. Qdrant — snapshot collection jarvis_memory uniquement ──────────────────
 log "--- Qdrant : snapshot $QDRANT_MEMORY_COLLECTION ---"
