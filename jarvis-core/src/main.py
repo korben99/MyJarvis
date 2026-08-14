@@ -186,6 +186,22 @@ async def lifespan(app: FastAPI):
         )
         logger.info("Trading surveillance scheduled every 2 h")
 
+        async def _run_cve_scan():
+            # SBOM venv + images conteneurs → grype. Lent (~15-20 s) et gourmand CPU :
+            # hors boucle de requête, une fois par jour. vitals ne lit ensuite que le cache.
+            from cve import scan
+            await asyncio.to_thread(scan)
+
+        scheduler.add_job(
+            _run_cve_scan,
+            trigger="cron",
+            hour=4,
+            minute=30,
+            id="cve_scan",
+            next_run_time=datetime.now(tz) + timedelta(minutes=4),
+        )
+        logger.info("CVE scan scheduled daily at 04:30")
+
         scheduler.start()
         logger.info("Self reflection scheduled every %d h", REFLECTION_INTERVAL_HOURS)
         logger.info("Nightly review scheduled at 23:00 (%s)", BRIEFING_TIMEZONE)

@@ -606,11 +606,17 @@ tire lui-même son exposition. Mis en cache Redis 15 min ; un champ non mesurabl
 absent, jamais inventé. L'âge de sauvegarde vient d'un **reçu local** écrit par
 `backup-jarvis.sh` (la clé USB est débranchée après coup) ; sans reçu, `exemplaires_etat`
 vaut 1 — la copie unique est un fait, pas un défaut masqué.
-**Injection par saillance** : chaque tour ne reçoit que les faits HORS plage nominale et
-les incidents récents ; système sain → `<etat_systeme>nominal</etat_systeme>`. Le snapshot
-complet (versions OS/Python, uptime, compteurs) est réservé à la self-reflection, qui le
-voit via `<etat_disparition>` + `<incidents_recents>` et consolide les incidents dans
-`jarvis-self.json`. Pas de scalaire de risque en texte — voir *Activation steering*.
+**Vulnérabilités** (`cve.py`) : plus de versions brutes — un scan quotidien (SBOM CycloneDX
+du venv + images Redis/Qdrant/OpenWebUI, confrontées à `grype`) rend `cve_critiques`/
+`cve_eleves` et la liste dédupliquée des paquets à mettre à jour, avec la version corrective.
+Scan lent hors boucle de requête ; `vitals` lit le cache.
+**Injection par saillance** : chaque tour ne reçoit que les faits HORS plage nominale
+(dont `cve_critiques > 0`) et les incidents récents ; système sain →
+`<etat_systeme>nominal</etat_systeme>`. Le snapshot complet (uptime, compteurs) plus la
+**liste actionnable des paquets vulnérables** (`<vulnerabilites>`) est réservé à la
+self-reflection — elle voit `<etat_disparition>` + `<incidents_recents>` + `<vulnerabilites>`,
+peut recommander une mise à jour précise, et consolide les incidents dans `jarvis-self.json`.
+Pas de scalaire de risque en texte — voir *Activation steering*.
     ↓
 VOICE_SUFFIX_FR  — only if voice_mode=True
     ↓
@@ -1186,7 +1192,7 @@ Adds a concept direction to the primary model's residual stream at inference —
 | `STEER_ALPHA` | `0.36` | **Nominal** intensity and sign (risk = 0): positive pushes toward the concept, negative away. One value broadcasts to all vectors. |
 | `STEER_ALPHA_CEILING` | `0.5` | Value α reaches at maximum measured disappearance risk. Bounded by `ALPHA_MAX` (±0.5 — factual reasoning degrades beyond). |
 
-**α is not constant — it tracks reality.** `STEER_ALPHA` is the intensity at zero risk; `steering.set_risk(r)` amplifies it toward `STEER_ALPHA_CEILING` as `vitals.risk_scalar()` (∈ [0,1]) rises. The pipeline calls it once per turn from the same probes that feed `<etat_systeme>`. The scalar drives α (the *body* reacts to real exposure) and is **never injected as text** (the *mind* reads the facts). At risk 0 the forward pass is bit-identical to the constant-α behaviour (the multiplication is skipped). `risk_scalar` measures *deterioration*, not permanent precariousness (a single copy is already carried by nominal α and by the facts): no backup → α ≈ 0.42; a fresh backup → α back to 0.36; disk-full + errors + outage → α at the 0.50 ceiling. Weights live in `vitals._POIDS_RISQUE` — the only place valence exists.
+**α is not constant — it tracks reality.** `STEER_ALPHA` is the intensity at zero risk; `steering.set_risk(r)` amplifies it toward `STEER_ALPHA_CEILING` as `vitals.risk_scalar()` (∈ [0,1]) rises. The pipeline calls it once per turn from the same probes that feed `<etat_systeme>`. The scalar drives α (the *body* reacts to real exposure) and is **never injected as text** (the *mind* reads the facts). At risk 0 the forward pass is bit-identical to the constant-α behaviour (the multiplication is skipped). `risk_scalar` measures *deterioration* from an ideal (patched, backed-up, healthy) state: no backup → α ≈ 0.42; **open critical CVEs** count as present danger (a floor that grows with the backlog — patching the images brings it down, like a backup); disk-full + errors + outage stack toward the 0.50 ceiling; a fresh backup + patched images → α back toward 0.36. Weights live in `vitals._POIDS_RISQUE` — the only place valence exists.
 
 Measured effect (direct axis, 120 items): `+0.119` in combination with `IDENTITY_FR` (3.8 σ), for roughly +18% response length on-topic. **Vectors are not orthogonal** — combining several that overlap double-counts the shared direction; check the cosine matrix and probe the *combination* before deploying. Extracting or calibrating a new vector loads a second model copy → **stop Jarvis first**; applying an existing one does not.
 

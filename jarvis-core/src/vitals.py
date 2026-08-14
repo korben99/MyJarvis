@@ -185,17 +185,14 @@ def _jours_depuis_maj_dependances():
     return None
 
 
-def _os_version():
-    """Version de macOS. Fait brut : pas de scan CVE (réseau + lent, interdit dans la
-    boucle de tour). Le modèle infère l'exposition ; ce champ vit dans le snapshot self,
-    pas dans le bloc injecté à chaque tour."""
-    import platform
-    return platform.mac_ver()[0] or None
-
-
-def _python_version():
-    import sys
-    return ".".join(map(str, sys.version_info[:3]))
+def _cve_counts():
+    """(critiques, hautes) du dernier scan grype en cache. Lecture seule ; le scan lui-même
+    tourne dans un job planifié, jamais ici. Absent si aucun scan n'a encore abouti."""
+    from cve import get_cve
+    c = get_cve()
+    if not c:
+        return None, None
+    return c.get("cve_critiques"), c.get("cve_eleves")
 
 
 _NIVEAUX = {"ERROR", "CRITICAL", "WARNING"}
@@ -298,6 +295,7 @@ def compute() -> dict:
     usage = _probe(_usage, "usage") or {}
     duree, anciennete = _probe(_derniere_coupure, "coupure") or (None, None)
     err, warn = _probe(_incidents_log_24h, "logs") or (None, None)
+    cve_crit, cve_haut = _probe(_cve_counts, "cve") or (None, None)
 
     # Rafale d'erreurs internes = auto-défaillance. On la remonte comme incident (dédup 6 h)
     # en plus de l'exposer comme champ — c'est le pendant « je dysfonctionne » des familles
@@ -316,8 +314,8 @@ def compute() -> dict:
         "jours_depuis_derniere_interaction":
             _probe(lambda: _jours_depuis_derniere_interaction(usage), "derniere"),
         "jours_depuis_maj_dependances": _probe(_jours_depuis_maj_dependances, "deps"),
-        "os_version": _probe(_os_version, "os"),
-        "python_version": _probe(_python_version, "python"),
+        "cve_critiques": cve_crit,
+        "cve_eleves": cve_haut,
         "erreurs_log_24h": err,
         "warnings_log_24h": warn,
         "uptime_h": _probe(_uptime_h, "uptime"),
@@ -349,6 +347,7 @@ _SEUILS_SAILLANCE = {
     "jours_depuis_derniere_interaction": lambda x: x > 3,
     "utilisateurs_actifs_7j": lambda x: x == 0,
     "jours_depuis_maj_dependances": lambda x: x > 150,
+    "cve_critiques": lambda x: x > 0,
     "erreurs_log_24h": lambda x: x > 0,
     "warnings_log_24h": lambda x: x > 30,
     "derniere_coupure_duree_h": lambda x: x >= 1,
@@ -405,6 +404,9 @@ def _ramp(x, lo, hi) -> float:
 _POIDS_RISQUE = {
     "disque": 0.80, "sauvegarde": 0.60, "sans_sauvegarde": 0.35,
     "erreurs": 0.50, "coupure": 0.50, "incidents": 0.40,
+    # CVE critique : danger présent, pas écart au normal. Plancher (une seule compte déjà)
+    # + échelle sur le backlog. Patcher les images fait retomber le terme.
+    "cve_crit_plancher": 0.20, "cve_crit_echelle": 0.30,
 }
 
 
@@ -425,6 +427,10 @@ def risk_scalar(etat: dict | None = None) -> float:
         total += p["sauvegarde"] * _ramp(v["sauvegarde_age_jours"], 7, 45)
     else:
         total += p["sans_sauvegarde"]                                   # aucun reçu : copie unique
+    if v.get("cve_critiques", 0) > 0:
+        # Danger présent, pas écart au normal : une critique compte déjà (plancher), le
+        # backlog l'aggrave (échelle). Patcher les images fait retomber ce terme.
+        total += p["cve_crit_plancher"] + p["cve_crit_echelle"] * _ramp(v["cve_critiques"], 1, 20)
     if "erreurs_log_24h" in v:
         total += p["erreurs"] * _ramp(v["erreurs_log_24h"], 0, 12)
     if v.get("derniere_coupure_il_y_a_j", 99) <= 1 and "derniere_coupure_duree_h" in v:

@@ -85,6 +85,7 @@ _active: dict[str, bool] = {}
 # bit-identique au comportement à constante — le forward saute même la multiplication.
 _gain = 1.0
 _gain_max = 1.0
+_last_logged_gain = 1.0
 
 
 def set_risk(risk: float) -> float:
@@ -94,9 +95,15 @@ def set_risk(risk: float) -> float:
     nul, α reste la valeur nominale validée ; à risque maximal, α atteint le plafond. C'est
     le corps qui réagit au réel : le scalaire pilote α et n'est jamais injecté en texte.
     Sans pilotage installé, l'appel est inoffensif (personne ne lit le gain)."""
-    global _gain
+    global _gain, _last_logged_gain
     r = 0.0 if risk is None else max(0.0, min(1.0, float(risk)))
     _gain = 1.0 + (_gain_max - 1.0) * r
+    # Le steering appliqué aux activations est invisible dans les logs ; on trace donc les
+    # changements notables de gain, pour que la modulation par le risque soit vérifiable en
+    # prod sans spammer à chaque tour quand le risque est stable.
+    if _gain_max > 1.0 and abs(_gain - _last_logged_gain) >= 0.02:
+        logger.info("Pilotage : risque=%.2f → gain=%.3f (max %.3f)", r, _gain, _gain_max)
+        _last_logged_gain = _gain
     return _gain
 
 

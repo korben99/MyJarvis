@@ -633,6 +633,15 @@ def gather_global_context() -> dict:
         logger.debug("gather_global_context: vitals indisponible (%s)", exc)
         vitals_snapshot, incidents = {}, []
 
+    # Liste actionnable des paquets vulnérables (quoi mettre à jour, vers quelle version) :
+    # la réflexion est la boucle de maintenance, elle peut en tirer une note ou une alerte.
+    try:
+        from cve import render_advice
+        cve_conseil = render_advice(critical_only=True, limit=20)
+    except Exception as exc:
+        logger.debug("gather_global_context: cve indisponible (%s)", exc)
+        cve_conseil = ""
+
     return {
         "timestamp": fmt_now_fr(BRIEFING_TIMEZONE),
         "identity": self_data.get("identity", {}),
@@ -642,6 +651,7 @@ def gather_global_context() -> dict:
         "memory_health": _check_memory_health(),
         "vitals": vitals_snapshot,
         "incidents": incidents,
+        "cve_conseil": cve_conseil,
         "user_activity": activity,
         "knowledge_gaps": gaps,
         "pending_proposals": _fmt_pending_proposals(),
@@ -861,6 +871,7 @@ async def _call_global_reflection_llm(
         memory_health=_fmt_memory_health(context.get("memory_health", {})),
         vitals=_fmt_vitals(context.get("vitals", {})),
         incidents=_fmt_incidents(context.get("incidents", [])),
+        vulnerabilites=context.get("cve_conseil") or "  aucune connue",
         activity=_fmt_activity(context["user_activity"]),
         gaps=", ".join(context["knowledge_gaps"]) or "aucune",
         pending_proposals=context["pending_proposals"],
