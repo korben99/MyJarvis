@@ -2013,3 +2013,44 @@ Testé et confirmé : l'output part en bruit dès les premières rejections.
 
 **En attente** : support du rollback d'état récurrent dans mlx-lm, ou migration vers un modèle primaire
 purement attention (Qwen3-30B dense, etc.).
+
+
+### Procédure Upgrade:
+Cas A — bumps de sécurité (routine, en place)
+
+cd /opt/jarvis
+# 0. ancre de rollback + sauvegarde (clé USB montée pour le reçu !)
+/opt/jarvis/venv/bin/python -m pip freeze > requirements.freeze.$(date +%Y%m%d).txt
+./scripts/backup-jarvis.sh
+
+# 1. éditer requirements.txt (bump ciblé), SAUVER, vérifier :
+git diff -- requirements.txt        # ou: grep cryptography requirements.txt
+
+# 2. appliquer DANS le venv existant (pas de nouveau venv, pas de mv)
+/opt/jarvis/venv/bin/python -m pip install -r requirements.txt --upgrade
+
+# 3. valider (voir plus bas), puis redémarrer Jarvis
+
+Cas B — rebuild complet ou bump de Python (en place, sans mv du neuf)
+
+cd /opt/jarvis
+/opt/jarvis/venv/bin/python -m pip freeze > requirements.freeze.$(date +%Y%m%d).txt
+./scripts/backup-jarvis.sh
+
+# (si Python) brew upgrade python@3.13   # reste en 3.13, pas 3.14
+
+# on écarte l'ANCIEN (rollback), on crée le neuf DIRECTEMENT au bon chemin
+mv /opt/jarvis/venv /opt/jarvis/venv-old
+/opt/homebrew/bin/python3.13 -m venv /opt/jarvis/venv      # ← créé au chemin final, jamais déplacé
+/opt/jarvis/venv/bin/python -m pip install -U pip
+/opt/jarvis/venv/bin/python -m pip install -r requirements.txt
+
+# rollback si besoin : rm -rf /opt/jarvis/venv && mv /opt/jarvis/venv-old /opt/jarvis/venv
+La différence clé avec aujourd'hui : on déplace l'ancien (qui, en rollback, retourne à son chemin d'origine → intact), et on crée le neuf directement à /opt/jarvis/venv. On ne déplace jamais le neuf.
+
+Validation (avant tout redémarrage)
+
+/opt/jarvis/venv/bin/pip --version                              # scripts OK
+/opt/jarvis/venv/bin/python -c "import mlx, torch, transformers, cryptography; print('core OK')"
+/opt/jarvis/venv/bin/python -c "import sys;sys.path.insert(0,'/opt/jarvis/jarvis-core/src');import cve;r=cve.scan();print('venv scanné:', 'venv' in r['par_source'])"
+# puis suite de tests, et un chargement modèle + génération

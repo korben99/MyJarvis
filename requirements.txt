@@ -36,7 +36,7 @@ APScheduler==3.11.2
 pytz==2026.1.post1
 
 # ── Push notifications (APNs JWT signing) ───────────────────────────────────
-cryptography==48.0.1
+cryptography==50.0.0
 
 # ── Vision pipeline (image handling) ────────────────────────────────────────
 pillow==12.3.0
@@ -51,3 +51,16 @@ mlx==0.32.0
 mlx-metal==0.32.0
 mlx-lm==0.31.3
 mlx-vlm==0.6.8
+
+# ── Sécurité : SBOM + scan CVE (cve.py + grype) ─────────────────────────────
+# cyclonedx-bom génère la SBOM du venv pour le scan de vulnérabilités.
+# NE PAS RETIRER : sans lui, cve.py saute silencieusement le venv et on perd toute
+# visibilité sur les CVE des paquets Python (c'est ce qui est arrivé au rebuild du 14/08).
+cyclonedx-bom==7.3.1
+
+# Transitifs épinglés à leur version corrigée (CVE hautes fermées le 14/08). Évite qu'un
+# futur rebuild ne redescende à une version vulnérable au gré de la résolution pip.
+urllib3==2.7.0
+pyasn1==0.6.4
+httplib2==0.32.0
+soupsieve==2.9.2

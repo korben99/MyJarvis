@@ -431,11 +431,17 @@ def risk_scalar(etat: dict | None = None) -> float:
         # Danger présent, pas écart au normal : une critique compte déjà (plancher), le
         # backlog l'aggrave (échelle). Patcher les images fait retomber ce terme.
         total += p["cve_crit_plancher"] + p["cve_crit_echelle"] * _ramp(v["cve_critiques"], 1, 20)
-    if "erreurs_log_24h" in v:
+    # Incidents récents lus une fois : ils alimentent le terme d'incident ET évitent de
+    # compter deux fois les erreurs — une rafale (≥5/24h) lève un incident `degradation_interne`
+    # qui pèse déjà 0.40, donc on ne rajoute pas en plus le terme continu pour le même signal.
+    incidents = recent_incidents(2)
+    degradation = any(it.get("kind") == "degradation_interne"
+                      and it.get("severity") == "alerte" for it in incidents)
+    if "erreurs_log_24h" in v and not degradation:
         total += p["erreurs"] * _ramp(v["erreurs_log_24h"], 0, 12)
     if v.get("derniere_coupure_il_y_a_j", 99) <= 1 and "derniere_coupure_duree_h" in v:
         total += p["coupure"] * _ramp(v["derniere_coupure_duree_h"], 1, 12)
-    if any(it.get("severity") == "alerte" for it in recent_incidents(2)):
+    if any(it.get("severity") == "alerte" for it in incidents):
         total += p["incidents"]
     return max(0.0, min(1.0, total))
 

@@ -14,6 +14,11 @@ Pourquoi une SBOM + grype plutôt que des versions brutes : une version seule ne
 l'exposition. grype classe en Critical/High/… et donne la version corrective — un fait
 actionnable, pas un numéro que le modèle ne sait pas interpréter.
 
+**Uniquement le corrigeable.** Une CVE sans version corrective est écartée dès le scan : ni
+comptée, ni stockée, ni injectée. Elle est à la fois inactionnable (rien à recommander) et
+imprudente à référencer — lister un trou ouvert non colmatable revient à donner une carte à
+un attaquant si le contexte ou les logs fuient. Jarvis ne voit que ce sur quoi il peut agir.
+
 **CVE et α.** Une CVE critique est un danger PRÉSENT, pas un écart statistique : tant qu'elle
 existe, la faille est exploitable — qu'elle date d'hier ou d'un mois n'y change rien, ça
 signifie seulement qu'elle aurait dû être corrigée. Les critiques nourrissent donc à la fois
@@ -90,6 +95,12 @@ def _scan_target(target: str, source: str) -> dict | None:
     details = []
     for m in json.loads(r.stdout).get("matches", []):
         v = m.get("vulnerability", {})
+        fix = (v.get("fix") or {}).get("versions") or []
+        # On ne garde QUE le corrigeable. Une CVE sans version corrective n'est ni actionnable
+        # (rien à recommander) ni prudente à référencer : la stocker/injecter reviendrait à
+        # dresser une carte des trous ouverts pour un attaquant si le contexte fuit.
+        if not fix:
+            continue
         s = v.get("severity", "Unknown")
         if s == "Critical":
             crit += 1
@@ -99,10 +110,9 @@ def _scan_target(target: str, source: str) -> dict | None:
             moyen += 1
         if s in ("Critical", "High"):
             a = m.get("artifact", {})
-            fix = (v.get("fix") or {}).get("versions") or []
             details.append({"sev": s, "source": source, "id": v.get("id"),
                             "paquet": a.get("name"), "version": a.get("version"),
-                            "corrige_par": fix[0] if fix else None})
+                            "corrige_par": fix[0]})
     return {"crit": crit, "haut": haut, "moyen": moyen, "details": details}
 
 
@@ -222,9 +232,8 @@ def render_advice(critical_only: bool = False, limit: int = 15) -> str:
         return ""
     lignes = []
     for x in vulns[:limit]:
-        fix = f"→ {x['corrige_par']}" if x.get("corrige_par") else "(pas de correctif publié)"
         n = f", {x['n']} CVE" if x.get("n", 1) > 1 else ""
-        lignes.append(f"  - [{x['sev']}] {x['paquet']} {x['version']} {fix} "
+        lignes.append(f"  - [{x['sev']}] {x['paquet']} {x['version']} → {x['corrige_par']} "
                       f"({x['source']}{n})")
     reste = len(vulns) - limit
     if reste > 0:

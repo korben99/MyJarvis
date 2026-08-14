@@ -829,6 +829,7 @@ _GLOBAL_ACTIONS = frozenset(
         "check_health",
         "prune_self_memory",
         "refine_prompt",
+        "alert_admin",
     }
 )
 _USER_ACTIONS = frozenset(
@@ -1146,6 +1147,52 @@ def _action_send_notification(params: dict) -> str:
     return "send_notification: delivery failed"
 
 
+def _deliver_push(user_code: str, message: str, cooldown_key: str,
+                  cooldown_ttl: int) -> str | None:
+    """Livre un push iOS : file Redis (fallback polling) + APNs immédiat si token réel +
+    injection dans la conversation iOS. Pose le cooldown fourni. Retourne None en cas de
+    succès, ou une chaîne d'erreur (device absent, cooldown actif).
+
+    Cœur partagé entre queue_push (conversationnel, par utilisateur) et alert_admin
+    (maintenance/sécurité, cooldown distinct). Un seul endroit pour la logique APNs — dont
+    le correctif boucle-vs-worker-thread ci-dessous.
+    """
+    r = get_redis()
+    device_token = r.get(f"{_DEVICE_TOKEN_PREFIX}:{user_code}") or ""
+    if not device_token:
+        return f"no device registered for {user_code}"
+    # Cooldown appliqué en code — le LLM de réflexion peut ignorer la contrainte du prompt.
+    if r.exists(cooldown_key):
+        return f"cooldown active for {user_code}"
+
+    # Toujours filer dans Redis — repli par polling si APNs échoue ou si l'app est au premier plan.
+    pending_key = f"{_PUSH_PENDING_PREFIX}:{user_code}"
+    r.rpush(pending_key, json.dumps({
+        "message": message,
+        "queued_at": datetime.now(timezone.utc).isoformat(),
+    }))
+    r.expire(pending_key, 86400)  # auto-expire si non relevé sous 24h
+    r.setex(cooldown_key, cooldown_ttl, "1")
+
+    # Injecte aussi dans la conversation iOS persistante : visible à l'ouverture même si la
+    # notification a été manquée.
+    append_conversation_message(user_code, _IOS_SESSION_ID, "assistant", message)
+
+    # APNs immédiat si token réel (livraison instantanée, app même tuée).
+    if is_real_apns_token(device_token):
+        # Cette fonction tourne dans deux contextes : boucle principale (requête) et worker
+        # thread (self-reflection via asyncio.to_thread). Dans le second, aucune boucle n'est
+        # associée au thread, et asyncio.ensure_future levait RuntimeError — ce qui faisait
+        # avorter TOUT le cycle de réflexion.
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(send_apns_push(device_token, body=message))
+        except RuntimeError:
+            asyncio.run(send_apns_push(device_token, body=message))
+        logger.info("APNs push scheduled for %s — %s", user_code, message[:80])
+    return None
+
+
 def _action_queue_push(params: dict) -> str:
     """
     Queue an iOS push notification for a user.
@@ -1160,55 +1207,41 @@ def _action_queue_push(params: dict) -> str:
     if not message:
         return "queue_push: empty message"
 
-    r = get_redis()
-
-    # Device must be registered
-    token_key = f"{_DEVICE_TOKEN_PREFIX}:{user_code}"
-    device_token = r.get(token_key) or ""
-    if not device_token:
-        return f"queue_push: no device registered for {user_code}"
-
-    cooldown_key = f"{_PUSH_COOLDOWN_PREFIX}:{user_code}"
-
-    # Enforce cooldown in code — the reflection LLM may ignore the prompt constraint.
-    if r.exists(cooldown_key):
-        return f"queue_push: cooldown active for {user_code}"
-
-    # Always queue to Redis — polling fallback if APNs fails or app is in foreground.
-    pending_key = f"{_PUSH_PENDING_PREFIX}:{user_code}"
-    r.rpush(
-        pending_key,
-        json.dumps(
-            {
-                "message": message,
-                "queued_at": datetime.now(timezone.utc).isoformat(),
-            }
-        ),
-    )
-    r.expire(pending_key, 86400)  # auto-expire if not polled within 24h
-    r.setex(cooldown_key, _PUSH_COOLDOWN_TTL, "1")
-
-    # Also inject into the persistent iOS conversation so the message is visible
-    # when the user opens the app — even if the notification was missed.
-    append_conversation_message(user_code, _IOS_SESSION_ID, "assistant", message)
-
-    # Fire APNs immediately when device has a real token (instant delivery, app can be killed).
-    if is_real_apns_token(device_token):
-        # Cette fonction tourne dans deux contextes : depuis la boucle principale (requête)
-        # et depuis un worker thread (self-reflection via asyncio.to_thread). Dans le second,
-        # aucune boucle n'est associée au thread, et asyncio.ensure_future levait
-        # RuntimeError — ce qui faisait avorter TOUT le cycle de réflexion.
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(send_apns_push(device_token, body=message))
-        except RuntimeError:
-            # Worker thread : pas de boucle ici. On envoie de façon synchrone — l'appel
-            # APNs est court et on est déjà hors du thread principal, bloquer est sans risque.
-            asyncio.run(send_apns_push(device_token, body=message))
-        logger.info("APNs push scheduled for %s — %s", user_code, message[:80])
-
+    err = _deliver_push(user_code, message,
+                        f"{_PUSH_COOLDOWN_PREFIX}:{user_code}", _PUSH_COOLDOWN_TTL)
+    if err:
+        return f"queue_push: {err}"
     logger.info("Self action: push queued for %s — %s", user_code, message[:80])
     return f"push queued for {user_code}: {message[:80]}"
+
+
+# Canal d'alerte administrateur : cooldown propre, distinct du push conversationnel, pour
+# qu'une reco de maintenance/sécurité ne soit ni bloquée par le push du jour ni ne le bloque.
+# Vocation à porter plus tard une action LLM automatique (le message deviendra une commande).
+_ADMIN_ALERT_COOLDOWN_PREFIX = "jarvis:admin_alert:cooldown"
+_ADMIN_ALERT_COOLDOWN_TTL = 86400  # 24 h — au plus une alerte admin par jour
+
+
+def _action_alert_admin(params: dict) -> str:
+    """Pousse une alerte à l'administrateur (maintenance, sécurité, dérive).
+
+    Action GLOBALE (phase 1) : c'est le canal par lequel Jarvis, ayant vu son état
+    (<etat_disparition>, <vulnerabilites>), peut enfin recommander une action concrète —
+    p.ex. « monter openssl vers 3.5.6 sur qdrant ». Cible l'admin, cooldown 24h dédié.
+    """
+    message = params.get("message", "").strip()
+    if not message:
+        return "alert_admin: empty message"
+    admin = next(iter(USER_ADMINS), "")
+    if not admin:
+        return "alert_admin: no admin configured"
+    corps = message if message.startswith(("[", "⚠")) else f"⚠️ Maintenance — {message}"
+    err = _deliver_push(admin, corps,
+                        _ADMIN_ALERT_COOLDOWN_PREFIX, _ADMIN_ALERT_COOLDOWN_TTL)
+    if err:
+        return f"alert_admin: {err}"
+    logger.info("Self action: admin alert → %s — %s", admin, message[:80])
+    return f"admin alerted ({admin}): {message[:80]}"
 
 
 def _action_correct_profile(params: dict) -> str:
@@ -2591,6 +2624,7 @@ _ACTION_CATALOG = {
     "refine_prompt": _action_refine_prompt,
     "prune_self_memory": _action_prune_self_memory,
     "flag_project_stall": _action_flag_project_stall,
+    "alert_admin": _action_alert_admin,
     # nightly_review is scheduled automatically — not in LLM action catalog
 }
 
