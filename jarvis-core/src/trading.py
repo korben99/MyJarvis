@@ -356,7 +356,11 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
                 if csv_price > 0 and price > 0:
                     deviation_pct = abs(price - csv_price) / csv_price * 100
                     if deviation_pct > 30:
-                        logger.error(
+                        # WARNING et non ERROR : condition de donnée externe auto-réparée
+                        # (on invalide le ticker et on re-résout au tour suivant), pas une
+                        # défaillance de Jarvis. À ERROR, la sonde de santé interne (vitals)
+                        # la comptait comme auto-dysfonction et faisait monter la peur à tort.
+                        logger.warning(
                             "TICKER MISMATCH: %s (%s) yfinance=%.2f vs CSV=%.2f (%.1f%% deviation) "
                             "— ticker likely maps to wrong security, clearing cache",
                             ticker,

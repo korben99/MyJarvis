@@ -60,6 +60,36 @@ CONTAINERS = [c.strip() for c in os.getenv(
     "CVE_CONTAINERS", "jarvis-redis,jarvis-qdrant,jarvis-webui").split(",") if c.strip()]
 _SCAN_TIMEOUT = int(os.getenv("CVE_SCAN_TIMEOUT", "300"))
 
+# Liste blanche d'exclusion : paquets délibérément RETIRÉS du décompte, avec motif obligatoire.
+# Ce n'est pas « masquer parce qu'il y en a beaucoup » (le réflexe refusé partout ailleurs) :
+# c'est ACTER une CVE comprise et hors de notre portée directe (correctif non tirable). Chaque
+# exclusion est journalisée à chaque scan → auditable, jamais silencieuse, et à ré-examiner.
+# Restreinte à (paquet, source) précis pour ne pas rater une NOUVELLE faille corrigeable du
+# même paquet ailleurs. Ajout via env CVE_EXCLUDE="paquet@source,paquet2@*" (@* = toutes sources).
+_PAQUETS_EXCLUS = [
+    {"paquet": "ffmpeg", "source": "jarvis-webui",
+     "motif": "embarqué par open-webui depuis Debian 12 ; correctif non tirable par pull "
+              "(en attente d'un rebuild amont) — risque traité au niveau exposition réseau"},
+]
+for _e in (x.strip() for x in os.getenv("CVE_EXCLUDE", "").split(",") if x.strip()):
+    _paq, _, _src = _e.partition("@")
+    _src = _src.strip()
+    _PAQUETS_EXCLUS.append({"paquet": _paq.strip(),
+                            "source": None if _src in ("", "*") else _src,
+                            "motif": "exclu via CVE_EXCLUDE"})
+
+
+def _est_exclu(paquet: str | None, source: str) -> dict | None:
+    """Règle d'exclusion qui matche (paquet[, source]), sinon None. Paquet insensible à la
+    casse ; `source` None dans la règle = toutes sources."""
+    if not paquet:
+        return None
+    pl = paquet.lower()
+    for regle in _PAQUETS_EXCLUS:
+        if regle["paquet"].lower() == pl and regle.get("source") in (None, source):
+            return regle
+    return None
+
 
 def _generate_sbom(path: str) -> bool:
     with open(path, "wb") as f:
@@ -93,6 +123,7 @@ def _scan_target(target: str, source: str) -> dict | None:
         return None
     crit = haut = moyen = 0
     details = []
+    exclus = []
     for m in json.loads(r.stdout).get("matches", []):
         v = m.get("vulnerability", {})
         fix = (v.get("fix") or {}).get("versions") or []
@@ -100,6 +131,13 @@ def _scan_target(target: str, source: str) -> dict | None:
         # (rien à recommander) ni prudente à référencer : la stocker/injecter reviendrait à
         # dresser une carte des trous ouverts pour un attaquant si le contexte fuit.
         if not fix:
+            continue
+        a = m.get("artifact", {})
+        paquet = a.get("name")
+        regle = _est_exclu(paquet, source)
+        if regle is not None:
+            exclus.append({"paquet": paquet, "source": source,
+                           "id": v.get("id"), "motif": regle["motif"]})
             continue
         s = v.get("severity", "Unknown")
         if s == "Critical":
@@ -109,11 +147,10 @@ def _scan_target(target: str, source: str) -> dict | None:
         elif s == "Medium":
             moyen += 1
         if s in ("Critical", "High"):
-            a = m.get("artifact", {})
             details.append({"sev": s, "source": source, "id": v.get("id"),
-                            "paquet": a.get("name"), "version": a.get("version"),
+                            "paquet": paquet, "version": a.get("version"),
                             "corrige_par": fix[0]})
-    return {"crit": crit, "haut": haut, "moyen": moyen, "details": details}
+    return {"crit": crit, "haut": haut, "moyen": moyen, "details": details, "exclus": exclus}
 
 
 def _detecter_aggravation(nouveau: dict) -> None:
@@ -144,6 +181,7 @@ def scan() -> dict | None:
 
     crit = haut = moyen = 0
     details = []
+    exclus = []
     par_source = {}
 
     def agrege(res: dict | None, source: str) -> bool:
@@ -154,6 +192,7 @@ def scan() -> dict | None:
         haut += res["haut"]
         moyen += res["moyen"]
         details.extend(res["details"])
+        exclus.extend(res["exclus"])
         par_source[source] = {"crit": res["crit"], "haut": res["haut"], "moyen": res["moyen"]}
         return True
 
@@ -184,14 +223,40 @@ def scan() -> dict | None:
         logger.warning("cve: aucune source scannée")
         return None
 
+    exclus_resume = _resume_exclus(exclus)
+    # Le détail des exclus (paquet, motif) NE va PAS dans le résultat Redis : celui-ci est lu
+    # par render_advice et donc potentiellement injecté — y nommer un trou accepté reviendrait
+    # à en dresser la carte. On n'y garde qu'un compteur nu ; le détail reste dans le log local.
     res = {"cve_critiques": crit, "cve_eleves": haut, "cve_moyennes": moyen,
            "par_source": par_source, "vulnerables": _dedup_paquets(details),
+           "exclus_n": sum(x["n"] for x in exclus_resume),
            "sources": sources, "scanned_at": time.time()}
     _detecter_aggravation(res)  # incident AVANT d'écraser le cache précédent
     redis_set_json(_CACHE_KEY, res, ttl=_CACHE_TTL)
     logger.info("cve: scan OK — %d critiques, %d hautes, %d moyennes (%d sources : %s)",
                 crit, haut, moyen, sources, ", ".join(par_source))
+    if exclus_resume:
+        # Seule trace du détail — locale (fichier log), jamais injectée. Une exclusion ne
+        # doit jamais disparaître en silence, mais elle ne doit pas non plus voyager.
+        logger.info("cve: %d vuln(s) exclues par liste blanche — %s",
+                    sum(x["n"] for x in exclus_resume),
+                    "; ".join(f"{x['paquet']}@{x['source']} ×{x['n']}" for x in exclus_resume))
     return res
+
+
+def _resume_exclus(exclus: list) -> list:
+    """Regroupe les vulnérabilités exclues par (source, paquet) avec leur compte et motif.
+    Conservé dans le résultat pour que l'exclusion reste visible (jamais un trou muet)."""
+    grp = {}
+    for e in exclus:
+        key = (e["source"], e["paquet"])
+        g = grp.get(key)
+        if g is None:
+            grp[key] = {"paquet": e["paquet"], "source": e["source"],
+                        "motif": e["motif"], "n": 1}
+        else:
+            g["n"] += 1
+    return sorted(grp.values(), key=lambda x: -x["n"])
 
 
 def _dedup_paquets(details: list) -> list:

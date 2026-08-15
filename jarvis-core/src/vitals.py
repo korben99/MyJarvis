@@ -70,6 +70,17 @@ _START_WALL = time.time()
 _INCIDENTS_KEY = "jarvis:incidents"
 _INCIDENTS_MAX = 20
 _MAINT_KEY = "jarvis:maintenance"
+_BOOT_KEY = "jarvis:boot_at"
+
+
+def _boot_wall() -> float:
+    """Heure de démarrage du service, en absolu. Posée une fois dans Redis par note_boot()
+    au startup. La lire (au lieu de _START_WALL, propre au processus) rend coupure et uptime
+    IDENTIQUES pour tout processus qui importe ce module : sans ça, un simple script de
+    diagnostic qui déclenche un recalcul écrit dans le cache partagé une coupure mesurée
+    depuis SA propre naissance — un faux que le service sert ensuite pendant 15 min."""
+    b = redis_get_json(_BOOT_KEY, None)
+    return float(b) if isinstance(b, (int, float)) else _START_WALL
 
 
 def _probe(fn, label: str):
@@ -162,18 +173,23 @@ def _requetes_30j(usage):
 # ── DISCONTINUITE ─────────────────────────────────────────────────────────
 
 def _uptime_h():
-    return round((time.monotonic() - _START_MONOTONIC) / 3600.0, 1)
+    return round((time.time() - _boot_wall()) / 3600.0, 1)
 
 
 def _derniere_coupure():
     """(durée en heures, ancienneté en jours) du dernier arrêt, depuis la trace posée
-    au démarrage précédent. None au tout premier démarrage."""
+    au démarrage précédent. None au tout premier démarrage.
+
+    Ancré sur _boot_wall() (heure de boot absolue, partagée via Redis) et non sur _START_WALL :
+    ainsi la coupure vaut la même chose quel que soit le processus qui recalcule, et un
+    diagnostic n'empoisonne plus le cache partagé."""
     trace = redis_get_json("jarvis:last_shutdown", None)
     if not trace or "stopped_at" not in trace:
         return None, None
     stop = trace["stopped_at"]
-    duree = max(0.0, (_START_WALL - stop) / 3600.0)
-    return round(duree, 1), int((time.time() - _START_WALL) / 86400)
+    boot = _boot_wall()
+    duree = max(0.0, (boot - stop) / 3600.0)
+    return round(duree, 1), int((time.time() - boot) / 86400)
 
 
 # ── COMPROMISSION ─────────────────────────────────────────────────────────
@@ -288,9 +304,17 @@ def recent_incidents(jours: float = 7) -> list:
 
 
 def note_boot() -> None:
-    """Au démarrage : si l'arrêt précédent a laissé une coupure notable, l'enregistre comme
+    """Au démarrage : pose l'heure de boot absolue (que _boot_wall lira pour tous les
+    processus) puis, si l'arrêt précédent a laissé une coupure notable, l'enregistre comme
     incident — une fois par boot. À appeler depuis le startup du lifespan, en pendant de
-    mark_shutdown()."""
+    mark_shutdown().
+
+    L'ordre compte : on écrit boot_at AVANT de calculer la coupure, pour qu'elle se mesure
+    boot_at − stopped_at (le vrai écart) et non depuis _START_WALL."""
+    try:
+        redis_set_json(_BOOT_KEY, _START_WALL)
+    except Exception as exc:
+        logger.debug("vitals: heure de boot non posée (%s)", exc)
     duree, _ = _probe(_derniere_coupure, "coupure") or (None, None)
     if duree is not None and duree >= 1.0:
         mark_incident("coupure", f"interruption de {duree} h",
