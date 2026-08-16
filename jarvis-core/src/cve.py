@@ -121,10 +121,18 @@ def _scan_target(target: str, source: str) -> dict | None:
     if r.returncode != 0:
         logger.warning("cve: grype %s code %d — %s", source, r.returncode, (r.stderr or "")[-160:])
         return None
+    # Parsing isolé : une sortie vide/tronquée/`matches:null` d'UNE source ne doit pas faire
+    # tomber tout le scan (les autres sources restent valides). `or []` couvre matches=null.
+    try:
+        matches = json.loads(r.stdout).get("matches") or []
+    except (ValueError, AttributeError) as exc:
+        logger.warning("cve: sortie grype %s illisible (%s) — source ignorée", source,
+                       type(exc).__name__)
+        return None
     crit = haut = moyen = 0
     details = []
     exclus = []
-    for m in json.loads(r.stdout).get("matches", []):
+    for m in matches:
         v = m.get("vulnerability", {})
         fix = (v.get("fix") or {}).get("versions") or []
         # On ne garde QUE le corrigeable. Une CVE sans version corrective n'est ni actionnable

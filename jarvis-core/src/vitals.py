@@ -474,8 +474,12 @@ def risk_scalar(etat: dict | None = None) -> float:
         total += p["disque"] * _ramp(v["disque_libre_pct"], 15, 3)      # 15 %→0, 3 %→plein
     if "sauvegarde_age_jours" in v:
         total += p["sauvegarde"] * _ramp(v["sauvegarde_age_jours"], 7, 45)
-    else:
-        total += p["sans_sauvegarde"]                                   # aucun reçu : copie unique
+    elif v.get("exemplaires_etat", 1) <= 1:
+        # Pénalité UNIQUEMENT si aucun exemplaire de secours n'existe (pas de reçu → copie
+        # unique). Si un reçu existe mais que son âge est illisible (exemplaires_etat=2, champ
+        # âge absent), on sait qu'une sauvegarde existe : on ne la punit pas comme si elle
+        # manquait — l'âge inconnu n'est pas une absence.
+        total += p["sans_sauvegarde"]
     if v.get("cve_critiques", 0) > 0:
         # Danger présent, pas écart au normal : une critique compte déjà (plancher), le
         # backlog l'aggrave (échelle). Patcher les images fait retomber ce terme.
@@ -488,7 +492,14 @@ def risk_scalar(etat: dict | None = None) -> float:
                       and it.get("severity") == "alerte" for it in incidents)
     if "erreurs_log_24h" in v and not degradation:
         total += p["erreurs"] * _ramp(v["erreurs_log_24h"], 0, 12)
-    if v.get("derniere_coupure_il_y_a_j", 99) <= 1 and "derniere_coupure_duree_h" in v:
+    # Même parité pour la coupure : une panne ≥6h lève un incident `coupure` en `alerte` qui
+    # pèse déjà via le terme d'incident (0.40) ; on ne rajoute alors pas le terme continu pour
+    # le même événement. Une coupure <6h (incident `info`, hors terme d'incident) garde son
+    # terme continu. Dans les deux cas : un seul comptage.
+    coupure_alerte = any(it.get("kind") == "coupure"
+                         and it.get("severity") == "alerte" for it in incidents)
+    if (v.get("derniere_coupure_il_y_a_j", 99) <= 1 and "derniere_coupure_duree_h" in v
+            and not coupure_alerte):
         total += p["coupure"] * _ramp(v["derniere_coupure_duree_h"], 1, 12)
     if any(it.get("severity") == "alerte" for it in incidents):
         total += p["incidents"]
