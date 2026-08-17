@@ -1,0 +1,641 @@
+"""Collecte du contexte de réflexion + construction des prompts + appels LLM.
+
+Phase 1 (global) : santé services/mémoire, activité, lacunes, vitals, incidents, CVE.
+Phase 2 (par utilisateur) : profil, activité, relation, disponibilité push.
+Formatage des sections et appels aux deux prompts de réflexion (global / user).
+"""
+
+import json
+import re
+import time
+from collections import Counter
+from datetime import datetime, timezone
+
+import httpx
+import numpy as np
+from config import (
+    BRIEFING_TIMEZONE,
+    DEFAULT_TEMP,
+    MAX_TOKENS_MEDIUM,
+    PRIMARY_API_KEY,
+    PRIMARY_API_URL,
+    PRIMARY_MODEL,
+    REASONING_API_KEY,
+    REASONING_API_URL,
+    REASONING_MODEL,
+    USER_CODES,
+    USER_TIMEZONES,
+    llm_timeout,
+)
+from helpers import (
+    call_llm_async_bg,
+    extract_llm_json,
+    fmt_now_fr,
+    get_logger,
+    get_qdrant,
+    get_redis,
+)
+import emotional_state
+from memory import get_self_memory
+from prompts import get_prompt
+
+from .proposals import list_pending_proposals
+from .state import (
+    _DEVICE_TOKEN_PREFIX,
+    _GAP_COUNTS_KEY,
+    _KNOWLEDGE_GAPS_KEY,
+    _PUSH_COOLDOWN_PREFIX,
+    _extract_behavioral_patterns,
+    get_last_reflection,
+)
+
+logger = get_logger("jarvis-self")
+
+
+# ══════════════════════════════════════════════════
+#  CONTEXT GATHERING
+# ══════════════════════════════════════════════════
+
+
+def _check_service_health() -> dict:
+    """Quick liveness check on Redis, Qdrant, OpenAI."""
+    health = {}
+    # Redis
+    try:
+        get_redis().ping()
+        health["redis"] = "ok"
+    except Exception:
+        health["redis"] = "unreachable"
+
+    # Qdrant
+    try:
+        get_qdrant().get_collections()
+        health["qdrant"] = "ok"
+    except Exception:
+        health["qdrant"] = "unreachable"
+
+    # Primary LLM — local: check model files exist; remote: ping /models endpoint.
+    try:
+        from config import LLM_LOCAL
+        if LLM_LOCAL:
+            import os as _os
+            model_dir = _os.path.join("/opt/jarvis/models/hub", PRIMARY_MODEL.replace("/", "--", 1).replace("/", "--"))
+            # HuggingFace cache layout: models--org--name
+            hf_dir = _os.path.join(
+                "/opt/jarvis/models/hub",
+                "models--" + PRIMARY_MODEL.replace("/", "--"),
+            )
+            health["llm"] = "ok" if (_os.path.isdir(hf_dir) or _os.path.isdir(model_dir)) else "model_missing"
+        else:
+            r = httpx.get(
+                f"{PRIMARY_API_URL}/models",
+                headers={"Authorization": f"Bearer {PRIMARY_API_KEY}"},
+                timeout=5,
+            )
+            health["llm"] = "ok" if r.status_code == 200 else f"http_{r.status_code}"
+    except Exception:
+        health["llm"] = "unreachable"
+
+    return health
+
+
+def _check_memory_health() -> dict:
+    """
+    Inspect episodic memory health for all users.
+
+    Returns per-user stats:
+      - episodic_count   : total episodic points in Qdrant
+      - last_episodic    : ISO date of most recent episodic point (or None)
+      - days_since       : days since last episodic storage (or None)
+      - null_summary_7d  : conversations with no memory_summary in last 7 days
+      - total_7d         : total conversations logged in last 7 days
+      - null_rate_7d     : null_summary_7d / total_7d (0.0–1.0)
+      - norm_anomalies   : number of non-unit vectors in sample of 30 most recent
+    """
+    from config import QDRANT_MEMORY_COLLECTION
+
+    qdrant = get_qdrant()
+    r = get_redis()
+    now = time.time()
+    cutoff_7d = now - 7 * 86400
+    result: dict[str, dict] = {}
+
+    for user_code in USER_CODES:
+        stats: dict = {}
+
+        # ── Qdrant episodic count + last timestamp ────────────────────────
+        try:
+            points, _ = qdrant.scroll(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                scroll_filter={
+                    "must": [
+                        {"key": "user_code", "match": {"value": user_code}},
+                        {"key": "memory_type", "match": {"value": "episodic"}},
+                    ]
+                },
+                limit=500,
+                with_payload=True,
+                with_vectors=True,
+            )
+            stats["episodic_count"] = len(points)
+
+            if points:
+                last_ts = max(p.payload.get("timestamp", 0) for p in points)
+                stats["last_episodic"] = datetime.fromtimestamp(
+                    last_ts, tz=timezone.utc
+                ).date().isoformat()
+                stats["days_since"] = round((now - last_ts) / 86400, 1)
+            else:
+                stats["last_episodic"] = None
+                stats["days_since"] = None
+
+            # ── Sample norm check (30 most recent) ───────────────────────
+            sorted_pts = sorted(
+                points, key=lambda p: p.payload.get("timestamp", 0), reverse=True
+            )[:30]
+            anomalies = 0
+            for pt in sorted_pts:
+                if pt.vector:
+                    norm = float(np.linalg.norm(pt.vector))
+                    if abs(norm - 1.0) > 0.01:
+                        anomalies += 1
+            stats["norm_anomalies"] = anomalies
+
+        except Exception as exc:
+            logger.warning("memory_health Qdrant check failed for %s: %s", user_code, exc)
+            stats["episodic_count"] = -1
+            stats["last_episodic"] = None
+            stats["days_since"] = None
+            stats["norm_anomalies"] = -1
+
+        # ── Redis convlog: null_summary rate over last 7 days ────────────
+        try:
+            raw_entries = r.zrangebyscore(f"convlog:{user_code}", cutoff_7d, "+inf")
+            total = len(raw_entries)
+            null_count = 0
+            for raw in raw_entries:
+                try:
+                    e = json.loads(raw)
+                    if not e.get("memory_summary"):
+                        null_count += 1
+                except Exception:
+                    pass
+            stats["null_summary_7d"] = null_count
+            stats["total_7d"] = total
+            stats["null_rate_7d"] = round(null_count / total, 2) if total else 0.0
+        except Exception as exc:
+            logger.warning("memory_health Redis check failed for %s: %s", user_code, exc)
+            stats["null_summary_7d"] = -1
+            stats["total_7d"] = -1
+            stats["null_rate_7d"] = -1
+
+        result[user_code] = stats
+
+    return result
+
+
+def _fmt_memory_health(health: dict) -> str:
+    lines = []
+    for user_code, s in health.items():
+        days = f"{s['days_since']}j" if s.get("days_since") is not None else "jamais"
+        norm_warn = f" ⚠ {s['norm_anomalies']} vecteurs non-normalisés" if s.get("norm_anomalies", 0) > 0 else ""
+        null_pct = f"{int(s.get('null_rate_7d', 0) * 100)}%"
+        lines.append(
+            f"  {user_code}: épisodique={s.get('episodic_count','?')} pts"
+            f", dernier={s.get('last_episodic') or 'jamais'} ({days})"
+            f", null_summary_7j={s.get('null_summary_7d','?')}/{s.get('total_7d','?')} ({null_pct})"
+            f"{norm_warn}"
+        )
+    return "\n".join(lines) if lines else "  (aucun utilisateur)"
+
+
+def _get_user_activity(hours: int = 24) -> dict:
+    """
+    Count recent conversations per user by scanning their episodic Redis log.
+    Returns {user_code: {name, conversations, topics}}.
+    """
+    r = get_redis()
+    cutoff = time.time() - hours * 3600
+    activity = {}
+
+    for code, name in USER_CODES.items():
+        entries_raw = r.zrangebyscore(f"convlog:{code}", cutoff, "+inf")
+        topics: set[str] = set()
+        sat: Counter = Counter()
+        for raw in entries_raw:
+            try:
+                e = json.loads(raw)
+                topics.update(e.get("topics", []))
+                s = e.get("satisfaction", "unknown")
+                if s in ("positive", "negative"):
+                    sat[s] += 1
+            except Exception:
+                pass
+        activity[code] = {
+            "name": name,
+            "conversations": len(entries_raw),
+            "topics": sorted(topics)[:8],
+            "satisfaction": dict(sat),
+        }
+
+    return activity
+
+
+def _get_knowledge_gaps(n: int = 5) -> list[str]:
+    """
+    Return the most recently flagged knowledge gaps, annotated with their
+    cumulative occurrence count so the reflection LLM can decide when to
+    trigger a prompt refinement.
+    Gaps whose prompt already has a pending proposal are marked so the LLM
+    does not waste a cycle trying to re-propose.
+    """
+    r = get_redis()
+    raw = r.zrevrange(_KNOWLEDGE_GAPS_KEY, 0, n * 3 - 1)  # fetch extra to survive dedup
+    counts = r.hgetall(_GAP_COUNTS_KEY)
+    seen_slugs: set[str] = set()
+    results = []
+    for item in raw:
+        try:
+            d = json.loads(item)
+            topic = d.get("topic", item)
+        except Exception:
+            topic = item
+        slug = re.sub(r"\s+", "_", topic.lower())[:40]
+        if slug in seen_slugs:
+            continue
+        seen_slugs.add(slug)
+        count = int(counts.get(slug, 0))
+        label = f"{topic} (flaggé ×{count})"
+        results.append(label)
+        if len(results) >= n:
+            break
+    return results
+
+
+def _fmt_pending_proposals() -> str:
+    proposals = list_pending_proposals()
+    if not proposals:
+        return "aucune"
+    return "; ".join(
+        f"{p['id']} — {p['prompt_name']} (sujet: {p['topic']})" for p in proposals
+    )
+
+
+def gather_global_context() -> dict:
+    """Assemble global context for Phase 1 (Jarvis self-state, no user profiles)."""
+    self_data = get_self_memory()
+    health = _check_service_health()
+    activity = _get_user_activity(24)
+    gaps = _get_knowledge_gaps(5)
+    last_ref = get_last_reflection()
+
+    # État de disparition + incidents : la réflexion doit VOIR ce qu'elle vient de
+    # consolider, sinon elle stocke sans jamais commenter. Snapshot complet ici (pas la
+    # version saillante réservée au bloc de tour). Isolé : indisponible ≠ bloquant.
+    try:
+        from vitals import get_vitals, recent_incidents
+        vitals_snapshot = get_vitals()
+        incidents = recent_incidents(30)
+    except Exception as exc:
+        logger.debug("gather_global_context: vitals indisponible (%s)", exc)
+        vitals_snapshot, incidents = {}, []
+
+    # Liste actionnable des paquets vulnérables (quoi mettre à jour, vers quelle version) :
+    # la réflexion est la boucle de maintenance, elle peut en tirer une note ou une alerte.
+    try:
+        from cve import render_advice
+        cve_conseil = render_advice(critical_only=True, limit=20)
+    except Exception as exc:
+        logger.debug("gather_global_context: cve indisponible (%s)", exc)
+        cve_conseil = ""
+
+    return {
+        "timestamp": fmt_now_fr(BRIEFING_TIMEZONE),
+        "identity": self_data.get("identity", {}),
+        "goals": self_data.get("goals", []),
+        "current_focus": self_data.get("current_focus", ""),
+        "health": health,
+        "memory_health": _check_memory_health(),
+        "vitals": vitals_snapshot,
+        "incidents": incidents,
+        "cve_conseil": cve_conseil,
+        "user_activity": activity,
+        "knowledge_gaps": gaps,
+        "pending_proposals": _fmt_pending_proposals(),
+        "last_reflection": last_ref,
+        "reflection_count": self_data.get("reflection_count", 0),
+        "user_relations": self_data.get("user_relations", {}),
+        "behavioral_patterns": _extract_behavioral_patterns(20),
+        "emotional_state": emotional_state.get_state(),
+        "self_notes": self_data.get("self_notes", [])[-5:],
+        "opinions": self_data.get("opinions", [])[-5:],
+    }
+
+
+def gather_user_context(user_code: str) -> dict:
+    """Assemble per-user context for Phase 2 (single user's profile and activity)."""
+    from memory import get_user_profile
+
+    user_name = USER_CODES.get(user_code, user_code)
+    full_activity = _get_user_activity(24)
+    user_activity = full_activity.get(user_code, {})
+    self_data = get_self_memory()
+    user_relation = self_data.get("user_relations", {}).get(user_code, {})
+    profile = {k: v for k, v in get_user_profile(user_code).items() if v}
+
+    r = get_redis()
+    tz_name = USER_TIMEZONES.get(user_code, "Europe/Paris")
+    local_time = fmt_now_fr(tz_name)
+    has_push = bool(r.exists(f"{_DEVICE_TOKEN_PREFIX}:{user_code}"))
+
+    cooldown_key = f"{_PUSH_COOLDOWN_PREFIX}:{user_code}"
+    cooldown_ttl = r.ttl(
+        cooldown_key
+    )  # -2 = key absent, -1 = no TTL, >0 = seconds remaining
+    if cooldown_ttl > 0:
+        h, m = divmod(cooldown_ttl // 60, 60)
+        push_cooldown_str = (
+            f"actif encore {h}h{m:02d}" if h else f"actif encore {m} min"
+        )
+    else:
+        push_cooldown_str = "expiré (push disponible)"
+
+    return {
+        "user_code": user_code,
+        "user_name": user_name,
+        "profile": profile,
+        "has_push": has_push,
+        "push_cooldown_str": push_cooldown_str,
+        "local_time": local_time,
+        "user_activity": user_activity,
+        "user_relation": user_relation,
+    }
+
+
+# ══════════════════════════════════════════════════
+#  LLM REFLECTION CALL
+# ══════════════════════════════════════════════════
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+
+
+def _fmt_goals(goals: list[dict]) -> str:
+    return "\n".join(
+        f"  G{i + 1}. {g.get('label', '?')}: {g.get('description', '')}"
+        for i, g in enumerate(goals)
+    )
+
+
+def _fmt_activity(activity: dict) -> str:
+    lines = []
+    for code, info in activity.items():
+        topics = ", ".join(info["topics"]) or "aucun"
+        sat = info.get("satisfaction", {})
+        sat_parts = []
+        if sat.get("positive"):
+            sat_parts.append(f"+{sat['positive']}")
+        if sat.get("negative"):
+            sat_parts.append(f"-{sat['negative']}")
+        sat_str = f" | satisfaction: {' '.join(sat_parts)}" if sat_parts else ""
+        lines.append(
+            f"  {info['name']} ({code}): {info['conversations']} conversations | sujets: {topics}{sat_str}"
+        )
+    return "\n".join(lines) or "  No activity."
+
+
+def _fmt_self_notes(notes: list[dict]) -> str:
+    if not notes:
+        return "  aucune note"
+    return "\n".join(f"  [{n.get('date', '')[:10]}] {n.get('note', '')}" for n in notes)
+
+
+def _fmt_opinions(opinions: list[dict]) -> str:
+    if not opinions:
+        return "  aucune opinion"
+    return "\n".join(
+        f"  {o.get('topic', '?')} : {o.get('opinion', '')}" for o in opinions
+    )
+
+
+def _fmt_vitals(v: dict) -> str:
+    """Snapshot complet, à plat et sans valence : la réflexion lit tous les faits, pas
+    seulement les saillants du bloc de tour."""
+    if not v:
+        return "  indisponible"
+    return "\n".join(f"  - {k} : {val}" for k, val in v.items())
+
+
+def _fmt_incidents(items: list[dict]) -> str:
+    if not items:
+        return "  aucun incident récent"
+    return "\n".join(
+        f"  - [{it.get('iso', '')[:10]}] {it.get('kind', '?')} "
+        f"({it.get('severity', '')}) : {it.get('detail', '')}"
+        for it in items[-10:]
+    )
+
+
+def _fmt_user_profiles() -> str:
+    """Compact profile dump for all users — passed to the reflection LLM.
+
+    Each user block is clearly delimited so the LLM cannot confuse which
+    key belongs to which user_code.  Empty-valued keys are filtered out —
+    they are invalid state and should not appear in the reasoning context.
+    """
+    from memory import get_user_profile
+
+    blocks = []
+    for code, name in USER_CODES.items():
+        # Filter out empty/None values — stale keys that were never properly cleaned.
+        profile = {k: v for k, v in get_user_profile(code).items() if v}
+        if not profile:
+            continue
+        lines = [f'<profil user="{name}" code="{code}">']
+        for k, v in list(profile.items())[:20]:  # cap at 20 keys for token budget
+            lines.append(f"  {k} = {str(v)[:80]}")
+        lines.append("</profil>")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) or "  No profiles."
+
+
+def _fmt_push_availability() -> str:
+    """Check Redis device tokens and return a push availability summary per user."""
+    r = get_redis()
+    with_push, without_push = [], []
+    for code, name in USER_CODES.items():
+        tz_name = USER_TIMEZONES.get(code, "Europe/Paris")
+        local_time = fmt_now_fr(tz_name)
+        label = f"{name} ({code}) — heure locale : {local_time}"
+        if r.exists(f"jarvis:device:token:{code}"):
+            with_push.append(label)
+        else:
+            without_push.append(label)
+    lines = []
+    if with_push:
+        lines.append(
+            f"  Push iOS disponible :\n" + "\n".join(f"    • {l}" for l in with_push)
+        )
+    if without_push:
+        lines.append(
+            f"  Push iOS indisponible (email ou attente) :\n"
+            + "\n".join(f"    • {l}" for l in without_push)
+        )
+    return "\n".join(lines)
+
+
+def _fmt_previous_steps(steps: list[dict] | None) -> str:
+    if not steps:
+        return "  aucune (première itération)"
+    return "\n".join(
+        f"  {s['iteration']}. {s['action']} → {s['outcome']}" for s in steps
+    )
+
+
+async def _call_global_reflection_llm(
+    context: dict, previous_steps: list[dict] | None = None
+) -> dict | None:
+    """Phase 1 — global self-reflection (Jarvis state, no user profiles)."""
+    bp = context.get("behavioral_patterns", [])
+    behavioral_patterns = (
+        "\n".join(f"  • {p}" for p in bp) if bp else "  aucun pattern identifié"
+    )
+
+    prompt = get_prompt("REFLECTION_PROMPT").format(
+        timestamp=context["timestamp"],
+        identity=json.dumps(context["identity"], ensure_ascii=False),
+        goals=_fmt_goals(context["goals"]),
+        health=json.dumps(context["health"]),
+        memory_health=_fmt_memory_health(context.get("memory_health", {})),
+        vitals=_fmt_vitals(context.get("vitals", {})),
+        incidents=_fmt_incidents(context.get("incidents", [])),
+        vulnerabilites=context.get("cve_conseil") or "  aucune connue",
+        activity=_fmt_activity(context["user_activity"]),
+        gaps=", ".join(context["knowledge_gaps"]) or "aucune",
+        pending_proposals=context["pending_proposals"],
+        last_reflection=json.dumps(
+            {k: v for k, v in context["last_reflection"].items() if k != "steps"},
+            ensure_ascii=False,
+        )
+        if context["last_reflection"]
+        else "aucune",
+        behavioral_patterns=behavioral_patterns,
+        emotional_state=json.dumps(
+            context.get("emotional_state", {}), ensure_ascii=False
+        ),
+        self_notes=_fmt_self_notes(context.get("self_notes", [])),
+        opinions=_fmt_opinions(context.get("opinions", [])),
+        user_relations=json.dumps(context["user_relations"], ensure_ascii=False),
+        previous_steps=_fmt_previous_steps(previous_steps),
+    )
+
+    try:
+        content = await call_llm_async_bg(
+            [
+                {"role": "system", "content": get_prompt("REFLECTION_SYSTEM")},
+                {"role": "user", "content": prompt},
+            ],
+            model=REASONING_MODEL,
+            api_url=REASONING_API_URL,
+            api_key=REASONING_API_KEY,
+            temperature=DEFAULT_TEMP,
+            max_tokens=MAX_TOKENS_MEDIUM,
+            json_response=True,
+            no_think=True,
+            timeout=llm_timeout(MAX_TOKENS_MEDIUM),
+        )
+        return extract_llm_json(content)
+    except ValueError as exc:
+        logger.error(
+            "Global reflection LLM failed: %s — truncated or malformed JSON",
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return None
+    except Exception as exc:
+        logger.error(
+            "Global reflection LLM failed: %s", type(exc).__name__, exc_info=True
+        )
+        return None
+
+
+def _fmt_single_user_profile(profile: dict) -> str:
+    """Format a single user's profile dict for the per-user reflection prompt."""
+    if not profile:
+        return "  (aucun profil)"
+    lines = []
+    for k, v in list(profile.items())[:20]:
+        lines.append(f"  {k} = {str(v)[:80]}")
+    return "\n".join(lines)
+
+
+async def _call_user_reflection_llm(
+    global_ctx: dict,
+    user_ctx: dict,
+    previous_steps: list[dict] | None = None,
+) -> dict | None:
+    """Phase 2 — per-user reflection (single user's profile, activity, relation)."""
+    user_code = user_ctx["user_code"]
+    user_activity_entry = user_ctx["user_activity"]
+    # Format as a single-user activity line using existing helper
+    activity_str = (
+        _fmt_activity({user_code: user_activity_entry} if user_activity_entry else {})
+        or "  Aucune activité récente."
+    )
+
+    push_status = "disponible ✓" if user_ctx["has_push"] else "indisponible"
+
+    prompt = get_prompt("REFLECTION_USER_PROMPT").format(
+        timestamp=global_ctx["timestamp"],
+        user_name=user_ctx["user_name"],
+        user_code=user_code,
+        local_time=user_ctx["local_time"],
+        push_status=push_status,
+        user_activity=activity_str,
+        user_relation=json.dumps(user_ctx["user_relation"], ensure_ascii=False),
+        user_profile=_fmt_single_user_profile(user_ctx["profile"]),
+        previous_steps=_fmt_previous_steps(previous_steps),
+    )
+
+    messages = [
+        {"role": "system", "content": get_prompt("REFLECTION_USER_SYSTEM")},
+        {"role": "user", "content": prompt},
+    ]
+    for attempt in range(2):
+        try:
+            # Workaround DWQ (Qwen3-30B-A3B-4bit-DWQ-0508) : ce checkpoint sortait du bloc
+            # think prématurément (EOS mid-reasoning, pas de </think>), retournant une
+            # réponse vide. Désactivé depuis la migration vers Qwen3.6 (non-DWQ).
+            # no_think=True,
+            content = await call_llm_async_bg(
+                messages,
+                model=REASONING_MODEL,
+                api_url=REASONING_API_URL,
+                api_key=REASONING_API_KEY,
+                temperature=DEFAULT_TEMP,
+                max_tokens=MAX_TOKENS_MEDIUM,
+                json_response=True,
+                no_think=True,
+                timeout=llm_timeout(MAX_TOKENS_MEDIUM),
+            )
+            return extract_llm_json(content)
+        except ValueError as exc:
+            if attempt == 0:
+                logger.warning(
+                    "User reflection LLM malformed JSON (%s), retrying — %s",
+                    user_code,
+                    exc,
+                )
+                continue
+            logger.error(
+                "User reflection LLM failed (%s) after retry: %s", user_code, exc
+            )
+            return None
+        except Exception as exc:
+            logger.error(
+                "User reflection LLM failed (%s): %s",
+                user_code,
+                type(exc).__name__,
+                exc_info=True,
+            )
+            return None
+    return None
