@@ -27,7 +27,7 @@ import threading
 
 import numpy as np
 from helpers import get_logger
-from llm_router import RouterResult
+from .router import RouterResult
 
 logger = get_logger("jarvis-embed-router")
 

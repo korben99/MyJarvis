@@ -54,14 +54,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from qdrant_client.models import Distance, HnswConfigDiff, VectorParams
 
 if LLM_LOCAL:
-    from llm_local import preload_models
+    from llm.local import preload_models
     from pipeline import build_system_prompt
 from analyzer import analyse_recent_conversations
 from deps import _STREAM_CLIENTS, HTTP_CLIENT, QDRANT_CLIENT
-from embed_router import preload_embed_router
+from llm.embed_router import preload_embed_router
 from google_services import is_google_available
 from helpers import get_logger, setup_logging
-from llm_client import openai_headers
+from llm.client import openai_headers
 import emotional_state
 from memory import get_embed_model
 from rag import search_documents

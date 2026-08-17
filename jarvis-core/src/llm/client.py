@@ -34,7 +34,7 @@ from config import (
 )
 from deps import get_stream_client
 from helpers import get_logger
-from llm_local import stream_local
+from .local import stream_local
 from prompts import VISION_USER_PROMPT
 
 _LOCAL_MODELS = {ROUTER_MODEL, PRIMARY_MODEL, REASONING_MODEL} if LLM_LOCAL else set()
@@ -224,7 +224,7 @@ async def describe_images(image_parts: list, text_prompt: str) -> str:
 
     # ── Local path (mlx_vlm) ──────────────────────────────────────────────
     if VISION_LOCAL:
-        from llm_local import describe_images_local
+        from .local import describe_images_local
         try:
             return await describe_images_local(list(resolved), text_prompt)
         except Exception as exc:

@@ -38,7 +38,7 @@ from config import (
     llm_timeout,
 )
 from deps import REDIS_CLIENT
-from embed_router import embed_route
+from llm.embed_router import embed_route
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from google_services import (
@@ -63,8 +63,8 @@ from helpers import (
     set_sticky_rag,
 )
 from apns import send_apns_push
-from llm_client import describe_images, stream_openai
-from llm_router import llm_route
+from llm.client import describe_images, stream_openai
+from llm.router import llm_route
 from memory import (
     append_conversation_message,
     async_search_memory,

@@ -29,7 +29,7 @@ from config import (
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from helpers import get_logger
-from llm_client import stream_openai
+from llm.client import stream_openai
 from pydantic import BaseModel
 
 from routes.chat import ChatRequest, chat
@@ -367,7 +367,7 @@ async def raw_chat(req: _RawChatRequest):
         raise HTTPException(503, "LLM_LOCAL non activé — endpoint raw indisponible")
 
     # import tardif : mlx non chargé si LLM_LOCAL=False
-    from llm_local import _RAW_PROMPTS_LOG_PATH, stream_local as _stream_local
+    from llm.local import _RAW_PROMPTS_LOG_PATH, stream_local as _stream_local
     from tool_calls import normalise_messages_for_template, parse_tool_calls
 
     # Messages transmis intégralement : le template a besoin de tool_calls (tours passés

@@ -47,7 +47,7 @@ from config import (
     USERS,
 )
 from helpers import extract_llm_json, get_logger, get_redis
-from llm_local import call_llm_local_async_bg
+from llm.local import call_llm_local_async_bg
 from prompts import get_prompt
 from pydantic import BaseModel, Field, ValidationError
 

@@ -15,7 +15,7 @@ from config import (
     ROUTER_MODEL,
     tokens_param,
 )
-from llm_local import (
+from llm.local import (
     call_llm_local,
     call_llm_local_async,
     call_llm_local_async_bg,

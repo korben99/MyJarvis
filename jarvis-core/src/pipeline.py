@@ -37,7 +37,7 @@ from deps import (
     WEB_CHAR_BUDGET,
 )
 from helpers import fmt_event_time, fmt_now_fr, get_logger, keyword_overlap_score, rel_time_fr
-from llm_client import trim_chunks
+from llm.client import trim_chunks
 from memory import (
     build_memory_context,
     log_conversation,
