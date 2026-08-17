@@ -10,6 +10,7 @@
 - [x] Terminé
 - [~] Partiellement implémenté
 - [ ] À faire
+- [-] Écarté — décision prise et motivée sur place, ne pas reproposer sans élément nouveau
 
 ---
 
@@ -114,7 +115,9 @@
 - [x] Routing : Tavily primary → DDG 4-stage fallback (si quota vide ou erreur non-réseau)
 - [x] `topic="news"` + `days=7` pour requêtes news, `search_depth="advanced"` pour général
 - [x] Un seul appel Tavily remplace les 4 stages DDG (qualité équivalente Stage 2+)
-- [ ] **SearXNG self-hosted** (Docker Mac Mini) — méta-moteur agrégeant Google + Bing + DDG + Brave. Zero rate limit. À déployer en docker-compose, brancher comme 2e backend après Tavily.
+- [-] **SearXNG self-hosted — écarté le 17/08/2026.** SearXNG n'est pas un substitut de Tavily : c'est un méta-moteur qui rend des snippets (~217 car. mesurés), là où Tavily rend du contenu de page crawlé + une synthèse en un appel (mesures du jour : général/`advanced` 4,90 s → 11 179 car. + synthèse ; news/`basic` 2,95 s → 4 217 car. + synthèse). Reconstituer ça localement remet 2 appels au routeur MLX dans le chemin critique, en concurrence GPU avec le 35B qui génère — on paierait en TTFT ce qu'on ne paie pas en euros (18 appels/mois sur 1 000 gratuits, 0 fallback DDG dans les logs). Le poids réel est la reformulation de requête et la synthèse, pas l'agrégation.
+  - `jianjungki/tavily-open` (TrailSearch) évalué au passage : API compatible (`/tavily/search`), `days`/`topic` implémentés, mais image `reader` **amd64 seule** (Rosetta sur M4 Pro pour un stack Chrome), stack demo à 5 conteneurs ~2–4 GB pour une VM OrbStack de 4,872 GiB / 2 vCPU, et `include_answer` = split sur `.` recollant 3 phrases (inutilisable en français). 27 étoiles, 27 commits, 1 mainteneur.
+  - Si le sujet revient : SearXNG **seul** (1 conteneur arm64, 150–250 MB avec `workers = 1`, redis existant en db 2) branché comme couche *source* sous le pipeline profond, Tavily gardé en tier 1. Jamais un remplacement 1:1.
 
 ### Interest weights — classement recall mémoire
 - [x] `search_memory()` applique un boost `+0.08` max basé sur les termes d'intérêt utilisateur (Redis `user:{code}:interest_weights`, set par l'analyser)
