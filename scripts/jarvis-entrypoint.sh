@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Wrapper pour launchd — PAS de & (launchd doit rester parent du process)
+# Point d'entrée du service — CE que launchd exécute (ProgramArguments du plist).
+# À ne pas confondre avec scripts/jarvis-launchd.sh, qui PILOTE launchd (start/stop/restart).
+# PAS de & et un `exec uvicorn` final : launchd doit rester parent direct du process pour
+# que KeepAlive fonctionne et que son SIGTERM d'arrêt atteigne uvicorn (shutdown gracieux).
 
 # Garde : si le port 8000 est déjà occupé, un Jarvis tourne déjà.
 # On sort proprement (exit 0) pour éviter la boucle KeepAlive.

@@ -9,7 +9,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>__JARVIS_HOME__/jarvis-service.sh</string>
+        <string>__JARVIS_HOME__/scripts/jarvis-entrypoint.sh</string>
     </array>
 
     <!-- PATH explicite : launchd n'hérite pas du shell utilisateur -->

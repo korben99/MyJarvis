@@ -1064,7 +1064,7 @@ jarvis-start
 ```
 
 (alias posé par `install.sh` ; équivaut à `scripts/jarvis-launchd.sh start`, idempotent —
-rejouable sans erreur si le service tourne déjà. Docker est démarré par `jarvis-service.sh`.)
+rejouable sans erreur si le service tourne déjà. Docker est démarré par `scripts/jarvis-entrypoint.sh`.)
 
 This starts:
 - `docker compose up -d` — Qdrant, Redis, Open WebUI (port 3000)
