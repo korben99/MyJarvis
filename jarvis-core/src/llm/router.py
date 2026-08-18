@@ -39,10 +39,15 @@ from config import (
     ROUTER_MODEL,
     ROUTER_TIMEOUT,
 )
-from helpers import call_llm_async, extract_llm_json, get_logger
+from helpers import call_llm_async, extract_llm_json, fmt_now_fr, get_logger
 from prompts import get_prompt
 
 logger = get_logger("jarvis-llm-router")
+
+# Fuseau de la date injectée dans <date>. Le routeur n'a pas de user_code sous la main
+# (llm_route ne reçoit que le message), et tous les utilisateurs sont sur le même
+# fuseau ; à défaut, une heure de décalage ne change pas un calcul en jours.
+_ROUTER_TZ = "Europe/Paris"
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────
@@ -87,6 +92,8 @@ def _log_routing_sample(
     message: str,
     result: "RouterResult",
     model: str,
+    source: str = "llm",
+    last_jarvis: str | None = None,
 ) -> None:
     """Append one JSONL entry to the router training file.
 
@@ -96,9 +103,29 @@ def _log_routing_sample(
       - message   : raw user input
       - routing   : the full RouterResult as a dict
       - model     : which router model produced this result
+      - source    : "embed" (fast-path) ou "llm" (routeur LLM)
+      - last_jarvis : dernier tour assistant, ou null. Ajouté le 18/08/2026 : sans
+                    lui, un message elliptique (« confirme », « la couronne ») est
+                    inétiquetable — le ré-étiquetage du 17/08 a rabattu une vingtaine
+                    de ces messages sur `web` faute d'antécédent, et le LoRA v2 a
+                    appris l'erreur. C'est LA donnée manquante du corpus.
       - ok        : null = uncurated, true = validated, false = wrong
+
+    `source` existe parce que jusqu'au 17/08/2026 seul le routeur LLM
+    journalisait : le fast-path embedding tranchait la moitié du trafic sans
+    laisser de trace. Le fichier ne contenait donc pas le trafic réel mais le
+    RÉSIDU que l'embedding avait refusé de trancher — les échantillons les plus
+    ambigus du corpus. Toute statistique calculée avant cette date est biaisée
+    dans ce sens ; filtrer sur `source` pour comparer ce qui est comparable.
     """
     os.makedirs(ROUTER_DATA_DIR, exist_ok=True)
+    # Règle stricte de ROUTER_SYSTEM : un champ n'est renseigné que si son intent
+    # est présent. RouterResult ne l'applique pas (calendar_days vaut 7 par défaut
+    # même sur une requête météo), et sans cette normalisation l'échantillon
+    # apprendrait au modèle à émettre 7 partout. curate_router_dataset.py applique
+    # déjà la règle en aval ; on la pose ici pour que la ligne journalisée soit
+    # utilisable telle quelle comme cible d'entraînement.
+    _in = lambda name: getattr(result, f"use_{name}")  # noqa: E731
     sample = {
         "id": str(uuid.uuid4()),
         "ts": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
@@ -119,13 +146,32 @@ def _log_routing_sample(
                 ]
                 if flag
             ],
-            "gmail_query": result.gmail_query,
-            "calendar_days": result.calendar_days,
-            "weather_location": result.weather_location,
-            "rag_query": result.rag_query,
+            "gmail_query": result.gmail_query or None if _in("gmail") else None,
+            "calendar_days": result.calendar_days if _in("calendar") else None,
+            "weather_location": result.weather_location or None if _in("weather") else None,
+            "rag_query": result.rag_query or None if _in("rag") else None,
+            # Absent des échantillons jusqu'au 17/08/2026, alors que ROUTER_SYSTEM
+            # impose la clé et que RouterResult la porte. router_lora_adapterv1.py
+            # la lisait donc via .get() → None sur 100 % des exemples : le LoRA v1 a
+            # appris à toujours émettre project_name:null, sans jamais pouvoir
+            # apprendre à l'extraire.
+            "project_name": result.project_name or None,
             "use_reasoning": result.use_reasoning,
         },
         "model": model,
+        "source": source,
+        "last_jarvis": last_jarvis,
+        # Décision à part entière du fast-path (aucun intent levé), invisible dans
+        # `intents` qui ne liste que les use_* — sans ce champ le petit talk serait
+        # indistinguable d'un routage vide.
+        #
+        # HORS de `routing` volontairement : curate_router_dataset.py sérialise ce
+        # sous-dict EN BLOC comme cible d'entraînement du LoRA
+        # (`json.dumps(routing)`). Toute clé ajoutée dans `routing` apprendrait au
+        # modèle à émettre un champ de plus, alors que ROUTER_SYSTEM impose
+        # « 7 clés, ni plus ni moins ». `routing` doit rester le miroir exact du
+        # schéma de sortie ; les métadonnées vont au niveau du dessus.
+        "use_small_talk": result.use_small_talk,
         "ok": None,  # null = not yet reviewed by human
     }
     path = os.path.join(ROUTER_DATA_DIR, "routing_samples.jsonl")
@@ -150,13 +196,26 @@ async def llm_route(message: str, google_available: bool = True, last_jarvis: st
     to the embedding router automatically.
     last_jarvis: last assistant response (truncated) — injected as <last_jarvis> for context-aware routing.
     """
-    # Truncate to 400 chars — enough to classify intent without risking the router answering.
-    routing_message = message[:400]
+    # Plafond à 1000 caractères. À 400 (valeur précédente), 6 % des messages réels
+    # étaient tronqués — souvent au milieu de la phrase qui portait l'intention, le
+    # sujet arrivant après une mise en contexte. Médiane mesurée : 101 caractères,
+    # p90 315, donc 1000 couvre 98,4 % des messages en entier et ne coûte rien au cas
+    # courant. Le plafond reste nécessaire : le corpus contient un message de 81 513
+    # caractères (document collé) qui saturerait le contexte du routeur.
+    routing_message = message[:1000]
+    # 600 et non 300 : c'est <last_jarvis> qui porte l'antécédent des messages
+    # elliptiques (« confirme », « la couronne », « oui je pense aussi »), et 300
+    # caractères tronquaient souvent la réponse avant le sujet dont elle parlait.
     last_jarvis_block = (
-        f"<last_jarvis>{last_jarvis[:300]}</last_jarvis>\n" if last_jarvis else ""
+        f"<last_jarvis>{last_jarvis[:600]}</last_jarvis>\n" if last_jarvis else ""
     )
+    # La date est indispensable à calendar_days : sans elle, « vendredi » ou « la
+    # semaine prochaine » ne sont pas calculables — ce n'était pas une faiblesse du
+    # modèle mais une donnée absente. Jour de la semaine inclus, c'est lui qui sert
+    # au calcul relatif.
+    routing_date = fmt_now_fr(_ROUTER_TZ).split(",")[0]
     prompt = get_prompt("ROUTER_USER").format(
-        message=routing_message, last_jarvis_block=last_jarvis_block
+        date=routing_date, message=routing_message, last_jarvis_block=last_jarvis_block
     )
 
     try:
@@ -275,5 +334,5 @@ async def llm_route(message: str, google_available: bool = True, last_jarvis: st
         parsed.get("use_reasoning"),
         result.use_reasoning,
     )
-    _log_routing_sample(message, result, ROUTER_MODEL)
+    _log_routing_sample(message, result, ROUTER_MODEL, last_jarvis=last_jarvis)
     return result

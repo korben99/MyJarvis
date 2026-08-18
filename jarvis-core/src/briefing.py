@@ -171,6 +171,30 @@ _STOP_WORDS = {
 }
 
 
+def _split_top_level(raw: str) -> list[str]:
+    """Split on commas that are OUTSIDE parentheses.
+
+    Le champ `intérêts` du profil contient des listes imbriquées
+    ("sports (vtt, footing), voyages (îles)") : un split brut sur la virgule
+    coupait à l'intérieur des parenthèses et produisait les termes de recherche
+    'sports (vtt' et 'footing)'. La parenthèse est conservée telle quelle, le
+    moteur de news la traite comme du texte.
+    """
+    parts, buf, depth = [], [], 0
+    for ch in raw:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+        if ch == "," and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append("".join(buf).strip())
+    return [p for p in parts if p]
+
+
 def _get_user_interests(user_code: str) -> list[str]:
     """
     Extract interest keywords from the user's Redis profile + stable profile.
@@ -187,8 +211,7 @@ def _get_user_interests(user_code: str) -> list[str]:
     # 1. Stable profile interests — always clean, comma-separated keywords
     stable = USERS.get(user_code, {}).get("profile", {})
     stable_interests_raw = stable.get("intérêts", "") or stable.get("interests", "")
-    for term in stable_interests_raw.split(","):
-        term = term.strip()
+    for term in _split_top_level(stable_interests_raw):
         if len(term) > 2 and term.lower() not in _STOP_WORDS:
             interests.append(term)
 
@@ -296,12 +319,13 @@ async def _fetch_news(interests: list[str]) -> list[dict]:
             logger.warning("News fetch failed for %r: %s", query, type(exc).__name__)
             return []
 
-    def _quote_multiword(term: str) -> str:
-        return f'"{term}"' if " " in term else term
-
-    # One task per interest (full phrase, not just last word) + general fallback
+    # Gabarit fixe. Une reformulation LLM a été essayée puis abandonnée le
+    # 17/08/2026 : à partir d'un intérêt nu ("Horlogerie"), le modèle n'a aucun
+    # contexte à exploiter et se contente de rembourrer avec des synonymes de
+    # domaine ("horlogerie horloge horloger"). Sans injecter beaucoup de contexte
+    # utilisateur, la reformulation n'apporte rien qu'un gabarit ne donne déjà.
     tasks = [_fetch_one(general_query, 4)] + [
-        _fetch_one(_quote_multiword(kw), 2) for kw in interests[:3]
+        _fetch_one(f"info importantes {kw} ", 2) for kw in interests[:3]
     ]
     results_lists = await asyncio.gather(*tasks)
     gen_results = results_lists[0]

@@ -86,7 +86,6 @@ from self import handle_proposal_command
 from web_search import (
     INTERNET_ERROR,
     fetch_user_urls,
-    optimize_web_query,
     search_weather,
     search_web,
 )
@@ -845,7 +844,26 @@ async def chat(req: ChatRequest):
     # ~2-5 ms. Skips the LLM router (~1.3 s) when confident.
     # Returns None when score is low or ambiguous → LLM router takes over.
     # ════════════════════════════════════════════════════════════════════════
-    _embed_result = embed_route(_history_user_msg, google_available=_google_available)
+    # Dernier tour assistant, lu AVANT le fast-path (Redis local, < 1 ms). Il était
+    # auparavant lu dans la branche `else`, donc absent du chemin embedding — or c'est
+    # la moitié du trafic, et c'est cette donnée qui porte l'antécédent des messages
+    # elliptiques (« confirme », « la couronne »). Sans elle dans les échantillons, le
+    # professeur du prochain ré-étiquetage aura le même angle mort et rabattra ces
+    # messages sur `web`, comme mesuré le 18/08/2026.
+    _last_jarvis_for_router: str | None = None
+    try:
+        _tail = REDIS_CLIENT.lrange(f"chat:{user_code}:{req.session_id}", -4, -1)
+        _last_jarvis_for_router = next(
+            (json.loads(m).get("content", "")[:600]
+             for m in reversed(_tail)
+             if json.loads(m).get("role") == "assistant"),
+            None,
+        )
+    except Exception:
+        pass
+
+    _embed_result = embed_route(_history_user_msg, google_available=_google_available,
+                                last_jarvis=_last_jarvis_for_router)
 
     # ════════════════════════════════════════════════════════════════════════
     # STEP 3 — LLM ROUTER + dynamic prefix + conversation history (parallel)
@@ -941,19 +959,7 @@ async def chat(req: ChatRequest):
         )
     else:
         # Fallback: LLM router 3B + dynamic prefix + history + memory in parallel.
-        # Quick Redis fetch of last assistant turn for context-aware routing (< 1ms local).
-        _last_jarvis_for_router: str | None = None
-        try:
-            _tail = REDIS_CLIENT.lrange(f"chat:{user_code}:{req.session_id}", -4, -1)
-            _last_jarvis_for_router = next(
-                (json.loads(m).get("content", "")[:300]
-                 for m in reversed(_tail)
-                 if json.loads(m).get("role") == "assistant"),
-                None,
-            )
-        except Exception:
-            pass
-
+        # _last_jarvis_for_router est lu plus haut, avant le fast-path.
         _gather1 = await asyncio.gather(
             asyncio.to_thread(
                 build_dynamic_prefix,
@@ -1106,7 +1112,7 @@ async def chat(req: ChatRequest):
         else _empty(),
         search_weather(_weather_query)
         if use_weather_auto
-        else search_web(optimize_web_query(req.message), original_message=req.message)
+        else search_web(req.message, original_message=req.message)
         if (req.use_web or use_web_auto)
         else _empty(),
         _timed_thread(fetch_gmail_messages, gmail_query, 10, user_code)

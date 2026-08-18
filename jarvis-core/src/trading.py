@@ -347,42 +347,21 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
                 float(getattr(fi, "regular_market_change_percent", 0.0) or 0.0), 2
             )
 
-            # Sanity check: compare against last Boursorama CSV price.
-            # A deviation > 15% vs the last CSV import is suspicious (likely wrong ticker).
-            # > 30% almost certainly means we resolved the wrong security — invalidate and skip.
-            pos_key_check = pos_key(user_code, isin)
-            try:
-                csv_price = float(r.hget(pos_key_check, "last_price_csv") or 0)
-                if csv_price > 0 and price > 0:
-                    deviation_pct = abs(price - csv_price) / csv_price * 100
-                    if deviation_pct > 30:
-                        # WARNING et non ERROR : condition de donnée externe auto-réparée
-                        # (on invalide le ticker et on re-résout au tour suivant), pas une
-                        # défaillance de Jarvis. À ERROR, la sonde de santé interne (vitals)
-                        # la comptait comme auto-dysfonction et faisait monter la peur à tort.
-                        logger.warning(
-                            "TICKER MISMATCH: %s (%s) yfinance=%.2f vs CSV=%.2f (%.1f%% deviation) "
-                            "— ticker likely maps to wrong security, clearing cache",
-                            ticker,
-                            isin,
-                            price,
-                            csv_price,
-                            deviation_pct,
-                        )
-                        r.hdel(pos_key_check, "yahoo_ticker")
-                        continue  # skip this price, will re-resolve next run
-                    elif deviation_pct > 15:
-                        logger.warning(
-                            "PRICE DRIFT: %s (%s) yfinance=%.2f vs CSV=%.2f (%.1f%% deviation) "
-                            "— verify ticker is still correct",
-                            ticker,
-                            isin,
-                            price,
-                            csv_price,
-                            deviation_pct,
-                        )
-            except (TypeError, ValueError):
-                pass  # no CSV price yet — skip validation
+            # Aucune validation du prix : on fait confiance à Yahoo.
+            #
+            # Il y avait ici un garde-fou qui comparait le cours live au dernier prix du CSV
+            # Boursorama et invalidait le ticker au-delà de 30 % d'écart. Retiré le 17/08/2026 :
+            # la référence CSV est un instantané figé dont l'âge n'est pas borné, donc toute
+            # tendance réelle finissait par la franchir. Valneva (FR0004056851 → VLA.PA) est
+            # passée de 2,17 le 5 août à 3,08 le 17 : +40 %, hausse authentique, prise pour une
+            # erreur de résolution. Pire, le garde-fou ne pouvait pas se rétablir — il vidait le
+            # ticker, la résolution suivante rendait le MÊME ticker (la preuve qu'il était bon),
+            # et le contrôle re-déclenchait : 10 fois le 17/08. Le cours est resté gelé à 2,455
+            # pendant 12 jours, sous-évaluant la ligne de 186 € et neutralisant ses seuils.
+            #
+            # L'identité par ISIN ne remplace pas ce contrôle : yfinance rend "-" pour VLA.PA et
+            # 2CRSI.PA, et FR001400UEY9 au lieu de FR0000120578 pour Sanofi. Une valeur qui
+            # dérape se voit à l'œil sur le portefeuille.
 
             entry = {"price": round(float(price), 4), "intraday_var_pct": change_pct}
             results[isin] = entry

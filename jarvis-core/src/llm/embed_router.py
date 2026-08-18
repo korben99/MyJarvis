@@ -27,7 +27,7 @@ import threading
 
 import numpy as np
 from helpers import get_logger
-from .router import RouterResult
+from .router import RouterResult, _log_routing_sample
 
 logger = get_logger("jarvis-embed-router")
 
@@ -493,7 +493,33 @@ def _extract_gmail_query(message: str) -> str:
 # ── Fonction principale ───────────────────────────────────────────────────────
 
 
-def embed_route(message: str, google_available: bool = True) -> RouterResult | None:
+def embed_route(message: str, google_available: bool = True,
+                last_jarvis: str | None = None) -> RouterResult | None:
+    """Fast-path de routage par embeddings, avec journalisation de la décision.
+
+    `last_jarvis` n'entre PAS dans la décision — le fast-path tranche sur la seule
+    similarité du message. Il n'est là que pour être journalisé : c'est l'antécédent
+    des messages elliptiques, et sans lui dans les échantillons le professeur du
+    prochain ré-étiquetage travaillera en aveugle comme le mien l'a fait.
+
+    Enveloppe `_embed_route`. Quand le fast-path tranche, la décision est écrite
+    dans routing_samples.jsonl avec source="embed" ; quand il défère (None), rien
+    n'est écrit ici car le routeur LLM journalisera lui-même en aval.
+
+    Sans cette journalisation, le jeu d'échantillons ne contenait que le résidu
+    déféré au LLM — soit les messages les plus ambigus — et pas le trafic réel.
+    """
+    result = _embed_route(message, google_available)
+    if result is not None:
+        try:
+            _log_routing_sample(message, result, "embed-router", source="embed",
+                                last_jarvis=last_jarvis)
+        except Exception as exc:  # jamais bloquer le routage pour une trace
+            logger.debug("Embed router: journalisation impossible (%s)", type(exc).__name__)
+    return result
+
+
+def _embed_route(message: str, google_available: bool = True) -> RouterResult | None:
     """
     Tente de router le message par similarité d'embeddings.
 

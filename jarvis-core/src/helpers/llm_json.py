@@ -54,6 +54,20 @@ def filter_think_chunk(chunk: str, in_think: bool) -> tuple[str, str, bool]:
     return "".join(visible), "".join(thinking), in_think
 
 
+def _excerpt(text: str, head: int = 200, tail: int = 120) -> str:
+    """Début ET fin de la charge, pour les messages d'erreur.
+
+    Ne montrer que `text[:200]` a rendu deux échecs sur trois non diagnosticables
+    (12/07 et 09/08/2026) : les défauts de ces sorties se situent en FIN de charge —
+    celui du 14/08, seul dont la queue a survécu dans prompts.log, était un `)`
+    parasite entre le guillemet fermant de la dernière valeur et l'accolade. Le début
+    seul montrait un JSON parfaitement valide.
+    """
+    if len(text) <= head + tail:
+        return text
+    return f"{text[:head]} …[{len(text) - head - tail} car. coupés]… {text[-tail:]}"
+
+
 def extract_llm_json(text: str) -> dict:
     """
     Extraction robuste de JSON depuis une réponse LLM.
@@ -106,11 +120,11 @@ def _extract_llm_json_once(text: str) -> dict:
         try:
             parsed = json.loads(text)
             raise ValueError(
-                f"LLM returned {type(parsed).__name__} instead of JSON object: {text[:200]}"
+                f"LLM returned {type(parsed).__name__} instead of JSON object: {_excerpt(text)}"
             )
         except json.JSONDecodeError:
             pass
-        raise ValueError(f"No JSON found in LLM response: {text[:200]}")
+        raise ValueError(f"No JSON found in LLM response: {_excerpt(text)}")
 
     depth = 0
     in_string = False
@@ -179,4 +193,4 @@ def _extract_llm_json_once(text: str) -> dict:
         except json.JSONDecodeError:
             continue
 
-    raise ValueError(f"Invalid JSON in LLM response: {text[:200]}")
+    raise ValueError(f"Invalid JSON in LLM response: {_excerpt(text)}")

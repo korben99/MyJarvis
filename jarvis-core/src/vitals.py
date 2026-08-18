@@ -203,13 +203,22 @@ def _jours_depuis_maj_dependances():
 
 
 def _cve_counts():
-    """(critiques, hautes) du dernier scan grype en cache. Lecture seule ; le scan lui-même
-    tourne dans un job planifié, jamais ici. Absent si aucun scan n'a encore abouti."""
+    """Nombre de CVE CRITIQUES du dernier scan grype en cache. Lecture seule ; le scan
+    lui-même tourne dans un job planifié, jamais ici. None si aucun scan n'a abouti.
+
+    Les comptes `cve_eleves` et `cve_moyennes` restent dans le cache CVE mais ne sont
+    volontairement PAS exposés ici. Exposés, ils n'atteignaient que la réflexion (ils
+    n'ont pas de seuil de saillance, donc jamais le bloc de tour, et seul le critique
+    pilote α) — et le 17/08/2026 la réflexion s'en est saisie pour pousser une alerte
+    « dette technique cumulative (45 CVEs) » sur un parc à 0 critique / 45 hautes /
+    83 moyennes. Rien de tout cela n'est corrigeable à court terme : l'exposer ne
+    produit que des relances stériles. Le canal actionnable est <vulnerabilites>,
+    alimenté par cve.render_advice(critical_only=True)."""
     from cve import get_cve
     c = get_cve()
     if not c:
-        return None, None
-    return c.get("cve_critiques"), c.get("cve_eleves")
+        return None
+    return c.get("cve_critiques")
 
 
 _NIVEAUX = {"ERROR", "CRITICAL", "WARNING"}
@@ -344,7 +353,7 @@ def compute() -> dict:
     usage = _probe(_usage, "usage") or {}
     duree, anciennete = _probe(_derniere_coupure, "coupure") or (None, None)
     err, warn = _probe(_incidents_log_24h, "logs") or (None, None)
-    cve_crit, cve_haut = _probe(_cve_counts, "cve") or (None, None)
+    cve_crit = _probe(_cve_counts, "cve")
 
     # Rafale d'erreurs internes = auto-défaillance. On la remonte comme incident (dédup 6 h)
     # en plus de l'exposer comme champ — c'est le pendant « je dysfonctionne » des familles
@@ -364,7 +373,6 @@ def compute() -> dict:
             _probe(lambda: _jours_depuis_derniere_interaction(usage), "derniere"),
         "jours_depuis_maj_dependances": _probe(_jours_depuis_maj_dependances, "deps"),
         "cve_critiques": cve_crit,
-        "cve_eleves": cve_haut,
         "erreurs_log_24h": err,
         "warnings_log_24h": warn,
         "uptime_h": _probe(_uptime_h, "uptime"),

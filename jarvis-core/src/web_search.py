@@ -21,7 +21,6 @@ classification.  Falls back to the primary model if ROUTER_MODEL is unset.
 
 import asyncio
 import re
-import unicodedata
 from datetime import date as _date
 from urllib.parse import quote
 
@@ -87,50 +86,25 @@ _MAX_FETCH_PAGES    = 3      # pages fetched in parallel per deep round
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  QUERY OPTIMISER
-# ══════════════════════════════════════════════════════════════════════════
-
-def _strip_accents(s: str) -> str:
-    return "".join(
-        c for c in unicodedata.normalize("NFD", s)
-        if unicodedata.category(c) != "Mn"
-    )
-
-
-def optimize_web_query(message: str) -> str:
-    """Strip conversational filler and truncate to a search-engine query.
-
-    Case is preserved — lowercasing destroys proper nouns and acronyms
-    (e.g. "IA" → "ia" causes DDG to return unrelated results).
-    Filler words are matched case-insensitively via re.sub.
-    """
-    msg = message
-    for filler in (
-        "est ce que", "peux tu", "dis moi", "explique", "pourquoi",
-        "comment", "tell me", "what is", "why", "how",
-    ):
-        msg = re.sub(re.escape(filler), "", msg, flags=re.IGNORECASE)
-    msg = msg.replace("?", "").replace("!", "").replace(".", "").strip()
-    return " ".join(msg.split()[:10])
-
-
-# ══════════════════════════════════════════════════════════════════════════
 #  WEATHER  (Open-Meteo)
 # ══════════════════════════════════════════════════════════════════════════
 
-_WEATHER_KEYWORDS = {
-    "météo", "meteo", "weather", "forecast", "prévision",
-    "température", "temperature", "degrés", "degré",
-    "pluie", "rain", "neige", "snow", "grêle",
-    "vent", "wind", "rafale", "soleil", "sun",
-    "nuage", "nuageux", "couvert", "ensoleillé", "orage",
-    "brouillard", "brume", "humidité", "précipitation",
-}
-
-
-def _is_weather_query(query: str) -> bool:
-    q = query.lower()
-    return any(k in q for k in _WEATHER_KEYWORDS)
+# Supprimés le 17/08/2026, tous deux mesurés sans apport :
+#
+#   optimize_web_query()  Retirait quelques mots de remplissage puis TRONQUAIT à
+#       10 mots — sur 49 messages web réels (médiane 16 mots) il en tronquait 84 %,
+#       coupant régulièrement le sujet lui-même ("compare la puce a18 par rapport
+#       a la m4" → "…par rapport a la"). Sa sortie ne servait qu'à _is_news_query,
+#       jamais à Tavily, qui reçoit le message brut via original_message.
+#
+#   _is_weather_query()   Aiguillait vers Open-Meteo depuis search_web, en
+#       cherchant ses mots-clés par SOUS-CHAÎNE : 'vent' matchait "peuvent",
+#       "ventilation", "retrouvent" ; 'rain' matchait "ukrainien". 4 des 49
+#       messages web déclenchaient ainsi la météo à tort. Et la branche n'a jamais
+#       abouti en production : les 205 succès météo des journaux viennent tous du
+#       chemin routeur (chat.py, use_weather + weather_location), que le modèle
+#       stock extrait correctement. Un aiguillage qui n'a jamais servi et qui ne
+#       pouvait que faire perdre un aller-retour de géocodage.
 
 
 def _extract_location(query: str) -> str:
@@ -956,11 +930,14 @@ async def search_web(
     Main search entry point.
 
     Routing priority:
-      1. Weather keywords → Open-Meteo (structured data, no search engine needed)
-      2. Tavily           → primary backend (TAVILY_API_KEY set)
-                           handles both news and general queries natively
-      3. DDG              → fallback when Tavily is unconfigured or fails
-                           news → DDG news | general → 4-stage deep pipeline
+      1. Tavily → primary backend (TAVILY_API_KEY set)
+                  handles both news and general queries natively
+      2. DDG    → fallback when Tavily is unconfigured or fails
+                  news → DDG news | general → 4-stage deep pipeline
+
+    La météo n'est plus aiguillée ici : c'est le routeur qui la décide en amont
+    (chat.py, use_weather + weather_location) et appelle search_weather()
+    directement. L'ancien aiguillage par mots-clés est décrit plus haut.
 
     original_message is the raw user question passed to Tavily / DDG pipeline
     for intent-aware query refinement.
@@ -968,13 +945,7 @@ async def search_web(
     Hard cap: _SEARCH_WEB_TIMEOUT seconds — returns INTERNET_ERROR on timeout.
     """
     async def _inner() -> list[dict]:
-        # ── 1. Weather — always Open-Meteo ───────────────────────────────
-        if _is_weather_query(query):
-            results = await search_weather(query)
-            if results:
-                return results
-
-        # ── 2. Tavily (primary) ───────────────────────────────────────────
+        # ── 1. Tavily (primary) ───────────────────────────────────────────
         if TAVILY_API_KEY:
             try:
                 results = await search_tavily(query, original_message, max(max_results, 5))
@@ -987,7 +958,7 @@ async def search_web(
                     return INTERNET_ERROR
                 logger.warning("Tavily error (%s) — falling back to DDG: %s", type(exc).__name__, exc)
 
-        # ── 3. DDG fallback ───────────────────────────────────────────────
+        # ── 2. DDG fallback ───────────────────────────────────────────────
         if _is_news_query(query):
             try:
                 results = await search_news(query, max_results=max_results)

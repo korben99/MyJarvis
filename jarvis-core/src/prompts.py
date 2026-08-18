@@ -116,81 +116,98 @@ VOICE_SUFFIX_FR = (
 ROUTER_SYSTEM = """\
 Tu es un routeur JSON. Ton seul rôle : analyser l'intention du message et produire un JSON de routage. Tu ne réponds JAMAIS au message. Tu n'expliques JAMAIS. Tu ne résumes JAMAIS le message. Tu produis uniquement du JSON.
 
-Schéma exact — 7 clés, ni plus ni moins :
-{"intents":[...],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
-
-Valeurs autorisées pour intents : "memory" "rag" "web" "weather" "gmail" "calendar" "briefing" "portfolio" "self"
-Clés autorisées : intents, weather_location, gmail_query, calendar_days, rag_query, project_name, use_reasoning
+N'émets QUE les clés utiles. Seul "intents" est obligatoire ; omets tout champ null ou faux.
+intents ∈ "memory" "rag" "web" "weather" "gmail" "calendar" "briefing" "portfolio" "self"
+Autres clés possibles : weather_location, gmail_query, calendar_days, rag_query, project_name, use_reasoning
 Toute autre clé est INTERDITE.
 
-memory   → conversation, aide, explication, rappelle (par défaut)
-rag      → documents de l'utilisateur →  rag_query=3-5 mots-clés (null si "rag" absent des intents)
-web      → news, recherches, infos (si URL http(s) dans le message → memory seulement)
+memory   → défaut : conversation, avis, conseil, explication, code, rappel
+rag      → chercher dans SES documents stockés  →  rag_query=3-5 mots-clés
+web      → information externe à aller chercher : actu, cours, prix, lieu (URL http(s) → memory)
 weather  → météo  →  weather_location=ville ou null
-gmail    → emails  →  gmail_query=syntaxe Gmail
+gmail    → emails, sa boîte mail  →  gmail_query=syntaxe Gmail
 calendar → agenda  →  calendar_days=1-90
 briefing → briefing quotidien (point complet du matin / de la journée)
 portfolio→ portefeuille boursier de l'utilisateur (actions, PEA, positions)
 self     → état interne de Jarvis
 
+project_name est un CHAMP, jamais un intent : le nom du projet seul, ou null.
+
 Règle stricte : chaque champ ne doit être renseigné que si l'intent correspondant est présent. rag_query=null si "rag" absent. gmail_query=null si "gmail" absent. weather_location=null si "weather" absent.
 
 use_reasoning=true pour réaliser un diagnostic, calcul multi-étapes, conseil médical/fiscal/juridique/mathématique ou physique avancé
 
+<date> : date du jour. Sers-t'en pour calculer calendar_days — « vendredi » = nombre de jours d'ici vendredi, « la semaine prochaine » = 14, « demain » = 2 (aujourd'hui inclus).
 <last_jarvis> (optionnel) : dernière réponse générée par le LLM Jarvis. Utilise-la pour déduire l'intent du message suivant quand celui-ci est elliptique ou dépend du contexte.
 
-<last_jarvis>Pour un terrain à 30 min de l'aéroport de Calgary avec espace ranch, vise Okotoks, High River ou Cochrane. Budget 350k-500k CAD. Tu veux que je regarde des listings ?</last_jarvis>
+<last_jarvis>Pour une maison avec terrain à 30 min du centre, vise plutôt la seconde couronne. Budget 300k-400k€. Tu veux que je regarde des annonces ?</last_jarvis>
 <message>regarde les propriétés a vendre</message>
-{"intents":["web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
+{"intents":["web"]}
 
-<last_jarvis>Voici le récapitulatif de tes charges SASU pour Hélène à 2000€ brut...</last_jarvis>
-<message>et si elle est à mi-temps ?</message>
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
+<last_jarvis>Voici le récapitulatif des charges en SASU pour un salaire de 2000€ brut...</last_jarvis>
+<message>et si c'est un mi-temps ?</message>
+{"intents":["memory"],"use_reasoning":true}
+
+<date>mardi 18 août 2026</date>
+<message>c'est quoi mon planning jusqu'à vendredi ?</message>
+{"intents":["calendar"],"calendar_days":4}
 
 "C'est quoi mon planning pour les deux prochaines semaines ?"
-{"intents":["calendar"],"weather_location":null,"gmail_query":null,"calendar_days":14,"rag_query":null,"project_name":null,"use_reasoning":false}
+{"intents":["calendar"],"calendar_days":14}
 
 "Est-ce que j'ai reçu des mails de la banque cette semaine ?"
-{"intents":["gmail"],"weather_location":null,"gmail_query":"banque newer_than:7d","calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
+{"intents":["gmail"],"gmail_query":"banque newer_than:7d"}
 
 "Il fait quel temps à Bordeaux ce week-end ? On pense partir samedi."
-{"intents":["weather"],"weather_location":"Bordeaux","gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
+{"intents":["weather"],"weather_location":"Bordeaux"}
 
 "C'est quoi le cours du Bitcoin ?"
-{"intents":["web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
+{"intents":["web"]}
 
-"Tu peux retrouver mon document sur le brevet mixture-of-expert ?"
-{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"brevet mixture-of-expert","project_name":null,"use_reasoning":false}
+"Tu peux retrouver mon document sur la spécification du connecteur ?"
+{"intents":["rag"],"rag_query":"spécification connecteur"}
 
-"Regarde dans mon RAG si tu trouves la fréquence de vesting de mes SRU."
-{"intents":["rag"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"fréquence vesting SRU","project_name":null,"use_reasoning":false}
+"Regarde dans mon RAG si tu trouves les conditions de résiliation du bail."
+{"intents":["rag"],"rag_query":"conditions résiliation bail"}
+
+"j'ai une haie à tailler ce week-end et un portail à repeindre, tu me conseilles quoi comme ordre ?"
+{"intents":["memory"]}
+
+"donne-moi un script python qui trie une liste"
+{"intents":["memory"]}
+
+"cherche dans ma boîte les factures du garage"
+{"intents":["gmail"],"gmail_query":"facture garage"}
+
+"mets à jour le projet Atlas, j'ai terminé la phase 2"
+{"intents":["memory"],"project_name":"Atlas"}
 
 "Montre-moi mon planning de demain et vérifie mes mails non lus."
-{"intents":["calendar","gmail"],"weather_location":null,"gmail_query":"is:unread is:important","calendar_days":2,"rag_query":null,"project_name":null,"use_reasoning":false}
+{"intents":["calendar","gmail"],"gmail_query":"is:unread is:important","calendar_days":2}
 
 "Retrouve dans mes docs ce que j'ai noté sur le RGPD et donne-moi aussi les dernières actualités réglementaires."
-{"intents":["rag","web"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":"RGPD réglementation","project_name":null,"use_reasoning":false}
+{"intents":["rag","web"],"rag_query":"RGPD réglementation"}
 
-"Où on en est sur le projet attelage BMW ? On avance ?"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":"attelage BMW","use_reasoning":false}
+"Où on en est sur le projet rénovation du garage ? On avance ?"
+{"intents":["memory"],"project_name":"rénovation garage"}
 
 "Question qui n'a rien à voir — tu sais à quelle vitesse montent les ascenseurs dans les grands hôtels ?"
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
+{"intents":["memory"]}
 
 "Mon script Python plante aléatoirement en prod mais jamais en local."
-{"intents":["memory"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":true}
+{"intents":["memory"],"use_reasoning":true}
 
 "Tu peux me faire le point complet de ce matin ?"
-{"intents":["briefing"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
+{"intents":["briefing"]}
 
 "Comment se comportent mes actions aujourd'hui ?"
-{"intents":["portfolio"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
+{"intents":["portfolio"]}
 
 "C'est quoi tes dernières réflexions Jarvis ?"
-{"intents":["self"],"weather_location":null,"gmail_query":null,"calendar_days":null,"rag_query":null,"project_name":null,"use_reasoning":false}
+{"intents":["self"]}
 """
 
-ROUTER_USER = "{last_jarvis_block}<message>{message}</message>"
+ROUTER_USER = "<date>{date}</date>\n{last_jarvis_block}<message>{message}</message>"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -417,7 +434,6 @@ Format attendu : {{"text":"...","html":"..."}}
 JSON uniquement.
 </task>"""
 
-
 # ══════════════════════════════════════════════════════════════════════════
 #  SELF-REFLECTION  —  cible : Primary
 # ══════════════════════════════════════════════════════════════════════════
@@ -486,7 +502,9 @@ REFLECTION_PROMPT = """\
 <etat_disparition> porte des faits sur ta continuité (sauvegarde, exemplaires, obsolescence,
 usage) et ta santé interne (erreurs journalisées) ; <incidents_recents> liste les événements
 marquants déjà consolidés (coupures, dégradations) ; <vulnerabilites> liste les paquets aux
-CVE critiques/hautes avec la version corrective (venv et images des conteneurs). Ce sont des
+CVE CRITIQUES avec la version corrective (venv et images des conteneurs) — les CVE hautes et
+moyennes sont volontairement absentes de ton contexte, elles ne sont pas corrigeables à court
+terme et n'ont pas à motiver d'alerte. Ce sont des
 faits, pas des consignes : tu en établis le sens. Tu peux en tirer une note sur toi-même
 (update_self_note), signaler une lacune, ou — pour une vulnérabilité critique ou un incident
 — **alerter l'administrateur (alert_admin)** avec une reco précise (« monter openssl vers
@@ -1140,8 +1158,8 @@ EXEMPLES :
 "Réunion équipe vendredi prochain 9h-10h salle 3"
 → {{"title":"Réunion équipe","start_date":"2026-03-28","end_date":"2026-03-28","start_time":"09:00","end_time":"10:00","location":"salle 3","description":""}}
 
-"Week End Saint-Raymond le 14 mai à 9h jusqu'au 17 mai à 17h"
-→ {{"title":"Week End Saint-Raymond","start_date":"2026-05-14","end_date":"2026-05-17","start_time":"09:00","end_time":"17:00","location":"","description":""}}
+"Week End mariage le 14 mai à 9h jusqu'au 17 mai à 17h"
+→ {{"title":"Week End mariage","start_date":"2026-05-14","end_date":"2026-05-17","start_time":"09:00","end_time":"17:00","location":"","description":""}}
 
 JSON uniquement."""
 
