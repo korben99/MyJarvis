@@ -344,6 +344,7 @@ class _RawChatRequest(_OAIChatRequest):
     thinking_budget: Optional[int] = None    # niveau d'effort demandé par le client
     tools: Optional[list] = None             # schémas d'outils au format OpenAI
     tool_choice: Optional[str | dict] = None  # accepté, non contraint côté template
+    priority: Optional[str] = None           # "bg" (défaut de la route) | "chat"
 
 
 @router.post("/v1/raw/chat/completions")
@@ -414,6 +415,17 @@ async def raw_chat(req: _RawChatRequest):
 
     # 16000 (et non 8000) car réflexion et réponse se partagent ce budget.
     max_tokens = req.max_tokens or int(os.getenv("RAW_MAX_TOKENS", "16000"))
+
+    # Priorité GPU basse par défaut sur CETTE route : /v1/raw est par définition le trafic
+    # des agents (OpenCode), jamais celui de l'assistant — le chat passe par /chat et
+    # /v1/chat/completions. L'info est donc portée par la route, aucun réglage à faire côté
+    # client. Sans ça, un refactor OpenCode concurrence le chat à égalité et dégrade son TTFT.
+    # Coût quand personne ne chatte : nul (aucun chat_waiter → lock pris immédiatement).
+    # Attente non bornée en cas de chat soutenu : assumé, l'agent patiente.
+    priority = (req.priority or os.getenv("RAW_PRIORITY", "bg")).strip().lower()
+    if priority not in ("bg", "chat"):
+        priority = "bg"
+
     req_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
 
@@ -447,6 +459,7 @@ async def raw_chat(req: _RawChatRequest):
             skip_debug_log=False,
             debug_log_path=_RAW_PROMPTS_LOG_PATH,
             tools=req.tools,
+            priority=priority,
         ):
             full += chunk
 
@@ -475,6 +488,7 @@ async def raw_chat(req: _RawChatRequest):
             thinking_budget=thinking_budget,
             skip_debug_log=False,
             debug_log_path=_RAW_PROMPTS_LOG_PATH,
+            priority=priority,
         ):
             if think_done:
                 yield _sse(chunk)
@@ -512,6 +526,7 @@ async def raw_chat(req: _RawChatRequest):
         skip_debug_log=False,
         debug_log_path=_RAW_PROMPTS_LOG_PATH,
         tools=req.tools,
+        priority=priority,
     ):
         full += chunk
     if not no_think and "</think>" in full:

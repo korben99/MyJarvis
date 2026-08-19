@@ -270,6 +270,42 @@ def _wake_bg_waiters() -> None:
     except RuntimeError:
         pass  # loop closed (shutdown)
 
+
+async def _acquire_infer_lock_bg() -> float:
+    """Acquire the GPU lock at background priority. Returns the wait duration in seconds.
+
+    Extrait tel quel de call_llm_local_async_bg : la boucle est maintenant partagée avec
+    stream_local(priority="bg"), qui est le seul chemin d'inférence acceptant `tools` et
+    qu'un agent en tâche de fond doit pouvoir emprunter sans concurrencer le chat.
+    Le caller possède le lock au retour et doit le relâcher (+ _wake_bg_waiters).
+    """
+    global _bg_wakeup, _bg_loop
+    if _bg_wakeup is None:
+        _bg_wakeup = asyncio.Event()
+        _bg_loop = asyncio.get_running_loop()
+        _bg_wakeup.set()
+    _t0 = time.time()
+    while True:
+        with _chat_waiters_lock:
+            if _chat_waiters == 0:
+                acquired = _infer_lock.acquire(blocking=False)
+                if acquired:
+                    _bg_wakeup.clear()
+                    break
+        _bg_wakeup.clear()
+        with _chat_waiters_lock:
+            if _chat_waiters == 0:
+                acquired = _infer_lock.acquire(blocking=False)
+                if acquired:
+                    break
+        _waited = time.time() - _t0
+        if _waited > 5.0 and int(_waited) % 10 == 0:
+            logger.debug("[BG-INFER] waiting for GPU (chat priority) — %.0fs", _waited)
+        await _bg_wakeup.wait()
+
+    return time.time() - _t0
+
+
 # LRU prompt cache: one LRUPromptCache per model-path.
 # Replaces the old _sys_kv dict (single system-prompt entry per model).
 # All fetch/insert operations happen under _infer_lock (serialized by GPU lock).
@@ -1225,31 +1261,8 @@ async def call_llm_local_async_bg(
     **_kwargs,
 ) -> str:
     """Async non-streaming, background priority: yields GPU when a chat caller is waiting."""
-    global _bg_wakeup, _bg_loop
-    if _bg_wakeup is None:
-        _bg_wakeup = asyncio.Event()
-        _bg_loop = asyncio.get_running_loop()
-        _bg_wakeup.set()
-    _t0 = time.time()
-    while True:
-        with _chat_waiters_lock:
-            if _chat_waiters == 0:
-                acquired = _infer_lock.acquire(blocking=False)
-                if acquired:
-                    _bg_wakeup.clear()
-                    break
-        _bg_wakeup.clear()
-        with _chat_waiters_lock:
-            if _chat_waiters == 0:
-                acquired = _infer_lock.acquire(blocking=False)
-                if acquired:
-                    break
-        _waited = time.time() - _t0
-        if _waited > 5.0 and int(_waited) % 10 == 0:
-            logger.debug("[BG-INFER] waiting for GPU (chat priority) — %.0fs", _waited)
-        await _bg_wakeup.wait()
-
-    logger.debug("[BG-INFER] lock acquired after %.3fs", time.time() - _t0)
+    _waited = await _acquire_infer_lock_bg()
+    logger.debug("[BG-INFER] lock acquired after %.3fs", _waited)
     try:
         return await asyncio.to_thread(
             _generate_sync, model, messages, temperature, max_tokens,
@@ -1272,6 +1285,7 @@ async def stream_local(
     skip_debug_log: bool = False,
     tools: list | None = None,
     debug_log_path: str | None = None,
+    priority: str = "chat",
     **_kwargs,
 ) -> AsyncGenerator[str, None]:
     """Token-by-token streaming via mlx_lm.stream_generate.
@@ -1279,6 +1293,13 @@ async def stream_local(
     `tools` : schémas d'outils au format OpenAI, rendus par le template de chat. Doit
     rester un paramètre nommé explicite — **_kwargs l'avalerait en silence, et l'appelant
     croirait avoir activé le function calling.
+
+    `priority` : "chat" (défaut, comportement historique — la requête compte comme un
+    chat_waiter et fait céder les appels de fond) ou "bg" (attend que plus aucun chat ne
+    soit en attente). C'est le seul chemin qui rende `tools` disponible : sans ce
+    paramètre, tout agent outillé s'exécuterait forcément en priorité chat.
+    Granularité : une génération entière. Un chat qui arrive pendant un pas d'agent
+    attend la fin de ce pas — d'où le plafond bas de max_tokens côté agent.
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -1395,15 +1416,19 @@ async def stream_local(
             _wake_bg_waiters()
             loop.call_soon_threadsafe(queue.put_nowait, None)
 
-    with _chat_waiters_lock:
-        global _chat_waiters
-        _chat_waiters += 1
-    try:
-        await asyncio.to_thread(_infer_lock.acquire)
-    finally:
+    if priority == "bg":
+        _waited = await _acquire_infer_lock_bg()
+        logger.debug("[BG-INFER] stream_local: lock acquired after %.3fs", _waited)
+    else:
         with _chat_waiters_lock:
-            _chat_waiters -= 1
-    logger.debug("[TTFT] stream_local: lock acquired — waited %.3fs", time.time() - _t_lock_wait)
+            global _chat_waiters
+            _chat_waiters += 1
+        try:
+            await asyncio.to_thread(_infer_lock.acquire)
+        finally:
+            with _chat_waiters_lock:
+                _chat_waiters -= 1
+        logger.debug("[TTFT] stream_local: lock acquired — waited %.3fs", time.time() - _t_lock_wait)
 
     # From here the worker owns the lock release (in its finally). Only guard the
     # window where the thread could fail to start.
