@@ -37,6 +37,7 @@ from config import (
     MAX_TOKENS_HARD_CAP,
     PRIMARY_MODEL,
     QWEN36_NINJA_TEMPLATE,
+    QWEN38_REASONING_EFFORT,
     REASONING_MODEL,
     ROUTER_MODEL,
     USE_THINKING_BUDGET_PROCESSOR,
@@ -46,6 +47,8 @@ from config import (
     is_qwen25,
     is_qwen3,
     is_qwen36,
+    is_qwen38,
+    is_qwen3_hybrid,
 )
 from prompts import VISION_USER_PROMPT, get_prompt
 import mlx.core as mx
@@ -60,8 +63,9 @@ from mlx_lm.models.cache import (
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
 # ── ArraysCache trim patch — REMOVED ─────────────────────────────────────
-# Qwen3.6 uses a hybrid architecture: full_attention → KVCache (trimmable),
-# linear_attention → ArraysCache (recurrent state, NOT trimmable).
+# Les générations Qwen3 hybrides (3.5/3.6/3.8 — cf. config.is_qwen3_hybrid) mélangent
+# full_attention → KVCache (trimmable) et linear_attention → ArraysCache (état récurrent,
+# NON trimmable). Tout ce qui suit vaut pour la famille, pas seulement pour Qwen3.6.
 #
 # A previous patch made ArraysCache.trim() a no-op to enable multi-turn LRU hits.
 # Root-cause bug: on a partial LRU hit covering a previous full turn, KVCache was
@@ -190,8 +194,12 @@ class _ModelProfile:
 
 
 def _model_profile(model_path: str) -> _ModelProfile:
-    """Return sampling profile. Qwen3.6 checked before Qwen3 (is_qwen36 ⊂ is_qwen3)."""
-    if is_qwen36(model_path):
+    """Return sampling profile. Hybrides (3.5/3.6/3.8) avant Qwen3 (⊂ is_qwen3).
+
+    Profil mesuré sur Qwen3.6-35B-A3B ; appliqué tel quel aux autres générations
+    hybrides, qui partagent l'architecture. À revérifier après une bascule.
+    """
+    if is_qwen3_hybrid(model_path):
         return _ModelProfile(
             temp_think=1.0, temp_nothink=0.7,
             top_p_think=0.95, top_p_nothink=0.80,
@@ -737,9 +745,10 @@ def _build_prompt(
       no_think=True  → must end with </think>\\n\\n (closed empty block)
       no_think=False → must end with open <think>\\n
 
-    Note: Qwen3.6 does not honour <budget_remaining> tags — it was not trained with
-    Qwen3's budget-forcing mechanism. thinking_budget is therefore ignored for Qwen3.6
-    at the template level; ThinkingBudgetProcessor handles the cap at logit level.
+    Note: les générations hybrides (3.5/3.6/3.8, cf. is_qwen3_hybrid) n'honorent pas les
+    balises <budget_remaining> — elles n'ont pas été entraînées avec le budget-forcing de
+    Qwen3. thinking_budget y est donc ignoré au niveau du template ; ThinkingBudgetProcessor
+    applique le plafond au niveau des logits. Qwen3.8 offre à la place reasoning_effort.
     """
     base_kwargs: dict[str, Any] = {"tokenize": False, "add_generation_prompt": True}
 
@@ -769,10 +778,16 @@ def _build_prompt(
             "thinking_budget": 0,
             "preserve_thinking": True,
         }
-    elif thinking_budget > 0 and not is_qwen36(model_path):
+    elif thinking_budget > 0 and not is_qwen3_hybrid(model_path):
         think_kwargs = {"enable_thinking": True, "thinking_budget": thinking_budget}
     else:
         think_kwargs = {"enable_thinking": True}
+
+    # Qwen3.8 : le template accepte reasoning_effort (low/medium/xhigh) là où 3.5/3.6
+    # n'avaient aucun levier au niveau du template. On ne pose la clé que si elle est
+    # configurée — sinon le modèle applique son défaut (xhigh).
+    if QWEN38_REASONING_EFFORT and not no_think and is_qwen38(model_path):
+        think_kwargs["reasoning_effort"] = QWEN38_REASONING_EFFORT
 
     try:
         prompt = tokenizer.apply_chat_template(messages, **base_kwargs, **think_kwargs)
@@ -793,7 +808,7 @@ def _build_prompt(
         if not ("<think>" in _tail and "</think>" not in _tail[_tail.rfind("<think>"):]):
             prompt = prompt.rstrip("\n") + "\n<think>\n"
 
-    if thinking_budget > 0 and not no_think and not is_qwen36(model_path):
+    if thinking_budget > 0 and not no_think and not is_qwen3_hybrid(model_path):
         if "<budget_remaining>" not in prompt[-120:]:
             logger.warning(
                 "_build_prompt thinking_budget=%d → <budget_remaining> NOT injected "

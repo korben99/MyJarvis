@@ -53,10 +53,33 @@ VISION_TIMEOUT = float(os.getenv("VISION_TIMEOUT") or "60")
 # Remplace le chat_template par défaut du tokenizer Qwen3.6 :
 #   enable_thinking=False → aucun tag <think> (vs standard : <think>\n\n</think>\n\n)
 # Configurable via env QWEN36_NINJA_TEMPLATE pour pointer vers un autre chemin.
+# Ne s'applique qu'à Qwen3.6 (is_qwen36) : le fichier est lié à ce tokenizer précis.
 QWEN36_NINJA_TEMPLATE = os.getenv(
     "QWEN36_NINJA_TEMPLATE",
     "/opt/jarvis/models/templates/qwen36_ninja.jinja",
 )
+
+# ── Familles Qwen3 à architecture hybride ────────────────────────────────
+# Marqueurs de version reconnus par is_qwen3_hybrid(). Surchargeable par env
+# (liste séparée par des virgules) pour accueillir une génération suivante sans
+# toucher au code — la seule condition est qu'elle partage l'architecture.
+QWEN3_HYBRID_VERSIONS = tuple(
+    v.strip().lower()
+    for v in os.getenv("QWEN3_HYBRID_VERSIONS", "qwen3.5,qwen3.6,qwen3.8").split(",")
+    if v.strip()
+)
+
+# Effort de réflexion pour Qwen3.8 (template qwen3_8 : low / medium / xhigh).
+# Vide = on ne passe pas le kwarg, le modèle applique son propre défaut (xhigh).
+# À budget de réflexion constant, xhigh se fait couper par ThinkingBudgetProcessor
+# plus souvent : passer à "medium" si les réponses arrivent tronquées après bascule.
+QWEN38_REASONING_EFFORT = os.getenv("QWEN38_REASONING_EFFORT", "").strip().lower()
+if QWEN38_REASONING_EFFORT and QWEN38_REASONING_EFFORT not in ("low", "medium", "xhigh"):
+    logger.warning(
+        "QWEN38_REASONING_EFFORT=%r invalide (low|medium|xhigh) — ignoré",
+        QWEN38_REASONING_EFFORT,
+    )
+    QWEN38_REASONING_EFFORT = ""
 
 # ── Local LLM mode — Apple Silicon / mlx-lm (M4 Pro) ─────────────────────
 # Activé par LLM_LOCAL=yes dans .env.
@@ -111,16 +134,47 @@ def is_qwen3(model: str) -> bool:
     return "qwen3" in (model or "").lower()
 
 
+def is_qwen3_hybrid(model: str) -> bool:
+    """True for the Qwen3 "hybrid" generations (3.5 / 3.6 / 3.8 — same architecture).
+
+    Subset of is_qwen3() — always check is_qwen3_hybrid() BEFORE is_qwen3() to avoid
+    shadowing. Ces générations partagent (source : ms-swift, template qwen3_5/3_6/3_8)
+    une architecture identique, d'où un comportement commun côté inférence :
+      - Profil d'échantillonnage dédié (temp_think=1.0 vs 0.6 pour Qwen3 de base).
+      - Attention hybride full/linear → ArraysCache non trimmable, cf. llm/local.py:62.
+      - Aucun support de <budget_remaining> : le budget de réflexion n'est pas piloté
+        par le template mais par ThinkingBudgetProcessor, au niveau des logits.
+
+    La liste est surchargeable par env (QWEN3_HYBRID_VERSIONS) pour accueillir une
+    génération suivante sans changement de code.
+    """
+    m = (model or "").lower()
+    return any(v in m for v in QWEN3_HYBRID_VERSIONS)
+
+
 def is_qwen36(model: str) -> bool:
     """True specifically for Qwen3.6.x models (e.g. spicyneuron/Qwen3.6-35B-A3B-MLX-*).
-    Subset of is_qwen3() — always check is_qwen36() BEFORE is_qwen3() to avoid shadowing.
 
-    Differences vs base Qwen3:
-      - Distinct sampling profile (temp_think=0.7 vs 0.6).
-      - Ships chat_template.optional.jinja (ninja patch): enable_thinking=False produces
-        no <think> tag at all (vs standard Qwen3 which inserts <think>\\n\\n</think>\\n\\n).
+    Portée volontairement étroite : ne sert plus qu'à décider de l'application du ninja
+    patch, qui est un fichier Jinja lié au tokenizer 3.6 précis (QWEN36_NINJA_TEMPLATE).
+    Pour tout trait de comportement partagé par la génération, utiliser is_qwen3_hybrid().
     """
     return "qwen3.6" in (model or "").lower()
+
+
+def is_qwen38(model: str) -> bool:
+    """True for Qwen3.8.x models (Qwen3.8-27B, Qwen3.8-35B-A3B, Qwen3.8-2.4T-A95B).
+
+    Sous-ensemble de is_qwen3_hybrid(). Deux écarts vs 3.5/3.6, documentés par le
+    template qwen3_8 de ms-swift :
+      - `reasoning_effort` accepté : xhigh (défaut modèle) / medium / low.
+        Voir QWEN38_REASONING_EFFORT — xhigh produit des blocs de réflexion nettement
+        plus longs, qui se feront couper par ThinkingBudgetProcessor aux budgets actuels.
+      - Le contenu de réflexion des tours passés est conservé par défaut au rendu.
+        Sans effet ici : l'historique Jarvis ne stocke que des réponses déjà nettoyées
+        de leur bloc <think>.
+    """
+    return "qwen3.8" in (model or "").lower()
 
 
 def is_hermes(model: str) -> bool:

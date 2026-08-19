@@ -29,7 +29,10 @@ MODELS = [
 
 # Fichiers de template à télécharger séparément (indépendants du cache HF).
 # local_path doit correspondre à QWEN36_NINJA_TEMPLATE dans config.py.
-# Uniquement nécessaire si le primary/reasoning model est le Qwen3.6 "ninja template".
+# Uniquement nécessaire si le primary/reasoning model est un Qwen3.6 "ninja template" :
+# le fichier est lié à ce tokenizer précis, il ne se transpose pas à une autre
+# génération. En bascule vers Qwen3.6 → Qwen3.8, ce bloc se désactive tout seul et
+# config.is_qwen36() cesse de matcher — le template livré avec le modèle est utilisé.
 TEMPLATES = (
     [
         {
@@ -41,7 +44,7 @@ TEMPLATES = (
             ),
         },
     ]
-    if "spicyneuron/Qwen3.6" in "".join(MODELS)
+    if "qwen3.6" in "".join(MODELS).lower()
     else []
 )
 

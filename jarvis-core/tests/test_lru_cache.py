@@ -178,7 +178,7 @@ def run_turn(
 # ── Assertions de validation ───────────────────────────────────────────────
 
 def validate_results(results: list[dict], no_think: bool, model_path: str = "") -> None:
-    from config import is_qwen36
+    from config import is_qwen3_hybrid
     print(f"\n{'=' * 72}")
     print("VALIDATION")
     errors = []
@@ -209,12 +209,13 @@ def validate_results(results: list[dict], no_think: bool, model_path: str = "") 
 
     # Hit-rate doit être non-décroissant à partir du tour 3
     # (au tour 2 le dénominateur saute, ce qui peut faire baisser le %)
-    # Qwen3.6 : cache multi-tours désactivé par design (ArraysCache non trimmable —
-    # voir l'en-tête de llm_local.py). Seul le préfixe système est réutilisé, donc
-    # le hit-rate % décroît mécaniquement quand le prompt grandit — pas une erreur.
-    if is_qwen36(model_path):
-        print("  ⏭️  Hit-rate % : check sauté (Qwen3.6 — multi-tours désactivé par design, "
-              "préfixe système seul réutilisé)")
+    # Générations hybrides (3.5/3.6/3.8) : cache multi-tours désactivé par design
+    # (ArraysCache non trimmable — voir l'en-tête de llm/local.py). Seul le préfixe
+    # système est réutilisé, donc le hit-rate % décroît mécaniquement quand le prompt
+    # grandit — pas une erreur.
+    if is_qwen3_hybrid(model_path):
+        print("  ⏭️  Hit-rate % : check sauté (Qwen3 hybride — multi-tours désactivé par "
+              "design, préfixe système seul réutilisé)")
     elif len(results) >= 3:
         pcts_3plus = [r["hit_pct"] for r in results[2:]]
         if all(pcts_3plus[i] <= pcts_3plus[i + 1] + 5 for i in range(len(pcts_3plus) - 1)):

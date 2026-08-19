@@ -418,6 +418,43 @@ Total TTFT               ~9.9s
 - `prompts.py` : balises XML sur tous les blocs de données injectés (reflection, nightly, consolidation)
 - Bascule Qwen3 → Qwen3.6 : un seul changement `.env` (`PRIMARY_MODEL_LOCAL`)
 
+### [~] Bascule Qwen3.8-35B-A3B — code préparé le 2026-08-18, poids pas encore publiés
+
+Signalé par le commit ms-swift `ab726e9` (`[model] qwen3.8`), qui enregistre
+`Qwen/Qwen3.8-35B-A3B(-FP8)` avant publication. Successeur direct du primaire actuel :
+même gabarit 35B / ~3B actifs, donc même enveloppe mémoire et même profil de latence.
+Sur HF au 18/08 : seuls `Qwen3.8-27B` et `Qwen3.8-2.4T-A95B` sont publiés.
+
+Préparation faite (code déjà en place, inerte tant que le modèle n'est pas configuré) :
+- [x] `config.is_qwen3_hybrid()` — remplace `is_qwen36()` pour tout trait partagé par la
+      génération (3.5/3.6/3.8 = même architecture, source ms-swift). Liste surchargeable
+      par `QWEN3_HYBRID_VERSIONS`. Précédence obligatoire avant `is_qwen3()`.
+- [x] `is_qwen36()` ramené à son seul usage légitime : le ninja patch, fichier Jinja lié
+      au tokenizer 3.6. Ne s'applique donc pas à 3.8, qui garde le template livré.
+- [x] `is_qwen38()` + `QWEN38_REASONING_EFFORT` (low/medium/xhigh) câblé dans
+      `_build_prompt` ; vide par défaut = défaut du modèle.
+- [x] `_model_profile()`, le garde-fou `<budget_remaining>` et `test_lru_cache.py`
+      basculés sur le prédicat de famille.
+- [x] `scripts/download_models.py` : le bloc TEMPLATES se désactive seul hors Qwen3.6.
+
+Reste à faire le jour de la sortie :
+- [ ] Attendre un quant MLX (5–6 bit, ~20–26 GB) ; les 3.5/3.6/3.8 partageant la
+      structure, la conversion communautaire devrait suivre vite.
+- [ ] Bascule = un seul changement `.env` (`PRIMARY_MODEL_LOCAL`) + `download_models.py`.
+- [ ] **Vérifier le format de function calling** — `tool_calls.py` parse le format XML
+      `<tool_call><function=…><parameter=…>` imposé par `qwen36_ninja.jinja`. Sans ninja
+      patch, c'est le template 3.8 qui décide : confirmer que le format natif est
+      identique avant de laisser tourner OpenCode (`DOCS/opencode-local.md`).
+- [ ] Rejouer le profil d'échantillonnage (`_model_profile`) — hérité tel quel de 3.6,
+      jamais mesuré sur 3.8.
+- [ ] Si les réponses arrivent tronquées : `QWEN38_REASONING_EFFORT=medium`. Le défaut
+      `xhigh` allonge les blocs de réflexion, que `ThinkingBudgetProcessor` coupe aux
+      budgets actuels (`THINKING_BUDGET_*`).
+- [ ] Rejouer `test_lru_cache.py --no-think` : la réutilisation multi-tours dépend de
+      `preserve_thinking`, dont 3.8 change le défaut (réflexion des tours passés
+      conservée). Sans effet attendu — l'historique ne stocke que du texte nettoyé —
+      mais c'est l'invariant à vérifier.
+
 ---
 
 ## Optimisations & Robustesse (v9 — 2026-04-06)

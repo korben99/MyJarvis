@@ -183,7 +183,8 @@ When `LLM_LOCAL=yes`, Jarvis uses `mlx_lm` directly (no HTTP server) — models 
 - `no_think=True` — disables thinking entirely (`enable_thinking=False` + `thinking_budget=0`). Saves ~4 s TTFT on simple chat.
 - `no_think=False, thinking_budget=0` — full unconstrained thinking (~1900 tok on Qwen3.6).
 - `no_think=False, thinking_budget>0` — thinking hard-cut by `ThinkingBudgetProcessor` at exactly `thinking_budget` tokens.
-- **Qwen3.6 ninja patch** (`QWEN36_NINJA_TEMPLATE`): Jinja2 template override. When `no_think=True`, outputs no `<think>` tag (better KV caching). When `no_think=False` with `thinking_budget>0`, injects `<think>\n<budget_remaining>N</budget_remaining>\n`.
+- **Qwen3.6 ninja patch** (`QWEN36_NINJA_TEMPLATE`): Jinja2 template override, applied only when `config.is_qwen36()` matches — the file is tied to that exact tokenizer. When `no_think=True`, outputs no `<think>` tag (better KV caching). When `no_think=False` with `thinking_budget>0`, injects `<think>\n<budget_remaining>N</budget_remaining>\n`.
+- **Hybrid Qwen3 generations** (`config.is_qwen3_hybrid()` — 3.5 / 3.6 / 3.8, list in `QWEN3_HYBRID_VERSIONS`): same architecture, so they share a dedicated sampling profile and ignore `<budget_remaining>` at the template level — `ThinkingBudgetProcessor` caps them at logit level instead. Qwen3.8 adds `reasoning_effort` (`QWEN38_REASONING_EFFORT`: `low`/`medium`/`xhigh`, empty = model default `xhigh`) as its template-level lever.
 
 **`ThinkingBudgetProcessor`** (`llm_local.py`): MLX logits processor that hard-cuts `</think>` at exactly `thinking_budget` tokens via logit manipulation — soft boost at 90% of budget, hard cut at 100%. The value is precise (not a boolean): too short a budget truncates reasoning mid-thought and degrades output quality. Per-task budgets: `THINKING_BUDGET_COMPACT=1024` (quick judgment), `THINKING_BUDGET_MEDIUM=2048` (chat/synthesis), `THINKING_BUDGET_DEEP=4000` (creative rewrite). Only active when `USE_THINKING_BUDGET_PROCESSOR=yes`.
 
@@ -1199,7 +1200,9 @@ All variables go in `/opt/jarvis/.env`.
 | `THINKING_BUDGET_MEDIUM` | `2048` | Hard-cut budget for chat synthesis + trading thresholds |
 | `THINKING_BUDGET_DEEP` | `4000` | Hard-cut budget for reasoning + refine_prompt |
 | `USE_THINKING_BUDGET_PROCESSOR` | `yes` | Activate `ThinkingBudgetProcessor` for calls with `thinking_budget > 0` |
-| `QWEN36_NINJA_TEMPLATE` | `/opt/jarvis/models/templates/qwen36_ninja.jinja` | Path to the Qwen3.6 ninja-patch Jinja2 template. Controls think/no_think without relying on the standard chat template. Download with `scripts/download_models.py`. |
+| `QWEN36_NINJA_TEMPLATE` | `/opt/jarvis/models/templates/qwen36_ninja.jinja` | Path to the Qwen3.6 ninja-patch Jinja2 template. Controls think/no_think without relying on the standard chat template. Download with `scripts/download_models.py`. Applied to Qwen3.6 only. |
+| `QWEN3_HYBRID_VERSIONS` | `qwen3.5,qwen3.6,qwen3.8` | Version markers matched by `config.is_qwen3_hybrid()` — dedicated sampling profile, limited multi-turn KV reuse, no `<budget_remaining>`. Extend when a later generation shares the architecture. |
+| `QWEN38_REASONING_EFFORT` | — (model default) | Qwen3.8 only: `low` / `medium` / `xhigh`. Empty = don't pass the kwarg, model applies `xhigh`. Lower it if answers come back truncated at the current thinking budgets. |
 
 ### Activation steering (optional, off by default)
 
