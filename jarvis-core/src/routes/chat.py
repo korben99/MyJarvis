@@ -9,11 +9,13 @@ import contextlib
 import json
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Optional
 
 from briefing import gather_briefing, get_stored_briefing, store_briefing
 from config import (
+    AGENT_ENABLED,
     BRIEFING_TIMEZONE,
     DEFAULT_TEMP,
     HIST_CONV_SUMMARIZE_THRESHOLD,
@@ -30,6 +32,7 @@ from config import (
     SESSION_SUMMARY_TOKENS,
     THINKING_BUDGET_COMPACT,
     THINKING_BUDGET_MEDIUM,
+    USER_ADMINS,
     USER_CITIES,
     USER_CODES,
     USER_TIMEZONES,
@@ -630,6 +633,69 @@ def _instant_reply(
     }
 
 
+def _handle_agent_task(
+    req: ChatRequest,
+    user_code: str,
+) -> "StreamingResponse | dict | None":
+    """Fast-track : « tâche agent: <objectif> » met une tâche en file, sans appel LLM.
+
+    Déclenchement par préfixe explicite, et NON par le routeur d'intentions. C'est
+    délibéré : un faux positif du routeur lancerait une tâche autonome de plusieurs
+    minutes sur une phrase anodine. Le préfixe, lui, ne se déclenche jamais par accident.
+    Le passage par l'intent (embed_router) est prévu en Phase 4, une fois la fiabilité de
+    la boucle mesurée.
+
+    Retourne None si le message n'est pas une commande agent — le pipeline normal suit.
+    """
+    # NFC d'abord : l'objectif est ensuite découpé sur `stripped` avec la longueur du
+    # préfixe DÉSACCENTUÉ. En NFD, « tâche » compte 6 caractères et non 5 — le découpage
+    # serait décalé d'un cran. macOS produit du NFD ; on ne peut pas supposer la forme.
+    stripped = unicodedata.normalize("NFC", req.message.strip())
+    lowered = unicodedata.normalize("NFD", stripped.lower())
+    lowered = "".join(c for c in lowered if unicodedata.category(c) != "Mn")
+
+    for prefix in ("tache agent:", "tache agent :", "agent:", "agent :"):
+        if lowered.startswith(prefix):
+            objective = stripped[len(prefix):].strip()
+            break
+    else:
+        return None
+
+    if not AGENT_ENABLED:
+        return _instant_reply(req, user_code, "Le mode agent est désactivé (AGENT_ENABLED=false).")
+
+    from agent import create_task, list_tasks
+
+    # Consultation depuis l'iPhone : sans ça la fonctionnalité serait à sens unique,
+    # curl n'étant pas une option sur un téléphone.
+    if objective.lower() in ("statut", "status", "etat", "état", "où en es-tu", "ou en es-tu"):
+        tasks = list_tasks(5, user_code=user_code)
+        if not tasks:
+            return _instant_reply(req, user_code, "Tu n'as aucune tâche agent enregistrée.")
+        lines = [
+            f"· {t['objective'][:60]} — {t['status']} ({t['steps']} pas)"
+            + (f" → {t['result'][:100]}" if t.get("result") else "")
+            for t in tasks
+        ]
+        return _instant_reply(req, user_code, "Tes dernières tâches :\n" + "\n".join(lines))
+
+    if user_code not in USER_ADMINS:
+        return _instant_reply(req, user_code, "Le mode agent est réservé aux administrateurs.")
+
+    if len(objective) < 10:
+        return _instant_reply(
+            req, user_code,
+            "Il me faut un objectif un peu plus explicite pour partir seul là-dessus.",
+        )
+
+    task = create_task(user_code, objective)
+    return _instant_reply(
+        req, user_code,
+        f"C'est parti — je m'en occupe en arrière-plan (tâche {task['id'][:8]}). "
+        f"Je te préviens quand j'ai terminé. « tâche agent: statut » pour suivre.",
+    )
+
+
 async def _handle_calendar_pending(
     req: ChatRequest,
     user_code: str,
@@ -812,7 +878,13 @@ async def chat(req: ChatRequest):
     # Checks keyword-triggered actions before any embedding or LLM call.
     # ════════════════════════════════════════════════════════════════════════
 
-    # ── 1a. Pending calendar action: confirm or cancel ──────────────────────
+    # ── 1a. Fast-track agent : « tâche agent: … » ──────────────────────────
+    # Testé en PREMIER, avant même le calendrier en attente : c'est une commande
+    # explicite, elle ne doit pas être avalée par un « oui/non » attendu ailleurs.
+    if (result := _handle_agent_task(req, user_code)) is not None:
+        return result
+
+    # ── 1b. Pending calendar action: confirm or cancel ──────────────────────
     # If a pending action exists and the user confirms/cancels → act and return.
     # If the word is unrecognised → skip calendar write check (avoids overwriting
     # the existing pending event with a brand new one).
@@ -824,7 +896,7 @@ async def chat(req: ChatRequest):
             return result
         # Unrecognised word while pending → fall through to router, skip 1b.
     else:
-        # ── 1b. Calendar write (keyword → LLM extraction, no router needed) ─
+        # ── 1c. Calendar write (keyword → LLM extraction, no router needed) ─
         # Only checked when there is no pending action to avoid overwriting it.
         if (
             result := await _handle_calendar_write(req, user_code, _google_available)

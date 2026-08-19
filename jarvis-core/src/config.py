@@ -284,7 +284,19 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "open-webui_knowledge")
 QDRANT_MEMORY_COLLECTION = os.getenv("QDRANT_MEMORY_COLLECTION", "jarvis_memory")
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", os.getenv("QDRANT_TOP_K", "8")))
-RAG_SCORE_THRESHOLD = float(os.getenv("RAG_SCORE_THRESHOLD", "0.4"))
+# Seuil de l'ÉTAPE 1 du RAG : score sémantique minimal pour qu'un document soit adopté
+# comme cible (rag.py, repli sémantique global). C'est le seul vrai verrou de la chaîne —
+# une fois un document adopté, l'étape 2 rend toujours des extraits, y compris par son
+# repli à score_threshold=0.0.
+#
+# Relevé de 0.40 à 0.55 le 19/08/2026, sur mesure et non au jugé. À 0.40, la requête
+# « Zero Bytes » (renseignement) adoptait une facture de piscine à 0.41 et injectait ses
+# extraits dans le contexte. Sur cette base : hors sujet plafonne à 0.41-0.52, une vraie
+# correspondance monte à 0.72-0.73. 0.55 sépare les deux avec de la marge des deux côtés.
+#
+# Effet de bord à surveiller : une question légitime mais formulée de loin peut désormais
+# ne plus trouver de document du tout. Repasser à 0.4 par env si le rappel se dégrade.
+RAG_SCORE_THRESHOLD = float(os.getenv("RAG_SCORE_THRESHOLD", "0.55"))
 OWUI_MAX_DOC_CHARS = int(os.getenv("OWUI_MAX_DOC_CHARS", "80000"))
 
 # ── Features ──────────────────────────────────────────────────────────────
@@ -307,6 +319,105 @@ CONV_ANALYSIS_INTERVAL_MINUTES = int(os.getenv("CONV_ANALYSIS_INTERVAL_MINUTES",
 MAX_CHAIN_ITERATIONS = int(
     os.getenv("MAX_CHAIN_ITERATIONS", "3")
 )  # max actions per reflection cycle
+
+# ── Boucle agentique (agent/) ─────────────────────────────────────────────
+# Régime DISTINCT du proto-self : le proto-self observe et propose sans jamais agir sur le
+# monde, l'agent agit — mais uniquement sur commande humaine explicite, jamais déclenché
+# par le cycle de réflexion. Désactivé par défaut : AGENT_ENABLED=false ⇒ aucun worker
+# démarré, aucune route montée, Jarvis est strictement celui d'avant.
+AGENT_ENABLED = os.getenv("AGENT_ENABLED", "false").lower() in ("yes", "true", "1")
+
+# Racine des espaces de travail. Une tâche = un sous-dossier {task_id}. C'est la SEULE
+# zone où l'agent peut écrire (voir agent/sandbox.py).
+AGENT_WORKSPACE = os.getenv("AGENT_WORKSPACE", "/opt/jarvis/agent_workspace")
+
+# Budgets d'une tâche. max_steps borne la dérive, le timeout borne le temps réel.
+AGENT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "20"))
+AGENT_TASK_TIMEOUT_MINUTES = int(os.getenv("AGENT_TASK_TIMEOUT_MINUTES", "45"))
+
+# Plafond de tokens PAR PAS. Volontairement bas : le lock GPU background ne cède qu'ENTRE
+# deux générations, donc ce plafond est le pire cas d'attente imposé à un tour de chat.
+# Mesuré ~50 tok/s sur Qwen3.6-35B-A3B-5bit ⇒ 1200 tok ≈ 24 s. Ne pas monter sans mesurer.
+# Les deux se partagent le MÊME budget : réflexion + sortie visible + appel d'outil.
+# Relevés le 19/08/2026 (1200/600) une fois le raisonnement du tour précédent réinjecté
+# dans le contexte — à ce moment-là la réflexion sert vraiment à quelque chose, et 600
+# tokens devenaient courts pour arbitrer entre huit outils sur un contexte de 17 k tokens.
+# Le coût est une latence de chat : (AGENT_STEP_MAX_TOKENS ÷ 50 tok/s) secondes d'attente
+# au pire pour un tour de conversation, soit ~44 s ici. La fenêtre de calme
+# (AGENT_QUIET_SECONDS) rend le cas rare, elle ne le supprime pas.
+# Le journal « think=N car » de chaque pas dit si la réflexion est coupée : si N frôle
+# systématiquement AGENT_THINKING_BUDGET × 4, c'est qu'elle l'est.
+AGENT_STEP_MAX_TOKENS = int(os.getenv("AGENT_STEP_MAX_TOKENS", "2200"))
+AGENT_THINKING_BUDGET = int(os.getenv("AGENT_THINKING_BUDGET", "1000"))
+
+# Plafond du pas d'ÉCRITURE. Un livrable transite par le paramètre `content` de write_file :
+# il est donc généré à l'intérieur du bloc <tool_call>, et AGENT_STEP_MAX_TOKENS le coupe en
+# plein milieu — le bloc n'est jamais fermé, aucun appel n'est détecté, le pas est perdu
+# (mesuré le 19/08/2026 : 6 pas consécutifs perdus sur une note de synthèse). Ce budget-là
+# n'est dépensé qu'en cas de troncature avérée, et sans raisonnement : ~2 min de GPU au pire.
+AGENT_WRITE_MAX_TOKENS = int(os.getenv("AGENT_WRITE_MAX_TOKENS", "6000"))
+
+# Taille annoncée au modèle pour UN appel write_file. Une consigne « écris en plusieurs
+# fois » sans chiffre est inapplicable : il ne peut pas connaître son propre plafond.
+#
+# Dérivé de AGENT_STEP_MAX_TOKENS et NON de AGENT_WRITE_MAX_TOKENS, à dessein : l'annoncer
+# sur le budget de reprise ferait tronquer CHAQUE écriture, et la reprise à 6000 tokens
+# (~2 min de GPU tenu) deviendrait le régime normal au lieu de l'exception — précisément ce
+# que le plafond par pas protège. Marge 2:1 : 2 caractères par token là où le français en
+# markdown en fait plutôt 3 à 4, le reste absorbe le bloc <tool_call> et le raisonnement.
+#
+# Écritures trop fragmentées à l'usage ? Monter AGENT_STEP_MAX_TOKENS — le coût se paie en
+# latence de chat : (tokens ÷ 50) secondes d'attente au pire pour un tour de conversation.
+AGENT_WRITE_MAX_CHARS = int(
+    os.getenv(
+        "AGENT_WRITE_MAX_CHARS",
+        str(max(AGENT_STEP_MAX_TOKENS - AGENT_THINKING_BUDGET, 400) * 2),
+    )
+)
+
+# Fenêtre de calme : on ne démarre un pas que si aucun chat n'a demandé le GPU depuis N s.
+# Complète le lock, qui ne sait rien du tour de chat à venir. 0 = désactivée.
+AGENT_QUIET_SECONDS = float(os.getenv("AGENT_QUIET_SECONDS", "45"))
+
+# Troncature des sorties d'outil injectées dans le contexte (caractères).
+# Relevé de 6000 à 15000 le 19/08/2026, sur mesure. À 6000, une recherche web de 9984
+# caractères perdait 40 % de sa matière — pendant qu'un contexte de tâche COMPLET pesait
+# 7784 tokens, soit 24 % du plafond pratique du modèle (~32 k). On affamait l'agent article
+# par article en laissant les trois quarts de la place vides.
+# Le vrai garde-fou reste global : _CONTEXT_SOFT_CAP dans loop.py élide les plus vieux
+# résultats quand la somme dépasse le budget, ce qui est le bon endroit pour arbitrer.
+AGENT_MAX_TOOL_OUTPUT = int(os.getenv("AGENT_MAX_TOOL_OUTPUT", "15000"))
+
+# Plafond d'extraction d'UNE page lue par l'agent (fetch_url). Distinct de
+# _PAGE_MAX_CHARS (6000), calibré pour le budget de contexte du chat : l'agent lit une
+# source pour en tirer dates et chiffres exacts, et un article de presse dépasse
+# largement 6000 caractères — c'est précisément la troncature qui l'a fait écrire des
+# dates de 2024/2025 sur des faits de 2026.
+AGENT_PAGE_MAX_CHARS = int(os.getenv("AGENT_PAGE_MAX_CHARS", "14000"))
+
+# Score minimal pour qu'un extrait de la base documentaire soit rendu à l'agent.
+# Bien plus strict que RAG_SCORE_THRESHOLD (0.4), qui sert le chat : là, un extrait
+# faiblement pertinent est au pire une phrase de trop dans un contexte que l'utilisateur
+# relit. Pour l'agent, c'est du bruit qu'il ne peut PAS identifier comme tel et qui le fait
+# diverger — mesuré le 19/08/2026 : 5 appels, 19 435 caractères de règlement intérieur et
+# de factures sur une tâche de renseignement.
+# Calibré sur mesure, sur cette base : hors sujet plafonne à 0.41-0.52, une vraie
+# correspondance monte à 0.72-0.73. 0.60 sépare les deux avec de la marge.
+AGENT_DOCS_MIN_SCORE = float(os.getenv("AGENT_DOCS_MIN_SCORE", "0.60"))
+
+# Rétention des enregistrements de tâche dans Redis.
+AGENT_TASK_TTL = int(os.getenv("AGENT_TASK_TTL_DAYS", "30")) * 86400
+
+# Racines lisibles en plus du workspace (lecture seule, jamais d'écriture). Sert la
+# lecture du code source prévue en Phase 1 d'Autocoding (ROADMAP).
+AGENT_READONLY_ROOTS = tuple(
+    p.strip()
+    for p in os.getenv(
+        "AGENT_READONLY_ROOTS",
+        "/opt/jarvis/jarvis-core/src,/opt/jarvis/scripts,/opt/jarvis/DOCS",
+    ).split(",")
+    if p.strip()
+)
 # ── Autocoding — prompt self-modification ─────────────────────────────────
 # Number of times a knowledge gap must be flagged before a prompt-refine is triggered
 REFINE_PROMPT_THRESHOLD = int(os.getenv("REFINE_PROMPT_THRESHOLD", "3"))

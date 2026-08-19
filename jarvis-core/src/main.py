@@ -56,6 +56,7 @@ from qdrant_client.models import Distance, HnswConfigDiff, VectorParams
 if LLM_LOCAL:
     from llm.local import preload_models
     from pipeline import build_system_prompt
+from agent import start_worker, stop_worker
 from analyzer import analyse_recent_conversations
 from deps import _STREAM_CLIENTS, HTTP_CLIENT, QDRANT_CLIENT
 from llm.embed_router import preload_embed_router
@@ -65,6 +66,7 @@ from llm.client import openai_headers
 import emotional_state
 from memory import get_embed_model
 from rag import search_documents
+from routes.agent_routes import router as agent_router
 from routes.briefing_routes import router as briefing_router
 from routes.briefing_routes import run_morning_briefings
 from routes.chat import router as chat_router
@@ -208,7 +210,13 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error("Scheduler failed to start: %s", type(exc).__name__)
 
+    # Worker agentique — hors scheduler : il n'est pas périodique, il consomme une file.
+    # No-op si AGENT_ENABLED=false.
+    start_worker()
+
     yield
+
+    await stop_worker()
 
     # Trace l'heure d'arrêt : c'est elle qui permet au démarrage suivant de mesurer la
     # durée de coupure (vitals, famille « discontinuité »). Sans cette trace, le champ
@@ -239,6 +247,7 @@ app.add_middleware(
 )
 
 app.include_router(chat_router)
+app.include_router(agent_router)
 app.include_router(briefing_router)
 app.include_router(self_router)
 app.include_router(device_router)

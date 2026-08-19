@@ -25,3 +25,6 @@ DerivedData/
 .env
 scripts/client_secret.json
 RESEARCH/
+
+#AGENT#
+agent_workspace/

@@ -233,6 +233,11 @@
 > Faire passer Jarvis d'une réflexion ponctuelle à une boucle itérative
 > où chaque résultat devient le contexte de l'itération suivante.
 
+> **Voir aussi `DOCS/AGENTIC.md`** — le chantier `agent/` (tâches autonomes confiées
+> explicitement par un humain : surf, lecture, écriture de documents, puis shell et code).
+> Régime distinct de ce qui suit : le proto-self propose, l'agent agit — mais jamais de sa
+> propre initiative. Phases 0 et 1 terminées le 19/08/2026.
+
 ### Étape A — Chaînes d'actions séquentielles — TERMINÉ (2026-03-23)
 - [x] Permettre jusqu'à N actions par cycle (`MAX_CHAIN_ITERATIONS`, défaut 3)
 - [x] Contexte cumulatif : chaque résultat alimente l'itération suivante

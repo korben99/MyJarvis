@@ -257,6 +257,21 @@ _chat_waiters_lock = threading.Lock()
 _bg_wakeup: asyncio.Event | None = None
 _bg_loop: asyncio.AbstractEventLoop | None = None  # loop that owns _bg_wakeup
 
+_last_chat_ts: float = 0.0  # dernière demande d'inférence en priorité chat
+
+
+def seconds_since_chat() -> float:
+    """Secondes écoulées depuis la dernière demande d'inférence en priorité chat.
+
+    Sert la fenêtre de calme du worker agentique. Le lock bg ne protège qu'ENTRE deux
+    générations : il ne dit rien du tour de chat À VENIR. Sans cette fenêtre, l'agent
+    s'empare du GPU pendant que l'utilisateur lit la réponse précédente, et le tour
+    suivant attend la fin du pas. inf tant qu'aucun chat n'a eu lieu depuis le démarrage.
+    """
+    if _last_chat_ts == 0.0:
+        return float("inf")
+    return time.time() - _last_chat_ts
+
 
 def _wake_bg_waiters() -> None:
     """Wake background-priority waiters from any thread.
@@ -1229,8 +1244,9 @@ async def call_llm_local_async(
     """Async non-streaming inference, high priority (chat calls)."""
     _t0 = time.time()
     with _chat_waiters_lock:
-        global _chat_waiters
+        global _chat_waiters, _last_chat_ts
         _chat_waiters += 1
+        _last_chat_ts = _t0
     try:
         await asyncio.to_thread(_infer_lock.acquire)
     finally:
@@ -1421,8 +1437,9 @@ async def stream_local(
         logger.debug("[BG-INFER] stream_local: lock acquired after %.3fs", _waited)
     else:
         with _chat_waiters_lock:
-            global _chat_waiters
+            global _chat_waiters, _last_chat_ts
             _chat_waiters += 1
+            _last_chat_ts = _t_lock_wait
         try:
             await asyncio.to_thread(_infer_lock.acquire)
         finally:

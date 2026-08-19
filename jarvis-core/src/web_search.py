@@ -441,11 +441,16 @@ def _extract_pub_date(html: str) -> str | None:
     return None
 
 
-async def _fetch_page(url: str) -> tuple[str, str | None]:
+async def _fetch_page(url: str, max_chars: int = 0) -> tuple[str, str | None]:
     """Fetch a URL and return (extracted text, publication date | None).
 
     Falls back to Jina reader on 403 or empty content.
     Publication date is extracted from raw HTML before tag stripping.
+
+    `max_chars` : plafond d'extraction. 0 = _PAGE_MAX_CHARS, calibré pour le budget de
+    contexte du chat (WEB_CHAR_BUDGET). La boucle agentique passe une valeur plus haute :
+    elle lit une source pour en tirer dates et chiffres exacts, et 6000 caractères
+    s'arrêtent au milieu d'un article de presse.
     """
     if not url or not url.startswith("http"):
         return "", None
@@ -462,7 +467,7 @@ async def _fetch_page(url: str) -> tuple[str, str | None]:
             return "", None
         raw = resp.text
         pub_date = _extract_pub_date(raw)
-        text = _extract_text_from_html(raw)
+        text = _extract_text_from_html(raw, max_chars or _PAGE_MAX_CHARS)
         if not text:
             return await _fetch_via_jina(url), pub_date
         return text, pub_date
@@ -471,9 +476,9 @@ async def _fetch_page(url: str) -> tuple[str, str | None]:
         return "", None
 
 
-async def _fetch_page_text(url: str) -> str:
+async def _fetch_page_text(url: str, max_chars: int = 0) -> str:
     """Compatibility wrapper — returns only the text part of _fetch_page()."""
-    text, _ = await _fetch_page(url)
+    text, _ = await _fetch_page(url, max_chars)
     return text
 
 
