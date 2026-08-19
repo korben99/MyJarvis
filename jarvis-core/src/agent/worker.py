@@ -22,6 +22,9 @@ _worker_task: asyncio.Task | None = None
 # deux tâches, mais pas de double envoi pour la même.
 _PUSH_COOLDOWN_TTL = 3600
 
+# Longueur utile d'une notification iOS ; le détail reste consultable dans la tâche.
+_PUSH_MAX_CHARS = 500
+
 
 def _notify(task: dict) -> None:
     """Prévient l'utilisateur que sa tâche est terminée. Ne doit jamais faire échouer le worker."""
@@ -30,7 +33,11 @@ def _notify(task: dict) -> None:
         return
 
     if status == store.STATUS_DONE:
-        body = task["result"] or "Tâche terminée."
+        # Une notification se lit sur un écran verrouillé : le résumé complet vit dans la
+        # tâche, pas dans le push.
+        body = (task["result"] or "Tâche terminée.").strip()
+        if len(body) > _PUSH_MAX_CHARS:
+            body = body[:_PUSH_MAX_CHARS].rsplit(" ", 1)[0] + "…"
         files = task.get("deliverables") or []
         if files:
             body += f"\n\nFichiers : {', '.join(files)} (dans {task['workspace']})"

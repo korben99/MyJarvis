@@ -105,6 +105,13 @@ _PROMPTS_LOG_PATH = "/opt/jarvis/logs/prompts.log"
 RAW_DEBUG_PROMPTS = os.getenv("RAW_DEBUG_PROMPTS", "true").lower() in ("yes", "true", "1")
 _RAW_PROMPTS_LOG_PATH = "/opt/jarvis/logs/opencode-prompts.log"
 
+# Journal dédié à la boucle agentique. Même raison que pour OpenCode : un pas d'agent
+# embarque les schémas des dix outils plus tout le contexte accumulé, et noierait les
+# prompts conversationnels de prompts.log. Gate indépendante, pour suivre l'agent sans
+# rallumer la journalisation de tout le trafic de chat.
+AGENT_DEBUG_PROMPTS = os.getenv("AGENT_DEBUG_PROMPTS", "true").lower() in ("yes", "true", "1")
+_AGENT_PROMPTS_LOG_PATH = "/opt/jarvis/logs/agent-prompts.log"
+
 QUANT_KV = os.getenv("QUANT_KV", "").lower() in ("yes", "true", "1")
 QUANT_KV_BITS = int(os.getenv("QUANT_KV_BITS", "4"))
 
@@ -160,7 +167,13 @@ def _debug_log(
     comportement d'origine sur prompts.log.
     """
     path = log_path or _PROMPTS_LOG_PATH
-    enabled = RAW_DEBUG_PROMPTS if log_path else LLM_DEBUG_PROMPTS
+    # Une gate par journal : sans ça, suivre l'agent obligeait à rallumer OpenCode et
+    # réciproquement, les deux partageant la même variable.
+    _gates = {
+        _RAW_PROMPTS_LOG_PATH: RAW_DEBUG_PROMPTS,
+        _AGENT_PROMPTS_LOG_PATH: AGENT_DEBUG_PROMPTS,
+    }
+    enabled = _gates.get(log_path, RAW_DEBUG_PROMPTS) if log_path else LLM_DEBUG_PROMPTS
     if not enabled or skip:
         return
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -451,7 +464,9 @@ def _eval_kv_cache(cache) -> None:
         mx.eval(*to_eval)
 
 
-def _system_prefix_text(model_path: str, tokenizer, system_content: str) -> str | None:
+def _system_prefix_text(
+    model_path: str, tokenizer, system_content: str, tools: list | None = None
+) -> str | None:
     """Render the system-only head of the prompt, or None if it can't be done safely.
 
     The result MUST be a textual prefix of what _build_prompt produces for the same
@@ -470,6 +485,40 @@ def _system_prefix_text(model_path: str, tokenizer, system_content: str) -> str 
     Returning None disables system-KV caching for the call: slower, still correct.
     """
     model_short = model_path.split("/")[-1]
+
+    # ── Avec outils, le bloc système ne se rend PAS comme sans ────────────────
+    # Le template Qwen3.6 ouvre le bloc système par « # Tools » et les schémas, et ne
+    # place le contenu système qu'ENSUITE (qwen36_ninja.jinja, lignes 50-59). Un candidat
+    # construit sans outils n'est alors pas un préfixe du prompt réel — mesuré le
+    # 19/08/2026 : 499 tokens annoncés, 3 réellement communs. _lru_get_cache tranchait le
+    # prompt à 499 et faisait reprendre le modèle au milieu du JSON des outils, avec un
+    # cache portant autre chose. Aucune exception, des réponses dégradées : noms d'outils
+    # inventés, appels écrits en prose. Concernait l'agent ET OpenCode via /v1/raw.
+    #
+    # On découpe donc le préfixe DANS le rendu réel, à la fin du premier bloc système :
+    # c'est un préfixe par construction, et il couvre la partie coûteuse (schémas inclus).
+    if tools:
+        try:
+            probe = tokenizer.apply_chat_template(
+                [{"role": "system", "content": system_content}, {"role": "user", "content": "?"}],
+                tools=tools, tokenize=False, add_generation_prompt=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "System prefix: rendu avec outils impossible (%s: %s) — cache KV système désactivé",
+                model_short, exc,
+            )
+            return None
+        marker = "<|im_end|>\n"
+        end = probe.find(marker)
+        if end == -1:
+            logger.warning(
+                "System prefix: fin du bloc système introuvable (%s) — cache KV système désactivé",
+                model_short,
+            )
+            return None
+        return probe[: end + len(marker)]
+
     candidate: str | None = None
     try:
         candidate = tokenizer.apply_chat_template(
@@ -512,11 +561,14 @@ def _system_prefix_text(model_path: str, tokenizer, system_content: str) -> str 
 
 
 def _make_system_kv(
-    model_path: str, model, tokenizer, system_content: str
+    model_path: str, model, tokenizer, system_content: str, tools: list | None = None
 ) -> tuple[Any, list[int]] | None:
     """Pre-fill system prompt into a KV cache.
-    Returns (cache, sys_token_ids) or None on failure."""
-    sys_prompt_text = _system_prefix_text(model_path, tokenizer, system_content)
+    Returns (cache, sys_token_ids) or None on failure.
+
+    `tools` : indispensable dès que l'appelant en passe au template — le bloc système
+    rendu en dépend, et un préfixe calculé sans eux ne correspond pas au prompt réel."""
+    sys_prompt_text = _system_prefix_text(model_path, tokenizer, system_content, tools)
     if sys_prompt_text is None:
         return None
     sys_token_ids = _prompt_token_ids(sys_prompt_text, tokenizer)
@@ -554,6 +606,7 @@ def _lru_get_cache(
     tokenizer,
     sys_content: str,
     prompt_token_ids: list[int],
+    tools: list | None = None,
 ) -> tuple[Any | None, list[int]]:
     """
     Fetch the best cached prefix for this prompt from the LRU.
@@ -596,7 +649,7 @@ def _lru_get_cache(
         return cache, remaining
 
     # LRU miss: build fresh system KV cache
-    result = _make_system_kv(model_path, model, tokenizer, sys_content)
+    result = _make_system_kv(model_path, model, tokenizer, sys_content, tools)
     if result is None:
         return None, prompt_token_ids
     sys_cache, sys_token_ids = result
@@ -1350,7 +1403,10 @@ async def stream_local(
             prompt_tokens = len(tok_ids)
 
             sys_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
-            lru_cache, remaining = _lru_get_cache(model, mlx_model, tokenizer, sys_content, tok_ids)
+            # `tools` transmis : le bloc système rendu en dépend (cf. _system_prefix_text).
+            lru_cache, remaining = _lru_get_cache(
+                model, mlx_model, tokenizer, sys_content, tok_ids, tools
+            )
             cache_kwarg = {"prompt_cache": lru_cache} if lru_cache is not None else {}
 
             profile = _model_profile(model)

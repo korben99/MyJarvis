@@ -28,7 +28,7 @@ contains financial or tabular information.
 
 import asyncio
 
-from config import USERS, USER_ADMINS, USER_TIMEZONES
+from config import AGENT_ENABLED, USERS, USER_ADMINS, USER_TIMEZONES
 from deps import (
     GOOGLE_CHAR_BUDGET,
     MEMORY_CHAR_BUDGET,
@@ -82,6 +82,12 @@ def build_system_prompt(user_code: str = "") -> str:
         parts.append(
             f"Tu parles avec {firstname}. Tutoie toujours, quelle que soit la langue du contexte injecté."
         )
+    # Capacité agent : admins seulement, et seulement si la boucle est active. Placée ici,
+    # du côté qui diverge déjà par utilisateur — la mettre dans SYSTEM_BASE_FR annoncerait
+    # à tous une commande que seuls les admins peuvent lancer.
+    if AGENT_ENABLED and user_code in USER_ADMINS:
+        parts.append(get_prompt("AGENT_CAPABILITY_FR").format(firstname=firstname or "l'utilisateur"))
+
     if profile:
         fields = " — ".join(f"{k} : {v}" for k, v in profile.items() if v)
         parts.append(f"<profil_utilisateur>\n{fields}\n</profil_utilisateur>")

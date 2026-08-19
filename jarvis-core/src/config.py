@@ -388,6 +388,15 @@ AGENT_QUIET_SECONDS = float(os.getenv("AGENT_QUIET_SECONDS", "45"))
 # résultats quand la somme dépasse le budget, ce qui est le bon endroit pour arbitrer.
 AGENT_MAX_TOOL_OUTPUT = int(os.getenv("AGENT_MAX_TOOL_OUTPUT", "15000"))
 
+# Plafond d'UNE lecture de fichier (read_file). Plus haut que le plafond général : un
+# fichier source doit tenir en UNE lecture. La pagination est ce que le modèle rate le
+# plus mal — mesuré le 19/08/2026 sur vitals.py (25 168 caractères, donc 2 lectures à
+# 15 000) : l'indication « reprends avec offset=318 » a été ignorée quatre fois de suite,
+# le modèle rejouant la même lecture jusqu'à épuiser la tâche. À 32 000, le fichier passe
+# d'un coup et le problème ne se pose plus. Coût : ~8 000 tokens de contexte pour un gros
+# fichier, sur les ~32 000 praticables — le contexte total d'une tâche mesurait 7 800.
+AGENT_READ_MAX_CHARS = int(os.getenv("AGENT_READ_MAX_CHARS", "32000"))
+
 # Plafond d'extraction d'UNE page lue par l'agent (fetch_url). Distinct de
 # _PAGE_MAX_CHARS (6000), calibré pour le budget de contexte du chat : l'agent lit une
 # source pour en tirer dates et chiffres exacts, et un article de presse dépasse
@@ -401,12 +410,41 @@ AGENT_PAGE_MAX_CHARS = int(os.getenv("AGENT_PAGE_MAX_CHARS", "14000"))
 # relit. Pour l'agent, c'est du bruit qu'il ne peut PAS identifier comme tel et qui le fait
 # diverger — mesuré le 19/08/2026 : 5 appels, 19 435 caractères de règlement intérieur et
 # de factures sur une tâche de renseignement.
-# Calibré sur mesure, sur cette base : hors sujet plafonne à 0.41-0.52, une vraie
-# correspondance monte à 0.72-0.73. 0.60 sépare les deux avec de la marge.
-AGENT_DOCS_MIN_SCORE = float(os.getenv("AGENT_DOCS_MIN_SCORE", "0.60"))
+# Abaissé de 0.60 à 0.35 le 19/08/2026, après contre-exemple. 0.60 venait d'une
+# calibration sur 5 requêtes DESCRIPTIVES ; il rejetait les requêtes par TITRE ou
+# acronyme, que l'embedding multilingue encode mal : « VIT Conscienceness AI » → 0.53 et
+# « Consciensness AI TACL » → 0.45 sur un corpus de 10 documents pourtant consacrés au
+# sujet. Or l'étape 1 du RAG avait identifié le bon document PAR SON TITRE, sans seuil —
+# et ce plancher défaisait ce travail.
+#
+# Il est de toute façon devenu redondant : depuis que RAG_SCORE_THRESHOLD est passé à
+# 0.55, le bruit est bloqué à la source (« Zero Bytes » ne fait plus adopter aucun
+# document). Ce plancher ne sert donc plus que de dernier filet, d'où sa valeur basse.
+# Les scores restent affichés à l'agent : c'est à lui de juger de la pertinence.
+AGENT_DOCS_MIN_SCORE = float(os.getenv("AGENT_DOCS_MIN_SCORE", "0.35"))
 
 # Rétention des enregistrements de tâche dans Redis.
 AGENT_TASK_TTL = int(os.getenv("AGENT_TASK_TTL_DAYS", "30")) * 86400
+
+# ── Shell agentique (Phase 2) ─────────────────────────────────────────────
+# Désactivé par défaut. Un shell sous le compte de l'utilisateur est la capacité la plus
+# dangereuse de la boucle : elle s'active sciemment, jamais par héritage de configuration.
+# Confinement : seatbelt (écriture workspace+/tmp, pas de réseau, secrets illisibles),
+# liste noire, quota et délai. Voir agent/shell.py.
+AGENT_SHELL_ENABLED = os.getenv("AGENT_SHELL_ENABLED", "false").lower() in ("yes", "true", "1")
+
+# Délai par commande. Court volontairement : une commande qui dépasse est presque toujours
+# une commande interactive ou en boucle, pas un traitement long légitime.
+AGENT_SHELL_TIMEOUT = float(os.getenv("AGENT_SHELL_TIMEOUT", "60"))
+
+# Quota de commandes par tâche — borne les dégâts d'une boucle que les autres détecteurs
+# laisseraient passer (arguments variables à chaque appel).
+AGENT_SHELL_MAX_CALLS = int(os.getenv("AGENT_SHELL_MAX_CALLS", "25"))
+
+# Réseau dans le shell. Coupé par défaut : l'agent a déjà web_search et fetch_url, qui
+# passent par du code journalisé et borné. Un `curl` libre est le chemin d'exfiltration le
+# plus court qui soit. Ne l'ouvrir que pour une tâche qui l'exige vraiment (pip, git clone).
+AGENT_SHELL_NETWORK = os.getenv("AGENT_SHELL_NETWORK", "false").lower() in ("yes", "true", "1")
 
 # Racines lisibles en plus du workspace (lecture seule, jamais d'écriture). Sert la
 # lecture du code source prévue en Phase 1 d'Autocoding (ROADMAP).

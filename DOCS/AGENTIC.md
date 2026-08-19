@@ -146,6 +146,10 @@ Vérifié en conditions réelles le 19/08/2026 : `lockbit3` → 57 `.onion` conn
   `AGENT_READONLY_ROOTS`. `/opt/jarvis/.env` est hors des racines, donc illisible.
 - **Budgets indépendants** : `AGENT_MAX_STEPS` (dérive), `AGENT_TASK_TIMEOUT_MINUTES`
   (temps réel), détection de boucle serrée (3 appels identiques d'affilée).
+- **Trois détecteurs de blocage**, chacun né d'une panne observée : 3 générations vides
+  d'affilée (prompt cassé) · 3 appels d'outil identiques (méthode en échec) · 3 tours de
+  prose identiques sans appel d'outil (modèle figé). Les trois sont nécessaires — chacun
+  laisse passer ce que les deux autres attrapent.
 - **Un appel d'outil par tour** : les appels surnuméraires d'un même tour porteraient sur
   des résultats que le modèle n'a pas encore vus. Le premier est exécuté, les autres
   ignorés — et le modèle en est informé.
@@ -175,9 +179,41 @@ d'un objectif suivi d'un tas de résultats bruts — **32 messages, 17 000 token
 tours assistant à 0 caractère de contenu**. Le modèle redécouvrait le problème à chaque
 tour et rejouait six fois la même recherche.
 
-Le raisonnement du **dernier** tour est désormais réinjecté (un seul : au-delà, la
-croissance redevient quadratique). Effet mesuré sur la même tâche : **6 pas au lieu de 16,
-et un livrable au lieu de rien**.
+**Deux tentatives de rapatrier le raisonnement ont échoué**, chacune en figeant la boucle,
+et il faut les garder en mémoire — elles disent quelque chose de général sur ce qu'on peut
+remettre dans un contexte :
+
+| Placement | Panne |
+|---|---|
+| Fusionné dans le `content` du tour assistant | Le modèle en déduit « contenu assistant = mon raisonnement » : il émet sa réflexion, ferme `</think>`, puis **réécrit le même texte en sortie visible** (`think=3556 car, visible=3556 car`) et se fige 6 pas. |
+| Message `user` en fin de contexte | Le plan périmé devient le signal **le plus récent** : il relit « ton plan était de lire l'article RTL » juste après avoir reçu cet article, et le refetche. 3 fois. |
+
+La leçon : du raisonnement réinjecté est soit pris pour un modèle de sortie, soit pour un
+ordre frais. **La solution n'est pas de mieux le replacer, c'est de ne pas en mettre.**
+
+### L'outil `plan` — l'agent suit son propre plan
+
+Un plan est une **donnée**, pas du raisonnement : il ne peut être confondu ni avec une
+sortie attendue, ni avec une instruction fraîche.
+
+- premier appel obligatoire : `plan(steps=[…])`, 3 à 6 étapes courtes ;
+- le plan est **réaffiché sous chaque résultat d'outil**, avec l'étape courante fléchée ;
+- `plan(done=N)` coche une étape ; de nouveaux `steps` remplacent le plan quand la réalité
+  le dément ;
+- **`plan` est le seul outil autorisé en plus d'une action dans le même tour.** L'exception
+  est de principe : marquer une étape ne dépend d'aucun résultat. L'exiger dans un tour
+  séparé ferait payer un pas par étape — un quart du budget en comptabilité.
+
+Le modèle écrit en plus **une phrase en clair** avant chaque appel (`AGENT_SYSTEM`) : elle
+atterrit dans `content`, se persiste d'elle-même et occupe la bonne place chronologique.
+C'est tout ce qu'il relit de son propre cheminement, et ça ne coûte aucune mécanique.
+
+### Où le compteur de tours est injecté
+
+Le pied de chaque résultat d'outil porte `[pas N/max]` — mais il n'arrive qu'**à partir du
+tour 2**. Au tour 1, le modèle ne voyait que l'objectif : ni sa position, ni ce qu'on
+attendait de lui en premier. `AGENT_OBJECTIVE` porte donc lui aussi le compteur et la
+consigne de planification, sur le seul message dont il dispose à cet instant.
 
 Corollaire : le découpage `<think>` doit précéder `parse_tool_calls`. Le modèle ébauche
 souvent un appel *dans* sa réflexion pour l'écarter ensuite — parser le brut l'exécuterait.
@@ -206,9 +242,28 @@ Trois règles dans `AGENT_SYSTEM`, plus un garde-fou mécanique :
 2. aucune date, aucun chiffre, aucune citation qui ne vienne d'une source lue ;
 3. toute source se cite avec son URL.
 
-Le garde-fou : `finish` est **refusé une fois** si aucun livrable ne contient d'URL
-(`_has_sources`). Une seule objection, jamais deux — sinon un livrable qui n'a
-légitimement pas de source (un script) devient impossible à rendre.
+#### Le garde-fou de sources : de bloquant à informatif (même journée)
+
+Première version : `finish` refusé si aucun livrable ne citait de source. Bilan sur une
+journée d'essais — **zéro fabrication rattrapée**, deux rustines nécessaires pour éviter
+les faux positifs (documentation de code, base documentaire), et un rapport de 11 ko
+**détruit** parce que l'objection a poussé le modèle à réécrire son fichier au lieu d'y
+ajouter une section.
+
+Beaucoup de livrables n'ont légitimement rien à citer : un script, un fichier de
+configuration, une synthèse des données de l'utilisateur lui-même. Et ce qui corrige
+réellement les inventions, ce sont les règles de sourçage d'`AGENT_SYSTEM` — l'article
+ZeroBytes est sorti avec dix citations sans que le garde-fou n'intervienne.
+
+Il est donc devenu un **signalement joint au compte rendu** : *« ce livrable ne cite
+aucune source consultée »*. L'information reste, la coercition disparaît, l'humain juge.
+
+#### Écrasement d'un livrable — garde `write_file`
+
+`append` par défaut à false : une écriture sans ce drapeau REMPLACE le fichier. Un rapport
+bâti en cinq pas est ainsi passé de 11 ko à 726 octets. `write_file` refuse désormais un
+remplacement qui raccourcit un fichier existant de plus de 30 %, et indique les deux
+sorties : `append=true` pour ajouter, `overwrite=true` pour remplacer délibérément.
 
 ### API
 
@@ -228,18 +283,230 @@ fin, via le même chemin de livraison que les push du proto-self.
 
 ---
 
-## Phase 2 — Shell — À FAIRE
+### Validation en conditions réelles (19/08/2026)
 
-Le point sensible : Jarvis tourne sous le compte `korben`, avec ses droits pleins.
+Tâche : *« note de synthèse sur le groupe Zero Bytes, actif contre des cibles françaises,
+sources citées »* — sujet d'actualité, absent des données d'entraînement du modèle.
 
-- [ ] Outil `shell(cmd, timeout)` — `cwd` forcé sur le workspace
-- [ ] `sandbox-exec` (seatbelt macOS) : profil autorisant l'écriture au seul workspace
-      + `/tmp`, lecture globale
-- [ ] Denylist (`sudo`, `launchctl`, `docker`, `rm -rf /`, `curl | sh`, `git push`),
-      timeout 120 s par commande, quota de commandes par tâche, sortie tronquée
+| | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| Issue | 20 pas, aucun livrable | figé, aucun livrable | **8 pas, livrable** |
+| Dates | inventées (2024/25 sur des faits de 2026) | — | **exactes et sourcées** |
+| Sources | 2, sans URL | — | **10 citations numérotées, URL réelles** |
+| Réflexion par tour | ~3500 car | 3556 (figé) | **72-335 car** |
+| Durée par pas | 30-80 s | — | **5-17 s** |
+
+Enchaînement du run 3 : `plan` → `web_search` → 2 × `fetch_url` (lectures complètes) →
+replanification → 2 × `write_file` → `finish`. La reprise sur troncature s'est déclenchée
+une fois et a fonctionné.
+
+L'effondrement de la réflexion (3500 → 300 caractères) est l'effet direct du plan : le
+modèle ne redérive plus le problème entier à chaque tour, il lit son plan et agit.
+
+Le livrable a été recoupé avec des recherches indépendantes : 678 000 comptes DGFiP, juin
+2026, VPN compromis, Intermarché Drive — tout tient. Le modèle a même produit de lui-même
+une section « Limites de l'analyse » signalant les revendications non confirmées, ce qui
+est la pratique CTI correcte.
+
+Deux défauts résiduels, tous deux corrigés depuis : une bibliographie par morceau écrit
+(consigne ajoutée) et un `append` collé au contenu précédent sans saut de ligne (jointure
+posée mécaniquement dans `write_file`).
+
+---
+
+## Phase 2 — Shell — LIVRÉ (2026-08-19)
+
+Jarvis tourne sous le compte `korben`, avec ses droits pleins. Le confinement n'est donc
+pas une option de configuration, c'est la condition d'existence de l'outil.
+
+- [x] Outil `shell(cmd, timeout)` — `cwd` forcé sur le workspace, `HOME` redirigé dessus
+- [x] `sandbox-exec` (seatbelt) : écriture limitée au workspace + `/tmp`, **réseau coupé**,
+      secrets (`.env`, `keys/`, `.ssh`, Keychains) illisibles
+- [x] Liste noire (`sudo`, `launchctl`, `docker`, `rm -rf /`, `curl | sh`, `git push`,
+      `diskutil`, arrêt machine…) — garde-fou contre l'erreur franche, pas une barrière
+- [x] Environnement réduit : aucune clé d'API de Jarvis à portée d'un `env`
+- [x] Délai par commande (60 s), quota par tâche (25), sortie tronquée
+- [x] **Désactivé par défaut** (`AGENT_SHELL_ENABLED=false`), et le schéma n'est même pas
+      déclaré au modèle quand la capacité est éteinte
 - [ ] Outil `ask_human` — suspend la tâche, push, reprise à la réponse
-- [ ] Durcissement optionnel : conteneur `jarvis-agent` dans `docker-compose.yml`,
-      workspace en volume, `/opt/jarvis` monté en lecture seule
+- [ ] Durcissement optionnel : conteneur `jarvis-agent`, `/opt/jarvis` en lecture seule
+
+### Validation en conditions réelles
+
+Tâche : *« analyse `jarvis-api.log` et fais un rapport des erreurs de la journée »* — 2,7 Mo,
+donc hors de portée de `read_file` : le shell est le seul chemin. Quatre exécutions, dont
+trois échecs qui ont chacun désigné un défaut précis.
+
+| Run | Issue | Défaut révélé |
+|---|---|---|
+| 1 | 20 pas, aucun fichier | shell trouvé au pas 8 ; relance de fin de budget trop douce |
+| 2 | figé sur 4 `plan` | tours « plan seul » sans pied de page — aucun signal de budget |
+| 3 | rapport **détruit** | `write_file` sans `append` écrase ; garde-fou sources coercitif |
+| 4 | **réussite** | 20 pas, 8 commandes, rapport de 5,8 ko |
+
+Contrôle du livrable du run 4 contre le journal réel :
+
+| Affirmation | Réel |
+|---|---|
+| 113 entrées ERROR/WARNING le 19/08 | 112 — à une unité près |
+| Boucle `item pairs from a mapping`, 10h03–10h38 | 40 occurrences, **toutes** dans cette fenêtre |
+| Outils absents des déclarés, 13h44–13h47 | 3, noms cités correctement |
+| Google en échec pour deux utilisateurs | 124 occurrences |
+
+Le rapport a diagnostiqué **les bugs de la journée dans ce dépôt**, dont
+`normalise_messages_for_template` (*« un dict mal sérialisé entre le LLM et le parser
+interne — inspection de jarvis-core/src/llm/ nécessaire »*) et les noms d'outils hallucinés.
+
+Seul défaut : « 40 » devient « ~68 » dans le résumé de notification, alors que le document
+est exact. Un chiffre approximé au moment de résumer, pas au moment d'analyser.
+
+### Auto-correction observée
+
+Le modèle a écrit `grep -oP` (GNU), lu l'échec BSD, et réécrit
+`grep -o '^[0-9]\{4\}-…'` sans aide. Il a aussi filtré ses propres commandes du journal
+avant analyse — *« pour éviter les biais autocentrés »* —, ce que personne ne lui avait dit.
+
+### Ce que quatre runs ont appris sur les garde-fous
+
+Sur douze pannes de la journée, **la moitié venait de garde-fous ajoutés en réaction à la
+panne précédente** : le refus de `finish` sans source a détruit un rapport, la relance de
+marquage a provoqué quatre `plan` stériles, le plancher RAG à 0.60 a rendu la base
+documentaire inaccessible. La règle qui en sort, et qui vaut pour la suite :
+
+> **Mesurer avant de durcir. Préférer signaler à interdire.**
+
+C'est le motif classique du risque introduit par la mesure qui contre un risque.
+
+### Pourquoi `(allow default)` et non `(deny default)`
+
+Un profil deny-default casse la moitié des outils Unix sur macOS (mach-lookup, sysctl,
+dyld) et aurait produit un shell inutilisable. On ferme les deux voies par lesquelles une
+erreur sort de la machine — **écriture hors zone et réseau** — et on garde le reste ouvert.
+La lecture reste large à dessein : l'agent doit pouvoir inspecter le système pour être
+utile, et tout ce qu'il lit finit dans un contexte que l'utilisateur relit.
+
+Le réseau est coupé alors même que l'agent a `web_search` et `fetch_url` : ces outils
+passent par du code journalisé et borné. Un `curl` libre est le chemin d'exfiltration le
+plus court qui soit.
+
+### Vérification du confinement (macOS 26.6, avant mise en service)
+
+| Tentative | Résultat |
+|---|---|
+| Écriture dans le workspace | autorisée |
+| Écriture dans `/opt/jarvis` | `Operation not permitted` |
+| `touch /Users/korben/PWNED` | `Operation not permitted` |
+| Écriture via `python3 open(…,'w')` | `PermissionError` |
+| `cat /opt/jarvis/.env` | refusé (liste noire) |
+| `cat /opt/jarvis/.e''nv` — **contournement de la regex** | `Operation not permitted` (noyau) |
+| `curl https://example.com` | exit 6 (pas de réseau) |
+| `socket.create_connection()` en Python | `PermissionError` |
+| `env \| grep -c 'api\|key\|token'` | `0` |
+| `sleep 5` avec délai 2 s | interrompu |
+
+Le dernier point est le plus important : **la liste noire est contournable, le bac à sable
+ne l'est pas.** C'est la seule couche sur laquelle reposer.
+
+---
+
+### Second registre validé — lecture de code (19/08/2026)
+
+Tâche : *« lis `vitals.py` et documente son fonctionnement, dont où le score de risque est
+consommé ailleurs dans le code »*. Registre volontairement éloigné du web.
+
+**Résultat : 12 pas, livrable exact.** L'agent a lu `vitals.py`, cherché le consommateur,
+ouvert `steering.py` de lui-même, et compris le lien. Recoupé contre le code : les 5
+familles de disparition, `risk_scalar`, `_ramp`, `steering.set_risk`, et **les 12
+identifiants de sondes cités existent tous**.
+
+Trois défauts, dont deux corrigés :
+
+| Défaut | Traitement |
+|---|---|
+| 4 appels `plan` identiques sans rien changer (pas 8-11), soit un tiers du budget | `plan` répond désormais « inchangé, rien n'a bougé » et rappelle d'utiliser `done` ; les tours sans action comptent dans la fenêtre de boucle |
+| 2 noms d'outils inventés (`list_directory`, `search_files`), 2 pas perdus | Récupération déjà correcte — le message d'outil inconnu liste les outils réels |
+| 2 caractères CJK (`部分`) dans 4738 caractères de français | Artefact de décodage de Qwen quantifié. Consigne d'alphabet ajoutée au prompt — atténuation partielle, la cause est au niveau du décodage |
+
+Enseignement transversal des sept runs : **presque toutes les pannes venaient de la
+plomberie, pas du modèle** — prompt enseignant le mauvais format, budget exprimé en lignes
+au lieu de caractères, compteur de boucle mesurant les répétitions consécutives au lieu
+d'une fenêtre. Le 35B choisit correctement quand on lui présente les choses correctement.
+
+---
+
+### Cache LRU et prompt d'agent (19/08/2026)
+
+Le prompt d'agent respecte la doctrine du chat, en plus strict : **tête constante, queue
+strictement croissante par ajout**.
+
+```
+[bloc système : outils + AGENT_SYSTEM]   constant pour toute la tâche
+[user : OBJECTIF]                        constant
+[assistant → tool → assistant → tool …]  croît, jamais réécrit
+```
+
+Rien de dynamique ne s'insère en tête — ni date, ni mémoire, ni état émotionnel,
+contrairement à `build_dynamic_prefix` du chat.
+
+#### Le bug qui annulait tout : préfixe système calculé sans les outils
+
+`_system_prefix_text` construisait son candidat de préfixe **sans passer `tools`**, et
+vérifiait son invariant contre un rendu lui aussi sans outils — la vérification passait
+donc toujours. Or le template ouvre le bloc système par `# Tools` et les schémas, et ne
+place le contenu système qu'ensuite (`qwen36_ninja.jinja:50-59`).
+
+```
+AVANT : préfixe annoncé  499 tok | réellement communs    3 tok | valide=False
+APRÈS : préfixe annoncé 1853 tok | réellement communs 1853 tok | valide=True
+```
+
+`_lru_get_cache` tranchait le prompt réel à 499 tokens et faisait reprendre le modèle **au
+milieu du JSON des outils**, avec un cache portant autre chose. Aucune exception — la
+docstring annonçait le symptôme : *« garbled answers, no exception raised »*. Concernait
+chaque génération outillée : la boucle agentique **et** OpenCode via `/v1/raw`.
+
+Réexplique plusieurs pannes d'abord imputées au modèle : noms d'outils inventés
+(`list_directory`, `search_files`), appels écrits en prose, consignes de résultat ignorées.
+
+#### Ce que le mode thinking coûte encore
+
+La queue reste non réutilisable en mode thinking : la clé LRU contient le `<think>` brut,
+absent du prompt suivant, et `ArraysCache` (Qwen3.6 hybride) n'est pas trimmable — donc
+`fetch_nearest_cache` saute l'entrée. Coût mesuré sur le run de lecture de code :
+
+```
+pas 2-3   :  6-8 s
+pas 7-12  : 34-68 s     ← re-prefill d'un contexte qui grossit
+```
+
+En `no_think`, `_build_prompt` passe `preserve_thinking=True` et la clé redevient un vrai
+préfixe. Vérifié **pour notre forme de messages**, `tool_calls` compris (leur mesure
+d'origine portait sur une conversation de chat sans outils) : clé de 5490 caractères,
+préfixe du prompt suivant à 100 %.
+
+#### Résultat de l'A/B no_think — TRANCHÉ, on reste en thinking (19/08/2026)
+
+Même tâche (documenter `vitals.py`), `AGENT_THINKING_BUDGET=0`, `AGENT_MAX_STEPS=30`.
+
+| | thinking | no_think |
+|---|---|---|
+| Pas | 12 | 21 |
+| Durée moyenne / pas | ~28 s | **27 s** — aucun gain |
+| Exactitude du livrable | 12 identifiants vérifiés réels | **fabrication complète** |
+
+Le document produit en no_think ne cite **aucune** des 5 familles réelles et invente
+`_check_redis()`, `_check_qdrant()`, `_check_disk_space()`, `_boot_checks()`, un
+`/proc/statfs` (Linux, sur une machine macOS), Qdrant, OpenAI, des inodes et des tableaux
+de seuils. Le fichier avait pourtant été lu sept fois : le modèle avait le contenu réel
+sous les yeux et a rédigé un module de monitoring générique tiré de ses a priori.
+
+**Le raisonnement est ce qui intègre ce qui vient d'être lu.** Le supprimer ne rend pas
+l'agent plus rapide, il le rend confiant et faux — le pire des deux mondes pour un
+livrable destiné à être utilisé.
+
+Réserve méthodologique : le correctif du préfixe LRU a été livré dans la même fournée,
+donc l'A/B est confondu. Le gain LRU, lui, est isolé et net : **1 seul prefill de 1874
+tokens pour 21 pas**, contre 12 prefills de 1140 auparavant.
 
 ---
 

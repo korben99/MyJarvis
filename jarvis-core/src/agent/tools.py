@@ -19,8 +19,11 @@ import os
 
 from config import (
     AGENT_DOCS_MIN_SCORE,
+    AGENT_SHELL_ENABLED,
+    AGENT_SHELL_TIMEOUT,
     AGENT_MAX_TOOL_OUTPUT,
     AGENT_PAGE_MAX_CHARS,
+    AGENT_READ_MAX_CHARS,
     AGENT_WRITE_MAX_CHARS,
 )
 from helpers import get_logger
@@ -29,8 +32,15 @@ from .sandbox import SandboxError, ensure_parent, relative, resolve
 
 logger = get_logger("jarvis-agent")
 
-# Nom réservé : traité par la boucle, jamais dispatché ici.
-FINISH = "finish"
+# Fichiers de service de la boucle, présents dans chaque workspace. Masqués à l'agent :
+# au run du 19/08/2026 il a listé son dossier puis lu son PROPRE transcript au pas 2,
+# dépensant un tour à relire sa propre trace. Ils ne lui apprennent rien qu'il n'ait déjà
+# dans son contexte, et messages.json en est une copie intégrale.
+_FICHIERS_INTERNES = frozenset({"transcript.jsonl", "messages.json", "messages.json.tmp"})
+
+# Noms réservés, traités à part par la boucle.
+FINISH = "finish"   # jamais dispatché ici — c'est la sortie de la boucle
+PLAN = "plan"       # seul outil autorisé EN PLUS d'une action dans le même tour
 
 
 def _truncate(text: str, limit: int = 0) -> str:
@@ -49,9 +59,8 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "web_search",
             "description": (
-                "Recherche sur le web. Renvoie titre, extrait et URL. Les extraits servent "
-                "à REPÉRER les bonnes sources, jamais à rédiger : ils sont courts, souvent "
-                "sans date et parfois trompeurs. Ouvre ensuite la source avec fetch_url."
+                "Recherche web : titres, extraits, URL. Les extraits servent à REPÉRER "
+                "les bonnes sources, jamais à rédiger. Ouvre-les ensuite avec fetch_url."
             ),
             "parameters": {
                 "type": "object",
@@ -68,9 +77,8 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "fetch_url",
             "description": (
-                "Lit une page web en entier. C'est ICI que tu prends tes dates, tes chiffres "
-                "et tes citations — un extrait de web_search ne suffit jamais pour ça. "
-                "Passage OBLIGÉ avant de rédiger une synthèse."
+                "Lit une page web en entier. C'est ici que tu prends dates, chiffres et "
+                "citations. Passage obligé avant de rédiger."
             ),
             "parameters": {
                 "type": "object",
@@ -84,10 +92,8 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "search_docs",
             "description": (
-                "Cherche dans les documents PERSONNELS de l'utilisateur : contrats, "
-                "factures, rapports internes, notes. Ne contient AUCUNE connaissance "
-                "générale — pour un sujet externe (entreprise, acteur, technologie), "
-                "c'est web_search qu'il faut."
+                "Documents PERSONNELS de l'utilisateur : contrats, factures, notes. "
+                "Aucune connaissance générale — pour un sujet externe, c'est web_search."
             ),
             "parameters": {
                 "type": "object",
@@ -101,10 +107,8 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "threat_intel",
             "description": (
-                "Renseignement sur un groupe d'attaquants (ransomware, extorsion), à partir "
-                "des agrégateurs de sites de fuite darknet. À utiliser AVANT le web pour "
-                "tout ce qui touche un groupe nommé : le web de surface recopie la presse, "
-                "ces sources-là remontent aux publications des groupes eux-mêmes."
+                "Groupes d'attaquants, via les agrégateurs de sites de fuite darknet. "
+                "À tenter AVANT le web sur tout groupe nommé."
             ),
             "parameters": {
                 "type": "object",
@@ -128,6 +132,59 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "plan",
+            "description": (
+                "Ton plan de travail, ton tout premier appel. `done` coche une étape faite, "
+                "`steps` remplace le plan quand la réalité le dément. Reposer le même plan "
+                "sans `done` ne fait rien."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Les étapes, dans l'ordre. 3 à 6, courtes et vérifiables.",
+                    },
+                    "done": {
+                        "type": "integer",
+                        "description": "Numéro de l'étape à marquer comme faite (1 = la première).",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "shell",
+            "description": (
+                "Exécute une commande shell dans ton espace de travail, en bac à sable : "
+                "écriture limitée à ton workspace, AUCUN accès réseau, secrets illisibles. "
+                "Pour compter, filtrer, chercher dans des fichiers, lancer un script. "
+                "Rien d'interactif : la commande doit se terminer seule. "
+                "MACHINE macOS, OUTILS BSD — pas les mêmes que sous Linux : pas de "
+                "`grep -P` (utilise `grep -E`), `sed -i` exige un argument (`sed -i ''`), "
+                "pas de `timeout`, `date` et `stat` ont une autre syntaxe. "
+                "Au moindre doute, passe par `python3` : il est présent et portable."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cmd": {"type": "string", "description": "La commande, ex \"wc -l *.md\"."},
+                    "timeout": {
+                        "type": "integer",
+                        "description": f"Délai en secondes. Défaut {AGENT_SHELL_TIMEOUT:.0f}.",
+                    },
+                },
+                "required": ["cmd"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_dir",
             "description": "Liste le contenu d'un dossier. Par défaut ton espace de travail.",
             "parameters": {
@@ -142,15 +199,21 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "read_file",
             "description": (
-                "Lit un fichier texte. Ton espace de travail est accessible, ainsi que le "
-                "code source de Jarvis en LECTURE SEULE."
+                "Lit un fichier : ton workspace, plus le code source de Jarvis en lecture "
+                "seule. Un gros fichier arrive en morceaux, le résultat indique la suite."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Chemin du fichier."},
                     "offset": {"type": "integer", "description": "Première ligne (1 par défaut)."},
-                    "limit": {"type": "integer", "description": "Nombre de lignes, défaut 200."},
+                    "limit": {
+                        "type": "integer",
+                        "description": (
+                            "Nombre de lignes max. Par défaut, autant que le budget le permet "
+                            "— ne le fixe que pour une lecture ciblée."
+                        ),
+                    },
                 },
                 "required": ["path"],
             },
@@ -161,11 +224,9 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "write_file",
             "description": (
-                "Écrit un fichier dans ton espace de travail. C'est ainsi que tu produis "
-                "tes livrables : notes, rapports, scripts. "
-                f"MAXIMUM {AGENT_WRITE_MAX_CHARS} caractères par appel — au-delà, ta sortie "
-                "est coupée et le tour est perdu. Pour un document plus long, découpe-le : "
-                "premier appel sans append, suivants avec append=true."
+                "Écrit dans ton workspace — c'est ainsi que tu produis tes livrables. "
+                f"Maximum {AGENT_WRITE_MAX_CHARS} caractères par appel, au-delà ta sortie est "
+                "coupée. Document plus long : découpe-le, append=true à partir du second."
             ),
             "parameters": {
                 "type": "object",
@@ -177,7 +238,17 @@ TOOL_SCHEMAS: list[dict] = [
                     },
                     "append": {
                         "type": "boolean",
-                        "description": "true = ajoute à la fin du fichier. Défaut false (écrase).",
+                        "description": (
+                            "true = AJOUTE à la fin. À utiliser dès que le fichier existe "
+                            "déjà : sans ce drapeau, tu remplaces tout son contenu."
+                        ),
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": (
+                            "true = remplacer délibérément un fichier par un contenu plus "
+                            "court. Sans ce drapeau, un tel remplacement est refusé."
+                        ),
                     },
                 },
                 "required": ["path", "content"],
@@ -189,8 +260,7 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": FINISH,
             "description": (
-                "Termine la tâche. À appeler UNIQUEMENT quand l'objectif est atteint, avec "
-                "un résumé de ce que tu as fait et la liste des fichiers produits."
+                "Termine la tâche, uniquement quand l'objectif est atteint."
             ),
             "parameters": {
                 "type": "object",
@@ -210,6 +280,11 @@ TOOL_SCHEMAS: list[dict] = [
         },
     },
 ]
+
+# Le shell n'est PAS déclaré au modèle tant que la capacité est éteinte : un outil annoncé
+# puis refusé lui fait perdre des tours à réessayer.
+if not AGENT_SHELL_ENABLED:
+    TOOL_SCHEMAS = [t for t in TOOL_SCHEMAS if t["function"]["name"] != "shell"]
 
 TOOL_NAMES = frozenset(t["function"]["name"] for t in TOOL_SCHEMAS)
 
@@ -244,6 +319,9 @@ async def _fetch_url(task: dict, args: dict) -> str:
     if not url.startswith("http"):
         return "Erreur : URL invalide (http/https attendu)."
     text = await _fetch_page_text(url, AGENT_PAGE_MAX_CHARS)
+    task.setdefault("sources_seen", [])
+    if url not in task["sources_seen"]:
+        task["sources_seen"].append(url)
     if not text:
         return f"Page vide ou inaccessible : {url}"
     return _truncate(text)
@@ -271,6 +349,15 @@ async def _search_docs(task: dict, args: dict) -> str:
             "factures, rapports internes — pas de la connaissance générale. "
             "Pour un sujet externe, utilise web_search."
         )
+    # Mémorisé au même titre qu'une URL ou un fichier lu : un article sourcé sur la base
+    # documentaire cite un nom de document, pas une URL — sans ça, _has_sources refusait
+    # le finish d'un livrable pourtant correctement sourcé.
+    task.setdefault("sources_seen", [])
+    for c in kept:
+        src = c.get("source")
+        if src and src not in task["sources_seen"]:
+            task["sources_seen"].append(src)
+
     lines = [
         f"### {c.get('source', '?')} (score {c.get('score', 0.0):.2f})\n{c.get('text', '')}"
         for c in kept
@@ -299,11 +386,142 @@ async def _threat_intel(task: dict, args: dict) -> str:
     return f"kind inconnu : {kind}. Valeurs acceptées : search, profile, victims, recent."
 
 
+def _same_step(a: str, b: str) -> bool:
+    """Deux intitulés désignent-ils la même étape, à une reformulation près ?
+
+    Le modèle réécrit ses étapes en replanifiant — « Recherche sources » devient
+    « recherche des sources ». Une comparaison caractère par caractère échoue sur un mot
+    inséré, et l'avancement acquis est perdu.
+
+    On s'appuie sur keyword_overlap_score (helpers/text.py), qui compte les mots de
+    contenu partagés hors stopwords français : c'est l'outil déjà utilisé ailleurs dans
+    Jarvis pour rapprocher deux formulations. Seuil bas assumé — rapprocher deux étapes
+    voisines à tort ne coûte qu'une case cochée un peu tôt, les séparer efface du travail
+    réellement fait.
+    """
+    from helpers import keyword_overlap_score
+
+    shared = keyword_overlap_score(a, b)
+    if shared == 0:
+        return False
+    # Rapporté au PLUS COURT des deux intitulés : « Analyse » et « Analyse des sources
+    # trouvées » ne partagent qu'un mot, mais c'est tout ce que le premier contient.
+    # keyword_overlap_score(x, x) donne le nombre de mots de contenu de x.
+    shortest = min(keyword_overlap_score(a, a), keyword_overlap_score(b, b))
+    return shortest > 0 and shared >= shortest * 0.6
+
+
+def render_plan(task: dict) -> str:
+    """Rend le plan courant, tel qu'il est réaffiché sous chaque résultat d'outil.
+
+    C'est ce réaffichage qui fait tout le travail : le plan est une DONNÉE stable, pas du
+    raisonnement réinjecté. Il ne peut donc ni être confondu avec une sortie attendue du
+    modèle, ni être relu comme un ordre frais à ré-exécuter — les deux pannes du
+    19/08/2026. Le modèle avance dedans en marquant ses étapes, et sait toujours où il en
+    est sans avoir à le redéduire.
+    """
+    steps = task.get("plan") or []
+    if not steps:
+        return ""
+    current = next((i for i, s in enumerate(steps) if not s.get("done")), len(steps))
+    lines = []
+    for i, step in enumerate(steps):
+        mark = "x" if step.get("done") else ("→" if i == current else " ")
+        lines.append(f"  [{mark}] {i + 1}. {step.get('text', '')}")
+    position = f"étape {current + 1}/{len(steps)}" if current < len(steps) else "toutes faites"
+    out = f"\n\nPlan ({position}) :\n" + "\n".join(lines)
+
+    # Relance quand rien n'a été coché depuis un moment : le modèle avance dans le travail
+    # mais oublie de le marquer, et son plan cesse alors de refléter où il en est.
+    stalled = task.get("steps", 0) - task.get("plan_marked_at", 0)
+    if current < len(steps) and stalled >= 3:
+        out += (
+            f"\n  (aucune étape cochée depuis {stalled} pas — si l'étape {current + 1} "
+            f"est faite, joins plan(done={current + 1}) à ton prochain appel)"
+        )
+    return out
+
+
+async def _plan(task: dict, args: dict) -> str:
+    from . import store
+
+    steps = args.get("steps")
+    done = args.get("done")
+
+    if isinstance(steps, str):
+        steps = [steps]
+    unchanged = False
+    if steps:
+        unchanged = [str(x).strip() for x in steps] == [
+            s["text"] for s in (task.get("plan") or [])
+        ]
+        # Une replanification REPORTE l'avancement déjà acquis, au lieu de le remettre à
+        # zéro. Le modèle replanifie en listant ce qu'il lui reste à faire, éventuellement
+        # en reprenant des étapes au même intitulé : effacer leur état, c'était décocher
+        # derrière lui puis lui reprocher de ne pas cocher (observé le 19/08/2026 — plan
+        # final à 1 étape sur 3 alors que le travail était fait).
+        previously_done = [s["text"] for s in (task.get("plan") or []) if s.get("done")]
+        task["plan"] = [
+            {
+                "text": str(s).strip(),
+                "done": any(_same_step(str(s), old) for old in previously_done),
+            }
+            for s in steps
+            if str(s).strip()
+        ][:8]
+
+    if done is not None:
+        try:
+            index = int(done) - 1
+        except (TypeError, ValueError):
+            return "Erreur : `done` doit être un numéro d'étape (1 = la première)."
+        current = task.get("plan") or []
+        if not 0 <= index < len(current):
+            return f"Erreur : l'étape {done} n'existe pas (le plan en compte {len(current)})."
+        # Re-cocher une étape déjà faite ne fait rien avancer : même tour perdu que reposer
+        # un plan inchangé, et le modèle y revenait autant (19/08/2026).
+        if current[index]["done"] and unchanged:
+            done = None
+        else:
+            current[index]["done"] = True
+
+    if not task.get("plan"):
+        return "Erreur : donne `steps` pour poser un plan."
+
+    # Reposer le MÊME plan sans rien cocher ne fait rien avancer et consomme un pas. Le
+    # modèle le fait en réaction à la relance de marquage, en renvoyant `steps` au lieu de
+    # `done` — observé le 19/08/2026 : 4 appels identiques d'affilée, un tiers du budget.
+    if unchanged and done is None:
+        current = next((i for i, s in enumerate(task["plan"]) if not s.get("done")), None)
+        hint = (
+            f" Pour marquer l'étape en cours comme faite, rappelle plan avec done={current + 1} "
+            f"— et joins-le à une VRAIE action, pas seul."
+            if current is not None else ""
+        )
+        return ("Plan inchangé, rien n'a bougé." + hint) + render_plan(task)
+
+    # Sert la relance de render_plan : on repère le décrochage entre le travail réel et
+    # son marquage. `steps` est le compteur de pas de la tâche, tenu par la boucle.
+    task["plan_marked_at"] = task.get("steps", 0)
+    store.save_task(task)
+    return "Plan à jour." + render_plan(task)
+
+
+async def _shell(task: dict, args: dict) -> str:
+    from . import shell as sh
+
+    sortie = await sh.executer(task, args.get("cmd") or "", float(args.get("timeout") or 0))
+    restantes = sh.commandes_restantes(task)
+    if restantes <= 5:
+        sortie += f"\n\n[{restantes} commande(s) restante(s) pour cette tâche]"
+    return _truncate(sortie)
+
+
 async def _list_dir(task: dict, args: dict) -> str:
     path = resolve(task["id"], args.get("path") or ".", write=False)
     if not os.path.isdir(path):
         return f"Pas un dossier : {args.get('path')}"
-    entries = sorted(os.listdir(path))
+    entries = sorted(e for e in os.listdir(path) if e not in _FICHIERS_INTERNES)
     if not entries:
         return "(dossier vide)"
     lines = []
@@ -319,24 +537,56 @@ async def _list_dir(task: dict, args: dict) -> str:
 
 async def _read_file(task: dict, args: dict) -> str:
     path = resolve(task["id"], args.get("path") or "", write=False)
+    if os.path.basename(path) in _FICHIERS_INTERNES:
+        return (
+            f"{os.path.basename(path)} est un fichier de service de la boucle, pas une "
+            "source : il ne contient que la trace de ce que tu as déjà fait."
+        )
     if not os.path.isfile(path):
         return f"Fichier introuvable : {args.get('path')}"
     offset = max(int(args.get("offset") or 1), 1)
-    limit = min(int(args.get("limit") or 200), 800)
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
     except OSError as exc:
         return f"Lecture impossible : {exc}"
-    selected = lines[offset - 1 : offset - 1 + limit]
-    if not selected:
+    if offset > len(lines):
         return f"Rien à lire à partir de la ligne {offset} (le fichier en compte {len(lines)})."
-    # Numérotation : l'agent doit pouvoir demander la suite sans recompter.
-    body = "".join(f"{offset + i}\t{line}" for i, line in enumerate(selected))
-    tail = ""
-    if offset - 1 + limit < len(lines):
-        tail = f"\n[…{len(lines) - (offset - 1 + limit)} lignes suivantes — relis avec offset={offset + limit}]"
-    return _truncate(body) + tail
+
+    # Le budget est en CARACTÈRES, pas en lignes. Un plafond de 200 lignes rendait 9 000
+    # caractères là où 15 000 étaient permis, et obligeait à paginer un fichier de 525
+    # lignes en trois appels — que le modèle a préféré rejouer à l'identique (19/08/2026).
+    # `limit` reste disponible pour une lecture ciblée, mais ne borne plus par défaut.
+    budget = AGENT_READ_MAX_CHARS
+    limit = int(args.get("limit") or 0)
+    kept, used = [], 0
+    for i, line in enumerate(lines[offset - 1:]):
+        if limit and i >= limit:
+            break
+        numbered = f"{offset + i}\t{line}"
+        if kept and used + len(numbered) > budget:
+            break
+        kept.append(numbered)
+        used += len(numbered)
+
+    task.setdefault("sources_seen", [])
+    if path not in task["sources_seen"]:
+        task["sources_seen"].append(path)
+
+    body = "".join(kept)
+    next_offset = offset + len(kept)
+    if next_offset > len(lines):
+        return body
+
+    # L'avertissement est répété EN TÊTE : placé au seul pied d'un bloc de 15 000 à 32 000
+    # caractères de code, il est noyé — mesuré le 19/08/2026, ignoré quatre fois de suite.
+    remaining = len(lines) - next_offset + 1
+    warning = (
+        f"[LECTURE PARTIELLE — lignes {offset} à {next_offset - 1} sur {len(lines)}. "
+        f"Il en reste {remaining}. Pour la suite : read_file avec offset={next_offset}. "
+        f"Redemander ces mêmes lignes ne rendra rien de neuf.]"
+    )
+    return f"{warning}\n\n{body}\n{warning}"
 
 
 async def _write_file(task: dict, args: dict) -> str:
@@ -349,6 +599,38 @@ async def _write_file(task: dict, args: dict) -> str:
     path = resolve(task["id"], rel, write=True)
     ensure_parent(path)
     append = bool(args.get("append"))
+
+    # ── Garde anti-écrasement ────────────────────────────────────────────────
+    # `append` par défaut à false : une écriture sans ce drapeau REMPLACE le fichier. Le
+    # 19/08/2026, un rapport bâti en cinq pas (11 ko) a été réduit à sa seule section
+    # « Sources » (726 o) parce que le modèle, invité à compléter ses sources, a réécrit
+    # sans append. Cinq pas de travail détruits par un booléen par défaut.
+    #
+    # On ne bloque QUE le cas accidentel : le fichier existe, on ne lui ajoute rien, et le
+    # nouveau contenu est nettement plus court que l'ancien. Une réécriture légitime
+    # (correction, réorganisation) produit un texte comparable ou plus long ; si elle est
+    # vraiment plus courte, `overwrite` la débloque en un mot.
+    if not append and not bool(args.get("overwrite")) and os.path.exists(path):
+        try:
+            ancien = os.path.getsize(path)
+        except OSError:
+            ancien = 0
+        if ancien > 0 and len(content) < ancien * 0.7:
+            return (
+                f"Écriture REFUSÉE : {relative(task['id'], path)} contient déjà {ancien} "
+                f"octets et tu n'en écris que {len(content)} — tu allais effacer ton propre "
+                "travail. Pour AJOUTER à la fin, utilise append=true. Pour remplacer "
+                "délibérément par une version plus courte, utilise overwrite=true."
+            )
+
+    # Un ajout qui démarre sans saut de ligne colle au contenu précédent et casse le
+    # markdown — mesuré le 19/08/2026 : « [5] https://…html## Contexte juridique ». Le
+    # modèle raisonne par blocs et ne pense pas à la jointure ; on la pose ici.
+    if append and content and not content.startswith("\n") and os.path.exists(path):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            f.seek(max(os.path.getsize(path) - 1, 0))
+            if f.read(1) not in ("\n", ""):
+                content = "\n\n" + content
     try:
         with open(path, "a" if append else "w", encoding="utf-8") as f:
             f.write(content)
@@ -356,18 +638,28 @@ async def _write_file(task: dict, args: dict) -> str:
     except OSError as exc:
         return f"Écriture impossible : {exc}"
     verb = "Ajouté à" if append else "Écrit"
-    # On rappelle le plafond à chaque écriture : c'est au moment où il vient d'écrire que
-    # le modèle décide s'il continue en append ou s'il conclut.
+    # On rend la FIN du fichier, pas seulement sa taille. Le modèle rédige par morceaux et
+    # ne se souvient pas de ce qu'il a déjà posé : au run du 19/08/2026 il a réécrit deux
+    # sections déjà présentes, dupliquant un paragraphe entier dans l'article final.
+    # Lui montrer sa dernière phrase lui dit où reprendre.
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            fin = f.read()[-220:]
+    except OSError:
+        fin = ""
     return (
         f"{verb} : {relative(task['id'], path)} — {len(content)} caractères écrits, "
-        f"{total} octets au total. Plafond par appel : {AGENT_WRITE_MAX_CHARS} caractères."
+        f"{total} octets au total. Plafond par appel : {AGENT_WRITE_MAX_CHARS} caractères.\n"
+        f"Fin actuelle du fichier — reprends APRÈS, ne la réécris pas :\n…{fin}"
     )
 
 
 _DISPATCH = {
     "web_search": _web_search,
     "fetch_url": _fetch_url,
+    "plan": _plan,
     "search_docs": _search_docs,
+    "shell": _shell,
     "threat_intel": _threat_intel,
     "list_dir": _list_dir,
     "read_file": _read_file,
