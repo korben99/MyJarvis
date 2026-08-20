@@ -6,7 +6,7 @@ projets actifs + état émotionnel + apprentissages/notes + relation utilisateur
 import json
 import time
 
-from config import QDRANT_MEMORY_COLLECTION
+from config import LEARNINGS_MAX_INJECTED, QDRANT_MEMORY_COLLECTION
 from helpers import (
     get_logger,
     get_qdrant,
@@ -117,6 +117,7 @@ _PROFILE_FILTER_THRESHOLD = 8
 
 # Max "other" (non-always) keys to keep after relevance scoring.
 _PROFILE_MAX_SCORED = 8
+
 
 
 def build_memory_context(
@@ -246,12 +247,23 @@ def build_memory_context(
         )
 
     # Self identity — apprentissages de Jarvis (guide interne, pas des faits sur l'utilisateur)
+    #
+    # Réinjection par RÉCENCE, en attendant que le ciblage soit tenable. Mesuré le
+    # 20/08/2026 (RESULTATS.md), trois mécanismes de tri ont échoué : le recouvrement
+    # lexical sur le topic (0 correspondance sur 8 questions), l'embedding sur un topic
+    # libre (vecteurs attracteurs — « securite abattage arbre frelon » attirait aussi bien
+    # l'effacement qu'une commande docker), et l'embedding sur le constat lui-même (le
+    # constat est en méta, le message en concret : deux registres incomparables).
+    #
+    # Ce qui rend la récence acceptable : dans eval_reuse.py, la condition « hors-sujet »
+    # a marqué EXACTEMENT comme l'absence de bloc (6 et 6). Un apprentissage bien formé
+    # mais hors sujet ne nuit pas — il coûte des tokens. Le gain du ciblage serait donc en
+    # tokens, pas en qualité, ce qui ne justifie pas d'expédier un tri qui se trompe.
     if self_mem.get("learnings"):
-        recent_learnings = self_mem["learnings"][-5:]
-        plines = [f"- {ln['text']}" for ln in recent_learnings]
+        retenus = self_mem["learnings"][-LEARNINGS_MAX_INJECTED:]
         parts.append(
             "<apprentissages_jarvis>\n"
-            + "\n".join(plines)
+            + "\n".join(f"- {ln['text']}" for ln in retenus)
             + "\n</apprentissages_jarvis>"
         )
 

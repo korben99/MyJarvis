@@ -125,12 +125,35 @@ async def _nightly_facts_user(
         return None
 
 
+def _normalise_reflections(brut: list) -> list[tuple[str, str]]:
+    """Retourne des paires (topic, constat) à partir de ce que le modèle a rendu.
+
+    Le schéma demande {"topic": …, "constat": …} ; un modèle local retombe parfois sur la
+    chaîne nue. Un constat sans terrain nommé reste un constat : on le garde avec un topic
+    vide, il sera simplement moins bien ciblé à la relecture.
+    """
+    paires: list[tuple[str, str]] = []
+    for r in brut:
+        if isinstance(r, dict):
+            texte, topic = r.get("constat") or r.get("text") or "", r.get("topic") or ""
+        else:
+            texte, topic = str(r or ""), ""
+        if texte.strip():
+            paires.append((topic.strip(), texte.strip()))
+    return paires
+
+
 async def _nightly_self_user(
     user_code: str, user_name: str, conversations: list[dict], review_date: str
 ) -> dict | None:
     """Call 2 — Jarvis self-reflection and opinion formation."""
     data = get_self_memory()
-    recent_self_reflections = [l["text"] for l in data.get("learnings", [])[-12:]]
+    # Avec leur topic : le modèle reproduit la forme qu'on lui remontre — c'est ainsi qu'il
+    # a tenu « je dois… » pendant des mois. On lui remontre donc la cible, pas l'ancien.
+    recent_self_reflections = [
+        f"[{l['topic']}] {l['text']}" if l["topic"] else l["text"]
+        for l in data.get("learnings", [])[-12:]
+    ]
     recent_opinions = [
         f"{o['topic']}: {o['opinion']}" for o in data.get("opinions", [])[-10:]
     ]
@@ -312,7 +335,7 @@ async def run_nightly_interaction_review() -> None:
         # ── Persist facts + self-reflection → jarvis-self.json ───────────
         summary = facts.get("daily_summary", "") if facts else ""
         rel_update = facts.get("user_relation_update", {}) if facts else {}
-        self_refls = [s for s in (self_result or {}).get("self_reflections", []) if s]
+        self_refls = _normalise_reflections((self_result or {}).get("self_reflections", []))
         new_opinions = [
             o
             for o in (self_result or {}).get("jarvis_opinions", [])
@@ -322,9 +345,10 @@ async def run_nightly_interaction_review() -> None:
         if self_refls or summary or rel_update or new_opinions:
             with self_memory_lock:
                 data = get_self_memory()
-                for refl in self_refls:
+                for topic, refl in self_refls:
                     data.setdefault("learnings", []).append(
-                        {"text": refl, "date": review_date, "source": "nightly_review"}
+                        {"topic": topic, "text": refl,
+                         "date": review_date, "source": "nightly_review"}
                     )
                 for op in new_opinions:
                     _upsert_opinion_inplace(

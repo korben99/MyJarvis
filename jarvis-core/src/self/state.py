@@ -50,14 +50,6 @@ def get_user_relation(user_code: str) -> dict:
     return {**_DEFAULT_RELATION, **relations.get(user_code, {})}
 
 
-def _update_self_fields(**fields) -> None:
-    """Update specific top-level fields in jarvis-self.json under the shared lock."""
-    with self_memory_lock:
-        data = get_self_memory()
-        data.update(fields)
-        save_self_memory(data)
-
-
 _INCIDENTS_SELF_MAX = 30
 
 

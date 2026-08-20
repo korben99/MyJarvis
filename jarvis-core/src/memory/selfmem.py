@@ -95,15 +95,9 @@ def save_self_memory(data: dict) -> None:
         logger.error("Could not save jarvis-self.json: %s", type(exc).__name__)
 
 
-def add_self_learning(learning: str):
-    """Add a Jarvis self-improvement note (not a user fact)."""
-    with self_memory_lock:
-        data = get_self_memory()
-        data.setdefault("learnings", []).append(
-            {
-                "text": learning,
-                "date": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-        data["learnings"] = data["learnings"][-LEARNINGS_MAX_ENTRIES:]
-        save_self_memory(data)
+# add_self_learning() supprimée le 20/08/2026 : jamais appelée depuis son écriture en
+# mars, dans aucun commit. La revue nocturne écrit directement dans `learnings`
+# (self/nightly.py, sous self_memory_lock, en même temps que les opinions et le
+# growth_log) et refait sa propre troncature — il y avait donc deux chemins pour la même
+# liste, dont un mort. Router la nocturne à travers ce helper aurait pris le verrou deux
+# fois pour une seule écriture.

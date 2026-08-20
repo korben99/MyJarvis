@@ -555,6 +555,20 @@ OPINIONS_MAX_ENTRIES = int(os.getenv("OPINIONS_MAX_ENTRIES", "120"))
 LEARNINGS_MAX_ENTRIES = int(os.getenv("LEARNINGS_MAX_ENTRIES", "100"))
 SELF_NOTES_MAX_ENTRIES = int(os.getenv("SELF_NOTES_MAX_ENTRIES", "100"))
 
+# ── Réinjection des apprentissages (memory/context.py) ────────────────────────
+# Nombre d'apprentissages réinjectés à chaque tour, les plus récents.
+#
+# La sélection par PERTINENCE reste à faire : mesuré le 20/08/2026, trois mécanismes de tri
+# ont échoué (détail dans RESEARCH/RESULTATS.md). Le blocage est de fond — l'apprentissage
+# est écrit en méta (« quand l'utilisateur expose une chaîne de blocages administratifs »)
+# et le message est concret (« j'ai encore la vente de l'appart ») : aucun score de
+# similarité ne franchit cet écart de registre sans passer par une couche d'énoncés
+# d'exemple, qui reste à construire.
+#
+# Trois et non cinq : le bloc coûte ~800 tokens par tour, et rien n'a jamais montré que les
+# cinq derniers valaient mieux que les trois derniers.
+LEARNINGS_MAX_INJECTED = int(os.getenv("LEARNINGS_MAX_INJECTED", "3"))
+
 
 # ══════════════════════════════════════════════════
 #  USER MANAGEMENT — loaded from users_list.json

@@ -435,54 +435,6 @@ def _fmt_incidents(items: list[dict]) -> str:
     )
 
 
-def _fmt_user_profiles() -> str:
-    """Compact profile dump for all users — passed to the reflection LLM.
-
-    Each user block is clearly delimited so the LLM cannot confuse which
-    key belongs to which user_code.  Empty-valued keys are filtered out —
-    they are invalid state and should not appear in the reasoning context.
-    """
-    from memory import get_user_profile
-
-    blocks = []
-    for code, name in USER_CODES.items():
-        # Filter out empty/None values — stale keys that were never properly cleaned.
-        profile = {k: v for k, v in get_user_profile(code).items() if v}
-        if not profile:
-            continue
-        lines = [f'<profil user="{name}" code="{code}">']
-        for k, v in list(profile.items())[:20]:  # cap at 20 keys for token budget
-            lines.append(f"  {k} = {str(v)[:80]}")
-        lines.append("</profil>")
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks) or "  No profiles."
-
-
-def _fmt_push_availability() -> str:
-    """Check Redis device tokens and return a push availability summary per user."""
-    r = get_redis()
-    with_push, without_push = [], []
-    for code, name in USER_CODES.items():
-        tz_name = USER_TIMEZONES.get(code, "Europe/Paris")
-        local_time = fmt_now_fr(tz_name)
-        label = f"{name} ({code}) — heure locale : {local_time}"
-        if r.exists(f"jarvis:device:token:{code}"):
-            with_push.append(label)
-        else:
-            without_push.append(label)
-    lines = []
-    if with_push:
-        lines.append(
-            f"  Push iOS disponible :\n" + "\n".join(f"    • {l}" for l in with_push)
-        )
-    if without_push:
-        lines.append(
-            f"  Push iOS indisponible (email ou attente) :\n"
-            + "\n".join(f"    • {l}" for l in without_push)
-        )
-    return "\n".join(lines)
-
-
 def _fmt_previous_steps(steps: list[dict] | None) -> str:
     if not steps:
         return "  aucune (première itération)"

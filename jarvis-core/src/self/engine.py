@@ -337,14 +337,34 @@ async def run_self_reflection() -> dict:
         # calls (4 days): all 69 zero-activity cycles answered "nothing" with the reason
         # "aucune activité récente", while every one of the 9 proposed actions came from a
         # user with 7+ conversations. Reflecting on a silent user costs ~1800 prompt tokens
-        # for a foregone conclusion. Trade-off: flag_project_stall can no longer fire for a
-        # fully silent user — it never fired in the measured window, and Phase 1 still runs.
+        # pour une conclusion écrite d'avance.
         if not user_ctx["user_activity"].get("conversations"):
             logger.info(
                 "--- User: %s (%s) — skipped (no activity) ---",
                 user_code,
                 user_ctx["user_name"],
             )
+            # MAIS la relance de tâches, elle, tourne quand même — mécaniquement, sans
+            # passer par le LLM.
+            #
+            # Le compromis d'origine acceptait de la perdre pour les utilisateurs
+            # silencieux, au motif qu'« elle ne s'était jamais déclenchée sur la fenêtre
+            # mesurée ». Cette fenêtre faisait 4 jours, et le seuil de relance est de 21 :
+            # elle ne pouvait donc pas contenir le phénomène qu'on supprimait. Conséquence
+            # relevée le 20/08/2026 — 5 projets en attente, dont trois de Mathilde à 87,
+            # 122 et 122 jours, tous invisibles parce qu'elle ne parlait plus.
+            #
+            # Or un projet en sommeil est PRÉCISÉMENT la signature d'un utilisateur
+            # silencieux : la relance ne pouvait atteindre que ceux qui n'en avaient pas
+            # besoin. Et rien ici ne demande un jugement — une échéance dépassée, un
+            # projet sans mise à jour depuis 21 jours, ça se calcule. La fonction porte
+            # déjà ses garde-fous (cooldown de 14 j par projet, échéances traitées à part).
+            outcome = _execute_action("flag_project_stall", {"user_code": user_code})
+            if "aucun projet" not in outcome:
+                logger.info("Relance de tâches (%s) : %s", user_code, outcome)
+                all_user_steps.append({
+                    "user": user_code, "action": "flag_project_stall", "outcome": outcome,
+                })
             continue
 
         user_steps: list[dict] = []

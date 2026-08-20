@@ -49,7 +49,6 @@ from .projects import (
     update_user_projects,
 )
 from .selfmem import (
-    add_self_learning,
     atomic_json_write,
     get_self_memory,
     save_self_memory,
@@ -80,7 +79,7 @@ __all__ = [
     "append_conversation_message", "get_conversation",
     # selfmem
     "self_memory_lock", "atomic_json_write", "get_self_memory",
-    "save_self_memory", "add_self_learning",
+    "save_self_memory",
     # profile
     "get_user_profile", "update_user_profile", "update_user_profile_batch",
     "set_interest_weight", "get_interest_weights",

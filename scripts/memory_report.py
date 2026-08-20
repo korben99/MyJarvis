@@ -232,6 +232,23 @@ def i08_09_reflexion() -> list:
     _enregistrer("incidents", len(incidents))
     out.append(("Incidents consolidés", str(len(incidents)), None))
 
+    # Fraîcheur de la revue nocturne. C'est ELLE qui écrit les faits autobiographiques, la
+    # relation par utilisateur et le journal de croissance : si elle s'arrête, trois étages
+    # de mémoire cessent d'être alimentés en même temps. `last_nightly` n'est mis à jour
+    # que sur une revue PRODUCTIVE — une nuit sans conversation ne compte pas, et c'est
+    # voulu : ce qu'on surveille est la production, pas le passage du planificateur.
+    try:
+        veille = json.load(open(SELF_MEMORY_PATH, encoding="utf-8")).get("last_nightly", "")
+        ecart = (datetime.now(timezone.utc).date()
+                 - datetime.strptime(veille, "%Y-%m-%d").date()).days if veille else 999
+    except (OSError, json.JSONDecodeError, ValueError):
+        veille, ecart = "?", 999
+    out.append((
+        "Dernière revue nocturne productive",
+        f"{veille} (il y a {ecart} j)" if ecart < 999 else "inconnue",
+        f"aucune revue productive depuis {ecart} jours" if ecart >= 3 else None,
+    ))
+
     try:
         from self import get_reflection_log
         journal = get_reflection_log(int(REFLEXION_STERILE_N) * 2) or []
