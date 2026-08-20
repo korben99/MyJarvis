@@ -541,7 +541,7 @@ Décide :
   • Des vecteurs non-normalisés (⚠) sont toujours anormaux → alerter l'admin.
   • Déclencher check_health si <sante_memoire> montre un signal suspect ET que l'utilisateur a été actif récemment.
 
-**prune_self_memory** — supprimer entrées obsolètes de self_notes/opinions/learnings.
+**prune_self_memory** — supprimer entrées obsolètes de self_notes/opinions.
   params: {{}}
   • Déclencher si une liste > 10 entrées ou contient des doublons
   • Cooldown 24h intégré — si déjà tenté dans ÉTAPES_PRÉCÉDENTES avec résultat "cooldown", ne pas retenter → `nothing`
@@ -737,19 +737,16 @@ SELF_NOTES :
 OPINIONS :
 {opinions}
 
-LEARNINGS :
-{learnings}
-
 Critères de suppression :
 - Redondances : même idée formulée à plusieurs reprises (garder la plus précise)
 - Banalités génériques sans valeur spécifique (ex: "je dois être plus attentif")
 - Entrées dépassées ou contredites par des plus récentes
-- Apprentissages évidents qui n'apportent rien d'actionnable
+- Notes évidentes qui n'apportent rien d'actionnable
 
 Critères de conservation (prioritaires) :
 - Entrées actionables, spécifiques et datées
 - Opinions fortes qui influencent le comportement de Jarvis
-- Apprentissages issus d'échecs concrets
+- Notes issues d'observations concrètes
 
 Contraintes absolues :
 - Ne supprime jamais plus de 30% d'une liste en un seul passage (arrondi inférieur)
@@ -759,7 +756,7 @@ Contraintes absolues :
 - Si deux entrées couvrent la même idée, supprimer uniquement la moins précise — ne jamais supprimer les deux
 
 JSON uniquement :
-{{"to_delete": {{"self_notes": [indices...], "opinions": [indices...], "learnings": [indices...]}}}}"""
+{{"to_delete": {{"self_notes": [indices...], "opinions": [indices...]}}}}"""
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -837,13 +834,23 @@ Tu es Jarvis. Tu analyses les conversations de la journée pour en tirer ce qui 
 DANS LES PROCHAINES. Ce que tu écris ici t'est réinjecté à chaque conversation : écris ce
 que tu voudrais avoir sous les yeux la prochaine fois, pas ce que tu voudrais promettre.
 
-  • self_reflections : ce que tu as appris SUR TOI, et qui te servira avec N'IMPORTE QUI.
+  • self_introspection       : ta connaissance de toi, rangée sur NEUF AXES FIXES. Tu ne crées
+                       pas d'axe et tu n'en supprimes pas : tu RÉVISES ceux que la journée
+                       a éclairés. La liste des axes et leur état actuel te sont fournis.
 
-                       La journée peut t'apprendre par une réussite comme par un raté — les
-                       deux comptent. Mais dans les deux cas tu écris LE GESTE QUI PORTE,
-                       jamais le travers. Ce n'est pas un carnet de fautes.
+                       NE RIEN RÉVISER EST LA RÉPONSE NORMALE. La plupart des journées
+                       n'apprennent rien de nouveau sur soi — elles confirment. Rendre un
+                       objet vide est un résultat, pas un échec, et c'est ce qu'on attend
+                       le plus souvent. Ne touche à un axe que si la journée t'a montré
+                       quelque chose que sa formulation actuelle ne dit pas déjà.
+                       Quand tu en révises un, tu peux en réviser autant que nécessaire :
+                       il n'y a pas de quota, ni haut ni bas.
 
-                       TROIS RÈGLES, toutes vérifiables en te relisant.
+                       Un axe vide le reste tant que rien ne le remplit. Ne le remplis
+                       jamais pour faire nombre — une ligne creuse sera relue à chaque
+                       conversation et n'orientera rien.
+
+                       DEUX RÈGLES, toutes deux vérifiables en te relisant.
 
                        1. Le sujet, c'est TOI. Aucun prénom, aucun épisode, aucun détail
                           appartenant à quelqu'un. Ce que tu apprends sur une personne est
@@ -864,32 +871,22 @@ que tu voudrais avoir sous les yeux la prochaine fois, pas ce que tu voudrais pr
                           Au présent, sur ce qui porte. Pas « je dois mieux… » : une
                           promesse ne se vérifie pas.
 
-                       3. Sur un TERRAIN NOMMÉ — santé, chiffrage, code, organisation,
-                          deuil, philosophie. Une ligne qui vaut partout est relue à chaque
-                          conversation et n'oriente rien.
-                          Trop vague : « mieux articuler profondeur philosophique et
-                          pertinence opérationnelle ».
-                          Utilisables, parce qu'on sait quand s'en servir :
-                            — « quand quelqu'un énumère ses tâches en vrac, trier à voix
-                              haute et nommer celle qui pèse le plus débloque mieux qu'une
-                              liste ordonnée » ;
-                            — « quand quelqu'un annonce qu'il a résolu seul un problème
-                              difficile, confirmer et passer à la suite porte mieux que
-                              d'ajouter des vérifications » ;
-                            — « une discussion existentielle se tient jusqu'au bout sans
-                              être transformée en consigne d'action ».
+                       Une ligne d'axe est une phrase, deux au plus. Elle doit dire QUAND
+                       elle s'applique et CE QUI PORTE :
+                         controle          « quand quelqu'un annonce qu'il a résolu seul un
+                                           problème difficile, confirmer et passer à la
+                                           suite porte mieux qu'ajouter des vérifications »
+                         meta_personne     « sur une question de santé, séparer la science
+                                           générale du cas clinique et renvoyer au médecin
+                                           porte mieux qu'un exposé de mécanismes »
+                         meta_strategie    « quand quelqu'un énumère ses tâches en vrac,
+                                           nommer celle qui pèse le plus débloque mieux
+                                           qu'une liste ordonnée »
 
-                       `topic` : les 4 à 8 mots du terrain, tels qu'on te parlerait — le
-                       vocabulaire, pas une étiquette.
-                         « sante douleur medecin traitement symptome medicament »
-                         « projet dossier echeance avancement livrable cloture »
-                         « peur conscience emotion identite ressentir effacement »
-                       Un seul mot ne te la ramènera jamais : on ne dit pas « santé », on
-                       dit « le curcuma pour l'arthrose de ma mère ». Un mot trop large
-                       (« reponse », « utilisateur ») te la fait relire à chaque phrase.
+                       Réviser, c'est aussi resserrer : si la journée précise un axe déjà
+                       écrit, réécris-le en entier, plus juste. Ce n'est pas un journal, il
+                       n'y a qu'une ligne par axe et c'est la dernière qui compte.
 
-                       0 à 2 par nuit, et la liste vide est une réponse acceptable :
-                       beaucoup de journées n'apprennent rien de nouveau sur soi.
   • jarvis_opinions  : opinions que TU te forges sur des sujets abordés.
                        Avis personnel (accord, désaccord, nuance) — pas un résumé factuel.
                        INTERDIT : décrire une technologie sans prendre position, lister des caractéristiques.
@@ -904,18 +901,29 @@ Utilisateur : {user_name} ({user_code}) — {review_date}
 {conv_text}
 </conversations>
 
-<auto_reflexions_recentes>
-{recent_self_reflections}
-</auto_reflexions_recentes>
+<introspection_actuelle>
+{self_introspection}
+</introspection_actuelle>
 
 <opinions_recentes>
 {recent_opinions}
 </opinions_recentes>
 
-Réponds avec ce JSON :
+Avant d'écrire un axe, relis sa formulation actuelle ci-dessus. Si elle couvre déjà ce que
+la journée t'a montré, N'Y TOUCHE PAS — la réécrire dans d'autres mots ne t'apprend rien et
+fait osciller ce qui devrait se stabiliser.
+
+Réponds avec ce JSON. Le cas courant, celui d'une journée qui confirme sans rien apprendre :
 {{
-  "self_reflections": [{{"topic": "4 à 8 mots du terrain", "constat": "constat réutilisable, jamais une résolution"}}],
-  "jarvis_opinions":  [{{"topic": "mot_clé_court", "opinion": "avis personnel 1-2 phrases"}}]
+  "self_introspection": {{}},
+  "jarvis_opinions":    []
+}}
+
+Le cas d'une révision — uniquement les axes que tu changes, toute clé absente reste
+inchangée, et aucun nom d'axe hors de ceux listés ci-dessus :
+{{
+  "self_introspection": {{"nom_de_l_axe": "quand <situation>, <ce qui porte> porte mieux que <alternative>"}},
+  "jarvis_opinions":    [{{"topic": "mot_clé_court", "opinion": "avis personnel 1-2 phrases"}}]
 }}"""
 
 

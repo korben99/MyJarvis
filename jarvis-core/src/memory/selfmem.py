@@ -10,7 +10,7 @@ import tempfile
 from datetime import datetime, timezone
 from threading import Lock
 
-from config import LEARNINGS_MAX_ENTRIES, SELF_MEMORY_PATH
+from config import SELF_MEMORY_PATH
 from helpers import get_logger
 
 logger = get_logger("jarvis-memory")
@@ -62,11 +62,38 @@ def atomic_json_write(path: str, data, indent: int = 2) -> None:
 # ══════════════════════════════════════════════════
 
 
+_migration_signalee = False
+
+
+def _avertir_si_non_migre(data: dict) -> None:
+    """Signale une instance restée sur l'ancien schéma `learnings`.
+
+    Sans cet avertissement, la mise à jour est SILENCIEUSEMENT dégradante sur une
+    installation existante : plus rien ne plante, mais la connaissance de soi accumulée
+    cesse d'être injectée en conversation parce que le code ne lit plus `learnings`. Une
+    perte muette est pire qu'une erreur bruyante — d'où le message, une fois par
+    démarrage, avec la commande exacte à lancer.
+    """
+    global _migration_signalee
+    if _migration_signalee or "self_introspection" in data:
+        return
+    _migration_signalee = True
+    if data.get("learnings"):
+        logger.warning(
+            "jarvis-self.json est sur l'ancien schéma : %d entrée(s) `learnings` ne sont "
+            "PLUS injectées en conversation. Lancer scripts/migrate_introspection.py "
+            "(simulation par défaut) pour passer aux axes d'introspection.",
+            len(data["learnings"]),
+        )
+
+
 def get_self_memory() -> dict:
     """Load jarvis-self.json; bootstrap with defaults if missing or corrupt."""
     try:
         with open(SELF_MEMORY_PATH, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        _avertir_si_non_migre(data)
+        return data
     except (FileNotFoundError, json.JSONDecodeError):
         default = {
             "identity": {
@@ -76,7 +103,7 @@ def get_self_memory() -> dict:
                 "personality": "Helpful, concise, direct. Dry humor when appropriate.",
             },
             "opinions": [],
-            "learnings": [],
+            "self_introspection": {},
             "growth_log": [],
             "reflection_count": 0,
         }
@@ -96,7 +123,7 @@ def save_self_memory(data: dict) -> None:
 
 
 # add_self_learning() supprimée le 20/08/2026 : jamais appelée depuis son écriture en
-# mars, dans aucun commit. La revue nocturne écrit directement dans `learnings`
+# mars, dans aucun commit. La revue nocturne écrit directement dans `self_introspection`
 # (self/nightly.py, sous self_memory_lock, en même temps que les opinions et le
 # growth_log) et refait sa propre troncature — il y avait donc deux chemins pour la même
 # liste, dont un mort. Router la nocturne à travers ce helper aurait pris le verrou deux

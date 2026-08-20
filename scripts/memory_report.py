@@ -280,7 +280,7 @@ def i10_listes_self() -> list:
     # et sous-estimait `opinions`, qui était déjà saturé à 50/50.
     from config import (
         GROWTH_LOG_MAX_ENTRIES,
-        LEARNINGS_MAX_ENTRIES,
+        INTROSPECTION_LOG_MAX_ENTRIES,
         OPINIONS_MAX_ENTRIES,
         SELF_NOTES_MAX_ENTRIES,
     )
@@ -288,7 +288,7 @@ def i10_listes_self() -> list:
     plafonds = {
         "growth_log": GROWTH_LOG_MAX_ENTRIES,
         "opinions": OPINIONS_MAX_ENTRIES,
-        "learnings": LEARNINGS_MAX_ENTRIES,
+        "introspection_log": INTROSPECTION_LOG_MAX_ENTRIES,
         "self_notes": SELF_NOTES_MAX_ENTRIES,
     }
     tailles = {k: len(d.get(k) or []) for k in plafonds}
@@ -297,8 +297,23 @@ def i10_listes_self() -> list:
     pleines = [f"{k} {n}/{plafonds[k]}" for k, n in tailles.items()
                if plafonds[k] and n >= plafonds[k] * LISTE_REMPLISSAGE]
     detail = ", ".join(f"{k}:{n}/{plafonds[k]}" for k, n in sorted(tailles.items()))
-    return [("Listes de self.json", detail,
-             f"proche du plafond — {', '.join(pleines)}" if pleines else None)]
+    # Les neuf axes d'introspection n'ont pas de plafond — ils sont bornés par
+    # construction. Ce qu'on surveille chez eux, c'est l'inverse : un axe qui ne se
+    # remplit JAMAIS est un axe qui ne mord pas sur ce qu'est Jarvis, et c'est le signal
+    # qui dit s'il faut le retirer ou le reformuler (RESULTATS.md, 20/08/2026).
+    from config import INTROSPECTION_AXES
+
+    axes = d.get("self_introspection") or {}
+    remplis = [a for a in INTROSPECTION_AXES if (axes.get(a) or "").strip()]
+    vides = [a for a in INTROSPECTION_AXES if a not in remplis]
+    _enregistrer("introspection_axes", {"remplis": len(remplis), "total": len(INTROSPECTION_AXES)})
+
+    return [
+        ("Listes de self.json", detail,
+         f"proche du plafond — {', '.join(pleines)}" if pleines else None),
+        ("Axes d'introspection", f"{len(remplis)}/{len(INTROSPECTION_AXES)} remplis",
+         f"jamais remplis — {', '.join(vides)}" if vides else None),
+    ]
 
 
 INDICATEURS = (i01_02_ecritures_memoire, i03_profils, i04_05_emotion,

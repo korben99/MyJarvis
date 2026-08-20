@@ -1,6 +1,6 @@
 """Revue nocturne par utilisateur (APScheduler 23:00) : 5 appels séquentiels par
 utilisateur — faits durables (autobio + relation + suggestions), auto-réflexion de
-Jarvis (learnings/opinions), curation mémoire, dedup de profil, narratif de profil.
+Jarvis (introspection/opinions), curation mémoire, dedup de profil, narratif de profil.
 Déclenche la consolidation mensuelle le 1er du mois.
 
 Module indépendant : ni la réflexion ni les actions ne l'appellent (planifié à part).
@@ -13,7 +13,8 @@ from datetime import datetime, timedelta, timezone
 from config import (
     DEFAULT_TEMP,
     GROWTH_LOG_MAX_ENTRIES,
-    LEARNINGS_MAX_ENTRIES,
+    INTROSPECTION_AXES,
+    INTROSPECTION_LOG_MAX_ENTRIES,
     MAX_TOKENS_COMPACT,
     MAX_TOKENS_NO_THINK,
     REASONING_API_KEY,
@@ -125,22 +126,46 @@ async def _nightly_facts_user(
         return None
 
 
-def _normalise_reflections(brut: list) -> list[tuple[str, str]]:
-    """Retourne des paires (topic, constat) à partir de ce que le modèle a rendu.
+def _normalise_introspection(brut, actuel: dict | None = None) -> dict[str, str]:
+    """Les révisions d'axes retenues, filtrées sur les noms d'axes connus.
 
-    Le schéma demande {"topic": …, "constat": …} ; un modèle local retombe parfois sur la
-    chaîne nue. Un constat sans terrain nommé reste un constat : on le garde avec un topic
-    vide, il sera simplement moins bien ciblé à la relecture.
+    Un axe inventé est jeté sans bruit plutôt que créé : la liste est fermée par
+    construction (config.INTROSPECTION_AXES), c'est ce qui borne le coût de réinjection et
+    empêche la liste de redevenir un tas. Un objet vide — le cas attendu la plupart des
+    nuits — ne produit aucune écriture.
+
+    Une réécriture À L'IDENTIQUE est écartée : mesuré le 20/08/2026, le modèle réémet
+    parfois un axe au mot près. Sans effet sur le contenu, mais elle gonflerait
+    introspection_log et ferait croire à une révision là où il n'y en a pas.
     """
-    paires: list[tuple[str, str]] = []
-    for r in brut:
-        if isinstance(r, dict):
-            texte, topic = r.get("constat") or r.get("text") or "", r.get("topic") or ""
-        else:
-            texte, topic = str(r or ""), ""
-        if texte.strip():
-            paires.append((topic.strip(), texte.strip()))
-    return paires
+    if not isinstance(brut, dict):
+        return {}
+    actuel = actuel or {}
+    revisions = {}
+    for axe, texte in brut.items():
+        cle = str(axe).strip().lower()
+        if cle not in INTROSPECTION_AXES:
+            logger.info("Nightly self: axe inconnu ignoré (%s)", cle[:40])
+            continue
+        if isinstance(texte, str) and texte.strip():
+            propre = texte.strip()
+            if propre == (actuel.get(cle) or "").strip():
+                continue
+            revisions[cle] = propre
+    return revisions
+
+
+def _render_introspection(data: dict) -> str:
+    """L'état courant des axes, tel qu'il est montré à la revue nocturne.
+
+    Les axes vides sont montrés VIDES et non masqués : c'est ce qui permet à la nuit de
+    les remplir, et de voir qu'ils le sont restés.
+    """
+    slots = data.get("self_introspection") or {}
+    return "\n".join(
+        f"{axe} ({question})\n    {slots.get(axe) or '— vide —'}"
+        for axe, question in INTROSPECTION_AXES.items()
+    )
 
 
 async def _nightly_self_user(
@@ -148,12 +173,6 @@ async def _nightly_self_user(
 ) -> dict | None:
     """Call 2 — Jarvis self-reflection and opinion formation."""
     data = get_self_memory()
-    # Avec leur topic : le modèle reproduit la forme qu'on lui remontre — c'est ainsi qu'il
-    # a tenu « je dois… » pendant des mois. On lui remontre donc la cible, pas l'ancien.
-    recent_self_reflections = [
-        f"[{l['topic']}] {l['text']}" if l["topic"] else l["text"]
-        for l in data.get("learnings", [])[-12:]
-    ]
     recent_opinions = [
         f"{o['topic']}: {o['opinion']}" for o in data.get("opinions", [])[-10:]
     ]
@@ -163,7 +182,7 @@ async def _nightly_self_user(
         review_date=review_date,
         count=len(conversations),
         conv_text=_build_conv_text(conversations),
-        recent_self_reflections=json.dumps(recent_self_reflections, ensure_ascii=False),
+        self_introspection=_render_introspection(data),
         recent_opinions=json.dumps(recent_opinions, ensure_ascii=False)
         if recent_opinions
         else "aucune",
@@ -248,7 +267,7 @@ async def run_nightly_interaction_review() -> None:
 
     For each user with conversations yesterday (5 sequential LLM calls):
       Call 1 — NIGHTLY_FACTS  : user insights → Qdrant autobio + relation update + suggestions
-      Call 2 — NIGHTLY_SELF   : Jarvis self-reflection → learnings, opinions, growth_log
+      Call 2 — NIGHTLY_SELF   : Jarvis self-reflection → introspection, opinions, growth_log
       Call 3 — NIGHTLY_CLEANING: Qdrant autobio curation (archive outdated, delete errors)
       Call 4 — profile dedup  : curative_profile_cleanup() → Redis profile hash (sync, no LLM if < 5 keys)
       Call 5 — profile narrative: update_profile_narrative() → Redis user:{code}:profile_narrative (7-day TTL)
@@ -335,21 +354,30 @@ async def run_nightly_interaction_review() -> None:
         # ── Persist facts + self-reflection → jarvis-self.json ───────────
         summary = facts.get("daily_summary", "") if facts else ""
         rel_update = facts.get("user_relation_update", {}) if facts else {}
-        self_refls = _normalise_reflections((self_result or {}).get("self_reflections", []))
+        revisions = _normalise_introspection(
+            (self_result or {}).get("self_introspection"),
+            get_self_memory().get("self_introspection"),
+        )
         new_opinions = [
             o
             for o in (self_result or {}).get("jarvis_opinions", [])
             if isinstance(o, dict) and o.get("topic") and o.get("opinion")
         ]
 
-        if self_refls or summary or rel_update or new_opinions:
+        if revisions or summary or rel_update or new_opinions:
             with self_memory_lock:
                 data = get_self_memory()
-                for topic, refl in self_refls:
-                    data.setdefault("learnings", []).append(
-                        {"topic": topic, "text": refl,
-                         "date": review_date, "source": "nightly_review"}
+                # Un axe est RÉÉCRIT, jamais empilé : une seule ligne par axe, la dernière.
+                # C'est ce qui borne le coût de réinjection et évite que la connaissance de
+                # soi redevienne la liste sans fin qu'elle était avant le 20/08/2026.
+                axes = data.setdefault("self_introspection", {})
+                for axe, texte in revisions.items():
+                    axes[axe] = texte
+                    data.setdefault("introspection_log", []).append(
+                        {"axe": axe, "text": texte, "date": review_date,
+                         "user_code": user_code}
                     )
+                    logger.info("Nightly introspection: %s → %s", axe, texte[:70])
                 for op in new_opinions:
                     _upsert_opinion_inplace(
                         data, op["topic"], op["opinion"].strip(), review_date
@@ -401,7 +429,12 @@ async def run_nightly_interaction_review() -> None:
                         new_style,
                         new_mood,
                     )
-                data["learnings"] = data.get("learnings", [])[-LEARNINGS_MAX_ENTRIES:]
+                # Les axes eux-mêmes sont bornés par construction (9). Seule leur trace
+                # historique est tronquée — elle sert à relire comment un axe a évolué,
+                # pas à alimenter les conversations.
+                data["introspection_log"] = data.get("introspection_log", [])[
+                    -INTROSPECTION_LOG_MAX_ENTRIES:
+                ]
                 data["growth_log"] = data.get("growth_log", [])[
                     -GROWTH_LOG_MAX_ENTRIES:
                 ]

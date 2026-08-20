@@ -10,7 +10,6 @@ import asyncio
 import json
 import re
 import time
-import uuid
 from datetime import datetime, timezone
 
 import numpy as np
@@ -649,9 +648,13 @@ _HEALTH_ALERT_TTL = 4 * 3600  # 4h — évite le spam en cas de service instable
 
 def _action_prune_self_memory(params: dict) -> str:
     """
-    Call the Primary LLM to identify obsolete/redundant entries in self_notes,
-    opinions, and learnings, then delete them from jarvis-self.json.
+    Call the Primary LLM to identify obsolete/redundant entries in self_notes and
+    opinions, then delete them from jarvis-self.json.
     Runs synchronously (called via asyncio.to_thread from run_self_reflection).
+
+    `self_introspection` n'est PAS purgeable : neuf axes fixes, révisés par la revue
+    nocturne, jamais supprimés. Une purge par index n'aurait aucun sens sur un dict borné
+    par construction — et un axe qu'on efface reviendrait vide le lendemain.
     """
     r = get_redis()
     if r.exists(_PRUNE_COOLDOWN_KEY):
@@ -662,9 +665,8 @@ def _action_prune_self_memory(params: dict) -> str:
 
     self_notes = data.get("self_notes", [])
     opinions = data.get("opinions", [])
-    learnings = data.get("learnings", [])
 
-    if max(len(self_notes), len(opinions), len(learnings)) < 2:
+    if max(len(self_notes), len(opinions)) < 2:
         return "prune_self_memory: nothing to prune (all lists have < 2 entries)"
 
     def _fmt(items: list, text_key: str = "text") -> str:
@@ -697,7 +699,6 @@ def _action_prune_self_memory(params: dict) -> str:
     user_prompt = get_prompt("PRUNE_SELF_MEMORY_USER").format(
         self_notes=_fmt(self_notes, "note"),
         opinions=_fmt(opinions, "opinion"),
-        learnings=_fmt(learnings, "text"),
     )
 
     try:
@@ -734,7 +735,7 @@ def _action_prune_self_memory(params: dict) -> str:
 
     with self_memory_lock:
         data = get_self_memory()
-        for field in ("self_notes", "opinions", "learnings"):
+        for field in ("self_notes", "opinions"):
             raw_indices = to_delete.get(field, [])
             if not raw_indices:
                 continue

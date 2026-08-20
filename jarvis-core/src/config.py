@@ -552,22 +552,60 @@ GROWTH_LOG_MAX_ENTRIES = int(os.getenv("GROWTH_LOG_MAX_ENTRIES", "180"))
 # Défauts = valeurs d'origine : aucun changement de comportement tant qu'on ne les règle
 # pas. C'est la sonde scripts/memory_report.py qui surveille leur remplissage.
 OPINIONS_MAX_ENTRIES = int(os.getenv("OPINIONS_MAX_ENTRIES", "120"))
-LEARNINGS_MAX_ENTRIES = int(os.getenv("LEARNINGS_MAX_ENTRIES", "100"))
 SELF_NOTES_MAX_ENTRIES = int(os.getenv("SELF_NOTES_MAX_ENTRIES", "100"))
 
-# ── Réinjection des apprentissages (memory/context.py) ────────────────────────
-# Nombre d'apprentissages réinjectés à chaque tour, les plus récents.
+# Trace historique des révisions d'axes — sert à relire comment un axe a bougé, jamais
+# injectée en conversation. Les axes eux-mêmes sont bornés par construction (9), il n'y a
+# donc plus de plafond à régler sur la connaissance de soi elle-même.
+INTROSPECTION_LOG_MAX_ENTRIES = int(os.getenv("INTROSPECTION_LOG_MAX_ENTRIES", "200"))
+
+# ── Introspection de Jarvis : 9 axes fixes ────────────────────────────────────────
+# Remplace la liste `learnings`, qui accumulait sans fin des aperçus indexés par SUJET.
+# Deux constats du 20/08/2026 (RESEARCH/RESULTATS.md) ont conduit à ce changement :
 #
-# La sélection par PERTINENCE reste à faire : mesuré le 20/08/2026, trois mécanismes de tri
-# ont échoué (détail dans RESEARCH/RESULTATS.md). Le blocage est de fond — l'apprentissage
-# est écrit en méta (« quand l'utilisateur expose une chaîne de blocages administratifs »)
-# et le message est concret (« j'ai encore la vente de l'appart ») : aucun score de
-# similarité ne franchit cet écart de registre sans passer par une couche d'énoncés
-# d'exemple, qui reste à construire.
+#   1. Sur 17 apprentissages produits indépendamment, le modèle redécouvrait les mêmes
+#      huit axes nuit après nuit. La liste ne grandissait pas en contenu, seulement en
+#      longueur — 17 quasi-doublons en route vers le plafond de 100.
+#   2. Aucun mécanisme de rappel par pertinence n'a tenu (quatre essayés). La cause est
+#      structurelle : un apprentissage est écrit en méta, un message est concret. Et sur
+#      une relance (« et pour ma mère ? »), le message ne porte plus aucun sujet.
 #
-# Trois et non cinq : le bloc coûte ~800 tokens par tour, et rien n'a jamais montré que les
-# cinq derniers valaient mieux que les trois derniers.
-LEARNINGS_MAX_INJECTED = int(os.getenv("LEARNINGS_MAX_INJECTED", "3"))
+# Une disposition ne se rappelle pas, elle est toujours là : les axes non vides sont donc
+# injectés en PERMANENCE, et le coût est borné par construction (9 lignes) au lieu de
+# croître avec l'usage.
+#
+# Les axes ne sont pas dérivés de ce que le modèle a produit — ils viennent de cadres
+# publiés, ce qui évite la circularité. Le consensus Delphi de Nature Reviews Psychology
+# (2026) retient que la connaissance de soi est « largement spécifique à un domaine »,
+# d'où des axes séparés plutôt qu'une liste indifférenciée.
+#
+#   controle, communion               circumplexe interpersonnel (Wiggins 1979) — les deux
+#                                     axes orthogonaux de la conduite interpersonnelle.
+#                                     « controle » traduit *agency* (dominance ↔ soumission).
+#   meta_personne/tache/strategie     métacognition (Flavell 1979) — la seule taxonomie
+#                                     conçue pour ce qu'un système sait de sa propre
+#                                     cognition.
+#   affect_antecedent/reponse         modèle processuel de la régulation émotionnelle
+#                                     (Gross) — avant que l'état s'installe / après.
+#   autonomie_autre, competence_autre théorie de l'autodétermination (Deci & Ryan 1985) —
+#                                     les besoins de l'INTERLOCUTEUR, pas de Jarvis. Son
+#                                     troisième besoin, la relation, est replié dans
+#                                     `communion` : les deux se recouvraient trop.
+#
+# Ces cadres décrivent des humains ; les appliquer ici est une analogie, pas un fait
+# acquis. Le dispositif la rend testable : un axe qui reste vide ou ne produit que des
+# platitudes est un axe qui ne mord pas sur ce qu'est Jarvis.
+INTROSPECTION_AXES: dict[str, str] = {
+    "controle": "quand je prends la main, quand je la laisse",
+    "communion": "quand je me rapproche, quand je garde la distance, comment j'entretiens le lien",
+    "meta_personne": "ce que je sais de mes propres capacités et de mes limites",
+    "meta_tache": "ce que ce type de demande exige vraiment",
+    "meta_strategie": "quelle approche porte, et dans quelles conditions",
+    "affect_antecedent": "ce qui déclenche mes états, et comment je les réévalue",
+    "affect_reponse": "comment je module ce qui sort une fois l'état installé",
+    "autonomie_autre": "soutenir son choix plutôt que le diriger",
+    "competence_autre": "reconnaître et renforcer sa maîtrise",
+}
 
 
 # ══════════════════════════════════════════════════
