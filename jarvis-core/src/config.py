@@ -426,6 +426,17 @@ AGENT_DOCS_MIN_SCORE = float(os.getenv("AGENT_DOCS_MIN_SCORE", "0.35"))
 # Rétention des enregistrements de tâche dans Redis.
 AGENT_TASK_TTL = int(os.getenv("AGENT_TASK_TTL_DAYS", "30")) * 86400
 
+# Envoi du livrable par courriel au demandeur, à la fin de la tâche. Le push iOS annonce,
+# le courriel transporte : plafonné à 500 caractères et lu sur un écran verrouillé, une
+# notification ne peut pas porter un rapport. Destinataire = le demandeur lui-même, depuis
+# son propre compte Google ; jamais un tiers.
+AGENT_EMAIL_REPORT = os.getenv("AGENT_EMAIL_REPORT", "true").lower() in ("yes", "true", "1")
+
+# Plafond du corps du courriel. Au-delà, le document est tronqué avec un renvoi vers le
+# workspace — un rapport de plusieurs centaines de kilooctets ne se lit pas dans un client
+# de messagerie, et certains les rejettent.
+AGENT_EMAIL_MAX_CHARS = int(os.getenv("AGENT_EMAIL_MAX_CHARS", "120000"))
+
 # ── Shell agentique (Phase 2) ─────────────────────────────────────────────
 # Désactivé par défaut. Un shell sous le compte de l'utilisateur est la capacité la plus
 # dangereuse de la boucle : elle s'active sciemment, jamais par héritage de configuration.

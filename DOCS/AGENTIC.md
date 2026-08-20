@@ -278,8 +278,34 @@ curl localhost:8000/agent/tasks/{id}/transcript      # ce que l'agent a réellem
 curl -X POST localhost:8000/agent/tasks/{id}/cancel  # pris en compte entre deux pas
 ```
 
-Livrables dans `/opt/jarvis/agent_workspace/{task_id}/` (gitignoré). Notification iOS à la
-fin, via le même chemin de livraison que les push du proto-self.
+Livrables dans `/opt/jarvis/agent_workspace/{task_id}/` (gitignoré).
+
+### Restitution : le push annonce, le courriel transporte
+
+À la fin d'une tâche réussie, **deux canaux**, et la division du travail entre eux est le
+point important :
+
+| Canal | Porte | Limite |
+|---|---|---|
+| Push iOS | l'annonce et le résumé | 500 caractères, écran verrouillé |
+| Courriel | le **livrable entier** | 120 000 caractères, puis renvoi vers le workspace |
+
+Le courriel part depuis le compte Google du demandeur, **vers lui-même** — jamais vers un
+tiers. `send_gmail_message` n'accepte pas de pièce jointe (multipart/alternative texte +
+HTML) : le document part donc dans le corps, ce qui a l'avantage d'être lisible sans rien
+ouvrir. Le contenu est échappé avant rendu HTML.
+
+L'envoi précède le push, ce qui permet à la notification de dire « envoyé par mail » —
+et donc de savoir sans ouvrir sa boîte s'il y a quelque chose à lire.
+
+Silencieux et non bloquant dans tous les cas de bord : aucun livrable, fichier illisible
+ou vide, utilisateur sans courriel configuré, Gmail indisponible. Le livrable reste de
+toute façon sur disque. `AGENT_EMAIL_REPORT=false` pour couper.
+
+> **Injection dans l'historique** — le push est aussi ajouté à la conversation iOS
+> (`iphone-main`), donc Jarvis y fait référence quand on lui parle **depuis l'iPhone**.
+> Depuis Open WebUI, chaque conversation est une session distincte : les comptes rendus
+> n'y apparaissent pas.
 
 ---
 

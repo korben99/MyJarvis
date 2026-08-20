@@ -11,7 +11,7 @@ import asyncio
 from config import AGENT_ENABLED
 from helpers import get_logger
 
-from . import store
+from . import report, store
 from .loop import run_task
 
 logger = get_logger("jarvis-agent")
@@ -33,6 +33,11 @@ def _notify(task: dict) -> None:
         return
 
     if status == store.STATUS_DONE:
+        # Le courriel part AVANT le push : il porte le livrable, le push n'en porte que
+        # l'annonce. Cet ordre permet aussi d'écrire « envoyé par mail » dans la
+        # notification, donc de savoir sans ouvrir sa boîte s'il y a quelque chose à lire.
+        envoye = report.envoyer(task)
+
         # Une notification se lit sur un écran verrouillé : le résumé complet vit dans la
         # tâche, pas dans le push.
         body = (task["result"] or "Tâche terminée.").strip()
@@ -40,7 +45,8 @@ def _notify(task: dict) -> None:
             body = body[:_PUSH_MAX_CHARS].rsplit(" ", 1)[0] + "…"
         files = task.get("deliverables") or []
         if files:
-            body += f"\n\nFichiers : {', '.join(files)} (dans {task['workspace']})"
+            body += f"\n\nFichiers : {', '.join(files)}"
+            body += " — envoyé par mail." if envoye else f" (dans {task['workspace']})"
     else:
         body = f"Ta tâche a échoué : {task.get('error') or 'raison inconnue'}\n\n« {task['objective'][:120]} »"
 
