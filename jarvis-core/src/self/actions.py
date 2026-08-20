@@ -21,6 +21,7 @@ from config import (
     REASONING_API_KEY,
     REASONING_API_URL,
     REASONING_MODEL,
+    SELF_NOTES_MAX_ENTRIES,
     USER_ADMINS,
     USER_CODES,
     USER_EMAILS,
@@ -528,7 +529,7 @@ def _action_update_self_note(params: dict) -> str:
         if not merged:
             existing.append({"note": note, "date": datetime.now(timezone.utc).isoformat()})
 
-        data["self_notes"] = existing[-50:]
+        data["self_notes"] = existing[-SELF_NOTES_MAX_ENTRIES:]
         save_self_memory(data)
 
     action = "merged" if merged else "written"

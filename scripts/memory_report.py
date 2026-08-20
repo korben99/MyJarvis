@@ -257,11 +257,22 @@ def i10_listes_self() -> list:
     except (OSError, json.JSONDecodeError) as exc:
         return [("Listes de self.json", "illisible", str(exc))]
 
+    # Importés de config, jamais redéfinis ici : trois des quatre valeurs d'origine de
+    # cette sonde étaient inventées, avec des variables d'environnement inexistantes. Elle
+    # alertait donc contre des seuils qui ne correspondaient à aucune troncature réelle —
+    # et sous-estimait `opinions`, qui était déjà saturé à 50/50.
+    from config import (
+        GROWTH_LOG_MAX_ENTRIES,
+        LEARNINGS_MAX_ENTRIES,
+        OPINIONS_MAX_ENTRIES,
+        SELF_NOTES_MAX_ENTRIES,
+    )
+
     plafonds = {
-        "growth_log": int(os.getenv("GROWTH_LOG_MAX_ENTRIES", "180")),
-        "opinions": int(os.getenv("OPINIONS_MAX_ENTRIES", "60")),
-        "learnings": int(os.getenv("LEARNINGS_MAX_ENTRIES", "50")),
-        "self_notes": int(os.getenv("SELF_NOTES_MAX_ENTRIES", "30")),
+        "growth_log": GROWTH_LOG_MAX_ENTRIES,
+        "opinions": OPINIONS_MAX_ENTRIES,
+        "learnings": LEARNINGS_MAX_ENTRIES,
+        "self_notes": SELF_NOTES_MAX_ENTRIES,
     }
     tailles = {k: len(d.get(k) or []) for k in plafonds}
     _enregistrer("self_listes", tailles)

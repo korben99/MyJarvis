@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sonde mémoire quotidienne — 07h25, juste avant le briefing de 07h30.
+
+  Volontairement en launchd et NON dans l'APScheduler de l'API : on ne met pas la sonde
+  dans la machine surveillée. Si l'API tombe — l'instant précis où l'on veut savoir — un
+  job interne tombe avec elle et le rapport ne part jamais.
+
+  Le script n'envoie de courriel QUE s'il y a une alerte : une sonde qui écrit tous les
+  jours finit filtrée par son destinataire, et n'alerte plus quand il le faudrait.
+
+  Installation :
+      cp scripts/com.jarvis.memory-report.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.jarvis.memory-report.plist
+  Vérification :
+      launchctl list | grep memory-report
+      launchctl start com.jarvis.memory-report      # déclenchement immédiat
+  Retrait :
+      launchctl unload ~/Library/LaunchAgents/com.jarvis.memory-report.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jarvis.memory-report</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/jarvis/venv/bin/python</string>
+        <string>/opt/jarvis/scripts/memory_report.py</string>
+        <string>--send</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>7</integer>
+        <key>Minute</key><integer>25</integer>
+    </dict>
+
+    <!-- Le Mac Mini peut dormir à 07h25. Sans cette clé, l'exécution manquée est
+         simplement perdue ; avec elle, launchd la rattrape au réveil. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>/opt/jarvis</string>
+
+    <key>StandardOutPath</key>
+    <string>/opt/jarvis/logs/memory-report.log</string>
+    <key>StandardErrorPath</key>
+    <string>/opt/jarvis/logs/memory-report.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Le script lit .env via config.py, mais HF_HOME doit être posé avant tout
+             import : memory_report touche des modules qui initialisent HuggingFace. -->
+        <key>HF_HOME</key>
+        <string>/opt/jarvis/models</string>
+        <key>TOKENIZERS_PARALLELISM</key>
+        <string>false</string>
+    </dict>
+</dict>
+</plist>

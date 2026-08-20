@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from config import (
     DEFAULT_TEMP,
     GROWTH_LOG_MAX_ENTRIES,
+    LEARNINGS_MAX_ENTRIES,
     MAX_TOKENS_COMPACT,
     MAX_TOKENS_NO_THINK,
     REASONING_API_KEY,
@@ -376,7 +377,7 @@ async def run_nightly_interaction_review() -> None:
                         new_style,
                         new_mood,
                     )
-                data["learnings"] = data.get("learnings", [])[-100:]
+                data["learnings"] = data.get("learnings", [])[-LEARNINGS_MAX_ENTRIES:]
                 data["growth_log"] = data.get("growth_log", [])[
                     -GROWTH_LOG_MAX_ENTRIES:
                 ]

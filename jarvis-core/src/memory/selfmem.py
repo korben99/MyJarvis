@@ -10,7 +10,7 @@ import tempfile
 from datetime import datetime, timezone
 from threading import Lock
 
-from config import SELF_MEMORY_PATH
+from config import LEARNINGS_MAX_ENTRIES, SELF_MEMORY_PATH
 from helpers import get_logger
 
 logger = get_logger("jarvis-memory")
@@ -105,5 +105,5 @@ def add_self_learning(learning: str):
                 "date": datetime.now(timezone.utc).isoformat(),
             }
         )
-        data["learnings"] = data["learnings"][-100:]
+        data["learnings"] = data["learnings"][-LEARNINGS_MAX_ENTRIES:]
         save_self_memory(data)

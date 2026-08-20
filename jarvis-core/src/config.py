@@ -539,6 +539,22 @@ DONE_PROJECT_TTL_DAYS = int(os.getenv("DONE_PROJECT_TTL_DAYS", "180"))
 # Avec 2 utilisateurs actifs, 180 = environ 3 mois de journal avant rotation.
 GROWTH_LOG_MAX_ENTRIES = int(os.getenv("GROWTH_LOG_MAX_ENTRIES", "180"))
 
+# ── Plafonds des autres listes de jarvis-self.json ────────────────────────
+# Ces trois listes étaient tronquées par des tranches EN DUR, réparties dans quatre
+# fichiers (self/state.py, memory/selfmem.py, self/nightly.py, self/actions.py). Elles
+# vieillissent par le haut sans un mot dès qu'elles saturent : la mémoire longue de Jarvis
+# sur lui-même partait donc silencieusement, et rien ne permettait de le savoir ni de
+# l'ajuster sans toucher au code.
+#
+# Relevé le 20/08/2026 : opinions était À 50/50, donc en troncature permanente depuis un
+# moment — chaque nouvelle opinion en effaçait une ancienne.
+#
+# Défauts = valeurs d'origine : aucun changement de comportement tant qu'on ne les règle
+# pas. C'est la sonde scripts/memory_report.py qui surveille leur remplissage.
+OPINIONS_MAX_ENTRIES = int(os.getenv("OPINIONS_MAX_ENTRIES", "120"))
+LEARNINGS_MAX_ENTRIES = int(os.getenv("LEARNINGS_MAX_ENTRIES", "100"))
+SELF_NOTES_MAX_ENTRIES = int(os.getenv("SELF_NOTES_MAX_ENTRIES", "100"))
+
 
 # ══════════════════════════════════════════════════
 #  USER MANAGEMENT — loaded from users_list.json
@@ -611,4 +627,3 @@ APNS_TEAM_ID  = os.getenv("APNS_TEAM_ID",  "")   # 10-char team ID
 APNS_BUNDLE_ID = os.getenv("APNS_BUNDLE_ID", "com.sebastienviou.JarvisApp")
 APNS_KEY_PATH = os.getenv("APNS_KEY_PATH", "")   # absolute path to AuthKey_XXXXXX.p8
 APNS_ENV      = os.getenv("APNS_ENV",      "production")  # "production" or "sandbox"
-

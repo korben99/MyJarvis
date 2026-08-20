@@ -9,6 +9,7 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 
+from config import OPINIONS_MAX_ENTRIES
 from helpers import get_logger, get_redis
 from memory import get_self_memory, save_self_memory, self_memory_lock
 
@@ -98,7 +99,7 @@ def _upsert_opinion_inplace(data: dict, topic: str, opinion: str, date: str) -> 
         existing["updated"] = date
     else:
         opinions.append({"topic": topic, "opinion": opinion, "created": date})
-    data["opinions"] = opinions[-50:]
+    data["opinions"] = opinions[-OPINIONS_MAX_ENTRIES:]
 
 
 def add_self_opinion(topic: str, opinion: str) -> None:
