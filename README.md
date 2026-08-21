@@ -366,6 +366,28 @@ After each exchange, `analyzer.py` asks the LLM to evaluate an importance score 
 
 `memory_summary` is the prerequisite gate: if null, importance is forced to 0.0 regardless of the LLM score. No summary → nothing stored.
 
+**The summary is judged on the session, not on the hourly increment.** The analyzer runs
+every `CONV_ANALYSIS_INTERVAL_MINUTES` on messages newer than the per-session watermark, so
+a live conversation is cut into slices of one or two turns. Until 2026-08-21 the instruction
+on `<historique_deja_analyse>` read *"N'en extrais RIEN : … aucun résumé"*, and the model
+obeyed it literally: a slice was judged on its own and almost always came back null.
+
+Measured on identical content, only the boundary moving:
+
+| | result |
+|---|---|
+| 4 turns, all in `<echange>` | 0/3 null, importance 0.7 |
+| 2 turns in `<echange>` + 2 in `<historique_deja_analyse>` | **3/3 null** |
+
+The exception is now open to `memory_summary` alone — it may situate the increment in what
+came before. Extraction (`user_facts`, `project_updates`, `topics`) still applies strictly to
+the new exchange, which is what prevents re-writing what is already in memory. Duplicate
+summaries are caught at write time, not after: `store_memory_vector()` rejects anything below
+`NOVELTY_THRESHOLD` (0.25) — measured at 16% rejection over 86 logged decisions, with stored
+novelty ranging 0.250–0.813. That threshold was set by hand and is worth re-measuring now
+that the input distribution has changed; the `[memory_decision]` log lines carry everything
+needed.
+
 Storage threshold (set in `config.py`):
 - **`IMPORTANCE_THRESHOLD` (0.35)** — stored as episodic vector in Qdrant
 
@@ -1079,7 +1101,7 @@ cd /opt/jarvis
 `install.sh` is idempotent (safe to re-run after a `git pull`) and gets you all the way to "just fill in `.env`":
 - checks prerequisites (macOS/arm64, Python 3.13, Docker)
 - creates the venv and installs `requirements.txt`
-- creates every gitignored runtime directory (`RAGData/*`, `TradeData/`, `logs/`, `keys/`, `models/`, `jarvis-core/JarvisData/`)
+- creates every gitignored runtime directory (`RAGData/*` — including `RAGData/Trade/` —, `logs/`, `keys/`, `models/`, `jarvis-core/JarvisData/`)
 - copies `.env.example` → `.env` and `DOCS/examples/users_list.example.json` → `jarvis-core/JarvisData/users_list.json` (never overwrites existing files)
 - installs the `com.jarvis.api` launchd service from `DOCS/examples/com.jarvis.api.plist.template` and adds the `jarvis-start`/`jarvis-stop`/`jarvis-reload` aliases to your shell rc
 
@@ -1140,7 +1162,7 @@ initialisation et est ignorée ensuite. Symptôme si désactivé :
 
 ### 7. Import trading portfolio (optional)
 
-Export your Boursorama positions as CSV (*Mes comptes → Exporter*) and drop the file in `TradeData/`. Jarvis imports it automatically on the next hourly tick, or immediately on restart.
+Export your Boursorama positions as CSV (*Mes comptes → Exporter*) and drop the file in `RAGData/Trade/`. Jarvis imports it automatically on the next hourly tick, or immediately on restart.
 
 ### macOS launchd Service
 
@@ -1328,7 +1350,7 @@ Measured effect (direct axis, 120 items): `+0.119` in combination with `IDENTITY
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TRADE_DATA_DIR` | `/app/trade_data` | Path to the CSV drop directory (mapped from `./TradeData/` on host) |
+| `TRADE_DATA_DIR` | `/opt/jarvis/RAGData/Trade` | CSV drop directory. The `/app/trade_data` container path predates the native launchd install |
 
 ### User Management
 
@@ -1340,7 +1362,7 @@ Users are defined in `jarvis-core/JarvisData/users_list.json`. Each entry contai
 - `trading` — boolean — set to `true` to enable hourly portfolio surveillance for this user
 - `profile` — object of stable biographical facts injected into the cached system prompt (never in the dynamic prefix). Fields: `famille`, `taille`, `poids`, `année de naissance`, `habitation`, `travail`, `intérêts`, `voiture`. Add/remove keys freely — all non-empty values are rendered as `k : v` in `<profil_utilisateur>`. Update here, not via the analyzer (which tracks dynamic facts in Redis).
 
-Only users with `"trading": true` participate in scheduled trade checks (CSV import, price fetch, alert evaluation). Users without this flag are never included, regardless of whether a CSV exists in `TradeData/`.
+Only users with `"trading": true` participate in scheduled trade checks (CSV import, price fetch, alert evaluation). Users without this flag are never included, regardless of whether a CSV exists in `RAGData/Trade/`.
 
 Une entrée est chargée dès qu'elle possède un `code` : il n'existe pas de drapeau
 d'activation. Désactiver un utilisateur = retirer son entrée du fichier. `JarvisData/` étant
@@ -1593,11 +1615,17 @@ Only outward-facing work lives here since 2026-08-21; memory upkeep moved to the
   `self_introspection` is never pruned: nine axes bounded by construction, revised not deleted.
 - `consolidate_memory` — full memory compression, now the nightly monthly run (day 1). The
   on-demand path is gone; compressing memory is upkeep, not action.
+- `flag_knowledge_gap` — log a topic Jarvis answered poorly, now a field of the nightly self
+  call. It requires a *concrete* failure as context, and only the night has the conversations
+  in view: the reflection cycle sees counts and topics, never content, so it could not satisfy
+  that honestly. It showed — the two gaps actually on file described Jarvis's own loop
+  behaviour ("decision inertia", "notification handling"), the only thing it could observe,
+  and those fed `refine_prompt`. Guards unchanged: 7-day cooldown per topic, blocked if a
+  proposal is pending.
 
 | Action | Phase | Description |
 |--------|-------|-------------|
 | `nothing` | Both | Explicit no-op with reason |
-| `flag_knowledge_gap` | Global | Log a topic Jarvis answered poorly. Requires a concrete failure as context. 7-day cooldown per topic, blocked if proposal pending. |
 | `refine_prompt` | Global | Propose an improved version of a prompt (see Prompt Self-Modification below). |
 | `alert_admin` | Global | Push a maintenance/security recommendation to the admin (e.g. *"bump openssl to 3.5.6 on qdrant"*). The channel through which Jarvis, having seen `<etat_disparition>` and `<vulnerabilites>`, can act on its own state. Dedicated 24h cooldown. |
 | `send_notification` | User | Send a Gmail to one user (rate-limited to 1/user/day). |
@@ -1698,7 +1726,7 @@ L'affinité est exprimée en label sémantique (`forte` ≥ 0.8 · `bonne` ≥ 0
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/portfolio/{user_code}` | Full portfolio with live P&L |
-| `POST` | `/portfolio/import/{user_code}` | Force re-parse of the latest CSV in `TradeData/` |
+| `POST` | `/portfolio/import/{user_code}` | Force re-parse of the latest CSV in `RAGData/Trade/` |
 | `POST` | `/portfolio/upload/{user_code}` | Upload a CSV directly (multipart/form-data) |
 | `PUT` | `/portfolio/position/{user_code}/{isin}` | Patch Jarvis-managed fields on a position |
 | `GET` | `/portfolio/analysis/{user_code}` | On-demand AI analysis of the portfolio |
@@ -1716,7 +1744,7 @@ L'affinité est exprimée en label sémantique (`forte` ≥ 0.8 · `bonne` ≥ 0
 
 **Scheduled jobs:**
 - **Every hour** (weekdays 09:00–17:35 Paris): fetch live prices via yfinance, evaluate alert conditions with PRIMARY_MODEL. Fired alerts are queued in Redis and injected into the user's next chat message.
-- **Every hour (always)**: check `TradeData/` for a new CSV (mtime-gated); import automatically if a newer file is found.
+- **Every hour (always)**: check `RAGData/Trade/` for a new CSV (mtime-gated); import automatically if a newer file is found.
 - **Morning briefing**: portfolio performance summary included as a section when positions are loaded.
 
 **Alert conditions** — PRIMARY_MODEL fires an alert only when at least one of these is true:
@@ -1893,21 +1921,39 @@ Both files are written to `/opt/jarvis/logs/` and are accessible directly on the
 
 ### Journaux de prompts
 
-Deux journaux distincts enregistrent prompt + réponse **brute** du LLM, chacun avec sa
-propre bascule :
+Six journaux enregistrent prompt + réponse **brute** du LLM :
 
-| File | Gate | Contenu |
-|------|------|---------|
-| `prompts.log` | `LLM_DEBUG_PROMPTS` | tout le trafic conversationnel |
+| Fichier | Gate | Contenu |
+|---|---|---|
+| `prompts.log` | `LLM_DEBUG_PROMPTS` | trafic conversationnel |
+| `analyzer-prompts.log` | `LLM_DEBUG_PROMPTS` | analyse de conversation (horaire) |
+| `nightly-prompts.log` | `LLM_DEBUG_PROMPTS` | revue nocturne — **tout** ce qu'elle appelle |
+| `reflection-prompts.log` | `LLM_DEBUG_PROMPTS` | cycle de réflexion, auto-contestations comprises |
 | `opencode-prompts.log` | `RAW_DEBUG_PROMPTS` | uniquement `/v1/raw` (agents de code) |
+| `agent-prompts.log` | `AGENT_DEBUG_PROMPTS` | boucle agentique (tâches autonomes) |
 
-Fichiers séparés parce qu'un prompt d'agent de code embarque tout le contexte du dépôt et
-noierait le reste ; gates séparées pour pouvoir suivre OpenCode sans réactiver la
-journalisation complète.
+**Deux mécanismes de routage, pour deux besoins différents.** OpenCode et l'agent passent un
+chemin **explicite** (`debug_log_path`) et ont leur propre bascule : leurs prompts embarquent
+tout le contexte du dépôt ou les schémas de dix outils, et on veut pouvoir les suivre sans
+rallumer la journalisation conversationnelle.
 
-Rotation : `PROMPT_LOG_MAX_MB` × `PROMPT_LOG_BACKUPS` (20 Mo × 3 par défaut). Elle a été
-ajoutée en août 2026 — ces deux journaux écrivaient auparavant en `open(…, "a")` brut, sans
-rotation, et `prompts.log` avait atteint 42 Mo.
+Les trois traitements de fond passent par une **variable de contexte** (`journal_de_cycle`,
+`llm/local.py`). Ils partagent la gate de `prompts.log` — c'est le même trafic, seulement
+rangé ailleurs. Le contexte a été préféré à un paramètre parce qu'un cycle appelle le LLM
+depuis plusieurs modules : la revue nocturne délègue la curation à `memory/cleaning.py` et le
+narratif à `memory/profile.py`. Faire descendre un chemin à travers `helpers` puis les quatre
+points d'entrée de `llm/local.py` aurait demandé une dizaine de signatures modifiées, en
+ratant quand même les appels délégués. La variable suit le cycle où qu'il aille, y compris à
+travers `asyncio.to_thread`, qui recopie le contexte.
+
+Pour l'analyseur, le contexte est posé sur `analyze_exchange()` et non sur le job planifié :
+deux chemins y mènent (le scheduler et `POST /memory/analyze`), et c'est cette fonction qui
+porte l'unique appel LLM.
+
+Rotation : `PROMPT_LOG_MAX_MB` × `PROMPT_LOG_BACKUPS` (20 Mo × 3 par défaut), appliquée à
+chaque fichier — `_prompt_writer()` crée un `RotatingFileHandler` par chemin, donc un nouveau
+journal est couvert sans réglage. Elle a été ajoutée en août 2026 : ces journaux écrivaient
+auparavant en `open(…, "a")` brut, sans rotation, et `prompts.log` avait atteint 42 Mo.
 
 > **Piège d'analyse.** Ces journaux montrent la sortie LLM **avant** validation pydantic.
 > Un champ visible ici n'est pas un champ arrivé en base — vérifier Redis/Qdrant, pas le
@@ -1933,77 +1979,81 @@ This replaces the per-module `import logging` + `logging.getLogger(...)` pattern
 
 ```
 /opt/jarvis/
-├── docker-compose.yml
-├── .env
-├── jarvis-status.sh
-├── JarvisApp/                 # iOS Swift app (Xcode project)
-│   ├── JarvisApp.swift        # App entry point, lifecycle, notification wiring
-│   ├── JarvisAPI.swift        # API client: streaming chat, history, routing
-│   ├── NotificationService.swift  # Push polling (BGAppRefreshTask + foreground timer)
-│   ├── ContentView.swift      # Root view
-│   ├── ChatView.swift         # Chat UI
-│   ├── VoiceView.swift        # Voice mode UI
-│   ├── SettingsView.swift     # Server URL, user code, model config
-│   ├── AppSettings.swift      # @AppStorage persistent settings
-│   ├── SpeechEngine.swift     # WhisperKit STT + AVSpeech TTS
-│   ├── WakeWordEngine.swift   # On-device wake word detection
-│   └── Models.swift           # Shared data models
-├── AGENTS.md              # → DOCS/AGENTS.md (lien) — consignes lues par les agents de code
+├── docker-compose.yml · .env · jarvis-status.sh
+├── AGENTS.md                   # → DOCS/AGENTS.md (lien) — consignes lues par les agents de code
+├── JarvisApp/                  # App iOS Swift (projet Xcode)
+│   ├── JarvisApp.swift · ContentView.swift · ChatView.swift · VoiceView.swift
+│   ├── JarvisAPI.swift         # Client API : chat en flux, historique, routage
+│   ├── NotificationService.swift  # Polling push (BGAppRefreshTask + timer premier plan)
+│   ├── SpeechEngine.swift · WakeWordEngine.swift   # WhisperKit STT, AVSpeech TTS, mot-clé
+│   └── SettingsView.swift · AppSettings.swift · Models.swift
 ├── jarvis-core/
 │   ├── Dockerfile
-│   ├── tests/
-│   │   └── test_quality.py    # Suite unitaire + intégration (pytest)
+│   ├── tests/                  # test_quality.py · test_lru_cache.py · test_web_search.py
 │   ├── src/
-│   │   ├── main.py            # Démarrage app, scheduler, routes hors chat
-│   │   ├── routes/            # chat.py, proxy.py (/v1/*), memory_routes.py, self_routes.py…
-│   │   ├── llm_local.py       # Inférence MLX, cache LRU de prompts, journaux de prompts
-│   │   ├── tool_calls.py      # Function calling : format modèle ↔ OpenAI (agents de code)
-│   │   ├── pipeline.py        # Assemblage du prompt + post_analysis
-│   │   ├── memory.py          # Memory system (Redis + Qdrant)
-│   │   ├── self.py            # Proto-self / reflection loop + autocoding actions
-│   │   ├── briefing.py        # Morning briefing generation
-│   │   ├── google_services.py # Gmail + Calendar
-│   │   ├── trading.py         # Boursorama portfolio surveillance
-│   │   ├── llm_router.py      # Intent classification (Tier 1)
-│   │   ├── analyzer.py        # Conversation analysis (Tier 2b)
-│   │   ├── web_search.py      # External search: weather (Open-Meteo), news (DDG), 3-stage deep web
-│   │   ├── prompts.py         # All LLM prompt constants + get_prompt() live override loader
-│   │   ├── helpers.py         # Shared: LLM clients, logging (setup_logging/get_logger), Redis/Qdrant singletons
-│   │   ├── trade_keys.py      # Redis key helpers for the trading module
-│   │   └── config.py          # Configuration loader + model helpers
+│   │   ├── main.py             # Démarrage app, scheduler APScheduler, cycle de vie
+│   │   ├── config.py           # Configuration + helpers modèle (is_qwen36, INTROSPECTION_AXES…)
+│   │   ├── prompts.py          # Constantes de prompts + get_prompt() (surcharge à chaud)
+│   │   ├── pipeline.py         # Assemblage du prompt système + post_analysis
+│   │   ├── analyzer.py         # Analyse de conversation (toutes les 60 min)
+│   │   ├── emotional_state.py  # État émotionnel continu (Redis, 3 dimensions)
+│   │   ├── vitals.py · cve.py  # État de disparition mesuré · scan SBOM/grype
+│   │   ├── steering.py         # Activation steering (désactivé par défaut)
+│   │   ├── rag.py · web_search.py · trading.py · briefing.py · google_services.py
+│   │   ├── apns.py · deps.py · tool_calls.py · trade_keys.py
+│   │   ├── llm/                # client.py · local.py (MLX, cache LRU) · router.py · embed_router.py
+│   │   ├── memory/             # LES CINQ ÉTAGES + curation
+│   │   │   ├── shortterm.py · episodic.py · vectors.py   # Redis · Qdrant
+│   │   │   ├── profile.py · projects.py                  # Profil, projets & tâches
+│   │   │   ├── selfmem.py                                # jarvis-self.json, opinions
+│   │   │   ├── context.py                                # build_memory_context()
+│   │   │   ├── cleaning.py                               # Consolidation, décroissance
+│   │   │   └── embed.py                                  # Modèle d'embedding (singleton)
+│   │   ├── self/               # LA NUIT APPREND, LA RÉFLEXION AGIT
+│   │   │   ├── nightly.py      # Apprendre : introspection, faits, curation, profil
+│   │   │   ├── engine.py       # Agir : boucle, garde mécanique, auto-contestation
+│   │   │   ├── actions.py      # Catalogue d'actions + livraison push
+│   │   │   ├── context.py      # Contexte des appels de réflexion
+│   │   │   ├── proposals.py    # refine_prompt — propositions en attente d'accord humain
+│   │   │   └── state.py        # jarvis-self.json, journal de réflexion, incidents
+│   │   ├── agent/              # Boucle agentique (tâches autonomes, admin uniquement)
+│   │   │   ├── loop.py · worker.py · store.py · tools.py
+│   │   │   └── shell.py (seatbelt) · sandbox.py · report.py · cti.py
+│   │   ├── routes/             # chat.py · proxy.py (/v1/*) · memory_routes.py · self_routes.py
+│   │   │                       # agent_routes.py · briefing_routes.py · portfolio.py · device.py
+│   │   └── helpers/            # llm_http.py · llm_json.py · store.py · text.py
+│   │                           # timefmt.py · weather.py · logging_setup.py
 │   └── JarvisData/
-│       ├── users_list.json
-│       ├── jarvis-self.json
-│       ├── reflections/
-│       └── prompts/
-│           ├── prompt_proposals.json   # Append-only proposal history
-│           └── prompt_overrides.json   # Live active overrides (applied without restart)
-├── TradeData/             # Boursorama CSV exports (drop here)
-├── RAGData/               # Documents to index
-│   ├── personal/
-│   ├── work/
-│   ├── documents/
-│   ├── company/
-│   └── reflexions/
+│       ├── users_list.json · jarvis-self.json · backup_receipt.json
+│       ├── model_cache/
+│       └── prompts/            # prompt_proposals.json · prompt_overrides.json
 ├── scripts/
-│   ├── uploadrag.py             # Indexe RAGData/ dans OpenWebUI (job launchd 23:10)
-│   ├── jarvis-launchd.sh        # Gestion du service launchd — idempotente
-│   ├── search-qdrant.py         # Test RAG search
-│   ├── download_models.py       # Récupère modèles + template de chat
-│   └── backup-jarvis.sh         # Sauvegarde
-├── logs/
-│   ├── jarvis-api.log / jarvis-debug.log
-│   ├── prompts.log              # Prompts LLM (conversationnel)
-│   └── opencode-prompts.log     # Prompts LLM (agents de code, /v1/raw)
+│   ├── jarvis-launchd.sh · jarvis-entrypoint.sh · jarvis-status.sh · backup-jarvis.sh
+│   ├── uploadrag.py            # Indexe RAGData/ dans OpenWebUI (launchd 23:10)
+│   ├── memory_report.py        # Sonde quotidienne des étages de mémoire (launchd)
+│   ├── migrate_introspection.py  # learnings → self_introspection (simulation par défaut)
+│   ├── purge_user.py           # Retire toutes les traces d'un utilisateur (simulation)
+│   ├── reclassify-incident.py · cron-index.sh
+│   └── download_models.py · search-qdrant.py · generate_google_token.py
+├── RESEARCH/                   # Hors dépôt (gitignoré) — mesures et entraînements
+│   ├── CLAUDE.md               # Point de reprise : pièges connus, état des campagnes
+│   ├── RESULTATS.md            # TOUTES les mesures, avec leurs réserves
+│   ├── evaluation/             # eval_reuse · eval_opinions · eval_emotion · eval_logprob
+│   │   └── dryrun_introspection.py   # Essai à blanc de la revue nocturne
+│   ├── adapters/ · data/ · lora/ · orpo/ · bench/ · ablation/ · concept-vectors/
+│   └── prompts/                # Versions successives de IDENTITY_FR (v1→v11)
+├── RAGData/                    # Documents à indexer (personal, work, documents…)
+│   └── Trade/                  # Exports CSV Boursorama (TRADE_DATA_DIR)
+├── logs/                       # jarvis-api · jarvis-debug
+│                               # prompts · analyzer-prompts · nightly-prompts
+│                               # reflection-prompts
+│                               # opencode-prompts · agent-prompts
 └── DOCS/
-    ├── AGENTS.md                # Consignes projet pour agents de code
-    ├── opencode-local.md        # Brancher OpenCode sur le LLM local
-    ├── opencode.json.example    # Config provider OpenCode (à copier)
-    ├── jarvis_cheatsheet.md
-    └── examples/
-        ├── com.jarvis.api.plist.template
-        ├── jarvis-aliases.sh    # Alias jarvis-start/stop/restart/status
-        └── users_list.example.json
+    ├── ROADMAP.md              # Journal des décisions — historique, pas état courant
+    ├── AGENTIC.md              # Boucle agentique : conception et phases
+    ├── AGENTS.md · GOOGLE.md · REDIS.md · jarvis_cheatsheet.md
+    ├── opencode-local.md · opencode.json.example
+    └── examples/               # plist template · alias shell · users_list.example.json
 ```
 
 ---

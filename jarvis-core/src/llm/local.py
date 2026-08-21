@@ -21,6 +21,8 @@ LRU_KV_GB=4.0    total RAM budget for all LRU caches in GB (default 4.0)
 
 import asyncio
 import concurrent.futures
+import contextlib
+import contextvars
 import copy
 import datetime
 import json
@@ -112,6 +114,36 @@ _RAW_PROMPTS_LOG_PATH = "/opt/jarvis/logs/opencode-prompts.log"
 AGENT_DEBUG_PROMPTS = os.getenv("AGENT_DEBUG_PROMPTS", "true").lower() in ("yes", "true", "1")
 _AGENT_PROMPTS_LOG_PATH = "/opt/jarvis/logs/agent-prompts.log"
 
+# Journaux des deux cycles de fond. Ils partagent la gate de prompts.log — ce sont les
+# mêmes prompts, on veut juste pouvoir les lire séparément du trafic conversationnel.
+_NIGHTLY_PROMPTS_LOG_PATH = "/opt/jarvis/logs/nightly-prompts.log"
+_REFLECTION_PROMPTS_LOG_PATH = "/opt/jarvis/logs/reflection-prompts.log"
+# L'analyseur tourne toutes les heures et son prompt embarque la base de connaissances, les
+# clés de profil et 2000 caractères d'historique. Surtout, on ne l'ouvre pas pour la même
+# question : devant prompts.log on demande ce que Jarvis a répondu à quelqu'un, devant
+# celui-ci pourquoi un fait n'a pas été extrait ou un résumé rendu nul.
+_ANALYZER_PROMPTS_LOG_PATH = "/opt/jarvis/logs/analyzer-prompts.log"
+
+# Routage par CONTEXTE plutôt que par paramètre. Un cycle de fond appelle le LLM depuis
+# plusieurs modules — la revue nocturne délègue à memory/cleaning.py et memory/profile.py —
+# et faire descendre un chemin de journal à travers helpers puis les quatre points d'entrée
+# aurait demandé une dizaine de signatures modifiées, en ratant quand même les appels
+# délégués. Une variable de contexte suit le cycle où qu'il aille, y compris à travers
+# asyncio.to_thread, qui recopie le contexte.
+_cycle_journal: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "cycle_journal", default=None
+)
+
+
+@contextlib.contextmanager
+def journal_de_cycle(path: str):
+    """Route vers `path` tous les prompts émis dans ce bloc, appels délégués compris."""
+    jeton = _cycle_journal.set(path)
+    try:
+        yield
+    finally:
+        _cycle_journal.reset(jeton)
+
 QUANT_KV = os.getenv("QUANT_KV", "").lower() in ("yes", "true", "1")
 QUANT_KV_BITS = int(os.getenv("QUANT_KV_BITS", "4"))
 
@@ -163,12 +195,14 @@ def _debug_log(
 ) -> None:
     """Journalise prompt + réponse brute.
 
-    `log_path` route vers un journal dédié (agents de code) avec sa propre gate ; sans lui,
-    comportement d'origine sur prompts.log.
+    `log_path` route vers un journal dédié (agents de code) avec sa propre gate. À défaut,
+    le journal du cycle en cours (revue nocturne, réflexion) s'applique — voir
+    `journal_de_cycle`. Sans ni l'un ni l'autre : prompts.log, le trafic conversationnel.
     """
-    path = log_path or _PROMPTS_LOG_PATH
+    path = log_path or _cycle_journal.get() or _PROMPTS_LOG_PATH
     # Une gate par journal : sans ça, suivre l'agent obligeait à rallumer OpenCode et
-    # réciproquement, les deux partageant la même variable.
+    # réciproquement, les deux partageant la même variable. Les journaux de cycle, eux,
+    # suivent LLM_DEBUG_PROMPTS : c'est le même trafic, seulement rangé ailleurs.
     _gates = {
         _RAW_PROMPTS_LOG_PATH: RAW_DEBUG_PROMPTS,
         _AGENT_PROMPTS_LOG_PATH: AGENT_DEBUG_PROMPTS,

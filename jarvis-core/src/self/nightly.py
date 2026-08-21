@@ -29,6 +29,7 @@ from config import (
     llm_timeout,
 )
 from helpers import call_llm_async_bg, extract_llm_json, get_logger, get_redis
+from llm.local import _NIGHTLY_PROMPTS_LOG_PATH, journal_de_cycle
 from memory import (
     archive_autobiographical_event,
     consolidate_memories,
@@ -343,6 +344,13 @@ async def run_nightly_interaction_review() -> None:
     l'appel — aucune donnée n'est retenue au travers d'un await.
     Idempotent : verrou Redis par utilisateur et par date (TTL 25 h).
     """
+    with journal_de_cycle(_NIGHTLY_PROMPTS_LOG_PATH):
+        await _revue_nocturne()
+
+
+async def _revue_nocturne() -> None:
+    """Corps de la revue. Séparé pour que TOUT ce qu'elle appelle — y compris la curation
+    et le narratif de profil, qui vivent dans memory/ — écrive dans nightly-prompts.log."""
     logger.info("=== Nightly interaction review starting ===")
     r = get_redis()
     now = datetime.now(timezone.utc)

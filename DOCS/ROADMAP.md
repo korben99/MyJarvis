@@ -682,6 +682,43 @@ Reste à faire le jour de la sortie :
 
 ---
 
+## Découpage apprendre / agir (v9 — 2026-08-21)
+
+Les entrées `- [x]` plus haut décrivent l'état au moment où elles ont été écrites. Cette
+section dit ce qui les a remplacées — les lire comme l'état courant serait une erreur.
+
+**Règle** : la nuit apprend, la réflexion agit. Une question place n'importe quel code —
+est-ce que ça écrit ce que Jarvis sait, ou est-ce que ça fait quelque chose ?
+
+- [x] Connaissance de soi : la liste `learnings` (accumulation par sujet, sans plafond
+      utile) remplacée par **9 axes fixes** issus de cadres publiés — circumplexe
+      interpersonnel (Wiggins), métacognition (Flavell), régulation émotionnelle (Gross),
+      autodétermination (Deci & Ryan). Révisés, jamais empilés ; tous injectés en
+      permanence, coût borné par construction. Migration : `scripts/migrate_introspection.py`
+- [x] `self_notes` **supprimée** — son bloc d'injection en conversation lisait la clé
+      `text` alors que l'écriture posait `note` : masqué par un garde, il n'avait jamais
+      rien affiché depuis avril. Notes lues seulement par le cycle qui les écrivait
+- [x] Opinions : sélection par **embedding** (28 % de déclenchement contre 20 % en
+      lexical), repli sur la plus récente retiré (mesuré inerte), dédup sémantique à
+      l'écriture, règle « aucune information sur une personne »
+- [x] Actions retirées du catalogue de réflexion : `store_insight`, `correct_profile`
+      (la nuit est propriétaire de l'autobio et du profil), `consolidate_memory` et
+      `prune_self_memory` (entretien → nuit), `check_health` (devenue
+      `alerter_si_anomalie_critique()`, déterministe avant tout appel LLM),
+      `flag_knowledge_gap` (exige un échec concret : seule la nuit voit les conversations)
+- [x] Garde mécanique sur « agir sur soi » : sans matière (service KO, CVE critique,
+      incident récent, lacune au seuil), l'appel LLM n'a pas lieu
+- [x] Introspection sortie de la boucle utilisateur : **un** appel par nuit sur la journée
+      entière, nourri aussi de l'état opérationnel (`<ton_fonctionnement>`)
+- [x] Analyseur : le résumé n'était jugé que sur l'incrément horaire, l'instruction
+      interdisant d'utiliser l'historique déjà analysé — 3/3 nuls sur un lot de 2 tours
+      contre 0/3 sur le même contenu en un seul bloc. Exception ouverte au seul
+      `memory_summary` ; l'extraction reste sur l'incrément, donc pas de doublon
+- [x] Consolidation : les points épisodiques n'étaient supprimés qu'après *tentative*
+      d'écriture, sans vérifier qu'elle avait abouti. `store_autobiographical_event`
+      renvoie désormais un booléen ; un lot dont tous les faits sont dédupliqués est
+      **conservé**
+
 ## Autres axes (non planifiés)
 
 - [x] Écriture calendrier Google (créer des événements, pas seulement lire)

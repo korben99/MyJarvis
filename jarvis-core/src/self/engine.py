@@ -24,6 +24,7 @@ from config import (
     llm_timeout,
 )
 from helpers import call_llm_async_bg, extract_llm_json, get_logger, get_redis
+from llm.local import _REFLECTION_PROMPTS_LOG_PATH, journal_de_cycle
 import emotional_state
 from memory import get_self_memory, save_self_memory, self_memory_lock
 from prompts import get_prompt
@@ -300,16 +301,22 @@ def _run_chain_step(
 
 
 async def run_self_reflection() -> dict:
-    """
-    Two-phase self-reflection cycle. Called by APScheduler every REFLECTION_INTERVAL_HOURS.
+    """LE CYCLE QUI AGIT. Appelé par APScheduler toutes les REFLECTION_INTERVAL_HOURS.
 
-    Phase 1 (global): Jarvis self-state — health, knowledge gaps, self-notes, prompts.
-                      Up to MAX_CHAIN_ITERATIONS steps.
-    Phase 2 (per-user): One LLM chain per user — profile, push, insights.
-                        Up to MAX_CHAIN_ITERATIONS steps per user.
+    Deux appels, tous deux tournés vers l'extérieur — apprendre appartient à la nuit :
+      agir sur soi          : proposer un prompt, alerter l'admin. Précédé d'un garde
+                              mécanique : sans matière, pas d'appel LLM du tout.
+      agir vers l'utilisateur : push, mail, question, relance — un enchaînement par
+                              utilisateur actif, jusqu'à MAX_CHAIN_ITERATIONS pas.
 
-    Returns a log entry with all steps under the "steps" key.
+    Retourne l'entrée de journal, tous les pas sous la clé "steps".
     """
+    with journal_de_cycle(_REFLECTION_PROMPTS_LOG_PATH):
+        return await _reflechir()
+
+
+async def _reflechir() -> dict:
+    """Corps du cycle. Séparé pour que tout ce qu'il appelle écrive dans son journal."""
     logger.info(
         "=== Jarvis self-reflection starting (max %d steps/phase) ===",
         MAX_CHAIN_ITERATIONS,

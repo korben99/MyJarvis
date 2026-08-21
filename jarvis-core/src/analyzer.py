@@ -47,7 +47,11 @@ from config import (
     USERS,
 )
 from helpers import extract_llm_json, get_logger, get_redis
-from llm.local import call_llm_local_async_bg
+from llm.local import (
+    _ANALYZER_PROMPTS_LOG_PATH,
+    call_llm_local_async_bg,
+    journal_de_cycle,
+)
 from prompts import get_prompt
 from pydantic import BaseModel, Field, ValidationError
 
@@ -148,9 +152,27 @@ async def analyze_exchange(
 
     `analysed_history` : tours antérieurs de la même session, déjà analysés lors d'une
     passe précédente. Joints en lecture seule pour que le modèle puisse résoudre les
-    références ("ça", "c'est terminé") au lieu de les rattacher au hasard à un projet
-    connu. Le prompt lui interdit explicitement d'en extraire quoi que ce soit.
+    références ("ça", "c'est terminé"). Seul `memory_summary` peut s'en servir — voir la
+    consigne dans ANALYSIS_PROMPT.
+
+    Le journal de prompts est posé ICI et non sur `analyse_recent_conversations` : deux
+    chemins mènent à l'analyseur (le scheduler et la route à la demande), et c'est cette
+    fonction qui porte l'unique appel LLM.
     """
+    with journal_de_cycle(_ANALYZER_PROMPTS_LOG_PATH):
+        return await _analyse(
+            conversation, existing_projects, existing_profile_keys,
+            stable_profile, analysed_history,
+        )
+
+
+async def _analyse(
+    conversation: str,
+    existing_projects: list | None,
+    existing_profile_keys: list | None,
+    stable_profile: dict | None,
+    analysed_history: str,
+) -> dict:
     existing_projects = existing_projects or []
     try:
         # Show in_progress projects clearly + recent done projects (last 90 days)
