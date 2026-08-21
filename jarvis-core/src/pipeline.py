@@ -28,7 +28,13 @@ contains financial or tabular information.
 
 import asyncio
 
-from config import AGENT_ENABLED, USERS, USER_ADMINS, USER_TIMEZONES
+from config import (
+    AGENT_ENABLED,
+    OPINIONS_MAX_INJECTED,
+    USERS,
+    USER_ADMINS,
+    USER_TIMEZONES,
+)
 from deps import (
     GOOGLE_CHAR_BUDGET,
     MEMORY_CHAR_BUDGET,
@@ -36,11 +42,12 @@ from deps import (
     TOTAL_CONTEXT_BUDGET,
     WEB_CHAR_BUDGET,
 )
-from helpers import fmt_event_time, fmt_now_fr, get_logger, keyword_overlap_score, rel_time_fr
+from helpers import fmt_event_time, fmt_now_fr, get_logger, rel_time_fr
 from llm.client import trim_chunks
 from memory import (
     build_memory_context,
     log_conversation,
+    select_opinions,
 )
 from prompts import get_prompt
 from self import (
@@ -132,25 +139,25 @@ def build_dynamic_prefix(
         parts.append(f"<context>\n{memory_ctx}\n</context>")
 
     if include_opinions:
+        # Sélection par proximité sémantique (memory.select_opinions), et AUCUNE opinion
+        # quand rien ne correspond. Deux mesures du 21/08/2026, sur 261 messages réels :
+        #
+        #   • le recouvrement lexical ne trouvait quelque chose que sur 20 % des tours,
+        #     l'embedding sur 28 %, et il attrape ce qui ne partage aucun mot ;
+        #   • le repli sur `opinions[-1:]`, qui couvrait les 80 % restants, est INERTE —
+        #     il ne détournait pas la réponse mais ne donnait pas non plus la « voix »
+        #     qu'il promettait. ~70 tokens par tour pour rien (eval_opinions.py).
+        #
+        # Sans message utilisateur (chemins utilitaires), on garde la récence : il n'y a
+        # rien contre quoi comparer.
         opinions = self_mem.get("opinions", [])
         if opinions:
-            if user_message:
-                # Keep only opinions sharing at least one content word with the question.
-                # The plain top-5 slice injected whatever sorted first regardless of relevance:
-                # topics are snake_case, and keyword_overlap_score used to treat "_" as a word
-                # character, so every score was 0 and the sort was a no-op — the same 5 opinions
-                # went out on every turn (~1400 chars each) whatever was asked. That tokenizer
-                # bug is fixed in helpers.keyword_overlap_score; this threshold is what makes
-                # the scoring actually select.
-                # Fallback to the latest opinion (never nothing) so Jarvis keeps a voice on
-                # off-topic turns; the system prompt already tells it to ignore what doesn't fit.
-                scored = [(keyword_overlap_score(o["topic"], user_message), o) for o in opinions]
-                relevant = [
-                    o for s, o in sorted(scored, key=lambda t: t[0], reverse=True) if s >= 1
-                ][:5]
-                opinions = relevant or opinions[-1:]
-            else:
-                opinions = opinions[-5:]
+            opinions = (
+                select_opinions(opinions, user_message)
+                if user_message
+                else opinions[-OPINIONS_MAX_INJECTED:]
+            )
+        if opinions:
             ops_lines = "\n".join(f"- {o['topic']} : {o['opinion']}" for o in opinions)
             parts.append(f"<avis_jarvis>\n{ops_lines}\n</avis_jarvis>")
 

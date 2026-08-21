@@ -10,8 +10,14 @@ import tempfile
 from datetime import datetime, timezone
 from threading import Lock
 
-from config import SELF_MEMORY_PATH
+from config import (
+    OPINIONS_EMBED_THRESHOLD,
+    OPINIONS_MAX_INJECTED,
+    SELF_MEMORY_PATH,
+)
 from helpers import get_logger
+
+from .embed import get_embed_model
 
 logger = get_logger("jarvis-memory")
 
@@ -60,6 +66,61 @@ def atomic_json_write(path: str, data, indent: int = 2) -> None:
 # ══════════════════════════════════════════════════
 #  SELF MEMORY — Jarvis's identity and growth
 # ══════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════
+#  OPINIONS — surface d'encodage et sélection
+# ══════════════════════════════════════════════════
+
+
+def opinion_surface(topic: str, opinion: str) -> str:
+    """Le texte encodé pour une opinion, à l'écriture comme à la lecture.
+
+    Défini ici, en un seul endroit, parce que la dédup à l'écriture
+    (`_upsert_opinion_inplace`) et la sélection à la lecture (`build_system_prompt`) DOIVENT
+    comparer la même chose. Deux surfaces divergentes donneraient une liste dédupliquée
+    selon un critère et interrogée selon un autre.
+
+    Le topic est en snake_case : les underscores redeviennent des espaces, sans quoi
+    « horlogerie_heritage » s'encode comme un mot unique inconnu du modèle.
+    """
+    return f"{topic.replace('_', ' ')}. {opinion}"
+
+
+def select_opinions(
+    opinions: list[dict],
+    user_message: str,
+    seuil: float = OPINIONS_EMBED_THRESHOLD,
+    maxi: int = OPINIONS_MAX_INJECTED,
+) -> list[dict]:
+    """Les opinions proches du message. Aucune si aucune ne l'est.
+
+    Pourquoi l'embedding et non keyword_overlap_score : mesuré le 21/08/2026 sur 261
+    messages réels du convlog, le recouvrement lexical ne trouvait quelque chose que sur
+    20 % des tours. L'embedding atteint 28 % au seuil retenu, et surtout il attrape ce qui
+    ne partage aucun mot — « les gains de latence sont de 0,5 s » → `quantification_locale`.
+
+    Contrairement aux apprentissages, où l'embedding a échoué le 20/08 : une opinion porte
+    sur un SUJET, dans le même registre que le message, là où un apprentissage est écrit en
+    méta sur la conduite. C'est cet écart de registre qui condamnait l'autre, pas la méthode.
+
+    Aucun repli sur la plus récente : mesuré inerte (`RESEARCH/evaluation/eval_opinions.py`),
+    il coûtait ~70 tokens sur 80 % des tours sans donner la « voix » qu'il promettait.
+    """
+    if not opinions or not user_message.strip():
+        return []
+    try:
+        model = get_embed_model()
+        vecs = model.encode(
+            [opinion_surface(o["topic"], o["opinion"]) for o in opinions],
+            normalize_embeddings=True,
+        )
+        sims = vecs @ model.encode(user_message, normalize_embeddings=True)
+    except Exception as exc:
+        logger.warning("Sélection d'opinions indisponible (%s)", type(exc).__name__)
+        return []
+    ordre = sorted(range(len(opinions)), key=lambda i: float(sims[i]), reverse=True)
+    return [opinions[i] for i in ordre if float(sims[i]) >= seuil][:maxi]
 
 
 _migration_signalee = False

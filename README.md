@@ -73,7 +73,7 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
   │ Duplicate/erroneous facts (nightly cleaning)   │ retract_autobiographical_event() →   │ delete from Qdrant                                      │
   │                                                │ Qdrant delete                        │                                                         │
   ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
-  │ Jarvis behavioural self-improvements           │ jarvis-self.json → learnings[]       │ no user_code                                            │
+  │ Jarvis behavioural self-knowledge              │ jarvis-self.json → self_introspection│ no user_code                                            │
   │ (self_reflections)                             │                                      │                                                         │
   ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
   │ Jarvis day diary (daily_summary)               │ jarvis-self.json → growth_log[]      │ user_code kept — it's Jarvis's own timeline, not a user │
@@ -145,7 +145,7 @@ Tier 3 — REASONING      use_reasoning=True Use Qwen3 in thinking mode
 - The router sets `use_reasoning: true` very sparingly (see criteria below).
 - When `use_reasoning=false` (the vast majority of requests), `PRIMARY_MODEL` handles the response.
 - When `use_reasoning=true`, `REASONING_MODEL` is used instead.
-- `ANALYSIS_MODEL` runs asynchronously after every exchange — it never blocks the response.
+- Conversation analysis (`analyzer.py`) runs on `PRIMARY_MODEL`, asynchronously and on a schedule — it never blocks the response. There is no separate analysis-model variable.
 
 **`use_reasoning` criteria** — only set to `true` for:
 - Medical / legal / regulatory document analysis
@@ -209,7 +209,7 @@ Token budgets use per-task config variables (see `config.py`). Timeouts are deri
 | Global reflection (P1) | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_MEDIUM` (1 000) | — | Jarvis self-state: gaps, notes, prompts |
 | User reflection (P2) | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_MEDIUM` (1 000) | — | Per-user: profile, push, insights |
 | Nightly facts | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_NO_THINK` (1 500) | — | User insight + relation update |
-| Nightly self analysis | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_NO_THINK` (1 500) | — | Jarvis learnings, growth log, opinions |
+| Nightly self analysis | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_NO_THINK` (1 500) | — | Jarvis introspection axes, growth log, opinions |
 | Nightly cleaning | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_COMPACT` (600) | — | Autobio fact archive/delete |
 | refine_prompt (initial) | `self.py` | Tier 3 — REASONING | `False` | `MAX_TOKENS_REASONING` (10 000) | `THINKING_BUDGET_DEEP` (4 000) | Propose prompt improvement |
 | refine_prompt (retry) | `self.py` | Tier 3 — REASONING | `False` | `MAX_TOKENS_REASONING` (10 000) | `THINKING_BUDGET_DEEP` (4 000) | Retry with critique feedback |
@@ -253,7 +253,53 @@ If the LLM router is unavailable or fails (timeout / parse error), all `use_*` f
 | Semantic Memory | Redis Hashes | User profiles, preferences, learned facts |
 | Episodic Memory | Qdrant | Conversation summaries that passed the importance threshold |
 | Autobiographical Memory | Qdrant | High-importance milestones consolidated from episodic memory |
-| Self Memory | JSON file | Jarvis identity, goals, focus, reflection log, per-user relations |
+| Self Memory | JSON file | Jarvis identity, introspection (9 axes), opinions, self-notes, growth log, per-user relations |
+
+### Self-Introspection — nine fixed axes
+
+What Jarvis knows about **his own conduct**, in `jarvis-self.json` under `self_introspection`.
+Injected into every conversation as `<introspection_jarvis>`.
+
+This replaced the former `learnings` list on 2026-08-20. That list accumulated insights
+indexed *by subject* and grew without useful bound; measurement showed the model kept
+rediscovering the same eight axes night after night (17 near-duplicate entries), and no
+relevance-based recall mechanism survived testing — a learning is written in meta terms
+(*"when the user lists blocked admin steps…"*), a message is concrete (*"still got the flat
+to sell"*), and a follow-up (*"and for my mother?"*) carries no subject at all. Full
+measurements in `RESEARCH/RESULTATS.md`.
+
+Since a disposition applies everywhere rather than being recalled, **all non-empty axes are
+injected on every turn**. Cost is bounded by construction (9 lines) instead of growing with
+use.
+
+The axes come from published frameworks rather than from the model's own output, which
+would be circular — see `INTROSPECTION_AXES` in `config.py`:
+
+| Axes | Framework |
+|---|---|
+| `controle`, `communion` | Interpersonal circumplex (Wiggins 1979) — the two orthogonal dimensions of interpersonal conduct. `controle` renders *agency*. |
+| `meta_personne`, `meta_tache`, `meta_strategie` | Metacognitive knowledge (Flavell 1979) — person / task / strategy variables |
+| `affect_antecedent`, `affect_reponse` | Process model of emotion regulation (Gross) — antecedent-focused vs response-focused |
+| `autonomie_autre`, `competence_autre` | Self-determination theory (Deci & Ryan 1985) — the *interlocutor's* needs. Its third need, relatedness, is folded into `communion`. |
+
+**How it is written.** The nightly review (Call 2) *revises* axes rather than appending.
+One line per axis, the latest wins; a revision history is kept in `introspection_log`
+(never injected). No quota either way — and doing nothing is the expected answer on most
+nights. Axes outside the list are discarded, verbatim rewrites are filtered out, and an
+empty axis stays empty.
+
+Two measured rules govern what an axis line may contain:
+
+- **The gesture that works, never the flaw.** The model reproduces whatever it is shown,
+  defects included: an axis phrased *"I state biological mechanisms with unwarranted
+  confidence"* cut referrals to a doctor from 8 to 3 across four health questions. Turned
+  around into *"separating general science from the clinical case and referring to a doctor
+  works better than an exposé of mechanisms"*, it cut the mechanism dumping by two thirds.
+- **A statement, not a promise.** *"I must do better…"* cannot be verified or reused.
+
+**Migration.** Existing installs must run `scripts/migrate_introspection.py` (dry-run by
+default). Nothing crashes without it, but accumulated self-knowledge silently stops being
+injected — hence a warning logged when `jarvis-self.json` is loaded on the old schema.
 
 ### Emotional State
 
@@ -452,7 +498,7 @@ Time is injected at three levels to prevent date hallucination and give the LLM 
 | **User message prefix** | Current datetime in French, user timezone, with season (e.g. `"vendredi 3 avril 2026, 14:32 (printemps)"`) via `fmt_now_fr()` | `build_dynamic_prefix()` — prepended to each user message; does NOT go in the system prompt (KV-cache invariant) |
 | **Memory chunks** | French relative timestamp prepended to each retrieved memory (e.g. `"(il y a 3 jours) ..."`) via `rel_time_fr()` | `build_context()` — injected before `trim_chunks()` |
 | **Conversation analyzer** | Current date in ISO 8601 (`2026-03-30`) at the top of `ANALYSIS_PROMPT` | `analyze_exchange()` — prevents the LLM from inventing dates for `memory_summary` anchors |
-| **Self-reflection** | Server local time in French (`fmt_now_fr(BRIEFING_TIMEZONE)`) replaces raw UTC ISO in `gather_context()` | `gather_context()` — reflection LLM knows actual local time |
+| **Self-reflection** | Server local time in French (`fmt_now_fr(BRIEFING_TIMEZONE)`) replaces raw UTC ISO | `gather_global_context()` / `gather_user_context()` — reflection LLM knows actual local time |
 | **Push availability** | Per-user local time shown next to each push-capable device | `self/context.py` phase 2 (`has_push`, `push_cooldown_str`) — reflection LLM can decide not to push at 23h45 |
 
 `fmt_now_fr(tz_name)` is defined in `helpers.py` and includes the current season (hiver/printemps/été/automne) to prevent seasonal confusion in LLM responses.
@@ -500,7 +546,7 @@ EVERY 5H (défaut 6h — configurable via REFLECTION_INTERVAL_HOURS) — self.py
   │     ├── Redis jarvis:{code}:tomorrow_suggestions  (TTL 24h)
   │     └── jarvis-self.json → user_relations{}
   ├── Call 2 — NIGHTLY_SELF  (Jarvis self-reflection)
-  │     └── jarvis-self.json → learnings[], growth_log[], opinions[]
+  │     └── jarvis-self.json → self_introspection{}, growth_log[], opinions[]
   ├── Call 3 — NIGHTLY_CLEANING  (Qdrant autobio curation)
   │     ├── get_autobiographical_facts()  [read Qdrant autobio — status≠past, chronological]
   │     ├── archive_autobiographical_event()   → Qdrant autobio payload update
@@ -672,7 +718,7 @@ The cumulative prompt overhead is bounded at `HIST_CONV_TOKEN_BUDGET + SESSION_S
 | `PROJETS ACTIFS` | Redis `user:{code}:projects` — status `in_progress` only | Only if projects exist |
 | `SUJETS RÉCENTS (24h)` | Topics from last 10 conversations in Redis | Only if topics exist |
 | `ÉTAT ÉMOTIONNEL` | `emotional_state.render_prompt_lines()` → `<etat_emotionnel_jarvis>` | Only if any dim ≥ 0.25 |
-| `APPRENTISSAGES RÉCENTS` | `jarvis-self.json → learnings[-5:]` | Only if learnings exist |
+| `<introspection_jarvis>` | `jarvis-self.json → self_introspection` | All non-empty axes, every turn |
 | `FRISE CHRONOLOGIQUE` | Top 5 autobio Qdrant points by importance+recency — each prefixed with a French relative timestamp (`il y a 3 jours`, `il y a 2 semaines`, …) | Only if autobio exists |
 | `SUJETS À ABORDER AUJOURD'HUI` | Redis `jarvis:{code}:tomorrow_suggestions` (TTL 24h, written by nightly review) | Only if key exists |
 | `RELATION AVEC CET UTILISATEUR` | `jarvis-self.json → user_relations[user_code]` | Always — affinity, style, mood (compact). On `intent=self`, enriched with full tonal directives via `build_context`. |
@@ -930,19 +976,19 @@ Cartographie de tous les appels LLM de la codebase. Chaque ligne indique si le t
 
 | Fonction | Modèle | Think | Budget | Processor | Justification |
 |---|---|---|---|---|---|
-| `_call_global_reflection_llm` | REASONING | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Classification mood/satisfaction sur l'échange global — extraction pure |
-| `_call_user_reflection_llm` | REASONING | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Idem, par utilisateur |
+| `_call_global_reflection_llm` | REASONING | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Phase 1 — choisit UNE action globale par pas de chaîne |
+| `_call_user_reflection_llm` | REASONING | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Phase 2 — idem, par utilisateur |
 | `generate_proactive_push` | REASONING | `no_think` | `MAX_TOKENS_COMPACT` (600) | — | Décision binaire + phrase courte — thinking superflu |
 | `_action_prune_self_memory` | REASONING | `think` | `MAX_TOKENS_THINK_COMPACT` (2 048) | ✅ `THINKING_BUDGET_COMPACT` (1 024) | Sélection d'entrées à supprimer — thinking court pour cohérence sans agressivité |
-| `_action_refine_self` | REASONING | `think` | `MAX_TOKENS_THINK_COMPACT` (2 048) | ✅ `THINKING_BUDGET_COMPACT` (1 024) | Décision execute/skip avec contexte riche — thinking améliore la qualité du jugement contextuel. |
+| `_llm_review_before_action` | REASONING | `think` | `MAX_TOKENS_THINK_COMPACT` (2 048) | ✅ `THINKING_BUDGET_COMPACT` (1 024) | Auto-contestation avant une action sortante — thinking améliore la qualité du jugement contextuel. |
 
 ### Background — Nightly review (self.py)
 
 | Fonction | Modèle | Think | Budget | Processor | Justification |
 |---|---|---|---|---|---|
-| `_nightly_self_facts` | REASONING | `no_think` | `MAX_TOKENS_NO_THINK` (1 500) | — | Extraction de faits depuis les conversations — tâche de parsing structuré, thinking n'apporte pas de valeur mesurable |
-| `_nightly_self_user` | REASONING | `no_think` | `MAX_TOKENS_NO_THINK` (1 500) | — | Extraction mise à jour profil utilisateur — idem |
-| `_nightly_cleaning` | REASONING | `no_think` | `MAX_TOKENS_COMPACT` (600) | — | Nettoyage/déduplication — classification pure |
+| `_nightly_facts_user` (Call 1) | REASONING | `no_think` | `MAX_TOKENS_NO_THINK` (1 500) | — | Faits durables sur l'utilisateur → autobio Qdrant, relation, suggestions. Parsing structuré, thinking sans valeur mesurable |
+| `_nightly_self_user` (Call 2) | REASONING | `no_think` | `MAX_TOKENS_NO_THINK` (1 500) | — | Introspection de Jarvis (9 axes) + opinions. Révision, pas accumulation — voir *Self-Introspection* |
+| `_nightly_cleaning_user` (Call 3) | REASONING | `no_think` | `MAX_TOKENS_COMPACT` (600) | — | Curation autobio Qdrant (archive/supprime) — classification pure |
 | `update_profile_narrative` | PRIMARY | `no_think` | `PROFILE_NARRATIVE_TOKENS` (400) | — | Portrait narratif ~300 tokens — génération prose fluide, thinking superflu |
 | `_action_refine_prompt` (+ retry) | REASONING | `think` | `MAX_TOKENS_REASONING` (10 000) | ✅ `THINKING_BUDGET_DEEP` (4 000) | **Créativité** : réécriture de prompt système. Thinking essentiel. ~6 000 tok libres pour le prompt réécrit + rationale. |
 
@@ -1170,12 +1216,6 @@ All variables go in `/opt/jarvis/.env`.
 | `PRIMARY_MODEL_LOCAL` | `spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit` | Primary model HF repo ID or local path |
 | `PRIMARY_TIMEOUT` | `60` | Timeout in seconds |
 
-### Tier 2b — Analysis model
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ANALYSIS_MODEL` | *(PRIMARY_MODEL)* | Post-exchange fact/mood extraction. Defaults to PRIMARY if unset. |
-
 ### Tier 3 — Reasoning model
 
 | Variable | Default | Description |
@@ -1262,7 +1302,8 @@ Measured effect (direct axis, 120 items): `+0.119` in combination with `IDENTITY
 | `BRIEFING_TIME` | `07:30` | Briefing delivery time (HH:MM) |
 | `BRIEFING_TIMEZONE` | `Europe/Paris` | Timezone for scheduling |
 | `REFLECTION_INTERVAL_HOURS` | `6` | Hours between self-reflection cycles |
-| `ENABLE_ANALYSIS` | `true` | Enable post-response conversation analysis |
+| `CONV_ANALYSIS_INTERVAL_MINUTES` | `60` | Minutes between conversation-analysis runs |
+| `MAX_CHAIN_ITERATIONS` | `3` | Max actions per reflection phase |
 | `REFINE_PROMPT_THRESHOLD` | `3` | Times a knowledge gap must be flagged before a prompt refinement is proposed |
 
 ### Conversation Limits
@@ -1448,6 +1489,32 @@ The morning briefing aggregates: calendar events, unread emails, weather, news h
 | `GET` | `/self/log` | Last N reflection entries |
 | `POST` | `/self/reflect` | Trigger an immediate reflection cycle |
 
+#### Background cycles — who fires what, how often, and what it writes
+
+Every scheduled job, from `main.py`. Frequencies are the defaults; all are `.env`-tunable.
+"LLM calls" is per run, at full load — an idle system makes far fewer (silent users are
+skipped entirely, and most nights revise no introspection axis).
+
+| Trigger | Frequency | Entry point | LLM calls per run | Writes |
+|---|---|---|---|---|
+| `conversation_analysis` | **60 min** (`CONV_ANALYSIS_INTERVAL_MINUTES`) | `analyse_recent_conversations()` | 1 per session with new messages, per user | Redis profile (`update_user_profile_batch`), projects (`apply_project_updates`), interest weights, `convlog` back-fill (satisfaction · importance · mood · summary), Qdrant **episodic** vector if above `IMPORTANCE_THRESHOLD`, emotional state. **Never writes autobiographical.** |
+| `self_reflection` | **6 h** (`REFLECTION_INTERVAL_HOURS`) | `run_self_reflection()` | ≤ 3 (phase 1) + ≤ 3 per *active* user (phase 2) + 1 self-review per outward action + 1 proactive-push check per user | `jarvis-self.json` (`self_notes`, reflection log, incidents), Redis knowledge gaps, and whatever the chosen actions write — see the action catalog below |
+| `nightly_interaction_review` | **23:00** | `run_nightly_interaction_review()` | 5 per user *having conversed* (calls 1–3, profile dedup, narrative) | Qdrant **autobiographical** (create/archive/delete), `jarvis-self.json` (`self_introspection`, `introspection_log`, `opinions`, `growth_log`, `user_relations`), Redis profile + `profile_narrative` (7-day TTL) + `tomorrow_suggestions` (24 h TTL) |
+| ↳ monthly consolidation | **1st of month**, inside the nightly | `consolidate_memories()` | 1 per batch of 50 episodic points | Episodic → autobiographical milestones (`importance = 1.0`), deletes the consolidated points, then decays autobiographical |
+| `morning_briefing` | `BRIEFING_TIME` | `run_morning_briefings()` | 1 per user | Push / email delivery only |
+| `trade_check` | **2 h** | `run_trade_check()` | 1 per user (`evaluate_alerts`), skipped when the market is closed | Redis portfolio state (prices, auto-set thresholds), push on alert |
+| `cve_scan` | **04:30** | `cve.scan()` | none (SBOM + grype) | CVE cache read by `vitals` |
+| agent worker | queue-driven, not scheduled | `agent/worker.py` | per task step | Agent workspace, Redis task records |
+
+Two consequences worth knowing before changing anything:
+
+- **Three writers reach autobiographical memory**, not one: the nightly (call 1), the
+  reflection action `store_insight` (every 6 h), and consolidation. The comment in
+  `analyzer.py` claiming the nightly is "the sole authoritative writer" is accurate only
+  about the *analyzer* abstaining.
+- **The profile has three writers too**: the analyzer (hot, every hour), the nightly dedup
+  (call 4), and the reflection action `correct_profile`.
+
 Jarvis maintains two autonomous cognitive cycles:
 
 **Reflection loop** (configurable via `REFLECTION_INTERVAL_HOURS`, défaut 6h) — global self-observation. Jarvis reviews system health, user activity, and knowledge gaps, then picks one action from the catalog. At the end of each cycle Jarvis also runs a per-user **proactive push** check. Outcome and new focus are persisted to `jarvis-self.json`.
@@ -1455,14 +1522,14 @@ Jarvis maintains two autonomous cognitive cycles:
 **Nightly review** (23:00) — per-user conversation review using **5 sequential calls** per user:
 
 1. **`NIGHTLY_FACTS`** — extracts durable user insights (→ Qdrant autobiographical, dedup-checked at importance 0.70), updates the per-user relation in `jarvis-self.json`, and writes `tomorrow_suggestions` to Redis (TTL 24 h) for injection in the next day's system prompt.
-2. **`NIGHTLY_SELF`** — Jarvis self-reflection on the day's interactions: self-improvement notes (→ `learnings[]`), formed opinions (→ `opinions[]`), day diary entry (→ `growth_log[]`).
+2. **`NIGHTLY_SELF`** — Jarvis self-reflection on the day's interactions: revision of the nine introspection axes (→ `self_introspection{}`, history in `introspection_log[]`), formed opinions (→ `opinions[]`), day diary entry (→ `growth_log[]`). Revising nothing is the expected outcome on most nights.
 3. **`NIGHTLY_CLEANING`** — Qdrant autobio curation. Receives the full list of current autobiographical facts plus `user_insights` from call 1 as a signal for what is now superseded. Outputs `to_archive` (outdated facts → `archive_autobiographical_event`) and `to_delete` (errors/duplicates → `retract_autobiographical_event`). Very conservative by design.
 4. **`curative_profile_cleanup()`** — Redis profile hash dedup. Sync LLM call that identifies semantic duplicates and obsolete keys, applies consolidation updates (merge-before-delete), then deletes redundant keys. Skipped if profile has fewer than 5 keys. Previously monthly — now nightly so duplicate keys are caught within 24 h.
 5. **`update_profile_narrative()`** — generates a ~300-token LLM prose portrait of the user (cross-conversation, per-user). Synthesises the profile hash, top-15 interest weights, and the 5 most recent autobiographical facts. The `profil_utilisateur` fields (static biographical data already in the system prompt) are explicitly excluded to avoid repetition. Stored at `user:{code}:profile_narrative` with a 7-day TTL; injected in `build_memory_context()` as `<profil_narratif>` in place of the raw k/v block.
 
 Conversations from the day are sorted by importance score descending before being passed to each LLM call (up to 6 000 chars), so the most significant exchanges are always visible even on high-volume days.
 
-**Reflection context** — what the LLM sees at each reflection cycle (`gather_context()`):
+**Reflection context** — what the LLM sees at each reflection cycle. Two builders, one per phase: `gather_global_context()` (phase 1) and `gather_user_context(user_code)` (phase 2):
 
 | Field | Source | Notes |
 |-------|--------|-------|
@@ -1490,15 +1557,16 @@ Conversations from the day are sorted by importance score descending before bein
 | `flag_knowledge_gap` | Global | Log a topic Jarvis answered poorly. Requires a concrete failure as context. 7-day cooldown per topic, blocked if proposal pending. |
 | `update_self_note` | Global | Write a personal behavioural observation to `self_notes[]`. Semantic dedup: cosine > 0.85 with existing notes → merges instead of appending. |
 | `check_health` | Global | Service liveness (Redis/Qdrant/LLM) + memory health stats per user (episodic count, days since last write, null_summary rate 7d, vector norm anomalies). Sends admin email alert on critical issues (cooldown 4h). |
-| `prune_self_memory` | Global | LLM-assisted pruning of stale/redundant `self_notes`, `opinions`, `learnings`. 24h cooldown. |
+| `prune_self_memory` | Global | LLM-assisted pruning of stale/redundant `self_notes` and `opinions`. 24h cooldown. `self_introspection` is never pruned — nine axes bounded by construction, revised not deleted. |
 | `refine_prompt` | Global | Propose an improved version of a prompt (see Prompt Self-Modification below). |
+| `alert_admin` | Global | Push a maintenance/security recommendation to the admin (e.g. *"bump openssl to 3.5.6 on qdrant"*). The channel through which Jarvis, having seen `<etat_disparition>` and `<vulnerabilites>`, can act on its own state. Dedicated 24h cooldown. |
 | `store_insight` | User | Save a durable autobiographical fact to Qdrant. `importance` param (0.5–0.9, default 0.7): `0.5` useful fact · `0.7` significant · `0.9` key milestone. |
 | `send_notification` | User | Send a Gmail to one user (rate-limited to 1/user/day). |
-| `queue_push` | User | Queue an iOS push notification (rate-limited to 1/user/2h). |
+| `queue_push` | User | Queue an iOS push notification. Cooldown **48 h** per user (`_PUSH_COOLDOWN_TTL`, `self/state.py`). |
 | `ask_user` | User | Send a clarification question via push; user answers in chat. |
 | `correct_profile` | User | Modify or delete a Redis profile key (value=null to delete). Cannot create new keys. |
 | `consolidate_memory` | User | Trigger full memory compression. 48h cooldown per user. |
-| `flag_project_stall` | User | Detect active projects with no update for > 14 days and send a push reminder. 7-day cooldown per project. Only triggers if user was recently active. |
+| `flag_project_stall` | User | Detect active projects overdue, or with no update for **> 21 days**, and send a push reminder. **14-day** cooldown per project. Runs for **silent users too** — mechanically, without an LLM call: a dormant project is precisely the signature of a user who stopped talking, so restricting it to active users could only reach those who did not need it. |
 | `update_trade_threshold` | User | Update `threshold_high` / `threshold_low` for a portfolio position autonomously. |
 
 **Memory health monitoring:** `gather_global_context()` calls `_check_memory_health()` at every reflection cycle. The result is injected into `<sante_memoire>` in `REFLECTION_PROMPT` so the LLM sees per-user stats without triggering `check_health` first. The LLM uses activity data to distinguish genuine bugs (high null_rate + recent active user) from expected gaps (user on holiday). Vector norm anomalies are always flagged as critical regardless of activity.
@@ -1701,7 +1769,7 @@ All storage is bounded. The table below shows what grows, where it's capped, and
 |-------------|------|-----|-----------------|
 | `chat:{code}:{session}` | List | `CHAT_MAX_MESSAGES` (100) | Oldest messages trimmed at each write |
 | `episodic:{code}:conversations` | Sorted set (score = timestamp) | 1 000 entries | Oldest entries removed at each write |
-| `user:{code}:profile` | Hash | None (Redis) — nightly cleanup via `_curative_profile_cleanup()` | LLM identifies and deletes duplicate/obsolete keys |
+| `user:{code}:profile` | Hash | None (Redis) — nightly cleanup via `curative_profile_cleanup()` | LLM identifies and deletes duplicate/obsolete keys |
 | `jarvis:self:reflection_log` | Sorted set | 30 entries | Oldest entries trimmed at each write |
 | `jarvis:{code}:tomorrow_suggestions` | String | TTL 24 h | Auto-expires — no manual cleanup needed |
 | `jarvis:push:pending:{code}` | List | Cooldown 1 push/2 h | No write if cooldown active |
@@ -1710,7 +1778,8 @@ All storage is bounded. The table below shows what grows, where it's capped, and
 
 | Field | Cap | Notes |
 |-------|-----|-------|
-| `learnings[]` | 100 entries | Trimmed to `[-100:]` after nightly review |
+| `self_introspection{}` | 9 axes | Bounded by construction — revised in place, never appended |
+| `introspection_log[]` | `INTROSPECTION_LOG_MAX_ENTRIES` (200) | Revision history, never injected |
 | `self_notes[]` | 50 entries | Trimmed to `[-50:]` after each `update_self_note` action |
 | `opinions[]` | 50 entries | Trimmed to `[-50:]` after each `add_self_opinion` call; same-topic opinions are updated in place |
 | `growth_log[]` | `GROWTH_LOG_MAX_ENTRIES` (180) | Trimmed to `[-180:]` after nightly review |

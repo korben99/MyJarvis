@@ -51,6 +51,8 @@ from .projects import (
 from .selfmem import (
     atomic_json_write,
     get_self_memory,
+    opinion_surface,
+    select_opinions,
     save_self_memory,
     self_memory_lock,
 )
@@ -79,6 +81,7 @@ __all__ = [
     "append_conversation_message", "get_conversation",
     # selfmem
     "self_memory_lock", "atomic_json_write", "get_self_memory",
+    "opinion_surface", "select_opinions",
     "save_self_memory",
     # profile
     "get_user_profile", "update_user_profile", "update_user_profile_batch",

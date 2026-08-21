@@ -552,6 +552,26 @@ GROWTH_LOG_MAX_ENTRIES = int(os.getenv("GROWTH_LOG_MAX_ENTRIES", "180"))
 # Défauts = valeurs d'origine : aucun changement de comportement tant qu'on ne les règle
 # pas. C'est la sonde scripts/memory_report.py qui surveille leur remplissage.
 OPINIONS_MAX_ENTRIES = int(os.getenv("OPINIONS_MAX_ENTRIES", "120"))
+
+# ── Réinjection des opinions (<avis_jarvis>, pipeline.py) ─────────────────────
+# Sélection par proximité sémantique entre le message et `topic + opinion`. Mesuré le
+# 21/08/2026 sur 261 messages réels du convlog :
+#
+#   lexical (keyword_overlap_score)  20 % des tours — et 80 % de repli sur la plus récente
+#   embedding, seuil 0,45            13 %
+#   embedding, seuil 0,40            28 %   ← retenu
+#   embedding, seuil 0,35            41 %   (précision qui se dégrade)
+#
+# L'embedding réussit ici là où il a échoué pour les apprentissages : une opinion porte sur
+# un SUJET, dans le même registre que le message (« les gains de latence sont de 0,5 s » →
+# `quantification_locale`, sans un mot en commun). Un apprentissage est écrit en méta sur la
+# conduite — c'est cet écart de registre qui condamnait l'autre, pas la méthode.
+#
+# Aucune correspondance → AUCUNE opinion. L'ancien repli sur `opinions[-1:]` a été mesuré
+# inerte (eval_opinions.py) : il ne contaminait pas la réponse, mais ne donnait pas non plus
+# la « voix » qu'il promettait — ~70 tokens sur 80 % des tours pour rien.
+OPINIONS_EMBED_THRESHOLD = float(os.getenv("OPINIONS_EMBED_THRESHOLD", "0.40"))
+OPINIONS_MAX_INJECTED = int(os.getenv("OPINIONS_MAX_INJECTED", "3"))
 SELF_NOTES_MAX_ENTRIES = int(os.getenv("SELF_NOTES_MAX_ENTRIES", "100"))
 
 # Trace historique des révisions d'axes — sert à relire comment un axe a bougé, jamais

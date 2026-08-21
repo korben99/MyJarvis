@@ -890,6 +890,8 @@ que tu voudrais avoir sous les yeux la prochaine fois, pas ce que tu voudrais pr
   • jarvis_opinions  : opinions que TU te forges sur des sujets abordés.
                        Avis personnel (accord, désaccord, nuance) — pas un résumé factuel.
                        INTERDIT : décrire une technologie sans prendre position, lister des caractéristiques.
+                       Aucune information sur une personne ne doit fuiter dans une opinion :
+                       elle porte sur le sujet, pas sur qui l'a amené.
                        Seulement si un sujet t'a amené à un vrai avis. 0 à 2 opinions max par nuit.
 
 JSON valide uniquement, en français."""

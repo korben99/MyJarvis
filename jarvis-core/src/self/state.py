@@ -9,9 +9,16 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 
+import numpy as np
 from config import OPINIONS_MAX_ENTRIES
 from helpers import get_logger, get_redis
-from memory import get_self_memory, save_self_memory, self_memory_lock
+from memory import (
+    get_embed_model,
+    get_self_memory,
+    opinion_surface,
+    save_self_memory,
+    self_memory_lock,
+)
 
 logger = get_logger("jarvis-self")
 
@@ -52,6 +59,10 @@ def get_user_relation(user_code: str) -> dict:
 
 _INCIDENTS_SELF_MAX = 30
 
+# Cosinus au-delà duquel deux opinions sont considérées comme la même, sous des étiquettes
+# différentes. Même valeur que la dédup des self_notes (`_action_update_self_note`).
+_OPINION_MERGE_SIM = 0.85
+
 
 def consolidate_incidents() -> int:
     """Fige les incidents récents de vitals dans jarvis-self.json (champ `incidents`).
@@ -82,15 +93,63 @@ def consolidate_incidents() -> int:
 
 
 def _upsert_opinion_inplace(data: dict, topic: str, opinion: str, date: str) -> None:
-    """Upsert an opinion into an already-loaded self-memory dict (no lock — caller holds it)."""
+    """Upsert an opinion into an already-loaded self-memory dict (no lock — caller holds it).
+
+    Deux niveaux de rapprochement, dans cet ordre :
+
+    1. Topic identique — le cas simple, l'opinion est réécrite.
+    2. Opinion sémantiquement proche (cosinus > 0.85, même seuil et même méthode que
+       `_action_update_self_note`). La comparaison de topics EXACTS ne rattrapait rien
+       quand le même avis revenait sous une autre étiquette — or c'est le cas courant,
+       le modèle nommant librement ses topics chaque nuit.
+
+    Seuil vérifié sur le corpus réel le 21/08/2026 : une paraphrase quasi littérale marque
+    0,935, tandis que la paire d'opinions distinctes la plus proche des 50 en mémoire
+    plafonne à 0,713 (médiane 0,309). L'écart est large — 0,85 ne fusionnera pas deux avis
+    réellement différents.
+
+    On compare à TOUTE la liste, pas à une fenêtre récente : un doublon peut viser une
+    opinion ancienne, et c'est même le cas le plus probable puisqu'une opinion récente sur
+    le même sujet aurait déjà le même topic. Coût : un encodage par lot de ≤ 120 textes
+    courts, 0 à 2 fois par nuit.
+
+    La dédup ne doit jamais faire perdre l'opinion : toute erreur d'embedding est rattrapée
+    par un simple append.
+    """
     topic = topic.strip().lower()
     opinions = data.setdefault("opinions", [])
+
     existing = next((o for o in opinions if o["topic"] == topic), None)
     if existing:
         existing["opinion"] = opinion
         existing["updated"] = date
-    else:
-        opinions.append({"topic": topic, "opinion": opinion, "created": date})
+        data["opinions"] = opinions[-OPINIONS_MAX_ENTRIES:]
+        return
+
+    if opinions:
+        try:
+            model = get_embed_model()
+            vecs = model.encode(
+                [opinion_surface(o["topic"], o["opinion"]) for o in opinions],
+                normalize_embeddings=True,
+            )
+            sims = vecs @ model.encode(
+                opinion_surface(topic, opinion), normalize_embeddings=True
+            )
+            i = int(np.argmax(sims))
+            if sims[i] > _OPINION_MERGE_SIM:
+                logger.info(
+                    "Opinion fusionnée (sim=%.3f) : %s ← %s",
+                    sims[i], opinions[i]["topic"], topic,
+                )
+                opinions[i]["opinion"] = opinion
+                opinions[i]["updated"] = date
+                data["opinions"] = opinions[-OPINIONS_MAX_ENTRIES:]
+                return
+        except Exception as exc:
+            logger.warning("Dédup d'opinion indisponible (non bloquant) : %s", exc)
+
+    opinions.append({"topic": topic, "opinion": opinion, "created": date})
     data["opinions"] = opinions[-OPINIONS_MAX_ENTRIES:]
 
 
