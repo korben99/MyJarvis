@@ -60,7 +60,7 @@ def get_user_relation(user_code: str) -> dict:
 _INCIDENTS_SELF_MAX = 30
 
 # Cosinus au-delà duquel deux opinions sont considérées comme la même, sous des étiquettes
-# différentes. Même valeur que la dédup des self_notes (`_action_update_self_note`).
+# différentes. Même valeur que la dédup des self_notes (l'ancienne dédup des self_notes).
 _OPINION_MERGE_SIM = 0.85
 
 
@@ -99,7 +99,7 @@ def _upsert_opinion_inplace(data: dict, topic: str, opinion: str, date: str) -> 
 
     1. Topic identique — le cas simple, l'opinion est réécrite.
     2. Opinion sémantiquement proche (cosinus > 0.85, même seuil et même méthode que
-       `_action_update_self_note`). La comparaison de topics EXACTS ne rattrapait rien
+       l'ancienne dédup des self_notes). La comparaison de topics EXACTS ne rattrapait rien
        quand le même avis revenait sous une autre étiquette — or c'est le cas courant,
        le modèle nommant librement ses topics chaque nuit.
 

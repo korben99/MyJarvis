@@ -20,7 +20,7 @@ async def self_state():
         "last_reflection":  data.get("last_reflection", ""),
         "reflection_count": data.get("reflection_count", 0),
         "last_action":      last_ref[0] if last_ref else None,
-        "self_notes":       data.get("self_notes", [])[-5:],
+        "introspection":    data.get("self_introspection", {}),
         "user_relations":   data.get("user_relations", {}),
     }
 

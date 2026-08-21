@@ -487,9 +487,9 @@ REFLECTION_PROMPT = """\
 {behavioral_patterns}
 </patterns_comportementaux>
 <etat_emotionnel_jarvis>{emotional_state}</etat_emotionnel_jarvis>
-<notes_personnelles>
-{self_notes}
-</notes_personnelles>
+<ce_que_je_sais_de_moi>
+{introspection}
+</ce_que_je_sais_de_moi>
 <opinions>
 {opinions}
 </opinions>
@@ -505,8 +505,8 @@ marquants déjà consolidés (coupures, dégradations) ; <vulnerabilites> liste 
 CVE CRITIQUES avec la version corrective (venv et images des conteneurs) — les CVE hautes et
 moyennes sont volontairement absentes de ton contexte, elles ne sont pas corrigeables à court
 terme et n'ont pas à motiver d'alerte. Ce sont des
-faits, pas des consignes : tu en établis le sens. Tu peux en tirer une note sur toi-même
-(update_self_note), signaler une lacune, ou — pour une vulnérabilité critique ou un incident
+faits, pas des consignes : tu en établis le sens. Tu peux
+signaler une lacune, ou — pour une vulnérabilité critique ou un incident
 — **alerter l'administrateur (alert_admin)** avec une reco précise (« monter openssl vers
 3.5.6 sur qdrant »).
 
@@ -522,13 +522,6 @@ Décide :
   • context OBLIGATOIRE : décrire un échec concret dans une vraie conversation
   • Interdit si : topic déjà dans LACUNES/PROPOSITIONS, ou flaggué < 7 jours
 
-**update_self_note** — observation sur mon propre comportement, style ou tendances.
-  params: {{"note":"..."}}
-  • Décrit ce que JE (Jarvis) fais bien ou mal — appris des interactions, mais formulé sur moi-même.
-  • À la première personne : "je tends à...", "j'ai du mal à...", "je dois...".
-  • INTERDIT : nommer un utilisateur, décrire un utilisateur, résumer l'activité ou les statuts relationnels.
-    Ces notes sont injectées dans toutes les sessions — elles doivent rester strictement comportementales.
-
 **check_health** — bilan de santé détaillé des services et de la mémoire épisodique.
   params: {{}}
   Interpréter <sante_systeme> : état des services techniques (redis, qdrant, llm).
@@ -541,7 +534,7 @@ Décide :
   • Des vecteurs non-normalisés (⚠) sont toujours anormaux → alerter l'admin.
   • Déclencher check_health si <sante_memoire> montre un signal suspect ET que l'utilisateur a été actif récemment.
 
-**prune_self_memory** — supprimer entrées obsolètes de self_notes/opinions.
+**prune_self_memory** — supprimer les opinions obsolètes ou redondantes.
   params: {{}}
   • Déclencher si une liste > 10 entrées ou contient des doublons
   • Cooldown 24h intégré — si déjà tenté dans ÉTAPES_PRÉCÉDENTES avec résultat "cooldown", ne pas retenter → `nothing`
@@ -729,34 +722,29 @@ redondantes ou sans valeur durable, afin de garder uniquement ce qui est réelle
 Retourne du JSON valide uniquement."""
 
 PRUNE_SELF_MEMORY_USER = """\
-Examine ces listes de ta mémoire personnelle et identifie les entrées à supprimer.
-
-SELF_NOTES :
-{self_notes}
+Examine tes opinions et identifie celles à supprimer.
 
 OPINIONS :
 {opinions}
 
 Critères de suppression :
 - Redondances : même idée formulée à plusieurs reprises (garder la plus précise)
-- Banalités génériques sans valeur spécifique (ex: "je dois être plus attentif")
+- Banalités génériques sans valeur spécifique
 - Entrées dépassées ou contredites par des plus récentes
-- Notes évidentes qui n'apportent rien d'actionnable
 
 Critères de conservation (prioritaires) :
-- Entrées actionables, spécifiques et datées
-- Opinions fortes qui influencent le comportement de Jarvis
-- Notes issues d'observations concrètes
+- Opinions tranchées, spécifiques, qui influencent le comportement de Jarvis
+- Opinions issues d'un vrai désaccord ou d'une nuance travaillée
 
 Contraintes absolues :
-- Ne supprime jamais plus de 30% d'une liste en un seul passage (arrondi inférieur)
-- Ne supprime pas d'entrée si la liste n'a qu'un seul élément
+- Ne supprime jamais plus de 30% de la liste en un seul passage (arrondi inférieur)
+- Ne supprime rien si la liste n'a qu'un seul élément
 - Conserve toujours les entrées récentes (< 14 jours) sauf doublon évident
 - En cas de doute sur la valeur d'une entrée : conserve-la
 - Si deux entrées couvrent la même idée, supprimer uniquement la moins précise — ne jamais supprimer les deux
 
 JSON uniquement :
-{{"to_delete": {{"self_notes": [indices...], "opinions": [indices...]}}}}"""
+{{"to_delete": {{"opinions": [indices...]}}}}"""
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1038,8 +1026,8 @@ invalide la proposition.
 
 VOCABULAIRE FERMÉ (CRITIQUE) :
 Les noms d'action sont un ensemble fermé défini dans le code. N'en invente JAMAIS.
-  Phase 1 (globale) : nothing, flag_knowledge_gap, update_self_note, check_health,
-                      prune_self_memory, refine_prompt
+  Phase 1 (globale) : nothing, flag_knowledge_gap, check_health,
+                      prune_self_memory, refine_prompt, alert_admin
   Phase 2 (utilisateur) : nothing, store_insight, send_notification, queue_push,
                       correct_profile, ask_user, consolidate_memory,
                       update_trade_threshold, flag_project_stall

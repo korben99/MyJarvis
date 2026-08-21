@@ -181,13 +181,25 @@ def store_memory_vector(user_code: str, entry: dict):
         logger.error("Vector memory store failed: %s", e)
 
 
-def store_autobiographical_event(user_code: str, summary: str, importance: float):
+def store_autobiographical_event(
+    user_code: str, summary: str, importance: float
+) -> bool:
     """
     Store a major life / project milestone for the user.
 
     Skips storage if a semantically identical autobiographical memory already exists
     (cosine similarity ≥ AUTOBIO_DEDUP_THRESHOLD) to prevent the collection from
     accumulating redundant variants of the same fact over time.
+
+    Returns True when the call left a mark — a new point, or an existing one reinforced
+    with a higher importance. Returns False when the fact was dropped as a duplicate, or
+    when the write failed.
+
+    Ce retour existe pour `_consolidate_user_memories`, qui SUPPRIME les points épisodiques
+    après avoir tenté d'écrire leurs résumés. Sans lui (avant le 21/08/2026), l'appelant ne
+    pouvait pas distinguer « écrit » de « écarté par la dédup » : des faits tous
+    silencieusement dédupliqués faisaient quand même détruire le lot d'origine. Les
+    appelants qui ignorent la valeur de retour restent valides.
     """
     try:
         model = get_embed_model()
@@ -226,13 +238,13 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
                     existing_importance,
                     importance,
                 )
-            else:
-                logger.debug(
-                    "Autobio dedup: skipping '%s' (similar=%.2f)",
-                    summary[:60],
-                    dedup_score,
-                )
-            return
+                return True
+            logger.debug(
+                "Autobio dedup: skipping '%s' (similar=%.2f)",
+                summary[:60],
+                dedup_score,
+            )
+            return False
 
         point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{user_code}:autobio:{summary}"))
 
@@ -256,9 +268,11 @@ def store_autobiographical_event(user_code: str, summary: str, importance: float
 
         logger.info("Autobiographical memory stored: %s", summary)
         _invalidate_timeline_cache(user_code)
+        return True
 
     except Exception as e:
         logger.error("Autobiographical memory failed: %s", e)
+        return False
 
 
 def _autobio_op(user_code: str, query: str, threshold: float, action: str) -> int:

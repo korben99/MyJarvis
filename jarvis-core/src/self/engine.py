@@ -42,7 +42,6 @@ _GLOBAL_ACTIONS = frozenset(
     {
         "nothing",
         "flag_knowledge_gap",
-        "update_self_note",
         "check_health",
         "prune_self_memory",
         "refine_prompt",

@@ -116,10 +116,29 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
                 )
                 break
 
-            for fact in facts:
+            # On compte ce qui est RÉELLEMENT entré en mémoire avant de détruire la source.
+            # store_autobiographical_event écarte silencieusement un fait trop proche d'un
+            # souvenir existant : sans ce comptage (avant le 21/08/2026), un lot dont tous
+            # les faits étaient dédupliqués voyait quand même ses 50 points épisodiques
+            # supprimés — la source détruite, rien de gagné. Le garde `if not facts`
+            # ci-dessus ne voit pas ce cas, puisque la génération, elle, a réussi.
+            ecrits = sum(
                 store_autobiographical_event(
                     user_code, fact, MEMORY_CONSOLIDATION_IMPORTANCE
                 )
+                for fact in facts
+            )
+
+            if not ecrits:
+                logger.warning(
+                    "[%s] Consolidation: %d fait(s) tous écartés par la dédup autobio — "
+                    "%d point(s) épisodique(s) CONSERVÉ(S). Le lot sera réexaminé au "
+                    "prochain passage.",
+                    user_code,
+                    len(facts),
+                    len(point_ids),
+                )
+                break
 
             qdrant.delete(
                 collection_name=QDRANT_MEMORY_COLLECTION,
@@ -128,8 +147,9 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
 
             total_deleted += len(point_ids)
             logger.info(
-                "[%s] Consolidation batch: %d facts stored, %d points deleted",
+                "[%s] Consolidation batch: %d/%d fait(s) retenu(s), %d point(s) supprimé(s)",
                 user_code,
+                ecrits,
                 len(facts),
                 len(point_ids),
             )

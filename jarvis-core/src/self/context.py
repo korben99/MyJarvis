@@ -327,7 +327,9 @@ def gather_global_context() -> dict:
         "user_relations": self_data.get("user_relations", {}),
         "behavioral_patterns": _extract_behavioral_patterns(20),
         "emotional_state": emotional_state.get_state(),
-        "self_notes": self_data.get("self_notes", [])[-5:],
+        # Les neuf axes remplis remplacent l'ancienne liste `self_notes`, retirée le
+        # 21/08/2026 : la connaissance de soi n'a plus qu'un foyer, et c'est celui-ci.
+        "introspection": self_data.get("self_introspection", {}),
         "opinions": self_data.get("opinions", [])[-5:],
     }
 
@@ -403,10 +405,10 @@ def _fmt_activity(activity: dict) -> str:
     return "\n".join(lines) or "  No activity."
 
 
-def _fmt_self_notes(notes: list[dict]) -> str:
-    if not notes:
-        return "  aucune note"
-    return "\n".join(f"  [{n.get('date', '')[:10]}] {n.get('note', '')}" for n in notes)
+def _fmt_introspection(axes: dict) -> str:
+    """Les axes REMPLIS seulement — les vides n'apprennent rien à la réflexion."""
+    lignes = [f"  {axe} : {texte}" for axe, texte in (axes or {}).items() if texte]
+    return "\n".join(lignes) or "  aucun axe encore renseigné"
 
 
 def _fmt_opinions(opinions: list[dict]) -> str:
@@ -474,7 +476,7 @@ async def _call_global_reflection_llm(
         emotional_state=json.dumps(
             context.get("emotional_state", {}), ensure_ascii=False
         ),
-        self_notes=_fmt_self_notes(context.get("self_notes", [])),
+        introspection=_fmt_introspection(context.get("introspection", {})),
         opinions=_fmt_opinions(context.get("opinions", [])),
         user_relations=json.dumps(context["user_relations"], ensure_ascii=False),
         previous_steps=_fmt_previous_steps(previous_steps),

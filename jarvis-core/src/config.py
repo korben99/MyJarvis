@@ -572,7 +572,9 @@ OPINIONS_MAX_ENTRIES = int(os.getenv("OPINIONS_MAX_ENTRIES", "120"))
 # la « voix » qu'il promettait — ~70 tokens sur 80 % des tours pour rien.
 OPINIONS_EMBED_THRESHOLD = float(os.getenv("OPINIONS_EMBED_THRESHOLD", "0.40"))
 OPINIONS_MAX_INJECTED = int(os.getenv("OPINIONS_MAX_INJECTED", "3"))
-SELF_NOTES_MAX_ENTRIES = int(os.getenv("SELF_NOTES_MAX_ENTRIES", "100"))
+# SELF_NOTES_MAX_ENTRIES retirée le 21/08/2026 avec la liste `self_notes` : son bloc
+# d'injection en conversation lisait la mauvaise clé depuis avril et n'avait jamais rien
+# affiché, et la connaissance de soi tient désormais dans INTROSPECTION_AXES.
 
 # Trace historique des révisions d'axes — sert à relire comment un axe a bougé, jamais
 # injectée en conversation. Les axes eux-mêmes sont bornés par construction (9), il n'y a

@@ -12,7 +12,6 @@ import re
 import time
 from datetime import datetime, timezone
 
-import numpy as np
 import pytz
 from config import (
     DEFAULT_TEMP,
@@ -20,7 +19,6 @@ from config import (
     REASONING_API_KEY,
     REASONING_API_URL,
     REASONING_MODEL,
-    SELF_NOTES_MAX_ENTRIES,
     USER_ADMINS,
     USER_CODES,
     USER_EMAILS,
@@ -41,7 +39,6 @@ import emotional_state
 from memory import (
     append_conversation_message,
     consolidate_memories,
-    get_embed_model,
     get_self_memory,
     get_user_projects,
     save_self_memory,
@@ -492,48 +489,18 @@ def _action_ask_user(params: dict) -> str:
     return _action_queue_push({"user_code": user_code, "message": question})
 
 
-def _action_update_self_note(params: dict) -> str:
-    note = params.get("note", "").strip()
-    if not note:
-        return "update_self_note: empty note"
-
-    with self_memory_lock:
-        data = get_self_memory()
-        existing = data.get("self_notes", [])
-
-        # Dédup sémantique : si une note existante est très similaire, la remplacer
-        merged = False
-        if existing:
-            try:
-                model = get_embed_model()
-                new_vec = model.encode(note, normalize_embeddings=True)
-                texts = [n.get("note", "") for n in existing[-20:]]
-                existing_vecs = model.encode(texts, normalize_embeddings=True)
-                sims = existing_vecs @ new_vec  # dot product sur vecteurs normalisés = cosine
-                max_idx = int(np.argmax(sims))
-                if sims[max_idx] > 0.85:
-                    idx_in_full = len(existing) - len(texts) + max_idx
-                    existing[idx_in_full] = {
-                        "note": note,
-                        "date": datetime.now(timezone.utc).isoformat(),
-                    }
-                    merged = True
-                    logger.info(
-                        "Self note merged (sim=%.3f) with: %s",
-                        sims[max_idx], texts[max_idx][:60],
-                    )
-            except Exception as exc:
-                logger.warning("Self note dedup failed (non-blocking): %s", exc)
-
-        if not merged:
-            existing.append({"note": note, "date": datetime.now(timezone.utc).isoformat()})
-
-        data["self_notes"] = existing[-SELF_NOTES_MAX_ENTRIES:]
-        save_self_memory(data)
-
-    action = "merged" if merged else "written"
-    logger.info("Self action: self note %s", action)
-    return f"self note {action}: {note[:60]}"
+# _action_update_self_note() et la liste `self_notes` supprimées le 21/08/2026.
+#
+# Le bloc <notes_jarvis> qui devait porter ces notes en conversation lisait la clé `text`
+# alors que l'écriture posait `note` : masqué par un `if n.get("text")`, il n'a JAMAIS rien
+# injecté depuis sa création le 25/04/2026. Les notes n'étaient donc lues que par le cycle
+# qui les écrivait — un circuit fermé, dont le contenu observé portait la marque : six
+# notes en trois jours sur sa propre inertie, dont une constatant que les précédentes
+# étaient « redondantes et stériles ».
+#
+# La connaissance de soi a désormais un seul foyer, `self_introspection` (neuf axes, revus
+# la nuit, injectés en permanence). Si un besoin d'observation opérationnelle se confirme,
+# il passera par l'axe `meta_personne` plutôt que par une seconde liste.
 
 
 def _action_consolidate_memory(params: dict) -> str:
@@ -648,13 +615,14 @@ _HEALTH_ALERT_TTL = 4 * 3600  # 4h — évite le spam en cas de service instable
 
 def _action_prune_self_memory(params: dict) -> str:
     """
-    Call the Primary LLM to identify obsolete/redundant entries in self_notes and
-    opinions, then delete them from jarvis-self.json.
+    Call the Primary LLM to identify obsolete/redundant entries in `opinions`, then delete
+    them from jarvis-self.json.
     Runs synchronously (called via asyncio.to_thread from run_self_reflection).
 
-    `self_introspection` n'est PAS purgeable : neuf axes fixes, révisés par la revue
+    Ne porte plus que sur les opinions depuis le 21/08/2026 : `self_notes` a été supprimée,
+    et `self_introspection` n'est pas purgeable — neuf axes fixes, révisés par la revue
     nocturne, jamais supprimés. Une purge par index n'aurait aucun sens sur un dict borné
-    par construction — et un axe qu'on efface reviendrait vide le lendemain.
+    par construction, et un axe qu'on efface reviendrait vide le lendemain.
     """
     r = get_redis()
     if r.exists(_PRUNE_COOLDOWN_KEY):
@@ -663,11 +631,10 @@ def _action_prune_self_memory(params: dict) -> str:
     with self_memory_lock:
         data = get_self_memory()
 
-    self_notes = data.get("self_notes", [])
     opinions = data.get("opinions", [])
 
-    if max(len(self_notes), len(opinions)) < 2:
-        return "prune_self_memory: nothing to prune (all lists have < 2 entries)"
+    if len(opinions) < 2:
+        return "prune_self_memory: nothing to prune (fewer than 2 opinions)"
 
     def _fmt(items: list, text_key: str = "text") -> str:
         """Format a memory list for the LLM prompt.
@@ -697,7 +664,6 @@ def _action_prune_self_memory(params: dict) -> str:
         return "\n".join(lines)
 
     user_prompt = get_prompt("PRUNE_SELF_MEMORY_USER").format(
-        self_notes=_fmt(self_notes, "note"),
         opinions=_fmt(opinions, "opinion"),
     )
 
@@ -735,7 +701,7 @@ def _action_prune_self_memory(params: dict) -> str:
 
     with self_memory_lock:
         data = get_self_memory()
-        for field in ("self_notes", "opinions"):
+        for field in ("opinions",):
             raw_indices = to_delete.get(field, [])
             if not raw_indices:
                 continue
@@ -861,7 +827,6 @@ _ACTION_CATALOG = {
     "queue_push": _action_queue_push,
     "correct_profile": _action_correct_profile,
     "ask_user": _action_ask_user,
-    "update_self_note": _action_update_self_note,
     "consolidate_memory": _action_consolidate_memory,
     "check_health": _action_check_health,
     "update_trade_threshold": _action_update_trade_threshold,

@@ -268,14 +268,6 @@ def build_memory_context(
             + "\n</introspection_jarvis>"
         )
 
-    if self_mem.get("self_notes"):
-        recent_notes = self_mem["self_notes"][-5:]
-        _notes_lines = [f"- {n['text']}" for n in recent_notes if n.get("text")]
-        if _notes_lines:
-            parts.append(
-                "<notes_jarvis>\n" + "\n".join(_notes_lines) + "\n</notes_jarvis>"
-            )
-
     # User Timeline — served from pipeline cache hit [5]; fallback to Qdrant on miss
     if _timeline_cached:
         try:

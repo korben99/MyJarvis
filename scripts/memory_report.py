@@ -282,14 +282,12 @@ def i10_listes_self() -> list:
         GROWTH_LOG_MAX_ENTRIES,
         INTROSPECTION_LOG_MAX_ENTRIES,
         OPINIONS_MAX_ENTRIES,
-        SELF_NOTES_MAX_ENTRIES,
     )
 
     plafonds = {
         "growth_log": GROWTH_LOG_MAX_ENTRIES,
         "opinions": OPINIONS_MAX_ENTRIES,
         "introspection_log": INTROSPECTION_LOG_MAX_ENTRIES,
-        "self_notes": SELF_NOTES_MAX_ENTRIES,
     }
     tailles = {k: len(d.get(k) or []) for k in plafonds}
     _enregistrer("self_listes", tailles)

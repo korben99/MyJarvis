@@ -1498,7 +1498,7 @@ skipped entirely, and most nights revise no introspection axis).
 | Trigger | Frequency | Entry point | LLM calls per run | Writes |
 |---|---|---|---|---|
 | `conversation_analysis` | **60 min** (`CONV_ANALYSIS_INTERVAL_MINUTES`) | `analyse_recent_conversations()` | 1 per session with new messages, per user | Redis profile (`update_user_profile_batch`), projects (`apply_project_updates`), interest weights, `convlog` back-fill (satisfaction · importance · mood · summary), Qdrant **episodic** vector if above `IMPORTANCE_THRESHOLD`, emotional state. **Never writes autobiographical.** |
-| `self_reflection` | **6 h** (`REFLECTION_INTERVAL_HOURS`) | `run_self_reflection()` | ≤ 3 (phase 1) + ≤ 3 per *active* user (phase 2) + 1 self-review per outward action + 1 proactive-push check per user | `jarvis-self.json` (`self_notes`, reflection log, incidents), Redis knowledge gaps, and whatever the chosen actions write — see the action catalog below |
+| `self_reflection` | **6 h** (`REFLECTION_INTERVAL_HOURS`) | `run_self_reflection()` | ≤ 3 (phase 1) + ≤ 3 per *active* user (phase 2) + 1 self-review per outward action + 1 proactive-push check per user | `jarvis-self.json` (reflection log, incidents), Redis knowledge gaps, and whatever the chosen actions write — see the action catalog below |
 | `nightly_interaction_review` | **23:00** | `run_nightly_interaction_review()` | 5 per user *having conversed* (calls 1–3, profile dedup, narrative) | Qdrant **autobiographical** (create/archive/delete), `jarvis-self.json` (`self_introspection`, `introspection_log`, `opinions`, `growth_log`, `user_relations`), Redis profile + `profile_narrative` (7-day TTL) + `tomorrow_suggestions` (24 h TTL) |
 | ↳ monthly consolidation | **1st of month**, inside the nightly | `consolidate_memories()` | 1 per batch of 50 episodic points | Episodic → autobiographical milestones (`importance = 1.0`), deletes the consolidated points, then decays autobiographical |
 | `morning_briefing` | `BRIEFING_TIME` | `run_morning_briefings()` | 1 per user | Push / email delivery only |
@@ -1541,7 +1541,7 @@ Conversations from the day are sorted by importance score descending before bein
 | `last_reflection` | Redis sorted set (1 entry) | Previous action + outcome |
 | `behavioral_patterns` | Computed from last 20 reflection log entries | Action frequency, nothing-clustering by hour, recurring focus keywords |
 | `emotional_state` | `emotional_state.describe()` | Current internal state: humeur, confiance, energie (returns `"neutre"` when all dims < 0.25) |
-| `self_notes[-5:]` | `jarvis-self.json` | Last 5 personal observations written by `update_self_note` |
+| `introspection` | `jarvis-self.json` | The filled introspection axes — replaced `self_notes` on 2026-08-21 |
 | `opinions[-5:]` | `jarvis-self.json` | Last 5 topic opinions written by `add_self_opinion` |
 | `user_relations` | `jarvis-self.json` | Affinity + style per user |
 | `user_profiles` | Redis hash per user | Capped at 20 keys/user for token budget |
@@ -1555,9 +1555,8 @@ Conversations from the day are sorted by importance score descending before bein
 |--------|-------|-------------|
 | `nothing` | Both | Explicit no-op with reason |
 | `flag_knowledge_gap` | Global | Log a topic Jarvis answered poorly. Requires a concrete failure as context. 7-day cooldown per topic, blocked if proposal pending. |
-| `update_self_note` | Global | Write a personal behavioural observation to `self_notes[]`. Semantic dedup: cosine > 0.85 with existing notes → merges instead of appending. |
 | `check_health` | Global | Service liveness (Redis/Qdrant/LLM) + memory health stats per user (episodic count, days since last write, null_summary rate 7d, vector norm anomalies). Sends admin email alert on critical issues (cooldown 4h). |
-| `prune_self_memory` | Global | LLM-assisted pruning of stale/redundant `self_notes` and `opinions`. 24h cooldown. `self_introspection` is never pruned — nine axes bounded by construction, revised not deleted. |
+| `prune_self_memory` | Global | LLM-assisted pruning of stale/redundant `opinions`. 24h cooldown. `self_introspection` is never pruned — nine axes bounded by construction, revised not deleted. |
 | `refine_prompt` | Global | Propose an improved version of a prompt (see Prompt Self-Modification below). |
 | `alert_admin` | Global | Push a maintenance/security recommendation to the admin (e.g. *"bump openssl to 3.5.6 on qdrant"*). The channel through which Jarvis, having seen `<etat_disparition>` and `<vulnerabilites>`, can act on its own state. Dedicated 24h cooldown. |
 | `store_insight` | User | Save a durable autobiographical fact to Qdrant. `importance` param (0.5–0.9, default 0.7): `0.5` useful fact · `0.7` significant · `0.9` key milestone. |
@@ -1780,7 +1779,6 @@ All storage is bounded. The table below shows what grows, where it's capped, and
 |-------|-----|-------|
 | `self_introspection{}` | 9 axes | Bounded by construction — revised in place, never appended |
 | `introspection_log[]` | `INTROSPECTION_LOG_MAX_ENTRIES` (200) | Revision history, never injected |
-| `self_notes[]` | 50 entries | Trimmed to `[-50:]` after each `update_self_note` action |
 | `opinions[]` | 50 entries | Trimmed to `[-50:]` after each `add_self_opinion` call; same-topic opinions are updated in place |
 | `growth_log[]` | `GROWTH_LOG_MAX_ENTRIES` (180) | Trimmed to `[-180:]` after nightly review |
 | `user_relations{}` | 1 entry/user | Updated in place — no growth |
