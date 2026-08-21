@@ -7,6 +7,7 @@ Sommet du paquet : dépend de state, proposals, context, actions.
 import asyncio
 import json
 import re
+import time
 from datetime import datetime, timezone
 
 from config import (
@@ -16,6 +17,8 @@ from config import (
     REASONING_API_KEY,
     REASONING_API_URL,
     REASONING_MODEL,
+    REFINE_PROMPT_THRESHOLD,
+    REFLECTION_INTERVAL_HOURS,
     THINKING_BUDGET_MEDIUM,
     USER_CODES,
     llm_timeout,
@@ -25,7 +28,11 @@ import emotional_state
 from memory import get_self_memory, save_self_memory, self_memory_lock
 from prompts import get_prompt
 
-from .actions import _execute_action, generate_proactive_push
+from .actions import (
+    _execute_action,
+    alerter_si_anomalie_critique,
+    generate_proactive_push,
+)
 from .context import (
     _call_global_reflection_llm,
     _call_user_reflection_llm,
@@ -37,45 +44,91 @@ from .state import _GAP_COUNTS_KEY, consolidate_incidents, log_reflection
 
 logger = get_logger("jarvis-self")
 
-# Actions allowed per phase — LLM cannot hallucinate cross-phase actions
-_GLOBAL_ACTIONS = frozenset(
-    {
-        "nothing",
-        "flag_knowledge_gap",
-        "check_health",
-        "prune_self_memory",
-        "refine_prompt",
-        "alert_admin",
-    }
-)
+# ── Catalogues d'actions ──────────────────────────────────────────────────
+#
+# Le cycle de réflexion N'APPREND PLUS, il AGIT. Découpage arrêté le 21/08/2026 : la nuit
+# écrit ce que Jarvis sait (des conversations et de son état), la réflexion consomme ce
+# savoir pour faire des choses. Une seule question place n'importe quelle action —
+# est-ce que ça écrit ce que Jarvis sait, ou est-ce que ça fait quelque chose ?
+#
+# Ont quitté ce catalogue, et pourquoi :
+#   store_insight, correct_profile   la nuit est propriétaire de l'autobio et du profil ;
+#                                    il y avait trois écrivains pour chacun.
+#   consolidate_memory, prune_...    entretien de mémoire → revue nocturne.
+#   check_health                     n'était pas une action : son résultat est déjà dans le
+#                                    contexte via gather_global_context().
+#   flag_knowledge_gap               → revue nocturne. Elle EXIGE de « décrire un échec
+#                                    concret dans une vraie conversation », or ce cycle ne
+#                                    voit que des compteurs et des topics, jamais le
+#                                    contenu. Il ne pouvait donc pas la satisfaire
+#                                    honnêtement — et les deux lacunes réellement en base
+#                                    le montraient : « inertie décisionnelle », « gestion
+#                                    des notifications », soit son propre comportement de
+#                                    boucle, la seule chose qu'il pouvait observer. Ces
+#                                    lacunes alimentaient `refine_prompt`, qui réécrivait
+#                                    des prompts sur des défauts jamais constatés.
+_SELF_ACTIONS = frozenset({"nothing", "refine_prompt", "alert_admin"})
 _USER_ACTIONS = frozenset(
     {
         "nothing",
-        "store_insight",
         "send_notification",
         "queue_push",
-        "correct_profile",
         "ask_user",
-        "consolidate_memory",
         "update_trade_threshold",
         "flag_project_stall",
     }
 )
 
-# Actions that require a self-challenge LLM call before execution, per phase.
-# Split in two: Phase 1 can only emit _GLOBAL_ACTIONS and Phase 2 only _USER_ACTIONS, so a
-# single shared set advertised a coverage that did not exist — 3 of its 4 entries were
-# unreachable from Phase 1.
+# Actions passant par une auto-contestation LLM avant exécution.
 #
-# refine_prompt is deliberately NOT reviewed: it only *proposes* a change that already waits
-# for human approval, so it cannot alter anything on its own. Its real guardrails are
-# mechanical and live in _action_refine_prompt — no second proposal while one is pending for
-# the same prompt, plus the 30-day topic cooldown set on approval. Reviewing it on top cost
-# 19 vetoes out of 19 over the 4 days measured, and strangled the self-improvement loop.
-_P1_REVIEW_REQUIRED: frozenset[str] = frozenset()
-_P2_REVIEW_REQUIRED: frozenset[str] = frozenset(
+# `alert_admin` y est : elle réveille quelqu'un. `refine_prompt` n'y est PAS, et c'est un
+# choix mesuré, pas un oubli — elle ne fait que PROPOSER un changement qui attend ensuite
+# l'accord d'un humain, donc elle ne peut rien altérer seule. La contester en plus avait
+# coûté 19 vetos sur 19 en quatre jours et étranglé la boucle d'auto-amélioration. Ses
+# vrais garde-fous sont mécaniques et vivent dans _action_refine_prompt : pas de seconde
+# proposition tant qu'une est en attente sur le même prompt, plus 30 jours de cooldown par
+# sujet après approbation.
+_SELF_REVIEW_REQUIRED: frozenset[str] = frozenset({"alert_admin"})
+_USER_REVIEW_REQUIRED: frozenset[str] = frozenset(
     {"queue_push", "ask_user", "send_notification"}
 )
+
+
+def _matiere_pour_agir_sur_soi(ctx: dict) -> str:
+    """Ce sur quoi Jarvis pourrait agir CHEZ LUI, ou une chaîne vide s'il n'y a rien.
+
+    Garde mécanique, sans LLM, en tête de l'appel « agir sur soi ». Le catalogue de cet
+    appel est court par nature — proposer un prompt, alerter l'admin — et sans matière il
+    ne peut répondre que « nothing ». Mesuré sur 95 cycles avant le découpage : 69 se
+    concluaient ainsi. Autant ne pas payer l'appel.
+
+    Ce n'est pas un déclenchement par événement : il n'existe aucune sonde de santé
+    permanente à écouter, l'état n'est calculé qu'ici, à chaque passage. On garde donc la
+    fréquence et on décide sur pièces.
+
+    Les incidents sont filtrés sur la fenêtre écoulée depuis le dernier passage : le
+    contexte en remonte 30 jours, et un incident déjà vu au cycle précédent n'est plus une
+    raison d'agir.
+    """
+    raisons = []
+
+    services = ctx.get("health") or {}
+    hs = [n for n, v in services.items() if isinstance(v, str) and v != "ok"]
+    if hs:
+        raisons.append(f"service(s) injoignable(s) : {', '.join(hs)}")
+
+    if (ctx.get("cve_conseil") or "").strip():
+        raisons.append("CVE critique corrigeable")
+
+    frais = time.time() - REFLECTION_INTERVAL_HOURS * 3600
+    nouveaux = [i for i in (ctx.get("incidents") or []) if float(i.get("at", 0)) >= frais]
+    if nouveaux:
+        raisons.append(f"{len(nouveaux)} incident(s) depuis le dernier passage")
+
+    if int(ctx.get("gap_max_count", 0)) >= REFINE_PROMPT_THRESHOLD:
+        raisons.append("lacune au seuil de proposition")
+
+    return " · ".join(raisons)
 
 
 def _build_review_context(
@@ -266,13 +319,20 @@ async def run_self_reflection() -> dict:
     # déterministe, avant tout appel LLM, pour que la trace survive même si la chaîne échoue.
     await asyncio.to_thread(consolidate_incidents)
 
+    # Même principe : un service injoignable ou des vecteurs non normalisés sont anormaux
+    # sans discussion. L'alerte part mécaniquement, sans dépendre de ce que le modèle
+    # choisira ensuite — et le garde ci-dessous peut très bien fermer l'appel LLM.
+    logger.info("Contrôle d'anomalies : %s", await asyncio.to_thread(alerter_si_anomalie_critique))
+
     global_ctx = await asyncio.to_thread(gather_global_context)
     global_steps: list[dict] = []
     focus = ""
 
-    # ── Phase 1: global self-state ─────────────────────────────────────────
-    logger.info("--- Phase 1: global self-state ---")
-    for i in range(MAX_CHAIN_ITERATIONS):
+    # ── Appel 3 — AGIR SUR SOI ─────────────────────────────────────────────
+    matiere = _matiere_pour_agir_sur_soi(global_ctx)
+    if not matiere:
+        logger.info("--- Agir sur soi : rien à traiter, appel LLM évité ---")
+    for i in range(MAX_CHAIN_ITERATIONS if matiere else 0):
         result = await _call_global_reflection_llm(
             global_ctx, previous_steps=global_steps
         )
@@ -282,18 +342,18 @@ async def run_self_reflection() -> dict:
             break
 
         focus, action, reason, params, stop = _run_chain_step(
-            result, global_steps, _GLOBAL_ACTIONS, f"P1-step{i + 1}"
+            result, global_steps, _SELF_ACTIONS, f"soi-step{i + 1}"
         )
         params.setdefault(
             "reason", reason
         )  # forward top-level reason into _action_nothing
 
-        if action in _P1_REVIEW_REQUIRED:
+        if action in _SELF_REVIEW_REQUIRED:
             approved, rev_reason = await _llm_review_before_action(
                 action, params, global_ctx, None, global_steps
             )
             if not approved:
-                logger.info("P1 self-review rejected %s: %s", action, rev_reason)
+                logger.info("Agir sur soi : auto-contestation refuse %s (%s)", action, rev_reason)
                 action = "nothing"
                 params = {"reason": f"self-review: {rev_reason}"}
                 # Don't stop the chain — let the LLM try another action.
@@ -305,7 +365,7 @@ async def run_self_reflection() -> dict:
             emotional_state.update({"confiance": +0.1})
 
         step = {
-            "phase": "global",
+            "phase": "agir_sur_soi",
             "iteration": i + 1,
             "focus": focus,
             "action": action,
@@ -325,14 +385,14 @@ async def run_self_reflection() -> dict:
         if stop or action == "nothing":
             break
 
-    # ── Phase 2: per-user chains ───────────────────────────────────────────
-    logger.info("--- Phase 2: per-user reflection (%d users) ---", len(USER_CODES))
+    # ── Appel 4 — AGIR VERS L'UTILISATEUR ──────────────────────────────────
+    logger.info("--- Agir vers l'utilisateur (%d) ---", len(USER_CODES))
     all_user_steps: list[dict] = []
 
     for user_code in USER_CODES:
         user_ctx = gather_user_context(user_code)
 
-        # Skip users with no conversation in the activity window. Measured over 95 Phase 2
+        # Skip users with no conversation in the activity window. Measured over 95
         # calls (4 days): all 69 zero-activity cycles answered "nothing" with the reason
         # "aucune activité récente", while every one of the 9 proposed actions came from a
         # user with 7+ conversations. Reflecting on a silent user costs ~1800 prompt tokens
@@ -386,7 +446,7 @@ async def run_self_reflection() -> dict:
                 break
 
             ufocus, action, reason, params, stop = _run_chain_step(
-                result, user_steps, _USER_ACTIONS, f"P2-{user_code}-step{i + 1}"
+                result, user_steps, _USER_ACTIONS, f"user:{user_code}-step{i + 1}"
             )
             if not focus:
                 focus = ufocus
@@ -403,7 +463,6 @@ async def run_self_reflection() -> dict:
                 "queue_push",
                 "send_notification",
                 "ask_user",
-                "consolidate_memory",
                 "update_trade_threshold",
             }
             if action in _user_scoped and not params.get("user_code"):
@@ -424,7 +483,7 @@ async def run_self_reflection() -> dict:
                     "reason": f"previous {_prev_action} hit a system constraint — not retrying"
                 }
 
-            if action in _P2_REVIEW_REQUIRED:
+            if action in _USER_REVIEW_REQUIRED:
                 approved, rev_reason = await _llm_review_before_action(
                     action, params, global_ctx, user_ctx, user_steps
                 )

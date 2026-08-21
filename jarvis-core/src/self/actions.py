@@ -38,13 +38,10 @@ from helpers import (
 import emotional_state
 from memory import (
     append_conversation_message,
-    consolidate_memories,
     get_self_memory,
     get_user_projects,
     save_self_memory,
     self_memory_lock,
-    store_autobiographical_event,
-    update_user_profile,
 )
 from prompts import get_prompt
 from trade_keys import idx_key, pos_key
@@ -61,85 +58,12 @@ from .state import (
 
 logger = get_logger("jarvis-self")
 
-# ── Namespace guards for correct_profile ─────────────────────────────────
-# Each entry describes one protected domain: which key prefixes belong to it
-# and which terms must appear in the value for the write to be allowed.
-# Add a new domain here without touching _action_correct_profile logic.
-# extra_check: optional callable(value_lower) -> bool for non-keyword rules.
-_NS_GUARDS: list[dict] = [
-    {
-        "name": "financial",
-        "key_prefixes": frozenset(
-            {
-                "placement",
-                "capital",
-                "per",
-                "pea",
-                "livret_a",
-                "investissement",
-                "epargne",
-            }
-        ),
-        "required_terms": frozenset(
-            {
-                "€",
-                "$",
-                "%",
-                "fonds",
-                "fond",
-                "etf",
-                "action",
-                "obligation",
-                "livret",
-                "pea",
-                "per",
-                "scpi",
-                "crypto",
-                "bourse",
-                "placement",
-                "investissement",
-                "epargne",
-                "portefeuille",
-                "rendement",
-                "taux",
-                "assurance",
-                "virement",
-                "depot",
-                "retrait",
-                "titre",
-            }
-        ),
-        "extra_check": lambda v: any(c.isdigit() for c in v),
-        "error_hint": "financial context (amount, fund name, asset type, %, €, etc.)",
-    },
-    {
-        "name": "travel",
-        "key_prefixes": frozenset(
-            {"travel_plans", "travel_preference", "voyages_prevus"}
-        ),
-        "required_terms": frozenset(
-            {
-                "voyage",
-                "travel",
-                "trip",
-                "vacances",
-                "destination",
-                "hotel",
-                "vol",
-                "billet",
-                "trajet",
-                "sejour",
-                "partir",
-                "avion",
-                "train",
-                "city",
-                "ville",
-            }
-        ),
-        "extra_check": None,
-        "error_hint": "travel context",
-    },
-]
+# _NS_GUARDS supprimés le 21/08/2026 avec _action_correct_profile, seule à les utiliser.
+# À noter : ils protégeaient les espaces `financial` et `travel` du profil (une valeur
+# écrite sous `placement:*` devait contenir un montant, un nom de fonds…). Cette
+# protection n'existait QUE sur ce chemin — ni l'analyseur ni la revue nocturne ne l'ont
+# jamais eue. Sa disparition ne dégrade donc rien, mais si elle a de la valeur, sa place
+# est dans update_user_profile, là où le profil est réellement écrit.
 
 # ── Actions-local Redis keys / cooldowns ──────────────────────────────────
 _NOTIF_KEY_PREFIX = "jarvis:self:notif"
@@ -159,22 +83,10 @@ def _action_nothing(params: dict) -> str:
     return f"no-op: {reason}"
 
 
-def _action_store_insight(params: dict) -> str:
-    user_code = params.get("user_code", "")
-    insight = params.get("insight", "").strip()
-    if not user_code or not insight or user_code not in USER_CODES:
-        return "store_insight: invalid params"
-
-    try:
-        importance = float(params.get("importance", 0.7))
-        importance = round(max(0.0, min(1.0, importance)), 2)
-    except (TypeError, ValueError):
-        importance = 0.7
-
-    store_autobiographical_event(user_code, insight, importance=importance)
-    logger.info("Self action: stored insight for %s (importance=%.2f)", user_code, importance)
-    return f"stored insight for {user_code} (importance={importance})"
-
+# _action_store_insight() supprimée le 21/08/2026 : la revue nocturne est propriétaire
+# de la mémoire autobiographique (Call 1, `insights_durables`), et elle décide sur les
+# conversations complètes de la journée là où cette action ne voyait qu'un résumé
+# d'activité. Il y avait trois écrivains pour la même destination.
 
 _GAP_GENERIC_PHRASES = {
     "lacune de connaissance identifiée dans les capacités d'assistance",
@@ -387,90 +299,10 @@ def _action_alert_admin(params: dict) -> str:
     return f"admin alerted ({admin}): {message[:80]}"
 
 
-def _action_correct_profile(params: dict) -> str:
-    """
-    Directly write or delete a key in a user's Redis profile.
-    Use for clear duplicates (hobby:montres + interest:montres) or stale/wrong values.
-    value=null deletes the key; any string value overwrites it.
-    """
-    user_code = params.get("user_code", "")
-    key = params.get("key", "").strip()
-    value = params.get("value")  # None or "" means delete
-    if value == "":
-        value = None
-
-    if not user_code or user_code not in USER_CODES:
-        return "correct_profile: invalid user_code"
-    if not key:
-        return "correct_profile: missing key"
-    # Deletions (value=null) are reserved for nightly review and prune_self_memory.
-    # The reflection phase must never silently erase profile facts it cannot verify.
-    if value is None:
-        logger.warning(
-            "Self correct_profile: BLOCKED deletion of '%s' for %s — "
-            "deletions are not allowed in the reflection phase (use nightly review)",
-            key,
-            user_code,
-        )
-        return (
-            f"correct_profile: deletion of '{key}' blocked — "
-            "deletions are reserved for the nightly review phase"
-        )
-
-    # Guard: reflection can only modify or delete existing keys.
-    # New keys are created exclusively by the conversation analyzer (which reads
-    # actual user statements). This prevents the reflection from hallucinating
-    # profile facts from its own context.
-    if value is not None:
-        exists = get_redis().hexists(f"user:{user_code}:profile", key)
-        if not exists:
-            logger.warning(
-                "Self correct_profile: REJECTED creation of new key '%s' for %s — "
-                "new keys can only be created by the conversation analyzer",
-                key,
-                user_code,
-            )
-            return f"correct_profile: key '{key}' does not exist — use the analyzer to create new profile facts from conversation"
-
-    # ── Namespace protection: block cross-domain value contamination ────────
-    # Prevents reflection from writing hobby/travel/unrelated values into
-    # domain-specific keys (e.g. placement:amp20 = "pilote de kart").
-    # Guard rules are declared in _NS_GUARDS at module level — add new
-    # domains there without touching this function.
-    if value is not None:
-        _key_prefix_ns = key.split(":")[0]
-        _value_lower = value.lower()
-
-        for _guard in _NS_GUARDS:
-            _in_ns = (
-                _key_prefix_ns in _guard["key_prefixes"]
-                or key in _guard["key_prefixes"]
-            )
-            if not _in_ns:
-                continue
-            _has_match = any(t in _value_lower for t in _guard["required_terms"])
-            if not _has_match and _guard["extra_check"]:
-                _has_match = _guard["extra_check"](_value_lower)
-            if not _has_match:
-                logger.warning(
-                    "Self correct_profile: BLOCKED '%s' = '%s' for %s — "
-                    "%s namespace requires %s (namespace protection)",
-                    key,
-                    value,
-                    user_code,
-                    _guard["name"],
-                    _guard["error_hint"],
-                )
-                return (
-                    f"correct_profile: BLOCKED '{key}' = '{value}' — "
-                    f"{_guard['name']} namespace requires {_guard['error_hint']}"
-                )
-
-    update_user_profile(user_code, key, value if value is not None else None)
-    op = f"deleted '{key}'" if value is None else f"set '{key}' = '{value}'"
-    logger.info("Self action: correct_profile [%s] %s", user_code, op)
-    return f"correct_profile [{user_code}]: {op}"
-
+# _action_correct_profile() supprimée le 21/08/2026 : `curative_profile_cleanup`
+# (revue nocturne, Call 4) applique des `updates` par hset autant que des suppressions,
+# donc elle corrige aussi les valeurs — avec le profil entier sous les yeux, ce que
+# cette action n'avait pas.
 
 def _action_ask_user(params: dict) -> str:
     """
@@ -503,27 +335,28 @@ def _action_ask_user(params: dict) -> str:
 # il passera par l'axe `meta_personne` plutôt que par une seconde liste.
 
 
-def _action_consolidate_memory(params: dict) -> str:
-    user_code = params.get("user_code", "")
-    if not user_code or user_code not in USER_CODES:
-        return "consolidate_memory: invalid user_code"
+# _action_consolidate_memory() supprimée le 21/08/2026 : la consolidation reste appelée
+# par la revue nocturne le 1er du mois (`consolidate_memories`). On perd le déclenchement
+# à la demande — c'est assumé : comprimer la mémoire n'est pas agir, et cette action
+# portait un cooldown de 48 h qui la rendait de toute façon rare.
 
-    r = get_redis()
-    cooldown_key = f"{_CONSOLIDATE_COOLDOWN_PREFIX}:{user_code}"
-    if r.exists(cooldown_key):
-        ttl = r.ttl(cooldown_key)
-        return f"consolidate_memory: cooldown actif ({ttl // 3600}h restantes)"
+def alerter_si_anomalie_critique() -> str:
+    """Alerte l'admin sur les anomalies critiques. DÉTERMINISTE, sans LLM.
 
-    try:
-        consolidate_memories(user_code)
-        r.setex(cooldown_key, _CONSOLIDATE_COOLDOWN_TTL, "1")
-        logger.info("Self action: memory consolidation triggered for %s", user_code)
-        return f"memory consolidation triggered for {user_code}"
-    except Exception as exc:
-        return f"consolidate_memory: failed ({type(exc).__name__})"
+    Était l'action `check_health` jusqu'au 21/08/2026. Ce n'en était pas une : la moitié
+    du travail (sonder les services et la santé mémoire) est déjà faite par
+    `gather_global_context`, et l'autre moitié — cette alerte — ne demandait aucun
+    jugement. La laisser dans le catalogue rendait un signal critique dépendant du choix
+    du modèle, alors qu'un service injoignable ou des vecteurs non normalisés sont
+    anormaux sans discussion.
 
+    Appelée en tête de `run_self_reflection`, à côté de `consolidate_incidents`, pour que
+    l'alerte parte même si la chaîne LLM échoue ensuite. Le LLM garde la même information
+    dans son contexte et peut toujours en tirer un `alert_admin` argumenté ; les deux
+    canaux ne font pas doublon — celui-ci constate, l'autre recommande.
 
-def _action_check_health(params: dict) -> str:
+    Cooldown de 4 h propre, pour qu'un service instable ne génère pas un flot de mails.
+    """
     health = _check_service_health()
     issues = [svc for svc, status in health.items() if status != "ok"]
     if issues:
@@ -554,8 +387,7 @@ def _action_check_health(params: dict) -> str:
         else:
             logger.info("Self health alert suppressed (cooldown actif)")
 
-    svc_summary = f"services KO={issues}" if issues else "services OK"
-    return f"{svc_summary}\nmémoire:\n{mem_lines}"
+    return f"{len(critical)} anomalie(s) critique(s)" if critical else "aucune anomalie"
 
 
 def _action_update_trade_threshold(params: dict) -> str:
@@ -819,22 +651,24 @@ def _action_flag_project_stall(params: dict) -> str:
     return f"flag_project_stall: rappel envoyé pour {', '.join(sent)}"
 
 
+# Doit correspondre exactement à _SELF_ACTIONS | _USER_ACTIONS (self/engine.py) : une
+# entrée en trop est un handler que plus personne ne peut atteindre, une entrée manquante
+# fait retomber la chaîne sur "nothing".
+#
+# Deux entrées ne sont plus des actions du LLM mais restent ici, appelées directement par
+# la revue nocturne : `prune_self_memory` (l'entretien de mémoire a quitté le cycle
+# d'action) et `flag_knowledge_gap` (elle exige un échec concret, que seule la nuit voit).
 _ACTION_CATALOG = {
     "nothing": _action_nothing,
-    "store_insight": _action_store_insight,
     "flag_knowledge_gap": _action_flag_knowledge_gap,
     "send_notification": _action_send_notification,
     "queue_push": _action_queue_push,
-    "correct_profile": _action_correct_profile,
     "ask_user": _action_ask_user,
-    "consolidate_memory": _action_consolidate_memory,
-    "check_health": _action_check_health,
     "update_trade_threshold": _action_update_trade_threshold,
     "refine_prompt": _action_refine_prompt,
-    "prune_self_memory": _action_prune_self_memory,
     "flag_project_stall": _action_flag_project_stall,
     "alert_admin": _action_alert_admin,
-    # nightly_review is scheduled automatically — not in LLM action catalog
+    "prune_self_memory": _action_prune_self_memory,  # appelée par la nuit, pas par le LLM
 }
 
 

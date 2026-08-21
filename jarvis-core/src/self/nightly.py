@@ -1,7 +1,11 @@
-"""Revue nocturne par utilisateur (APScheduler 23:00) : 5 appels séquentiels par
-utilisateur — faits durables (autobio + relation + suggestions), auto-réflexion de
-Jarvis (introspection/opinions), curation mémoire, dedup de profil, narratif de profil.
-Déclenche la consolidation mensuelle le 1er du mois.
+"""Revue nocturne (APScheduler 23:00) — LA NUIT APPREND, elle n'agit jamais vers l'extérieur.
+
+Deux temps, depuis le découpage du 21/08/2026 :
+  • par utilisateur ayant conversé : faits durables, curation autobio, dédup et narratif
+    de profil — 4 appels chacun ;
+  • une fois, sur la journée entière : révision des axes d'introspection et des opinions,
+    depuis les conversations ET l'état opérationnel. Global, donc hors de la boucle.
+Puis l'entretien déterministe (purge des opinions, consolidation mensuelle le 1er).
 
 Module indépendant : ni la réflexion ni les actions ne l'appellent (planifié à part).
 """
@@ -27,6 +31,7 @@ from config import (
 from helpers import call_llm_async_bg, extract_llm_json, get_logger, get_redis
 from memory import (
     archive_autobiographical_event,
+    consolidate_memories,
     curative_profile_cleanup,
     get_autobiographical_facts,
     get_self_memory,
@@ -37,7 +42,14 @@ from memory import (
     update_profile_narrative,
 )
 from prompts import get_prompt
+from vitals import recent_incidents
 
+from .actions import _execute_action
+from .context import (
+    _check_memory_health,
+    _check_service_health,
+    _fmt_memory_health,
+)
 from .state import _DEFAULT_RELATION, _upsert_opinion_inplace, get_user_relation
 
 logger = get_logger("jarvis-self")
@@ -168,20 +180,59 @@ def _render_introspection(data: dict) -> str:
     )
 
 
-async def _nightly_self_user(
-    user_code: str, user_name: str, conversations: list[dict], review_date: str
+def _etat_operationnel() -> str:
+    """L'état de Jarvis lui-même sur la journée : services, incidents, santé mémoire.
+
+    Sans ce bloc, l'introspection ne se nourrit que des conversations et l'axe
+    `meta_personne` ne peut rien apprendre de son propre fonctionnement — un angle mort
+    relevé le 21/08/2026, quand `self_notes` (la seule à voir ces signaux) a été retirée.
+
+    Déterministe et tolérant : si une sonde est indisponible, on n'invente rien, la ligne
+    disparaît.
+    """
+    lignes = []
+    try:
+        services = _check_service_health()
+        ko = [s for s, v in services.items() if v != "ok"]
+        lignes.append(f"services : {'KO — ' + ', '.join(ko) if ko else 'tous nominaux'}")
+        lignes.append("santé mémoire :\n" + _fmt_memory_health(_check_memory_health()))
+    except Exception as exc:
+        logger.debug("état opérationnel : santé indisponible (%s)", type(exc).__name__)
+    try:
+        recents = recent_incidents(1)
+        if recents:
+            lignes.append(
+                "incidents des dernières 24 h :\n"
+                + "\n".join(
+                    f"  - {i.get('kind', '?')} ({i.get('severity', '?')}) : "
+                    f"{i.get('detail', '')}"
+                    for i in recents[-5:]
+                )
+            )
+    except Exception as exc:
+        logger.debug("état opérationnel : vitals indisponible (%s)", type(exc).__name__)
+    return "\n".join(lignes) or "aucun signal opérationnel"
+
+
+async def _nightly_introspection(
+    conversations: list[dict], review_date: str
 ) -> dict | None:
-    """Call 2 — Jarvis self-reflection and opinion formation."""
+    """Apprendre sur soi — révision des axes d'introspection et des opinions.
+
+    UN SEUL appel par nuit, toutes conversations confondues. Était dans la boucle
+    utilisateur jusqu'au 21/08/2026, donc exécuté N fois pour un modèle de soi qui est
+    GLOBAL : chaque passage ne voyait qu'un utilisateur et réécrivait par-dessus le
+    précédent. Les axes oscillaient entre les points de vue au lieu de se consolider.
+    """
     data = get_self_memory()
     recent_opinions = [
         f"{o['topic']}: {o['opinion']}" for o in data.get("opinions", [])[-10:]
     ]
     prompt = get_prompt("NIGHTLY_SELF_PROMPT").format(
-        user_name=user_name,
-        user_code=user_code,
         review_date=review_date,
         count=len(conversations),
         conv_text=_build_conv_text(conversations),
+        etat_operationnel=_etat_operationnel(),
         self_introspection=_render_introspection(data),
         recent_opinions=json.dumps(recent_opinions, ensure_ascii=False)
         if recent_opinions
@@ -205,8 +256,7 @@ async def _nightly_self_user(
         return extract_llm_json(content)
     except Exception as exc:
         logger.error(
-            "Nightly self LLM call failed for %s: %s",
-            user_code,
+            "Nightly introspection LLM call failed: %s",
             type(exc).__name__,
             exc_info=True,
         )
@@ -265,17 +315,33 @@ async def run_nightly_interaction_review() -> None:
     """
     Nightly per-user conversation review. Called by APScheduler at 23:00.
 
-    For each user with conversations yesterday (5 sequential LLM calls):
-      Call 1 — NIGHTLY_FACTS  : user insights → Qdrant autobio + relation update + suggestions
-      Call 2 — NIGHTLY_SELF   : Jarvis self-reflection → introspection, opinions, growth_log
-      Call 3 — NIGHTLY_CLEANING: Qdrant autobio curation (archive outdated, delete errors)
-      Call 4 — profile dedup  : curative_profile_cleanup() → Redis profile hash (sync, no LLM if < 5 keys)
-      Call 5 — profile narrative: update_profile_narrative() → Redis user:{code}:profile_narrative (7-day TTL)
+    LA NUIT APPREND — elle n'agit jamais vers l'extérieur. Découpage arrêté le 21/08/2026 :
+    ce qui SORT (push, mail, alerte) appartient au cycle de réflexion, ce qui S'ÉCRIT en
+    mémoire appartient ici.
 
-    Each user's write to jarvis-self.json is done under self_memory_lock
-    immediately after the LLM call — no data is held across await points.
-    Idempotent: Redis lock per user per date (TTL 25h).
-    Triggers monthly consolidation (episodic compress + autobio decay) on day 1.
+    APPRENDRE SUR L'UTILISATEUR — 4 appels par utilisateur ayant conversé la veille :
+      NIGHTLY_FACTS      : faits durables → Qdrant autobio, relation, suggestions du lendemain
+      NIGHTLY_CLEANING   : curation autobio (archive le périmé, supprime les erreurs)
+      curative_profile_cleanup() : dédup du hash profil Redis (sans LLM si < 5 clés)
+      update_profile_narrative() : portrait ~300 tokens, TTL 7 jours
+
+    APPRENDRE SUR SOI — 1 appel, APRÈS la boucle, sur la journée entière :
+      NIGHTLY_SELF       : révision des 9 axes d'introspection, opinions, et lacunes de
+                           connaissance — depuis les conversations ET l'état opérationnel
+                           (services, incidents, santé mémoire). Hors boucle parce que ces
+                           mémoires sont GLOBALES : les réviser par utilisateur revenait à
+                           les réécrire N fois, chaque passage écrasant le précédent.
+                           Les lacunes sont ici et pas dans le cycle d'action parce
+                           qu'elles exigent un échec CONCRET : seule la nuit voit les
+                           conversations.
+
+    ENTRETIEN — déterministe, sans jugement :
+      prune_self_memory  : opinions obsolètes (cooldown 24 h intégré)
+      consolidate_memories() le 1er du mois : compression épisodique + décroissance autobio
+
+    Chaque écriture dans jarvis-self.json se fait sous self_memory_lock immédiatement après
+    l'appel — aucune donnée n'est retenue au travers d'un await.
+    Idempotent : verrou Redis par utilisateur et par date (TTL 25 h).
     """
     logger.info("=== Nightly interaction review starting ===")
     r = get_redis()
@@ -286,6 +352,8 @@ async def run_nightly_interaction_review() -> None:
     end_ts = yesterday.replace(
         hour=23, minute=59, second=59, microsecond=999999
     ).timestamp()
+
+    toutes_conversations: list[dict] = []
 
     for user_code, user_name in USER_CODES.items():
         lock_key = f"jarvis:{user_code}:nightly_review:{review_date}"
@@ -346,45 +414,17 @@ async def run_nightly_interaction_review() -> None:
                     json.dumps(suggestions),
                 )
 
-        # ── Call 2: Jarvis self-reflection ────────────────────────────────
-        self_result = await _nightly_self_user(
-            user_code, user_name, conversations, review_date
-        )
+        # L'introspection et les opinions sont GLOBALES : elles sont révisées une seule
+        # fois, après la boucle, sur la journée entière. Voir _nightly_introspection.
+        toutes_conversations.extend(conversations)
 
-        # ── Persist facts + self-reflection → jarvis-self.json ───────────
+        # ── Persist facts → jarvis-self.json ─────────────────────────────
         summary = facts.get("daily_summary", "") if facts else ""
         rel_update = facts.get("user_relation_update", {}) if facts else {}
-        revisions = _normalise_introspection(
-            (self_result or {}).get("self_introspection"),
-            get_self_memory().get("self_introspection"),
-        )
-        new_opinions = [
-            o
-            for o in (self_result or {}).get("jarvis_opinions", [])
-            if isinstance(o, dict) and o.get("topic") and o.get("opinion")
-        ]
 
-        if revisions or summary or rel_update or new_opinions:
+        if summary or rel_update:
             with self_memory_lock:
                 data = get_self_memory()
-                # Un axe est RÉÉCRIT, jamais empilé : une seule ligne par axe, la dernière.
-                # C'est ce qui borne le coût de réinjection et évite que la connaissance de
-                # soi redevienne la liste sans fin qu'elle était avant le 20/08/2026.
-                axes = data.setdefault("self_introspection", {})
-                for axe, texte in revisions.items():
-                    axes[axe] = texte
-                    data.setdefault("introspection_log", []).append(
-                        {"axe": axe, "text": texte, "date": review_date,
-                         "user_code": user_code}
-                    )
-                    logger.info("Nightly introspection: %s → %s", axe, texte[:70])
-                for op in new_opinions:
-                    _upsert_opinion_inplace(
-                        data, op["topic"], op["opinion"].strip(), review_date
-                    )
-                    logger.info(
-                        "Nightly opinion: %s → %s", op["topic"], op["opinion"][:60]
-                    )
                 if summary:
                     data.setdefault("growth_log", []).append(
                         {
@@ -429,12 +469,6 @@ async def run_nightly_interaction_review() -> None:
                         new_style,
                         new_mood,
                     )
-                # Les axes eux-mêmes sont bornés par construction (9). Seule leur trace
-                # historique est tronquée — elle sert à relire comment un axe a évolué,
-                # pas à alimenter les conversations.
-                data["introspection_log"] = data.get("introspection_log", [])[
-                    -INTROSPECTION_LOG_MAX_ENTRIES:
-                ]
                 data["growth_log"] = data.get("growth_log", [])[
                     -GROWTH_LOG_MAX_ENTRIES:
                 ]
@@ -479,8 +513,6 @@ async def run_nightly_interaction_review() -> None:
         # Monthly memory consolidation on day 1
         if now.day == 1:
             try:
-                from memory import consolidate_memories
-
                 await asyncio.to_thread(consolidate_memories, user_code)
                 logger.info("Monthly memory consolidation done for %s", user_code)
             except Exception as exc:
@@ -489,5 +521,78 @@ async def run_nightly_interaction_review() -> None:
                     user_code,
                     type(exc).__name__,
                 )
+
+    # ── APPRENDRE SUR SOI — un seul appel, sur la journée entière ─────────
+    # Hors de la boucle : introspection et opinions sont GLOBALES. Les réviser par
+    # utilisateur revenait à les réécrire N fois, chaque passage ne voyant qu'un
+    # interlocuteur et écrasant le précédent.
+    if toutes_conversations:
+        resultat = await _nightly_introspection(toutes_conversations, review_date)
+        revisions = _normalise_introspection(
+            (resultat or {}).get("self_introspection"),
+            get_self_memory().get("self_introspection"),
+        )
+        opinions = [
+            o
+            for o in (resultat or {}).get("jarvis_opinions", [])
+            if isinstance(o, dict) and o.get("topic") and o.get("opinion")
+        ]
+
+        # Lacunes de connaissance — déplacées ici depuis le cycle de réflexion le
+        # 21/08/2026. Elles exigent de décrire un échec CONCRET, et seule la nuit a les
+        # conversations sous les yeux : la réflexion ne voyait que des compteurs, et
+        # produisait donc des lacunes sur son propre comportement de boucle faute d'autre
+        # matière observable. On réutilise l'action telle quelle — elle porte déjà les
+        # garde-fous qui comptent (contexte substantiel, cooldown de 7 j par sujet, refus
+        # si une proposition est en attente sur le même sujet).
+        for gap in (resultat or {}).get("knowledge_gaps") or []:
+            if not isinstance(gap, dict) or not gap.get("topic"):
+                continue
+            issue = await asyncio.to_thread(
+                _execute_action,
+                "flag_knowledge_gap",
+                {"topic": gap["topic"], "context": gap.get("context", "")},
+            )
+            logger.info("Nightly lacune : %s", issue)
+
+        if revisions or opinions:
+            with self_memory_lock:
+                data = get_self_memory()
+                # Un axe est RÉÉCRIT, jamais empilé : une seule ligne par axe, la dernière.
+                # C'est ce qui borne le coût de réinjection et évite que la connaissance de
+                # soi redevienne la liste sans fin qu'elle était avant le 20/08/2026.
+                axes = data.setdefault("self_introspection", {})
+                for axe, texte in revisions.items():
+                    axes[axe] = texte
+                    data.setdefault("introspection_log", []).append(
+                        {"axe": axe, "text": texte, "date": review_date}
+                    )
+                    logger.info("Nightly introspection: %s → %s", axe, texte[:70])
+                for op in opinions:
+                    _upsert_opinion_inplace(
+                        data, op["topic"], op["opinion"].strip(), review_date
+                    )
+                    logger.info(
+                        "Nightly opinion: %s → %s", op["topic"], op["opinion"][:60]
+                    )
+                # Les axes sont bornés par construction (9) ; seule leur trace historique
+                # est tronquée — elle sert à relire comment un axe a évolué.
+                data["introspection_log"] = data.get("introspection_log", [])[
+                    -INTROSPECTION_LOG_MAX_ENTRIES:
+                ]
+                save_self_memory(data)
+        else:
+            logger.info("Nightly introspection : aucune révision (réponse attendue)")
+
+    # ── Entretien de la mémoire de soi ────────────────────────────────────
+    # Hors boucle utilisateur : les opinions sont globales, pas per-user. Déplacé ici
+    # depuis le catalogue d'actions le 21/08/2026 — purger n'est pas agir, et le cycle de
+    # réflexion ne fait plus qu'agir. Le cooldown de 24 h vit dans l'action elle-même,
+    # donc un appel par nuit ne peut pas emballer la purge.
+    try:
+        resultat = await asyncio.to_thread(_execute_action, "prune_self_memory", {})
+        logger.info("Nightly: entretien des opinions — %s", resultat)
+    except Exception as exc:
+        logger.warning("Nightly: purge des opinions échouée (%s)", type(exc).__name__)
 
     logger.info("=== Nightly interaction review complete ===")

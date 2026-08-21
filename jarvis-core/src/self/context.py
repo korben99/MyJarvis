@@ -321,6 +321,12 @@ def gather_global_context() -> dict:
         "cve_conseil": cve_conseil,
         "user_activity": activity,
         "knowledge_gaps": gaps,
+        # Compteur brut le plus élevé, pour le garde mécanique de `run_self_reflection`.
+        # `knowledge_gaps` ne porte que des libellés d'affichage (« sujet (flaggé ×3) ») :
+        # les analyser à la regex serait lire une chaîne de présentation pour décider.
+        "gap_max_count": max(
+            (int(v) for v in get_redis().hgetall(_GAP_COUNTS_KEY).values()), default=0
+        ),
         "pending_proposals": _fmt_pending_proposals(),
         "last_reflection": last_ref,
         "reflection_count": self_data.get("reflection_count", 0),

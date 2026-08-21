@@ -64,7 +64,7 @@ Jarvis is a self-hosted, multi-user AI assistant with persistent memory, autonom
   │ Durable user facts (insights_durables)         │ store_autobiographical_event() →     │ memory_type: autobiographical, status: current          │
   │ written exclusively by nightly review          │ Qdrant                               │ importance = LLM score (0.0–1.0)                        │
   ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
-  │ Insights from store_insight action             │ store_autobiographical_event() →     │ same                                                    │
+  │ Durable insights (nightly call 1)              │ store_autobiographical_event() →     │ same                                                    │
   │                                                │ Qdrant                               │                                                         │
   ├────────────────────────────────────────────────┼──────────────────────────────────────┼─────────────────────────────────────────────────────────┤
   │ Outdated facts (nightly cleaning)              │ archive_autobiographical_event() →   │ payload update: status="past", archived_date            │
@@ -402,7 +402,7 @@ Every point stored in Qdrant carries an `importance` field used for retrieval ra
 |-------|--------|-----------------|
 | `1.0` (`MEMORY_CONSOLIDATION_IMPORTANCE`) | Monthly consolidation (`_consolidate_user_memories`) — LLM summary of episodic batch | **Permanent — exempt from decay** (`== MEMORY_DECAY_DURABLE_MIN`) |
 | `0.0–1.0` (LLM score) | Analyzer episodic write — LLM-evaluated, only stored if score `> IMPORTANCE_THRESHOLD` and summary present | Decays monthly |
-| `0.5–0.9` (LLM-set, défaut `0.7`) | `store_insight` self-action — LLM chooses importance: `0.5` fact utile · `0.7` significatif · `0.9` moment clé | Decays monthly |
+| `0.5–0.9` (LLM-set, défaut `0.7`) | Nightly `insights_durables` — LLM chooses importance: `0.5` fact utile · `0.7` significatif · `0.9` moment clé | Decays monthly |
 | `0.70` | Nightly review durable fact (`run_nightly_interaction_review`, `insights_durables` only) | Decays monthly |
 
 **Key invariant:** `MEMORY_CONSOLIDATION_IMPORTANCE` must equal `MEMORY_DECAY_DURABLE_MIN`. If you change one, change the other. Breaking this invariant would either make consolidation milestones decay (if `CONSOLIDATION_IMPORTANCE < DURABLE_MIN`) or promote ordinary memories to permanent status (if `DURABLE_MIN` is lowered).
@@ -423,7 +423,7 @@ Stage 1 prevents ~90 % of duplicates at the source. Stages 2–3 are safety nets
 
 Profile key **creation** is restricted exclusively to the conversation analyzer (`analyze_exchange` → `update_user_profile_batch`). The analyzer reads actual user messages and only extracts facts explicitly stated by the user.
 
-The autonomous reflection loop (`self.py`) can **modify or delete existing keys** via the `correct_profile` action, but is blocked from creating new keys — enforced both in code (`_action_correct_profile` checks `hexists` before any write) and in the reflection prompt. This prevents the reflection model from hallucinating profile facts from its own context or perpetuating garbage keys across cycles.
+Until 2026-08-21 the reflection loop could modify profile keys via `correct_profile`. That action was removed: the nightly `curative_profile_cleanup()` applies `updates` as well as deletions, with the whole profile in view, and the analyzer writes new values hourly. Profile writing now has one owner per path instead of three.
 
 The nightly review (`run_nightly_interaction_review`) does not write to the profile hash at all — its `user_insights` go to Qdrant autobiographical memory instead.
 
@@ -532,9 +532,7 @@ EVERY 60 MIN — analyzer.py → analyse_recent_conversations()
 EVERY 5H (défaut 6h — configurable via REFLECTION_INTERVAL_HOURS) — self.py → run_self_reflection()
   ├── search_memory()                  [read Qdrant — memory context assembled for LLM]
   │     └── reconsolidation: +0.05 importance on every recalled point (capped at 0.95)
-  ├── _action_store_insight()
   │     └── store_autobiographical_event()  → Qdrant autobio  (importance=0.70 par défaut, 0.5–0.9 selon le LLM)
-  ├── _action_correct_profile()
   │     └── Redis user:{code}:profile  (update/delete existing keys only — no new key creation)
   └── generate_proactive_push()
         └── Redis jarvis:push:pending:{code}  (TTL, 2h cooldown per user)
@@ -1509,11 +1507,50 @@ skipped entirely, and most nights revise no introspection axis).
 Two consequences worth knowing before changing anything:
 
 - **Three writers reach autobiographical memory**, not one: the nightly (call 1), the
-  reflection action `store_insight` (every 6 h), and consolidation. The comment in
+  and consolidation. Was three until 2026-08-21 — the reflection action `store_insight`
+  has been removed. The comment in
   `analyzer.py` claiming the nightly is "the sole authoritative writer" is accurate only
   about the *analyzer* abstaining.
 - **The profile has three writers too**: the analyzer (hot, every hour), the nightly dedup
-  (call 4), and the reflection action `correct_profile`.
+  (call 4). Was three until 2026-08-21 — `correct_profile` has been removed.
+
+#### One rule: the night learns, the reflection acts
+
+Reorganised on 2026-08-21. Before that, both cycles straddled both jobs — the night learned
+about users *and* about itself, the reflection learned *and* acted, on itself *and* on
+users. Three reflection actions duplicated three nightly jobs (`store_insight` vs autobio,
+`correct_profile` vs profile dedup, `consolidate_memory` vs curation), at different
+cadences, with nothing arbitrating. There was no rule to remember, so nothing was
+memorable.
+
+One question now places any piece of code: **does it write what Jarvis knows, or does it
+do something? about himself, or about someone?**
+
+| | learn (night, 23:00) | act (every `REFLECTION_INTERVAL_HOURS`) |
+|---|---|---|
+| **about itself** | 9 introspection axes + opinions — **one** call on the whole day, from conversations *and* operational state | `refine_prompt`, `alert_admin`, `flag_knowledge_gap` |
+| **about the user** | facts → autobio, relation, autobio curation, profile dedup, narrative — 4 calls **per active user** | `queue_push`, `send_notification`, `ask_user`, `flag_project_stall`, `update_trade_threshold` |
+
+Three consequences worth knowing:
+
+- **Self-learning left the per-user loop.** Introspection and opinions are global; revising
+  them once per user meant N rewrites a night, each seeing one interlocutor and overwriting
+  the previous. They now get one call on all of the day's conversations.
+- **The night sees its own operation.** `<ton_fonctionnement>` carries services, incidents
+  and memory health into the self call. Without it the `meta_personne` axis could learn
+  nothing about Jarvis's real limits — the blind spot left when `self_notes` was removed.
+- **Two guards are deterministic, not LLM decisions.** `consolidate_incidents()` and
+  `alerter_si_anomalie_critique()` run at the head of every reflection cycle, before any
+  model call. A service down or non-normalised vectors are abnormal without discussion; the
+  admin alert must not depend on what the model chooses next. The model still sees the same
+  facts and can raise a reasoned `alert_admin` — one reports, the other recommends.
+
+**Mechanical gate on "act about itself".** That catalogue is short by nature, so without
+material the call can only answer `nothing` — 69 of 95 cycles did, before the split.
+`_matiere_pour_agir_sur_soi()` opens the call only on a service down, a fixable critical
+CVE, an incident since the last pass, a gap at proposal threshold, or user activity. Not
+event-driven: no permanent health probe exists to listen to, so state is computed at each
+pass and the decision is made on evidence.
 
 Jarvis maintains two autonomous cognitive cycles:
 
@@ -1549,26 +1586,27 @@ Conversations from the day are sorted by importance score descending before bein
 
 **`behavioral_patterns`** is computed deterministically (no LLM) from the reflection log: action frequency (≥ 20 % of cycles), time-of-day clustering for "nothing" choices (night/evening pattern), and recurring keywords in past focus fields (seen ≥ 3 times). Up to 5 bullet points.
 
-**Reflection action catalog** — actions the LLM can choose during each reflection cycle:
+**Reflection action catalog** — actions the LLM can choose during each reflection cycle.
+Only outward-facing work lives here since 2026-08-21; memory upkeep moved to the night:
+
+- `prune_self_memory` — stale/redundant `opinions`, 24h cooldown, now a nightly step.
+  `self_introspection` is never pruned: nine axes bounded by construction, revised not deleted.
+- `consolidate_memory` — full memory compression, now the nightly monthly run (day 1). The
+  on-demand path is gone; compressing memory is upkeep, not action.
 
 | Action | Phase | Description |
 |--------|-------|-------------|
 | `nothing` | Both | Explicit no-op with reason |
 | `flag_knowledge_gap` | Global | Log a topic Jarvis answered poorly. Requires a concrete failure as context. 7-day cooldown per topic, blocked if proposal pending. |
-| `check_health` | Global | Service liveness (Redis/Qdrant/LLM) + memory health stats per user (episodic count, days since last write, null_summary rate 7d, vector norm anomalies). Sends admin email alert on critical issues (cooldown 4h). |
-| `prune_self_memory` | Global | LLM-assisted pruning of stale/redundant `opinions`. 24h cooldown. `self_introspection` is never pruned — nine axes bounded by construction, revised not deleted. |
 | `refine_prompt` | Global | Propose an improved version of a prompt (see Prompt Self-Modification below). |
 | `alert_admin` | Global | Push a maintenance/security recommendation to the admin (e.g. *"bump openssl to 3.5.6 on qdrant"*). The channel through which Jarvis, having seen `<etat_disparition>` and `<vulnerabilites>`, can act on its own state. Dedicated 24h cooldown. |
-| `store_insight` | User | Save a durable autobiographical fact to Qdrant. `importance` param (0.5–0.9, default 0.7): `0.5` useful fact · `0.7` significant · `0.9` key milestone. |
 | `send_notification` | User | Send a Gmail to one user (rate-limited to 1/user/day). |
 | `queue_push` | User | Queue an iOS push notification. Cooldown **48 h** per user (`_PUSH_COOLDOWN_TTL`, `self/state.py`). |
 | `ask_user` | User | Send a clarification question via push; user answers in chat. |
-| `correct_profile` | User | Modify or delete a Redis profile key (value=null to delete). Cannot create new keys. |
-| `consolidate_memory` | User | Trigger full memory compression. 48h cooldown per user. |
 | `flag_project_stall` | User | Detect active projects overdue, or with no update for **> 21 days**, and send a push reminder. **14-day** cooldown per project. Runs for **silent users too** — mechanically, without an LLM call: a dormant project is precisely the signature of a user who stopped talking, so restricting it to active users could only reach those who did not need it. |
 | `update_trade_threshold` | User | Update `threshold_high` / `threshold_low` for a portfolio position autonomously. |
 
-**Memory health monitoring:** `gather_global_context()` calls `_check_memory_health()` at every reflection cycle. The result is injected into `<sante_memoire>` in `REFLECTION_PROMPT` so the LLM sees per-user stats without triggering `check_health` first. The LLM uses activity data to distinguish genuine bugs (high null_rate + recent active user) from expected gaps (user on holiday). Vector norm anomalies are always flagged as critical regardless of activity.
+**Memory health monitoring:** `gather_global_context()` calls `_check_memory_health()` at every reflection cycle, and the result is injected into `<sante_memoire>` so the model sees per-user stats. It uses activity data to distinguish genuine bugs (high null_rate + recent active user) from expected gaps (user on holiday). In parallel and independently, `alerter_si_anomalie_critique()` mails the admin on services down or non-normalised vectors — deterministically, before any model call, with its own 4h cooldown. The same facts also feed the nightly self call as `<ton_fonctionnement>`.
 
 **Memory consolidation** — `consolidate_memories()` is the single entry point. It runs on the 1st of each month (nightly review scheduler) and on demand via the `consolidate_memory` self-action. It executes two steps in order for each user:
 1. `_consolidate_user_memories()` — processes episodic points in batches of 50 (oldest first), summarises each batch into one autobiographical milestone via LLM (stored at `importance = MEMORY_CONSOLIDATION_IMPORTANCE = 1.0`), deletes the processed points, loops until fewer than 5 remain.
