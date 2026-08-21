@@ -421,8 +421,15 @@ async def run_self_reflection() -> dict:
             outcome = _execute_action("flag_project_stall", {"user_code": user_code})
             if "aucun projet" not in outcome:
                 logger.info("Relance de tâches (%s) : %s", user_code, outcome)
+                # Même forme que les pas issus de la chaîne LLM : ce pas peut être le
+                # DERNIER du cycle (TEST est le dernier utilisateur et n'a jamais
+                # d'activité), et c'est lui qui alimente alors le journal de réflexion.
                 all_user_steps.append({
-                    "user": user_code, "action": "flag_project_stall", "outcome": outcome,
+                    "phase": f"user:{user_code}",
+                    "user": user_code,
+                    "action": "flag_project_stall",
+                    "reason": "relance mécanique — utilisateur silencieux",
+                    "outcome": outcome,
                 })
             continue
 
@@ -550,12 +557,15 @@ async def run_self_reflection() -> dict:
         if all_steps
         else {"action": "nothing", "reason": "no steps executed", "outcome": ""}
     )
+    # Lecture défensive : un pas n'a pas toujours la forme complète de la chaîne LLM —
+    # la relance mécanique des utilisateurs silencieux en est un. Un KeyError ici ferait
+    # échouer TOUT le cycle après coup, alors que les actions ont déjà été exécutées.
     log_entry = {
         "timestamp": now_iso,
         "focus": focus,
-        "action": last["action"],  # for _extract_behavioral_patterns
-        "reason": last["reason"],
-        "outcome": last["outcome"],
+        "action": last.get("action", "nothing"),  # for _extract_behavioral_patterns
+        "reason": last.get("reason", ""),
+        "outcome": last.get("outcome", ""),
         "steps": all_steps,
         "health": global_ctx["health"],
     }
@@ -565,7 +575,7 @@ async def run_self_reflection() -> dict:
         "=== Reflection complete: %d global + %d user step(s), final=%s ===",
         len(global_steps),
         len(all_user_steps),
-        last["action"],
+        last.get("action", "nothing"),
     )
 
     # Proactive push: per-user LLM call — fully guarded (device check + cooldown)
