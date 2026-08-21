@@ -2130,15 +2130,36 @@ Both files live in `JarvisData/prompts/` which is already inside the existing vo
 ### Reverting an override
 
 ```bash
-# Edit the file directly and remove the key, then the next get_prompt() call uses the default
-docker exec jarvis-api python3 -c "
-import json
-with open('/app/data/prompts/prompt_overrides.json') as f: d = json.load(f)
-del d['SYSTEM_BASE_FR']
-with open('/app/data/prompts/prompt_overrides.json', 'w') as f: json.dump(d, f, indent=2)
-print('reverted')
+# Remove the key; the next get_prompt() call serves the prompts.py version. No restart needed.
+python3 -c "
+import json, shutil, datetime
+p = '/opt/jarvis/jarvis-core/JarvisData/prompts/prompt_overrides.json'
+shutil.copy2(p, p + '.bak-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+d = json.load(open(p)); del d['REFLECTION_SYSTEM']
+json.dump(d, open(p, 'w'), ensure_ascii=False, indent=2); print('reverted')
 "
 ```
+
+> **Un override survit aux changements de code, et rien ne le revalide.** Le 21/08/2026, une
+> surcharge de `REFLECTION_SYSTEM` approuvée cinq jours plus tôt décrivait encore
+> `check_health`, `update_self_note` et `prune_self_memory` — trois actions retirées du
+> catalogue le jour même. Servie depuis le disque, elle masquait la version du code : le
+> modèle a proposé `check_health`, le validateur l'a rejetée, la chaîne est retombée sur
+> `nothing`. La seule occasion d'agir sur soi du cycle a été perdue, exactement le scénario
+> que le prompt de `refine_prompt` décrit comme à éviter.
+>
+> **Après toute modification du catalogue d'actions, vérifier les overrides actifs.** Un
+> contrôle possible en une ligne :
+>
+> ```bash
+> ./venv/bin/python -c "
+> import json, re, sys; sys.path.insert(0,'jarvis-core/src')
+> from self.engine import _SELF_ACTIONS, _USER_ACTIONS
+> d = json.load(open('jarvis-core/JarvisData/prompts/prompt_overrides.json'))
+> for k, v in d.items():
+>     cites = set(re.findall(r'\b([a-z_]{6,})\b', v)) & {'check_health','store_insight','correct_profile','consolidate_memory','update_self_note','prune_self_memory'}
+>     print(k, '→ actions inexistantes :', sorted(cites) or 'aucune')"
+> ```
 
 No restart needed — `get_prompt()` detects the file change on the next call.
 
