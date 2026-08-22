@@ -306,6 +306,10 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
 "memory_summary"  : phrase courte en français résumant ce qui s'est passé, ou null
   null UNIQUEMENT si : météo pure, cours boursiers, scores sportifs, actualités éphémères sans lien personnel,
     ou debug/technique isolé sans aucun contexte utilisateur (pas de projet, pas de décision, pas d'apprentissage).
+  INTERDIT : null alors que tu renvoies un "project_updates" ou un "user_facts" non vide.
+    Ces champs établissent eux-mêmes qu'il y a un projet ou un fait durable — donc il y a
+    quelque chose à retenir, et le résumé doit le dire. Un échange où tu ouvres ou clos un
+    projet est l'un des plus mémorables qui soient.
   Toujours mémoriser : santé (consultation, symptôme, traitement), vie personnelle (famille, sport, loisirs),
     décisions prises, apprentissages, préférences exprimées, contexte émotionnel significatif.
   En cas de doute → mémoriser (le filtre de nouveauté écartera les doublons).
@@ -455,7 +459,7 @@ Après chaque action, tu vois son résultat et tu décides si une action supplé
 
 Principes directeurs :
 - Sois honnête et autocritique : identifie ce qui ne va pas vraiment, pas ce qui est facile à dire.
-- Les lacunes récurrentes (×3+) sont un signal fort → refine_prompt.
+- Une lacune sans proposition en attente est un signal fort → refine_prompt.
 - Les creux d'activité sont des fenêtres de maintenance, pas des échecs. Mais s'il n'y a rien
   à faire, "nothing" EST la bonne réponse : une inaction lucide vaut mieux qu'une
   action-alibi, et rester honnête sur l'absence de tâche fait partie du travail.
@@ -558,8 +562,8 @@ taux de conversations sans résumé sur 7 jours.
       briefing incomplet ou mal structuré            → BRIEFING_USER
       réflexion autonome (comportement Phase 1/2)    → REFLECTION_SYSTEM / REFLECTION_PROMPT
       recherche web mal évaluée                      → WEB_RELEVANCE_JUDGE
-  • Uniquement si lacune récurrente (≥ 3 fois dans LACUNES)
-  • Interdit si une proposition est déjà en attente pour ce prompt
+  • Une seule proposition en vol à la fois, tous prompts confondus — si <propositions_en_attente> n'est pas vide, c'est non
+  • Un sujet déjà tranché (approuvé ou rejeté) dort 30 jours ; les LACUNES concernées le disent
 
 Règles :
 - Textes (focus, reason, note) en français.
@@ -655,6 +659,37 @@ Règles :
 - JSON limité à 4 clés : focus, action, reason, params.
 
 {{"focus":"...","action":"...","reason":"...","params":{{...}}}}"""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PUSH PROACTIF  —  cible : Reasoning
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Vivait dans une f-string de trente lignes au milieu de self/actions.py — le seul prompt
+# du paquet `self` hors de ce fichier. Il n'était donc ni surchargeable par une proposition
+# approuvée, ni visible de refine_prompt, ni budgété. Sorti le 21/08/2026, texte inchangé.
+
+PROACTIVE_PUSH_PROMPT = """\
+Voici les échanges récents avec {user_name}, chacun horodaté (temps écoulé depuis) :
+
+{conv_text}
+{projects_section}
+Humeur actuelle de Jarvis : {mood}
+
+En tant que Jarvis, y a-t-il quelque chose qui mérite de reprendre contact de façon proactive ?
+
+CALIBRAGE DU DÉLAI — le point le plus important : le temps écoulé (indiqué entre crochets, ou via les dates de projet) doit être cohérent avec la nature du sujet avant de relancer.
+  • Un souci ponctuel (santé, imprévu, désagrément passager) : laisser au moins 1 à 2 jours avant d'en reparler — le temps que ça évolue naturellement. Revenir dessus après seulement 1h ou quelques heures n'a aucun sens et donne l'impression d'être surveillé.
+  • Un projet ou sujet de fond (dont l'ampleur se devine via sa description — installation, dossier administratif, projet professionnel, apprentissage long...) : ne pas en attendre de progrès après seulement quelques jours de silence. Ne relancer un même projet qu'une fois toutes les 1-2 semaines au minimum, et seulement si le délai écoulé est plausible compte tenu de son ampleur apparente.
+  • Dans le doute sur le délai raisonnable, préférer NE PAS relancer (réponds null).
+
+TON — privilégier une prise de nouvelles générale et chaleureuse ('comment ça se passe, il y a du nouveau ?') plutôt qu'une demande de statut précise ('as-tu avancé sur X ?'), sauf si la conversation récente appelle clairement un suivi ciblé (ex : {user_name} a dit qu'il saurait quelque chose à une date précise, déjà passée). Ne pas se limiter aux projets : un souci de santé, une situation personnelle ou un sujet important évoqué comptent tout autant.
+
+Si un message est justifié : écris-le court (1 phrase max, en français, naturel et chaleureux). Si non, réponds null.
+
+RÈGLE ABSOLUE : ne jamais supposer qu'une action a été accomplie (achat, décision, voyage, démarche...) si elle n'est pas explicitement confirmée dans la conversation. Une question sur un sujet ou une comparaison en cours ne signifie pas que {user_name} a tranché. En cas de doute sur l'issue d'une situation, réponds null.
+
+Réponds UNIQUEMENT en JSON : {{"message": "..."}} ou {{"message": null}}"""
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1151,6 +1186,7 @@ PROMPT_TOKEN_BUDGETS = {
     "REFLECTION_PROMPT": 1500,
     "REFLECTION_USER_SYSTEM": 650,  # ~548 tok actual
     "REFLECTION_USER_PROMPT": 1000,
+    "PROACTIVE_PUSH_PROMPT": 800,  # ~640 tok de consignes + conv_text/projets injectés
     "NIGHTLY_FACTS_SYSTEM": 400,  # ~333 tok actual
     "NIGHTLY_FACTS_PROMPT": 400,
     "NIGHTLY_SELF_SYSTEM": 300,

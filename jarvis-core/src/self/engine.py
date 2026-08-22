@@ -6,7 +6,6 @@ Sommet du paquet : dépend de state, proposals, context, actions.
 
 import asyncio
 import json
-import re
 import time
 from datetime import datetime, timezone
 
@@ -17,9 +16,9 @@ from config import (
     REASONING_API_KEY,
     REASONING_API_URL,
     REASONING_MODEL,
-    REFINE_PROMPT_THRESHOLD,
     REFLECTION_INTERVAL_HOURS,
     THINKING_BUDGET_MEDIUM,
+    USER_ADMINS,
     USER_CODES,
     llm_timeout,
 )
@@ -30,6 +29,9 @@ from memory import get_self_memory, save_self_memory, self_memory_lock
 from prompts import get_prompt
 
 from .actions import (
+    _ACTION_CATALOG,
+    _ADMIN_ALERT_COOLDOWN_PREFIX,
+    EchecAction,
     _execute_action,
     alerter_si_anomalie_critique,
     generate_proactive_push,
@@ -40,8 +42,12 @@ from .context import (
     gather_global_context,
     gather_user_context,
 )
-from .proposals import _load_proposals
-from .state import _GAP_COUNTS_KEY, consolidate_incidents, log_reflection
+from .state import (
+    _DEVICE_TOKEN_PREFIX,
+    _PUSH_COOLDOWN_PREFIX,
+    consolidate_incidents,
+    log_reflection,
+)
 
 logger = get_logger("jarvis-self")
 
@@ -86,13 +92,42 @@ _USER_ACTIONS = frozenset(
 # choix mesuré, pas un oubli — elle ne fait que PROPOSER un changement qui attend ensuite
 # l'accord d'un humain, donc elle ne peut rien altérer seule. La contester en plus avait
 # coûté 19 vetos sur 19 en quatre jours et étranglé la boucle d'auto-amélioration. Ses
-# vrais garde-fous sont mécaniques et vivent dans _action_refine_prompt : pas de seconde
-# proposition tant qu'une est en attente sur le même prompt, plus 30 jours de cooldown par
-# sujet après approbation.
+# vrais garde-fous sont mécaniques et vivent dans _action_refine_prompt : une seule
+# proposition en vol tous prompts confondus, et 30 jours de sommeil par sujet une fois
+# celui-ci tranché — approuvé COMME rejeté.
 _SELF_REVIEW_REQUIRED: frozenset[str] = frozenset({"alert_admin"})
 _USER_REVIEW_REQUIRED: frozenset[str] = frozenset(
     {"queue_push", "ask_user", "send_notification"}
 )
+
+# L'invariant que le commentaire de _ACTION_CATALOG exigeait sans que rien ne le vérifie.
+# Une action annoncée au modèle mais absente du catalogue retombe silencieusement sur
+# "nothing" — c'est-à-dire un appel de raisonnement payé pour rien, découvert seulement en
+# relisant le journal. On préfère refuser de démarrer.
+_MANQUANTES = (_SELF_ACTIONS | _USER_ACTIONS) - set(_ACTION_CATALOG)
+if _MANQUANTES:  # pragma: no cover - garde de démarrage
+    raise RuntimeError(
+        f"self: actions annoncées au modèle mais sans handler : {sorted(_MANQUANTES)}"
+    )
+
+# Ensemble des actions qui portent sur UN utilisateur et ont donc besoin de `user_code`.
+# Dérivé du catalogue plutôt que réécrit à la main : la liste manuelle contenait encore
+# `correct_profile` et `store_insight` (supprimées le 21/08/2026) et il lui MANQUAIT
+# `flag_project_stall`, pourtant dans _USER_ACTIONS — l'action était donc morte par le
+# chemin LLM, où elle retombait sur « invalid user_code », et ne fonctionnait que par le
+# chemin mécanique qui passe user_code explicitement.
+_USER_SCOPED = _USER_ACTIONS - {"nothing"}
+
+
+# Empreinte des signaux PERSISTANTS de la dernière ouverture du garde.
+# Voir _matiere_pour_agir_sur_soi.
+_EMPREINTE_MATIERE_KEY = "jarvis:self:matiere_empreinte"
+# TTL de 7 jours, et il compte. L'empreinte est posée quand le garde OUVRE, pas quand la
+# phase aboutit : si la chaîne LLM échoue juste après, l'état est marqué « traité » alors
+# que personne ne l'a traité. Sans péremption, un service durablement injoignable ne serait
+# donc plus jamais réexaminé. Avec, il l'est une fois par semaine au lieu de cinq fois par
+# jour — ce qui était le but — et le pire cas reste borné.
+_EMPREINTE_MATIERE_TTL = 7 * 86400
 
 
 def _matiere_pour_agir_sur_soi(ctx: dict) -> str:
@@ -103,33 +138,114 @@ def _matiere_pour_agir_sur_soi(ctx: dict) -> str:
     ne peut répondre que « nothing ». Mesuré sur 95 cycles avant le découpage : 69 se
     concluaient ainsi. Autant ne pas payer l'appel.
 
-    Ce n'est pas un déclenchement par événement : il n'existe aucune sonde de santé
-    permanente à écouter, l'état n'est calculé qu'ici, à chaque passage. On garde donc la
-    fréquence et on décide sur pièces.
+    DÉCLENCHEMENT SUR FRONT, corrigé le 21/08/2026. Trois des quatre signaux sont des
+    ÉTATS et non des événements : un service reste injoignable, une CVE critique reste
+    ouverte, une lacune non traitée le reste. Le quatrième signal d'alors — un compteur
+    d'occurrences de lacunes — n'était jamais décrémenté : une fois le seuil franchi, le
+    garde restait ouvert à vie et l'appel LLM qu'il devait éviter était payé toutes les
+    REFLECTION_INTERVAL_HOURS indéfiniment. Il a été supprimé au profit du nombre de
+    lacunes ACTIONNABLES, qui retombe de lui-même dès qu'une proposition est déposée.
 
-    Les incidents sont filtrés sur la fenêtre écoulée depuis le dernier passage : le
-    contexte en remonte 30 jours, et un incident déjà vu au cycle précédent n'est plus une
-    raison d'agir.
+    On mémorise donc l'empreinte des signaux persistants. Tant qu'elle ne bouge pas, ils
+    ne rouvrent plus le garde : on a déjà regardé, on a déjà décidé. Ils le rouvrent dès
+    qu'elle change — un service de plus, une CVE de plus, une lacune de plus.
+
+    Les incidents échappent à l'empreinte : ils sont déjà filtrés sur la fenêtre écoulée
+    depuis le dernier passage, donc ils sont par construction un vrai front.
+
+    Ce que ce garde ne couvre pas, et n'a pas à couvrir : l'alerte sur anomalie critique
+    part mécaniquement dans `alerter_si_anomalie_critique`, avec son propre cooldown de
+    4 h, indépendamment de ce que le modèle décidera ensuite.
     """
-    raisons = []
+    persistants: list[str] = []
+    frais: list[str] = []
 
     services = ctx.get("health") or {}
-    hs = [n for n, v in services.items() if isinstance(v, str) and v != "ok"]
+    hs = sorted(n for n, v in services.items() if isinstance(v, str) and v != "ok")
     if hs:
-        raisons.append(f"service(s) injoignable(s) : {', '.join(hs)}")
+        persistants.append(f"service(s) injoignable(s) : {', '.join(hs)}")
 
     if (ctx.get("cve_conseil") or "").strip():
-        raisons.append("CVE critique corrigeable")
+        persistants.append("CVE critique corrigeable")
 
-    frais = time.time() - REFLECTION_INTERVAL_HOURS * 3600
-    nouveaux = [i for i in (ctx.get("incidents") or []) if float(i.get("at", 0)) >= frais]
+    # Lacunes sur lesquelles il reste quelque chose à faire — ni proposition en attente,
+    # ni sujet en sommeil. Remplace l'ancien `gap_max_count >= REFINE_PROMPT_THRESHOLD` :
+    # ce compteur n'était jamais décrémenté, donc le seuil, une fois franchi, laissait le
+    # garde ouvert à vie. Celui-ci retombe de lui-même dès que la lacune est traitée.
+    actionnables = int(ctx.get("gaps_actionnables", 0))
+    if actionnables:
+        persistants.append(f"{actionnables} lacune(s) sans proposition")
+
+    fenetre = time.time() - REFLECTION_INTERVAL_HOURS * 3600
+    nouveaux = [i for i in (ctx.get("incidents") or []) if float(i.get("at", 0)) >= fenetre]
     if nouveaux:
-        raisons.append(f"{len(nouveaux)} incident(s) depuis le dernier passage")
+        frais.append(f"{len(nouveaux)} incident(s) depuis le dernier passage")
 
-    if int(ctx.get("gap_max_count", 0)) >= REFINE_PROMPT_THRESHOLD:
-        raisons.append("lacune au seuil de proposition")
+    if persistants:
+        # L'empreinte porte les LIBELLÉS, qui contiennent déjà tout ce qui distingue deux
+        # états : les noms de services, le compteur de lacunes. Un hash de plus n'ajouterait
+        # rien qu'une indirection.
+        empreinte = " | ".join(persistants)
+        try:
+            r = get_redis()
+            deja_vue = r.get(_EMPREINTE_MATIERE_KEY)
+            if deja_vue == empreinte:
+                logger.info(
+                    "Agir sur soi : état persistant inchangé, déjà traité — %s", empreinte
+                )
+                persistants = []
+            else:
+                r.setex(_EMPREINTE_MATIERE_KEY, _EMPREINTE_MATIERE_TTL, empreinte)
+        except Exception as exc:
+            # Redis indisponible : on retombe sur l'ancien comportement (garde ouvert)
+            # plutôt que de fermer l'appel à tort.
+            logger.warning("Empreinte de matière illisible (%s) — garde non filtré", exc)
 
-    return " · ".join(raisons)
+    return " · ".join(persistants + frais)
+
+
+def _obstacle_mecanique(action: str, params: dict) -> str | None:
+    """L'obstacle EN DUR qui rend l'action impossible, ou None si la voie est libre.
+
+    Évalué avant l'auto-contestation, et c'est tout le point. Mesuré le 21/08/2026 à
+    15 h 12 : le contesteur a refusé un `queue_push` au motif que « le délai
+    d'indisponibilité (17 h 31 restantes) empêche l'envoi » — c'est-à-dire le cooldown de
+    push, que `_deliver_push` vérifie deux lignes plus loin par un simple `r.exists()`. Un
+    appel complet au modèle de raisonnement, budget de réflexion compris, pour conclure ce
+    qu'un EXISTS Redis savait déjà.
+
+    On ne paie donc le contesteur que pour la question qu'aucun compteur ne tranche — ce
+    message apporte-t-il quelque chose. Le « est-ce seulement possible » se calcule.
+    """
+    try:
+        r = get_redis()
+        if action in ("queue_push", "ask_user"):
+            user_code = params.get("user_code", "")
+            if not user_code:
+                return None
+            if not r.exists(f"{_DEVICE_TOKEN_PREFIX}:{user_code}"):
+                return f"aucun appareil enregistré pour {user_code}"
+            ttl = r.ttl(f"{_PUSH_COOLDOWN_PREFIX}:{user_code}")
+            if ttl > 0:
+                h, m = divmod(ttl // 60, 60)
+                return f"cooldown de push actif (encore {h} h {m:02d})"
+        elif action == "alert_admin":
+            admin = next(iter(USER_ADMINS), "")
+            if not admin:
+                return "aucun administrateur configuré"
+            if not r.exists(f"{_DEVICE_TOKEN_PREFIX}:{admin}"):
+                return f"aucun appareil enregistré pour l'administrateur {admin}"
+            # Même cooldown que celui appliqué par _deliver_push : sans ce contrôle, une
+            # alerte bloquée par le cooldown payait quand même le contesteur — le cas
+            # exact que cette fonction existe pour éviter.
+            ttl = r.ttl(f"{_ADMIN_ALERT_COOLDOWN_PREFIX}:{admin}")
+            if ttl > 0:
+                h, m = divmod(ttl // 60, 60)
+                return f"alerte admin déjà envoyée (encore {h} h {m:02d} de cooldown)"
+    except Exception as exc:
+        # Redis muet : on laisse passer vers le contesteur plutôt que de bloquer à tort.
+        logger.warning("Obstacle mécanique non évaluable (%s)", type(exc).__name__)
+    return None
 
 
 def _build_review_context(
@@ -138,57 +254,45 @@ def _build_review_context(
     user_ctx: dict | None,
     params: dict | None = None,
 ) -> tuple[str, str]:
-    """Return (context_str, criteria_str) tailored to the action being reviewed."""
+    """Return (context_str, criteria_str) tailored to the action being reviewed.
+
+    La branche `refine_prompt` a été retirée le 21/08/2026 : l'action avait quitté
+    `_SELF_REVIEW_REQUIRED`, donc la branche était inatteignable depuis. Ses deux lectures
+    utiles — le compteur de lacunes du sujet et l'historique des propositions du prompt —
+    ont été déplacées dans `_action_refine_prompt`, où elles sont désormais journalisées
+    à chaque proposition.
+    """
     params = params or {}
 
-    if action == "refine_prompt":
-        topic = params.get("topic", "")
-        prompt_name = params.get("prompt_name", "")
-
-        # Raw gap count for this specific topic
-        r = get_redis()
-        slug = re.sub(r"\s+", "_", topic.lower())[:40]
-        count = int(r.hget(_GAP_COUNTS_KEY, slug) or 0)
-
-        # Recent proposal history for this prompt (last 3)
-        all_proposals = _load_proposals()
-        recent = [
-            f"{p.get('status', '?')} le {p.get('created_at', '?')[:10]}"
-            for p in all_proposals
-            if p.get("prompt_name") == prompt_name
-        ][-3:]
-        proposals_history = "; ".join(recent) or "aucune"
-
-        gaps = ", ".join(global_ctx.get("knowledge_gaps", [])) or "aucune"
-        proposals_pending = global_ctx.get("pending_proposals", "aucune")
-
-        context = (
-            f"Topic proposé : '{topic}' — flaggé {count} fois dans les gaps\n"
-            f"Lacunes connues : {gaps}\n"
-            f"Historique des proposals pour '{prompt_name}' : {proposals_history}\n"
-            f"Proposals en attente : {proposals_pending}"
-        )
-        criteria = (
-            "refine_prompt est justifié si tu as des preuves concrètes que ce topic revient "
-            "régulièrement dans les conversations (gap count significatif) ET qu'aucune proposal "
-            "n'est déjà en attente ou n'a été soumise récemment pour ce prompt. "
-            "Si les données ci-dessus ne montrent pas de problème récurrent réel, dis false."
-        )
-
-    elif action in ("queue_push", "ask_user", "send_notification") and user_ctx:
-        has_push = user_ctx.get("has_push", False)
-        last_push = user_ctx.get("push_cooldown_str", "inconnu")
+    if action == "send_notification" and user_ctx:
+        # Critères PROPRES au courriel. Ils étaient ceux du push (« Push iOS disponible :
+        # … »), alors que send_notification passe par Gmail et porte son propre garde
+        # d'une notification par jour et par utilisateur : le contesteur jugeait sur un
+        # canal qui n'était pas celui de l'action.
         activity = str(user_ctx.get("user_activity", {}))[:300]
         context = (
-            f"Push iOS disponible : {has_push}\n"
-            f"Dernier push envoyé : {last_push}\n"
+            f"Canal : courriel (garde interne : au plus un par jour et par utilisateur)\n"
             f"Activité récente : {activity}"
         )
         criteria = (
-            "Un push est justifié si : push disponible ET délai raisonnable depuis le dernier "
-            "(au moins quelques heures) ET le message apporte une valeur concrète et urgente "
-            "qui n'a pas déjà été envoyée. Si le dernier push est récent, dis false. "
-            "Sois conservateur : mieux vaut ne pas envoyer que spammer."
+            "Un courriel est justifié si le contenu est durable et actionnable — quelque "
+            "chose que la personne voudra relire ou retrouver. Ce qui se dit en une phrase "
+            "relève du push, pas du courriel. Dans le doute, dis false."
+        )
+
+    elif action in ("queue_push", "ask_user") and user_ctx:
+        # La disponibilité du canal et le cooldown sont déjà tranchés en amont par
+        # _obstacle_mecanique : si on arrive ici, l'envoi est POSSIBLE. Reste la seule
+        # question qui demande un jugement.
+        activity = str(user_ctx.get("user_activity", {}))[:300]
+        context = (
+            f"Canal disponible, cooldown expiré — l'envoi est techniquement possible.\n"
+            f"Activité récente : {activity}"
+        )
+        criteria = (
+            "Le push est possible : juge uniquement s'il APPORTE quelque chose. Justifié si "
+            "le message a une valeur concrète pour la personne maintenant et n'a pas déjà "
+            "été dit. Sois conservateur : mieux vaut ne pas envoyer que spammer."
         )
 
     else:
@@ -207,7 +311,12 @@ async def _llm_review_before_action(
 ) -> tuple[bool, str]:
     """
     Self-challenge LLM call before executing a consequential action.
-    Uses the router model (fast, binary decision).
+
+    Tourne sur REASONING_MODEL, en mode raisonnant (`no_think=False`) — la docstring
+    annonçait « the router model (fast, binary decision) », ce qui n'a jamais été le cas et
+    faisait sous-estimer d'un ordre de grandeur ce que coûte une contestation. C'est
+    précisément pourquoi `_obstacle_mecanique` filtre en amont.
+
     Returns (should_execute, reason).
     Fail-closed: if the review call fails, the action is blocked (conservative default).
     """
@@ -300,6 +409,33 @@ def _run_chain_step(
     return focus, action, reason, params, False
 
 
+def _pas_marquant(steps: list[dict]) -> dict:
+    """Le pas qui RÉSUME le cycle — pas simplement le dernier.
+
+    L'en-tête de l'entrée de journal est lue par `_extract_behavioral_patterns`, par
+    `/self/log`, et surtout injectée en conversation (« Dernière action autonome : … »).
+    Elle prenait `all_steps[-1]`, ce qui produisait deux défauts mesurés sur les 30 entrées
+    du journal au 21/08/2026 :
+
+      • un `nothing` en fin de chaîne MASQUAIT tout ce qui l'avait précédé — 9 cycles sur
+        30 journalisaient « nothing » alors qu'une action avait bien eu lieu, dont un
+        « prune, prune, prune, nothing » rendu comme « nothing » ;
+      • le dernier pas appartient presque toujours au dernier utilisateur de USER_CODES,
+        souvent une relance mécanique, alors que le focus venait de la phase globale.
+
+    Règle : le dernier pas qui a réellement AGI, la phase « agir sur soi » étant prioritaire
+    parce qu'elle porte le regard de Jarvis sur lui-même. À défaut d'action, le dernier pas,
+    qui dit alors honnêtement que le cycle n'a rien fait.
+    """
+    if not steps:
+        return {"action": "nothing", "reason": "no steps executed", "outcome": ""}
+    agissants = [s for s in steps if s.get("action") not in (None, "nothing")]
+    if not agissants:
+        return steps[-1]
+    sur_soi = [s for s in agissants if s.get("phase") == "agir_sur_soi"]
+    return (sur_soi or agissants)[-1]
+
+
 async def run_self_reflection() -> dict:
     """LE CYCLE QUI AGIT. Appelé par APScheduler toutes les REFLECTION_INTERVAL_HOURS.
 
@@ -326,12 +462,22 @@ async def _reflechir() -> dict:
     # déterministe, avant tout appel LLM, pour que la trace survive même si la chaîne échoue.
     await asyncio.to_thread(consolidate_incidents)
 
-    # Même principe : un service injoignable ou des vecteurs non normalisés sont anormaux
-    # sans discussion. L'alerte part mécaniquement, sans dépendre de ce que le modèle
-    # choisira ensuite — et le garde ci-dessous peut très bien fermer l'appel LLM.
-    logger.info("Contrôle d'anomalies : %s", await asyncio.to_thread(alerter_si_anomalie_critique))
-
     global_ctx = await asyncio.to_thread(gather_global_context)
+
+    # Un service injoignable ou des vecteurs non normalisés sont anormaux sans discussion :
+    # l'alerte part mécaniquement, sans dépendre de ce que le modèle choisira ensuite.
+    #
+    # Appelée APRÈS la collecte, et avec ses résultats. Elle tournait avant, et refaisait
+    # donc ses propres sondes — dont `_check_memory_health`, qui fait un scroll Qdrant par
+    # utilisateur : deux sondes complètes par cycle pour un état identique. L'ordre
+    # n'affecte pas la garantie recherchée, puisque la collecte ne fait aucun appel LLM.
+    logger.info(
+        "Contrôle d'anomalies : %s",
+        await asyncio.to_thread(
+            alerter_si_anomalie_critique, global_ctx["health"], global_ctx["memory_health"]
+        ),
+    )
+
     global_steps: list[dict] = []
     focus = ""
 
@@ -356,20 +502,32 @@ async def _reflechir() -> dict:
         )  # forward top-level reason into _action_nothing
 
         if action in _SELF_REVIEW_REQUIRED:
-            approved, rev_reason = await _llm_review_before_action(
-                action, params, global_ctx, None, global_steps
-            )
-            if not approved:
-                logger.info("Agir sur soi : auto-contestation refuse %s (%s)", action, rev_reason)
+            obstacle = _obstacle_mecanique(action, params)
+            if obstacle:
+                logger.info("Agir sur soi : %s impossible — %s", action, obstacle)
                 action = "nothing"
-                params = {"reason": f"self-review: {rev_reason}"}
-                # Don't stop the chain — let the LLM try another action.
-                # Guard 2 (duplicate detection) prevents infinite loops.
+                params = {"reason": f"impossible : {obstacle}"}
+            else:
+                approved, rev_reason = await _llm_review_before_action(
+                    action, params, global_ctx, None, global_steps
+                )
+                if not approved:
+                    logger.info(
+                        "Agir sur soi : auto-contestation refuse %s (%s)", action, rev_reason
+                    )
+                    action = "nothing"
+                    params = {"reason": f"self-review: {rev_reason}"}
+                    # Don't stop the chain — let the LLM try another action.
+                    # Guard 2 (duplicate detection) prevents infinite loops.
 
         outcome = await asyncio.to_thread(_execute_action, action, params)
 
-        if action not in ("nothing", "flag_knowledge_gap"):
-            emotional_state.update({"confiance": +0.1})
+        # Même règle qu'en phase utilisateur. La confiance montait ici AVANT de regarder le
+        # résultat : un alert_admin en échec la faisait monter.
+        if action != "nothing":
+            emotional_state.update(
+                {"confiance": -0.1 if isinstance(outcome, EchecAction) else +0.1}
+            )
 
         step = {
             "phase": "agir_sur_soi",
@@ -425,8 +583,14 @@ async def _reflechir() -> dict:
             # besoin. Et rien ici ne demande un jugement — une échéance dépassée, un
             # projet sans mise à jour depuis 21 jours, ça se calcule. La fonction porte
             # déjà ses garde-fous (cooldown de 14 j par projet, échéances traitées à part).
-            outcome = _execute_action("flag_project_stall", {"user_code": user_code})
-            if "aucun projet" not in outcome:
+            # Via to_thread comme toute autre action : c'était le seul _execute_action
+            # appelé directement dans la boucle d'événements, ce qui lui faisait emprunter
+            # la branche loop.create_task de _deliver_push au lieu de asyncio.run — un
+            # chemin de code exercé nulle part ailleurs.
+            outcome = await asyncio.to_thread(
+                _execute_action, "flag_project_stall", {"user_code": user_code}
+            )
+            if "aucun projet" not in outcome and "aucun appareil" not in outcome:
                 logger.info("Relance de tâches (%s) : %s", user_code, outcome)
                 # Même forme que les pas issus de la chaîne LLM : ce pas peut être le
                 # DERNIER du cycle (TEST est le dernier utilisateur et n'a jamais
@@ -471,15 +635,7 @@ async def _reflechir() -> dict:
 
             # Inject user_code into params for all user-scoped actions so the
             # LLM doesn't need to carry it reliably across iterations.
-            _user_scoped = {
-                "correct_profile",
-                "store_insight",
-                "queue_push",
-                "send_notification",
-                "ask_user",
-                "update_trade_threshold",
-            }
-            if action in _user_scoped and not params.get("user_code"):
+            if action in _USER_SCOPED and not params.get("user_code"):
                 params["user_code"] = user_code
 
             # Don't retry an action that already hit a system-level constraint this cycle
@@ -498,32 +654,43 @@ async def _reflechir() -> dict:
                 }
 
             if action in _USER_REVIEW_REQUIRED:
-                approved, rev_reason = await _llm_review_before_action(
-                    action, params, global_ctx, user_ctx, user_steps
-                )
-                if not approved:
-                    logger.info(
-                        "P2 %s self-review rejected %s: %s",
-                        user_code,
-                        action,
-                        rev_reason,
-                    )
+                obstacle = _obstacle_mecanique(action, params)
+                if obstacle:
+                    logger.info("P2 %s : %s impossible — %s", user_code, action, obstacle)
+                    # Marquée en échec comme si elle avait été exécutée et refusée : un
+                    # obstacle mécanique ne se lève pas dans le même cycle, et sans ça la
+                    # chaîne peut la reproposer avant que la détection de doublon ne
+                    # l'attrape.
+                    _failed_actions.add(action)
                     action = "nothing"
-                    params = {"reason": f"self-review: {rev_reason}"}
-                    # Don't stop the chain — let the LLM try another action.
-                    # Guard 2 (duplicate detection) prevents infinite loops.
+                    params = {"reason": f"impossible : {obstacle}"}
+                else:
+                    approved, rev_reason = await _llm_review_before_action(
+                        action, params, global_ctx, user_ctx, user_steps
+                    )
+                    if not approved:
+                        logger.info(
+                            "P2 %s self-review rejected %s: %s",
+                            user_code,
+                            action,
+                            rev_reason,
+                        )
+                        action = "nothing"
+                        params = {"reason": f"self-review: {rev_reason}"}
+                        # Don't stop the chain — let the LLM try another action.
+                        # Guard 2 (duplicate detection) prevents infinite loops.
 
             outcome = await asyncio.to_thread(_execute_action, action, params)
 
-            # Detect system-constraint failures: outcome format is "action: error"
-            # (no "[user_code]" bracket), distinct from success "action [user_code]: ..."
-            _looks_like_error = outcome.startswith(
-                f"{action}:"
-            ) and not outcome.startswith(f"{action} [")
-            if _looks_like_error and action != "nothing":
+            # L'échec est porté par le TYPE de la sortie (EchecAction), plus par sa forme.
+            # L'heuristique de préfixe classait en échec toutes les sorties de
+            # flag_project_stall, succès compris — l'action était alors interdite pour le
+            # reste du cycle et la confiance baissait à chaque rappel réellement envoyé.
+            _echec = isinstance(outcome, EchecAction)
+            if _echec and action != "nothing":
                 _failed_actions.add(action)
                 emotional_state.update({"confiance": -0.1})
-            elif action not in ("nothing", "flag_knowledge_gap") and not _looks_like_error:
+            elif action != "nothing" and not _echec:
                 emotional_state.update({"confiance": +0.1})
 
             step = {
@@ -559,22 +726,28 @@ async def _reflechir() -> dict:
         data["reflection_count"] = data.get("reflection_count", 0) + 1
         save_self_memory(data)
 
-    last = (
-        all_steps[-1]
-        if all_steps
-        else {"action": "nothing", "reason": "no steps executed", "outcome": ""}
-    )
+    retenu = _pas_marquant(all_steps)
     # Lecture défensive : un pas n'a pas toujours la forme complète de la chaîne LLM —
     # la relance mécanique des utilisateurs silencieux en est un. Un KeyError ici ferait
     # échouer TOUT le cycle après coup, alors que les actions ont déjà été exécutées.
     log_entry = {
         "timestamp": now_iso,
-        "focus": focus,
-        "action": last.get("action", "nothing"),  # for _extract_behavioral_patterns
-        "reason": last.get("reason", ""),
-        "outcome": last.get("outcome", ""),
+        # `focus` vient du MÊME pas que `action`. Il était pris à part — premier focus non
+        # vide, donc celui de la phase globale — pendant que l'action venait du dernier pas
+        # du dernier utilisateur : le couple journalisé n'avait jamais existé.
+        "focus": retenu.get("focus") or focus,
+        "action": retenu.get("action", "nothing"),  # for _extract_behavioral_patterns
+        "reason": retenu.get("reason", ""),
+        "outcome": retenu.get("outcome", ""),
         "steps": all_steps,
         "health": global_ctx["health"],
+        # Le catalogue EN VIGUEUR au moment où l'entrée a été écrite. C'est ce qui permet à
+        # `_extract_behavioral_patterns` et à `get_last_reflection` d'ignorer les entrées
+        # d'un catalogue révolu. Sans lui, le 21/08/2026 : sur 30 entrées, 28 dataient
+        # d'avant le découpage, et le prompt annonçait au modèle que « check_health » était
+        # choisie dans 47 % des cycles — une action supprimée. Le cycle de 14 h 07 l'a
+        # dûment demandée, et l'a payée d'un appel de raisonnement pour rien.
+        "catalogue": sorted(_SELF_ACTIONS | _USER_ACTIONS),
     }
     log_reflection(log_entry)
 
@@ -582,7 +755,7 @@ async def _reflechir() -> dict:
         "=== Reflection complete: %d global + %d user step(s), final=%s ===",
         len(global_steps),
         len(all_user_steps),
-        last.get("action", "nothing"),
+        retenu.get("action", "nothing"),
     )
 
     # Proactive push: per-user LLM call — fully guarded (device check + cooldown)

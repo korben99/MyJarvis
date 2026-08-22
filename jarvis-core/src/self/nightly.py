@@ -312,6 +312,72 @@ async def _nightly_cleaning_user(
         return None
 
 
+# En deçà de ce TTL restant, le narratif de profil est régénéré. Il en faut un parce que
+# l'entretien tourne maintenant pour tout le monde chaque nuit : sans seuil, on repaierait
+# un appel LLM par utilisateur et par nuit pour un profil qui n'a pas bougé.
+_NARRATIF_SEUIL_REGEN = 2 * 86400
+
+
+async def _entretien_nocturne(now: datetime, review_date: str) -> None:
+    """Entretien de la mémoire — pour TOUS les utilisateurs, qu'ils aient parlé ou non.
+
+    Vivait dans la boucle par utilisateur, après deux `continue` : le verrou d'idempotence,
+    puis « aucune conversation hier ». Un utilisateur silencieux le 31 ne recevait donc
+    jamais `consolidate_memories` — ni compression épisodique, ni décroissance
+    autobiographique. Même sort pour la dédup de profil et le narratif, dont le TTL est de
+    7 jours : une semaine de silence faisait disparaître le portrait, aucun chemin ne
+    pouvait le régénérer, et `build_memory_context` retombait sans un mot sur le rendu
+    clé/valeur brut.
+
+    C'est l'inverse exact de ce qu'il faut. Un utilisateur silencieux est précisément celui
+    dont la mémoire a le plus besoin d'être entretenue — c'est chez lui que les faits
+    vieillissent et que les projets s'endorment.
+
+    Verrou d'idempotence propre : celui de la boucle d'apprentissage est consommé par
+    l'apprentissage, et deux passages dans la même nuit ne doivent pas doubler la purge.
+    """
+    r = get_redis()
+    for user_code in USER_CODES:
+        if not r.set(f"jarvis:{user_code}:nightly_maint:{review_date}", "1", nx=True, ex=90000):
+            logger.info("Entretien déjà fait pour %s le %s", user_code, review_date)
+            continue
+
+        stable_profile = USERS.get(user_code, {}).get("profile", {})
+
+        try:
+            await asyncio.to_thread(curative_profile_cleanup, user_code, stable_profile)
+        except Exception as exc:
+            logger.warning(
+                "Entretien : dédup de profil en échec pour %s (%s)",
+                user_code, type(exc).__name__,
+            )
+
+        try:
+            ttl = r.ttl(f"user:{user_code}:profile_narrative")
+            # -2 (absent) et -1 (sans TTL) passent tous deux le seuil : dans les deux cas
+            # il n'y a pas de narratif utilisable à conserver.
+            if ttl < _NARRATIF_SEUIL_REGEN:
+                await asyncio.to_thread(
+                    update_profile_narrative, user_code, stable_profile
+                )
+        except Exception as exc:
+            logger.warning(
+                "Entretien : narratif de profil en échec pour %s (%s)",
+                user_code, type(exc).__name__,
+            )
+
+        if now.day == 1:
+            try:
+                await asyncio.to_thread(consolidate_memories, user_code)
+                logger.info("Monthly memory consolidation done for %s", user_code)
+            except Exception as exc:
+                logger.warning(
+                    "Monthly consolidation failed for %s: %s",
+                    user_code,
+                    type(exc).__name__,
+                )
+
+
 async def run_nightly_interaction_review() -> None:
     """
     Nightly per-user conversation review. Called by APScheduler at 23:00.
@@ -323,8 +389,7 @@ async def run_nightly_interaction_review() -> None:
     APPRENDRE SUR L'UTILISATEUR — 4 appels par utilisateur ayant conversé la veille :
       NIGHTLY_FACTS      : faits durables → Qdrant autobio, relation, suggestions du lendemain
       NIGHTLY_CLEANING   : curation autobio (archive le périmé, supprime les erreurs)
-      curative_profile_cleanup() : dédup du hash profil Redis (sans LLM si < 5 clés)
-      update_profile_narrative() : portrait ~300 tokens, TTL 7 jours
+      (l'entretien du profil a quitté cette boucle — voir ENTRETIEN plus bas)
 
     APPRENDRE SUR SOI — 1 appel, APRÈS la boucle, sur la journée entière :
       NIGHTLY_SELF       : révision des 9 axes d'introspection, opinions, et lacunes de
@@ -336,9 +401,15 @@ async def run_nightly_interaction_review() -> None:
                            qu'elles exigent un échec CONCRET : seule la nuit voit les
                            conversations.
 
-    ENTRETIEN — déterministe, sans jugement :
-      prune_self_memory  : opinions obsolètes (cooldown 24 h intégré)
+    ENTRETIEN — pour TOUS les utilisateurs, y compris ceux qui n'ont pas parlé :
+      curative_profile_cleanup() : dédup du hash profil Redis (sans LLM si < 5 clés)
+      update_profile_narrative() : portrait ~300 tokens, régénéré si son TTL de 7 j approche
       consolidate_memories() le 1er du mois : compression épisodique + décroissance autobio
+      prune_self_memory  : opinions obsolètes, global (cooldown 24 h intégré)
+
+    Les trois premiers vivaient dans la boucle ci-dessus, donc derrière « a conversé
+    hier » — un silencieux n'était jamais entretenu, alors que c'est chez lui que les
+    faits vieillissent. Voir _entretien_nocturne.
 
     Chaque écriture dans jarvis-self.json se fait sous self_memory_lock immédiatement après
     l'appel — aucune donnée n'est retenue au travers d'un await.
@@ -511,24 +582,11 @@ async def _revue_nocturne() -> None:
                 rationale[:80],
             )
 
-        # ── Call 4: profile dedup (Redis profile hash) ────────────────────
-        stable_profile = USERS.get(user_code, {}).get("profile", {})
-        await asyncio.to_thread(curative_profile_cleanup, user_code, stable_profile)
-        await asyncio.to_thread(update_profile_narrative, user_code, stable_profile)
-
         logger.info("Nightly review done for %s — %s", user_code, summary[:80])
 
-        # Monthly memory consolidation on day 1
-        if now.day == 1:
-            try:
-                await asyncio.to_thread(consolidate_memories, user_code)
-                logger.info("Monthly memory consolidation done for %s", user_code)
-            except Exception as exc:
-                logger.warning(
-                    "Monthly consolidation failed for %s: %s",
-                    user_code,
-                    type(exc).__name__,
-                )
+    # L'entretien de la mémoire (dédup de profil, narratif, consolidation mensuelle) ne
+    # vit plus dans cette boucle — voir _entretien_nocturne pour le pourquoi.
+    await _entretien_nocturne(now, review_date)
 
     # ── APPRENDRE SUR SOI — un seul appel, sur la journée entière ─────────
     # Hors de la boucle : introspection et opinions sont GLOBALES. Les réviser par

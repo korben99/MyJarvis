@@ -64,3 +64,10 @@ urllib3==2.7.0
 pyasn1==0.6.4
 httplib2==0.32.0
 soupsieve==2.9.2
+
+# ── Tests (jarvis-core/tests/) ──────────────────────────────────────────────
+# Absents jusqu'au 21/08/2026 : la suite importait pytest sans qu'il soit déclaré ni
+# installé, donc elle ne pouvait pas tourner. `-m "not integration"` pour les tests
+# unitaires seuls, sans serveur.
+pytest==9.1.1
+pytest-asyncio==1.4.0

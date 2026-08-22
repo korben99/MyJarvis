@@ -141,6 +141,54 @@ class AnalysisResult(BaseModel):
     importance: float | None = None
 
 
+def _resume_depuis_extraction(result: dict) -> str:
+    """Un résumé bâti avec les seuls mots que le modèle a lui-même extraits.
+
+    Il n'y a aucune génération ici, et c'est tout l'intérêt : chaque fragment vient de
+    `project_updates[].name/summary` ou de `user_facts[].key/value`, déjà validés par le
+    schéma. Le résumé dérivé ne peut donc rien inventer — il ne fait que rendre lisible ce
+    qui était déjà structuré.
+
+    Pourquoi il faut le dériver plutôt que redemander : mesuré le 21/08/2026, le modèle
+    renvoie régulièrement des `project_updates` AVEC `memory_summary: null`, ce qui est
+    contradictoire selon la règle du prompt lui-même (null est réservé à l'échange « sans
+    aucun contexte utilisateur — pas de projet, pas de décision »). Cas relevé le
+    17/08/2026 à 18 h 07 : quatre événements projet extraits — webinar fortinet ot clos,
+    pose store giroussens close, renouvellement vehicules et abattre chene créés — et
+    résumé nul. La cascade est mécanique et silencieuse : `importance` est forcée à 0 par
+    la garde `_has_summary`, puis `store_memory_vector` est sauté parce que sa condition
+    exige `session_summary` même quand `has_durable_content` est vrai. L'échange le plus
+    mémorable du mois n'a produit aucune mémoire épisodique.
+    """
+    morceaux: list[str] = []
+
+    _VERBES = {
+        "create": "nouveau projet",
+        "done": "projet terminé",
+        "rename": "projet renommé",
+        "update": "projet",
+    }
+    for event in result.get("project_updates") or []:
+        if not isinstance(event, dict):
+            continue
+        name = (event.get("name") or "").strip()
+        if not name:
+            continue
+        verbe = _VERBES.get((event.get("action") or "").strip(), "projet")
+        summary = (event.get("summary") or "").strip()
+        morceaux.append(f"{verbe} « {name} »" + (f" : {summary}" if summary else ""))
+
+    for fact in result.get("user_facts") or []:
+        if not isinstance(fact, dict):
+            continue
+        key = (fact.get("key") or "").strip()
+        value = (fact.get("value") or "").strip()
+        if key and value:
+            morceaux.append(f"{key.replace(':', ' ')} : {value}")
+
+    return " · ".join(morceaux)[:600]
+
+
 async def analyze_exchange(
     conversation: str,
     existing_projects: list | None = None,
@@ -305,6 +353,29 @@ async def _analyse(
         if len(conversation) > 200:
             _ess += 0.05
         _ess = round(min(_ess, 1.0), 3)
+
+        # ── Invariant : résumé nul + contenu structuré = contradiction ────
+        # Voir _resume_depuis_extraction pour le pourquoi et le cas mesuré. On répare
+        # plutôt que de redemander : le second appel coûterait un aller-retour GPU pour
+        # reformuler une matière qu'on a déjà sous la main, et pourrait diverger.
+        # L'importance retombe sur l'ESS — il est calculé juste au-dessus et mesure
+        # exactement ça : la densité du contenu durable de l'échange, sans le terme de
+        # résumé (0.40) qui est par construction absent ici.
+        if not _has_summary:
+            _resume_derive = _resume_depuis_extraction(result)
+            if _resume_derive:
+                logger.warning(
+                    "[ANALYZER] memory_summary nul avec %d projet(s) et %d fait(s) — "
+                    "résumé dérivé de l'extraction, importance=%.3f (ESS) : %r",
+                    len(result.get("project_updates") or []),
+                    len(result.get("user_facts") or []),
+                    _ess,
+                    _resume_derive[:120],
+                )
+                result["memory_summary"] = _resume_derive
+                importance = _ess
+                result["importance"] = importance
+                _has_summary = True
 
         logger.debug(
             "[IMPORTANCE] llm=%.3f ess=%.3f summary=%s",

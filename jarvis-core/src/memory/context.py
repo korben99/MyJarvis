@@ -164,7 +164,12 @@ def build_memory_context(
 
     # Context-aware profile filtering: keep always-inject keys + top-N by keyword overlap.
     # Only applied when user_message is provided and profile is large enough to be worth filtering.
-    if user_message and len(profile) > _PROFILE_FILTER_THRESHOLD:
+    #
+    # Sauté quand le narratif existe : le bloc suivant s'en sert alors et le dict filtré
+    # n'est plus jamais lu. Or `update_profile_narrative` tourne chaque nuit, donc le
+    # narratif est présent sur presque tous les tours — le tri par keyword_overlap_score
+    # sur toutes les clés de profil était calculé puis jeté, à chaque tour de conversation.
+    if not _profile_narrative and user_message and len(profile) > _PROFILE_FILTER_THRESHOLD:
         _total = len(profile)
         always = {
             k: v
@@ -268,7 +273,7 @@ def build_memory_context(
             + "\n</introspection_jarvis>"
         )
 
-    # User Timeline — served from pipeline cache hit [5]; fallback to Qdrant on miss
+    # User Timeline — served from pipeline cache hit [4]; fallback to Qdrant on miss
     if _timeline_cached:
         try:
             timeline = json.loads(_timeline_cached)[:7]

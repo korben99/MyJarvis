@@ -27,11 +27,16 @@ from config import (
     llm_timeout,
 )
 from google_services import is_google_available, send_gmail_message
-from helpers import call_llm, extract_llm_json, get_logger, get_redis
+from helpers import call_llm_bg, extract_llm_json, get_logger, get_redis
 from memory import atomic_json_write
 from prompts import PROMPT_TOKEN_BUDGETS, get_prompt
 
-from .state import _GAP_COUNTS_KEY, _KNOWLEDGE_GAPS_KEY
+from .state import (
+    _KNOWLEDGE_GAPS_KEY,
+    _REFINE_COOLDOWN_PREFIX,
+    _REFINE_COOLDOWN_TTL,
+    slug_de_sujet,
+)
 
 logger = get_logger("jarvis-self")
 
@@ -92,17 +97,15 @@ def approve_proposal(proposal_id: str) -> str:
     found["approved_at"] = datetime.now(timezone.utc).isoformat()
     _save_proposals(proposals)
 
-    # Full knowledge-gap reset for this topic:
-    # 1. counter hash   — so refine_prompt threshold is not immediately re-crossed
-    # 2. sorted set     — remove all entries for this topic so it no longer appears in LACUNES
-    # 3. cooldown key   — prevent re-flagging for 30 days after approval
-    topic_slug = re.sub(r"\s+", "_", found.get("topic", "").lower())[:40]
+    # Remise à zéro du sujet :
+    # 1. sorted set   — plus aucune entrée pour ce sujet, il disparaît de LACUNES
+    # 2. cooldown     — ne plus RE-SIGNALER la lacune pendant 30 jours
+    # 3. sommeil      — ne plus RE-PROPOSER sur ce sujet pendant 30 jours
+    topic_slug = slug_de_sujet(found.get("topic", ""))
     if topic_slug:
         r = get_redis()
-        # hdel is unconditional — never swallowed by a broad except.
-        # A failed hdel would leave count intact and allow immediate re-crossing of threshold.
-        r.hdel(_GAP_COUNTS_KEY, topic_slug)
         r.setex(f"jarvis:self:gap_cooldown:{topic_slug}", 30 * 86400, "1")
+        r.setex(f"{_REFINE_COOLDOWN_PREFIX}:{topic_slug}", _REFINE_COOLDOWN_TTL, "approuvee")
         # Remove sorted-set entries one by one; skip malformed JSON silently so
         # a single corrupt entry doesn't abort the whole cleanup.
         try:
@@ -112,9 +115,7 @@ def approve_proposal(proposal_id: str) -> str:
             all_entries = []
         for e in all_entries:
             try:
-                e_slug = re.sub(r"\s+", "_", json.loads(e).get("topic", "").lower())[
-                    :40
-                ]
+                e_slug = slug_de_sujet(json.loads(e).get("topic", ""))
                 if e_slug == topic_slug:
                     r.zrem(_KNOWLEDGE_GAPS_KEY, e)
             except Exception:
@@ -154,8 +155,22 @@ def reject_proposal(proposal_id: str) -> str:
     found["rejected_at"] = datetime.now(timezone.utc).isoformat()
     _save_proposals(proposals)
 
+    # Sommeil du SUJET, symétrique de celui posé à l'approbation. Il n'existait que côté
+    # succès, ce qui revenait à récompenser l'échec : un rejet ne coûtait rien et le sujet
+    # pouvait revenir au cycle suivant. Mesuré sur prompt_proposals.json au 21/08/2026 —
+    # 11 rejets sur 13, dont quatre sur le même sujet.
+    topic_slug = slug_de_sujet(found.get("topic", ""))
+    if topic_slug:
+        get_redis().setex(
+            f"{_REFINE_COOLDOWN_PREFIX}:{topic_slug}", _REFINE_COOLDOWN_TTL, "rejetee"
+        )
+
     logger.info("Proposal %s rejected", proposal_id)
-    return f"✗ Proposition `{proposal_id}` rejetée."
+    return (
+        f"✗ Proposition `{proposal_id}` rejetée. "
+        f"Le sujet « {found.get('topic', '')} » ne reviendra pas avant "
+        f"{_REFINE_COOLDOWN_TTL // 86400} jours."
+    )
 
 
 def _notify_proposal(user_code: str, proposal: dict) -> None:
@@ -280,10 +295,41 @@ def _action_refine_prompt(params: dict) -> str:
     if not current_text:
         return f"refine_prompt: unknown prompt {prompt_name!r}"
 
-    # Guard: no duplicate pending proposal for the same prompt (data integrity, not a cooldown)
-    existing = [p for p in list_pending_proposals() if p["prompt_name"] == prompt_name]
-    if existing:
-        return f"refine_prompt: proposal already pending for {prompt_name} (id={existing[0]['id']})"
+    # ── Limite de DÉBIT, et non seuil de récurrence ──────────────────────────
+    #
+    # Le garde d'origine était « pas de proposition en attente pour ce prompt », doublé
+    # d'une consigne de prompt « uniquement si la lacune revient ≥ 3 fois » que rien ne
+    # lisait en code. Les deux ont échoué ensemble : le modèle sortait du premier en visant
+    # un autre prompt, et le second était inatteignable parce que le slug de sujet, tronqué
+    # à 40 caractères et sans rapprochement sémantique, comptait séparément deux
+    # formulations du même problème. Bilan mesuré au 21/08/2026 : 13 propositions,
+    # 11 rejetées, dont QUATRE sur le même sujet visant quatre prompts différents.
+    #
+    # Le raisonnement qui remplace tout ça : l'approbation humaine EST déjà le filtre de
+    # pertinence — rien ne s'applique sans un accord explicite. Ce garde-ci n'a donc pas à
+    # deviner si la proposition est bonne, seulement à ne pas noyer la personne qui la
+    # relit. C'est un problème de débit, et il se règle en deux verrous.
+    slug = slug_de_sujet(topic)
+
+    # 1. Une seule proposition en vol, TOUS PROMPTS CONFONDUS.
+    en_attente = list_pending_proposals()
+    if en_attente:
+        p = en_attente[0]
+        return (
+            f"refine_prompt: une proposition attend déjà une décision "
+            f"({p['id']} — {p['prompt_name']}, sujet « {p.get('topic', '')} »). "
+            f"Une seule à la fois."
+        )
+
+    # 2. Sujet en sommeil — posé à l'approbation comme au rejet.
+    ttl = get_redis().ttl(f"{_REFINE_COOLDOWN_PREFIX}:{slug}")
+    if ttl > 0:
+        # Arrondi au jour SUPÉRIEUR : un reste de quelques heures est un refus, pas
+        # « encore 0 jour ».
+        return (
+            f"refine_prompt: sujet « {topic} » déjà tranché récemment — "
+            f"encore {-(-ttl // 86400)} jour(s) de sommeil."
+        )
 
     max_budget = PROMPT_TOKEN_BUDGETS.get(prompt_name, 600)
     current_token_count = len(current_text) // 4  # approximation : 1 token ≈ 4 chars
@@ -298,7 +344,7 @@ def _action_refine_prompt(params: dict) -> str:
     )
 
     try:
-        content = call_llm(
+        content = call_llm_bg(
             [
                 {"role": "system", "content": get_prompt("REFINE_PROMPT_SYSTEM")},
                 {"role": "user", "content": refine_prompt_text},
@@ -374,7 +420,7 @@ def _action_refine_prompt(params: dict) -> str:
             },
         ]
         try:
-            content = call_llm(
+            content = call_llm_bg(
                 retry_messages,
                 model=REASONING_MODEL,
                 api_url=REASONING_API_URL,

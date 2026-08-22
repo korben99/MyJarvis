@@ -8,7 +8,6 @@ mutuellement récursifs (queue_push ↔ ask_user ↔ flag_project_stall ↔ gene
 
 import asyncio
 import json
-import re
 import time
 from datetime import datetime, timezone
 
@@ -28,8 +27,8 @@ from config import (
 from apns import is_real_apns_token, send_apns_push
 from google_services import is_google_available, send_gmail_message
 from helpers import (
-    call_llm,
     call_llm_async_bg,
+    call_llm_bg,
     extract_llm_json,
     get_logger,
     get_redis,
@@ -50,10 +49,10 @@ from .context import _check_memory_health, _check_service_health, _fmt_memory_he
 from .proposals import _action_refine_prompt, _load_proposals
 from .state import (
     _DEVICE_TOKEN_PREFIX,
-    _GAP_COUNTS_KEY,
     _KNOWLEDGE_GAPS_KEY,
     _PUSH_COOLDOWN_PREFIX,
     _PUSH_COOLDOWN_TTL,
+    slug_de_sujet,
 )
 
 logger = get_logger("jarvis-self")
@@ -64,6 +63,21 @@ logger = get_logger("jarvis-self")
 # protection n'existait QUE sur ce chemin — ni l'analyseur ni la revue nocturne ne l'ont
 # jamais eue. Sa disparition ne dégrade donc rien, mais si elle a de la valeur, sa place
 # est dans update_user_profile, là où le profil est réellement écrit.
+
+class EchecAction(str):
+    """Sortie d'action qui signale un échec. C'est une chaîne, et rien d'autre.
+
+    Remplace l'heuristique de préfixe de l'engine, qui déduisait l'échec de la FORME du
+    message : `outcome.startswith(f"{action}:")`. Toutes les sorties de
+    `_action_flag_project_stall` commencent par ce préfixe, réussite comprise — donc chaque
+    rappel effectivement envoyé était compté comme un échec système, interdisait l'action
+    pour le reste du cycle et faisait baisser la confiance.
+
+    Sous-classe de `str` à dessein : tout ce qui journalise, sérialise en JSON, concatène
+    ou tronque une sortie d'action continue de fonctionner sans un seul changement. Seul
+    l'engine lit le type, par `isinstance`.
+    """
+
 
 # ── Actions-local Redis keys / cooldowns ──────────────────────────────────
 _NOTIF_KEY_PREFIX = "jarvis:self:notif"
@@ -100,7 +114,7 @@ def _action_flag_knowledge_gap(params: dict) -> str:
     topic = params.get("topic", "").strip()
     context = params.get("context", "").strip()
     if not topic:
-        return "flag_knowledge_gap: missing topic"
+        return EchecAction("flag_knowledge_gap: missing topic")
 
     # Guard 1 — context must be substantive (not generic filler)
     if len(context) < 30 or context.lower().rstrip(".") in _GAP_GENERIC_PHRASES:
@@ -109,30 +123,30 @@ def _action_flag_knowledge_gap(params: dict) -> str:
             "describe a specific observed failure, not a general statement"
         )
 
-    slug = re.sub(r"\s+", "_", topic.lower())[:40]
+    slug = slug_de_sujet(topic)
     r = get_redis()
     cooldown_key = f"jarvis:self:gap_cooldown:{slug}"
 
     # Guard 2 — per-topic cooldown (7 days)
     if r.exists(cooldown_key):
         ttl = r.ttl(cooldown_key)
-        return f"flag_knowledge_gap: '{topic}' already flagged recently — cooldown active ({ttl // 3600}h remaining)"
+        return EchecAction(f"flag_knowledge_gap: '{topic}' already flagged recently — cooldown active ({ttl // 3600}h remaining)")
 
     # Guard 3 — block if a proposal already exists for this topic (pending or approved < 30 days)
     now_ts = datetime.now(timezone.utc).timestamp()
     cutoff = now_ts - 30 * 86400
     for p in _load_proposals():
-        p_slug = re.sub(r"\s+", "_", p.get("topic", "").lower())[:40]
+        p_slug = slug_de_sujet(p.get("topic", ""))
         if p_slug != slug:
             continue
         if p.get("status") == "pending":
-            return f"flag_knowledge_gap: proposal already pending for '{topic}' — no need to re-flag"
+            return EchecAction(f"flag_knowledge_gap: proposal already pending for '{topic}' — no need to re-flag")
         if p.get("status") == "approved":
             approved_ts = datetime.fromisoformat(
                 p.get("approved_at", "2000-01-01T00:00:00+00:00")
             ).timestamp()
             if approved_ts > cutoff:
-                return f"flag_knowledge_gap: proposal for '{topic}' approved recently — cooldown active (30 days)"
+                return EchecAction(f"flag_knowledge_gap: proposal for '{topic}' approved recently — cooldown active (30 days)")
 
     r.setex(cooldown_key, _GAP_COOLDOWN_TTL, "1")
 
@@ -143,16 +157,22 @@ def _action_flag_knowledge_gap(params: dict) -> str:
             "date": datetime.now(timezone.utc).isoformat(),
         }
     )
+    # Plus de compteur d'occurrences. Le seuil « ×3 » qu'il alimentait n'a jamais été lu
+    # en code, et il ne pouvait de toute façon pas mesurer la récurrence : le slug est
+    # tronqué à 40 caractères sans rapprochement sémantique, si bien que deux formulations
+    # du même problème comptaient séparément (mesuré le 21/08/2026 —
+    # « gestion_des_notifications_techniques_ave » = 2 et
+    # « gestion_des_défaillances_de_notification » = 1, même sujet de fond, jamais 3).
+    # refine_prompt est désormais borné en DÉBIT, pas en récurrence : voir
+    # _action_refine_prompt.
     pipe = r.pipeline()
     pipe.zadd(_KNOWLEDGE_GAPS_KEY, {entry: time.time()})
     pipe.zremrangebyrank(_KNOWLEDGE_GAPS_KEY, 0, -51)  # keep last 50
-    pipe.hincrby(_GAP_COUNTS_KEY, slug, 1)
-    results = pipe.execute()
-    count = int(results[2] or 0)
+    pipe.execute()
 
     emotional_state.update({"confiance": -0.15})
-    logger.info("Self action: knowledge gap flagged — %s (count=%d)", topic, count)
-    return f"flagged knowledge gap: {topic} (count={count})"
+    logger.info("Self action: knowledge gap flagged — %s", topic)
+    return f"flagged knowledge gap: {topic}"
 
 
 def _action_send_notification(params: dict) -> str:
@@ -161,14 +181,14 @@ def _action_send_notification(params: dict) -> str:
     message = params.get("message", "").strip()
 
     if not user_code or not subject or not message or user_code not in USER_CODES:
-        return "send_notification: invalid params"
+        return EchecAction("send_notification: invalid params")
 
     to = USER_EMAILS.get(user_code, "")
     if not to:
-        return f"send_notification: no email configured for {user_code}"
+        return EchecAction(f"send_notification: no email configured for {user_code}")
 
     if not is_google_available(user_code):
-        return "send_notification: Google not configured"
+        return EchecAction("send_notification: Google not configured")
 
     # One notification per user per day guard (uses user's local timezone)
     r = get_redis()
@@ -181,7 +201,7 @@ def _action_send_notification(params: dict) -> str:
             "Self action: notification suppressed for %s (already sent today)",
             user_code,
         )
-        return f"send_notification: suppressed (already sent to {user_code} today)"
+        return EchecAction(f"send_notification: suppressed (already sent to {user_code} today)")
 
     user_name = USER_CODES[user_code]
     html = f"<p>Bonjour {user_name},</p><p>{message}</p><p><em>— Jarvis</em></p>"
@@ -199,7 +219,7 @@ def _action_send_notification(params: dict) -> str:
         return f"notification sent to {user_code}"
     # Guard: mark as attempted today even on failure to avoid retry loops in the chain
     r.setex(notif_key, _NOTIF_TTL, "failed")
-    return "send_notification: delivery failed"
+    return EchecAction("send_notification: delivery failed")
 
 
 def _deliver_push(user_code: str, message: str, cooldown_key: str,
@@ -258,14 +278,14 @@ def _action_queue_push(params: dict) -> str:
     message = params.get("message", "").strip()
 
     if not user_code or user_code not in USER_CODES:
-        return "queue_push: invalid user_code"
+        return EchecAction("queue_push: invalid user_code")
     if not message:
-        return "queue_push: empty message"
+        return EchecAction("queue_push: empty message")
 
     err = _deliver_push(user_code, message,
                         f"{_PUSH_COOLDOWN_PREFIX}:{user_code}", _PUSH_COOLDOWN_TTL)
     if err:
-        return f"queue_push: {err}"
+        return EchecAction(f"queue_push: {err}")
     logger.info("Self action: push queued for %s — %s", user_code, message[:80])
     return f"push queued for {user_code}: {message[:80]}"
 
@@ -286,15 +306,19 @@ def _action_alert_admin(params: dict) -> str:
     """
     message = params.get("message", "").strip()
     if not message:
-        return "alert_admin: empty message"
+        return EchecAction("alert_admin: empty message")
     admin = next(iter(USER_ADMINS), "")
     if not admin:
-        return "alert_admin: no admin configured"
+        return EchecAction("alert_admin: no admin configured")
     corps = message if message.startswith(("[", "⚠")) else f"⚠️ Maintenance — {message}"
+    # Clé SUFFIXÉE par l'administrateur. Le préfixe nu était passé tel quel, donc la clé
+    # posée était littéralement « jarvis:admin_alert:cooldown » : sans effet avec un seul
+    # administrateur, mais avec deux la première alerte faisait taire le second.
     err = _deliver_push(admin, corps,
-                        _ADMIN_ALERT_COOLDOWN_PREFIX, _ADMIN_ALERT_COOLDOWN_TTL)
+                        f"{_ADMIN_ALERT_COOLDOWN_PREFIX}:{admin}",
+                        _ADMIN_ALERT_COOLDOWN_TTL)
     if err:
-        return f"alert_admin: {err}"
+        return EchecAction(f"alert_admin: {err}")
     logger.info("Self action: admin alert → %s — %s", admin, message[:80])
     return f"admin alerted ({admin}): {message[:80]}"
 
@@ -314,9 +338,9 @@ def _action_ask_user(params: dict) -> str:
     question = params.get("question", "").strip()
 
     if not user_code or user_code not in USER_CODES:
-        return "ask_user: invalid user_code"
+        return EchecAction("ask_user: invalid user_code")
     if not question:
-        return "ask_user: empty question"
+        return EchecAction("ask_user: empty question")
 
     return _action_queue_push({"user_code": user_code, "message": question})
 
@@ -340,8 +364,15 @@ def _action_ask_user(params: dict) -> str:
 # à la demande — c'est assumé : comprimer la mémoire n'est pas agir, et cette action
 # portait un cooldown de 48 h qui la rendait de toute façon rare.
 
-def alerter_si_anomalie_critique() -> str:
+def alerter_si_anomalie_critique(
+    health: dict | None = None, mem_health: dict | None = None
+) -> str:
     """Alerte l'admin sur les anomalies critiques. DÉTERMINISTE, sans LLM.
+
+    `health` et `mem_health` sont RÉUTILISÉS s'ils sont fournis. `gather_global_context`
+    calcule déjà les deux, et cette fonction les recalculait juste avant : deux sondes de
+    santé mémoire par cycle, chacune faisant un scroll Qdrant par utilisateur. Les sondes
+    par défaut restent en place pour les appelants qui n'ont pas de contexte sous la main.
 
     Était l'action `check_health` jusqu'au 21/08/2026. Ce n'en était pas une : la moitié
     du travail (sonder les services et la santé mémoire) est déjà faite par
@@ -357,12 +388,12 @@ def alerter_si_anomalie_critique() -> str:
 
     Cooldown de 4 h propre, pour qu'un service instable ne génère pas un flot de mails.
     """
-    health = _check_service_health()
+    health = health if health is not None else _check_service_health()
     issues = [svc for svc, status in health.items() if status != "ok"]
     if issues:
         logger.warning("Self health check: services KO — %s", issues)
 
-    mem_health = _check_memory_health()
+    mem_health = mem_health if mem_health is not None else _check_memory_health()
     mem_lines = _fmt_memory_health(mem_health)
     logger.info("Self memory health:\n%s", mem_lines)
 
@@ -397,15 +428,15 @@ def _action_update_trade_threshold(params: dict) -> str:
     tl = params.get("threshold_low")
 
     if not user_code or user_code not in USER_CODES:
-        return "update_trade_threshold: invalid user_code"
+        return EchecAction("update_trade_threshold: invalid user_code")
     if not isin:
-        return "update_trade_threshold: missing isin"
+        return EchecAction("update_trade_threshold: missing isin")
     if th is None and tl is None:
-        return "update_trade_threshold: at least one of threshold_high / threshold_low is required"
+        return EchecAction("update_trade_threshold: at least one of threshold_high / threshold_low is required")
 
     r = get_redis()
     if not r.sismember(idx_key(user_code), isin):
-        return f"update_trade_threshold: ISIN {isin} not in portfolio for {user_code}"
+        return EchecAction(f"update_trade_threshold: ISIN {isin} not in portfolio for {user_code}")
 
     key = pos_key(user_code, isin)
     mapping = {}
@@ -415,7 +446,7 @@ def _action_update_trade_threshold(params: dict) -> str:
         try:
             th = round(float(th), 2)
         except (TypeError, ValueError):
-            return "update_trade_threshold: threshold_high must be a number"
+            return EchecAction("update_trade_threshold: threshold_high must be a number")
         mapping["threshold_high"] = str(th)
         parts.append(f"high={th}€")
 
@@ -423,7 +454,7 @@ def _action_update_trade_threshold(params: dict) -> str:
         try:
             tl = round(float(tl), 2)
         except (TypeError, ValueError):
-            return "update_trade_threshold: threshold_low must be a number"
+            return EchecAction("update_trade_threshold: threshold_low must be a number")
         mapping["threshold_low"] = str(tl)
         parts.append(f"low={tl}€")
 
@@ -458,7 +489,7 @@ def _action_prune_self_memory(params: dict) -> str:
     """
     r = get_redis()
     if r.exists(_PRUNE_COOLDOWN_KEY):
-        return "prune_self_memory: cooldown active (24h)"
+        return EchecAction("prune_self_memory: cooldown active (24h)")
 
     with self_memory_lock:
         data = get_self_memory()
@@ -500,7 +531,7 @@ def _action_prune_self_memory(params: dict) -> str:
     )
 
     try:
-        content = call_llm(
+        content = call_llm_bg(
             [
                 {"role": "system", "content": get_prompt("PRUNE_SELF_MEMORY_SYSTEM")},
                 {"role": "user", "content": user_prompt},
@@ -518,15 +549,15 @@ def _action_prune_self_memory(params: dict) -> str:
         logger.error(
             "prune_self_memory LLM call failed: %s", type(exc).__name__, exc_info=True
         )
-        return f"prune_self_memory: LLM call failed ({type(exc).__name__})"
+        return EchecAction(f"prune_self_memory: LLM call failed ({type(exc).__name__})")
 
     try:
         result = extract_llm_json(content)
     except (ValueError, Exception) as exc:
         logger.warning("prune_self_memory: extract_llm_json failed (%s) — raw=%r…", exc, content[:80])
-        return "prune_self_memory: invalid LLM response"
+        return EchecAction("prune_self_memory: invalid LLM response")
     if not result or "to_delete" not in result:
-        return "prune_self_memory: invalid LLM response"
+        return EchecAction("prune_self_memory: invalid LLM response")
 
     to_delete = result["to_delete"]
     total_deleted = 0
@@ -582,7 +613,7 @@ def _action_flag_project_stall(params: dict) -> str:
     """
     user_code = params.get("user_code", "")
     if not user_code or user_code not in USER_CODES:
-        return "flag_project_stall: invalid user_code"
+        return EchecAction("flag_project_stall: invalid user_code")
 
     projects = _get_active_projects(user_code)
     if not projects:
@@ -590,7 +621,15 @@ def _action_flag_project_stall(params: dict) -> str:
 
     now = time.time()
     r = get_redis()
-    sent, skipped = [], []
+
+    # Sans appareil enregistré, aucun rappel ne peut partir : on le dit tout de suite au
+    # lieu de scanner les projets pour buter dessus projet par projet. Contrôle d'ÉTAT et
+    # non cooldown temporel — il se lève de lui-même à la seconde où un appareil est
+    # enregistré, là où un cooldown de 24 h ferait attendre un jour.
+    if not r.exists(f"{_DEVICE_TOKEN_PREFIX}:{user_code}"):
+        return f"flag_project_stall: aucun appareil enregistré pour {user_code}"
+
+    sent, skipped, injoignables = [], [], []
 
     for p in projects:
         name = p.get("name", "")
@@ -642,13 +681,28 @@ def _action_flag_project_stall(params: dict) -> str:
             r.setex(cooldown_key, _STALL_COOLDOWN_TTL, "1")
             sent.append(f"{name} (échéance {due[:10]})" if overdue else f"{name} ({days}j)")
         else:
-            return f"flag_project_stall: push indisponible — {result}"
+            # On NOTE et on continue, au lieu de sortir. Sortir au premier push non
+            # livrable annulait toute la passe : les projets suivants n'étaient jamais
+            # examinés, aucun cooldown n'était posé, et la passe repartait à l'identique au
+            # cycle suivant. Mesuré les 21/08/2026 sur trois cycles d'affilée, à la lettre
+            # près : « ZSXEDC — push indisponible : no device registered ». Il n'y a pas
+            # d'appareil enregistré et il n'y en aura pas tant que l'utilisateur n'en
+            # enregistre pas un ; la tentative se rejouait toutes les cinq heures.
+            injoignables.append(name)
 
-    if not sent and not skipped:
+    parts = []
+    if sent:
+        parts.append(f"rappel envoyé pour {', '.join(sent)}")
+    if skipped:
+        parts.append(f"{len(skipped)} en cooldown")
+    if injoignables:
+        parts.append(f"{len(injoignables)} non livrable(s) — canal indisponible")
+    if not parts:
         return "flag_project_stall: aucun projet en retard (> 21j)"
-    if not sent:
-        return f"flag_project_stall: {len(skipped)} projet(s) en retard mais tous en cooldown"
-    return f"flag_project_stall: rappel envoyé pour {', '.join(sent)}"
+
+    message = "flag_project_stall: " + ", ".join(parts)
+    # Échec seulement si RIEN n'est parti alors qu'il y avait quelque chose à envoyer.
+    return message if sent else EchecAction(message)
 
 
 # Doit correspondre exactement à _SELF_ACTIONS | _USER_ACTIONS (self/engine.py) : une
@@ -678,7 +732,7 @@ def _execute_action(action: str, params: dict) -> str:
         logger.warning(
             "Self: unknown action requested — %r (defaulting to nothing)", action
         )
-        return f"unknown action: {action}"
+        return EchecAction(f"unknown action: {action}")
     return fn(params or {})
 
 
@@ -805,33 +859,11 @@ async def generate_proactive_push(user_code: str) -> str:
             + "\n"
         )
 
-    prompt = (
-        f"Voici les échanges récents avec {user_name}, chacun horodaté (temps écoulé depuis) :\n\n{conv_text}\n"
-        f"{projects_section}\n"
-        f"Humeur actuelle de Jarvis : {mood}\n\n"
-        f"En tant que Jarvis, y a-t-il quelque chose qui mérite de reprendre contact de façon proactive ?\n\n"
-        f"CALIBRAGE DU DÉLAI — le point le plus important : le temps écoulé (indiqué entre crochets, ou "
-        f"via les dates de projet) doit être cohérent avec la nature du sujet avant de relancer.\n"
-        f"  • Un souci ponctuel (santé, imprévu, désagrément passager) : laisser au moins 1 à 2 jours avant "
-        f"d'en reparler — le temps que ça évolue naturellement. Revenir dessus après seulement 1h ou quelques "
-        f"heures n'a aucun sens et donne l'impression d'être surveillé.\n"
-        f"  • Un projet ou sujet de fond (dont l'ampleur se devine via sa description — installation, dossier "
-        f"administratif, projet professionnel, apprentissage long...) : ne pas en attendre de progrès après "
-        f"seulement quelques jours de silence. Ne relancer un même projet qu'une fois toutes les 1-2 semaines "
-        f"au minimum, et seulement si le délai écoulé est plausible compte tenu de son ampleur apparente.\n"
-        f"  • Dans le doute sur le délai raisonnable, préférer NE PAS relancer (réponds null).\n\n"
-        f"TON — privilégier une prise de nouvelles générale et chaleureuse ('comment ça se passe, il y a du "
-        f"nouveau ?') plutôt qu'une demande de statut précise ('as-tu avancé sur X ?'), sauf si la conversation "
-        f"récente appelle clairement un suivi ciblé (ex : {user_name} a dit qu'il saurait quelque chose à une "
-        f"date précise, déjà passée). Ne pas se limiter aux projets : un souci de santé, une situation "
-        f"personnelle ou un sujet important évoqué comptent tout autant.\n\n"
-        f"Si un message est justifié : écris-le court (1 phrase max, en français, naturel et chaleureux). "
-        f"Si non, réponds null.\n\n"
-        f"RÈGLE ABSOLUE : ne jamais supposer qu'une action a été accomplie (achat, décision, voyage, démarche...) "
-        f"si elle n'est pas explicitement confirmée dans la conversation. "
-        f"Une question sur un sujet ou une comparaison en cours ne signifie pas que {user_name} a tranché. "
-        f"En cas de doute sur l'issue d'une situation, réponds null.\n\n"
-        f'Réponds UNIQUEMENT en JSON : {{"message": "..."}} ou {{"message": null}}'
+    prompt = get_prompt("PROACTIVE_PUSH_PROMPT").format(
+        user_name=user_name,
+        conv_text=conv_text,
+        projects_section=projects_section,
+        mood=mood,
     )
 
     try:

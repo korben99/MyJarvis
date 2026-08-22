@@ -15,11 +15,37 @@ irréversible et porte sur de la mémoire longue, pas sur du cache.
 
 import argparse
 import json
+import os
 import shutil
+import subprocess
 import sys
 from datetime import datetime
 
 sys.path.insert(0, "/opt/jarvis/jarvis-core/src")
+
+
+def _exiger_jarvis_arrete() -> None:
+    """Refuse de tourner tant que le service est démarré.
+
+    Ce script réécrit jarvis-self.json depuis son propre processus, alors que la revue
+    nocturne et le cycle de réflexion l'écrivent depuis le service. `self_memory_lock` est
+    intra-processus et ne les sérialise donc pas entre eux : deux écritures concurrentes
+    liraient le même état et la dernière écraserait l'autre.
+
+    On règle ça ici plutôt que par un verrou inter-processus dans le chemin chaud du
+    service : ce script se lance à la main, une fois de temps en temps. Même garde que
+    `jarvis-core/tests/test_lru_cache.py`, et même motif précis — « pgrep -f jarvis »
+    attraperait n'importe quel shell ouvert dans /opt/jarvis.
+    """
+    try:
+        sortie = subprocess.check_output(["pgrep", "-f", "uvicorn main:app"], text=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return
+    pids = [p for p in sortie.strip().splitlines() if p and p != str(os.getpid())]
+    if pids:
+        print(f"ERREUR : Jarvis tourne (pids {pids}) et écrit jarvis-self.json.")
+        print("Arrête-le avant : jarvis-stop")
+        sys.exit(1)
 
 from config import QDRANT_MEMORY_COLLECTION, SELF_MEMORY_PATH, USER_ADMINS  # noqa: E402
 from helpers import get_qdrant, get_redis  # noqa: E402
@@ -97,6 +123,10 @@ def main() -> int:
     if not args.apply:
         print("\nSimulation — rien supprimé. Ajouter --apply pour exécuter.")
         return 0
+
+    # Contrôlé ici et non à l'import : la simulation est en lecture seule et doit rester
+    # utilisable sur un Jarvis en marche.
+    _exiger_jarvis_arrete()
 
     # Sauvegarde AVANT toute écriture : jarvis-self.json porte l'identité, les objectifs
     # et le journal de croissance. Redis et Qdrant se reconstruisent, pas ce fichier.

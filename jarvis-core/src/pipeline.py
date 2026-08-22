@@ -51,7 +51,7 @@ from memory import (
 )
 from prompts import get_prompt
 from self import (
-    get_reflection_log,
+    get_last_reflection,
     get_self_memory,
     list_pending_proposals,
 )
@@ -385,9 +385,13 @@ def build_context(
     if use_self:
         self_data = self_mem if self_mem is not None else get_self_memory()
         focus = self_data.get("current_focus", "")
-        last_ref = get_reflection_log(1)
-        last_action = last_ref[0].get("action", "none") if last_ref else "none"
-        last_reason = last_ref[0].get("reason", "") if last_ref else ""
+        # `get_last_reflection` et non `get_reflection_log(1)` : la première écarte les
+        # entrées d'un catalogue d'actions révolu. Le chemin brut annonçait encore en
+        # conversation « Dernière action autonome : check_health », pour une action
+        # supprimée le 21/08/2026.
+        last_ref = get_last_reflection()
+        last_action = last_ref.get("action", "none") if last_ref else "none"
+        last_reason = last_ref.get("reason", "") if last_ref else ""
         goals_text = " | ".join(
             f"G{i + 1}: {g['label']}" for i, g in enumerate(self_data.get("goals", []))
         )

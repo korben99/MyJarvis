@@ -49,16 +49,39 @@ _SCALAR_CANONICAL: dict[str, str] = {
 
 # Namespace families: keys in the same family are compared together for dedup.
 # Each family is isolated — namespaces from different families are NEVER compared.
+#
+# Chaque famille = UN namespace canonique inscriptible, plus ses synonymes — y compris
+# ceux qui ne sont PLUS inscriptibles mais subsistent dans des profils écrits avant
+# _ALLOWED_PROFILE_NAMESPACES. C'est la vraie fonction de cette table, et elle n'était dite
+# nulle part : elle sert de PASSERELLE DE MIGRATION, en permettant à une nouvelle clé
+# `etude:*` de se rapprocher d'une ancienne `specialite:*`. Le profil de ZSXEDC en porte
+# encore trois au 21/08/2026 : `specialite:`, `option:`, `matière:`.
+#
+# Ce qui était faux, en revanche, et corrigé ici : les exemples des deux prompts de dédup
+# enseignaient au modèle de rapprocher VERS le legacy (« loisir:kart → hobby:kart »),
+# c'est-à-dire vers une clé que plus rien ne peut écrire. La convergence doit aller dans
+# l'autre sens — vers le namespace canonique, seul inscriptible.
+#
+# Les familles sont disjointes : `_candidate_keys` retient la première qui contient le
+# préfixe, donc un préfixe présent dans deux familles rendrait le regroupement dépendant
+# de l'ordre d'itération. Un préfixe seul dans sa catégorie n'a pas besoin d'entrée — le
+# repli de `_candidate_keys` le traite déjà comme sa propre famille.
+#
+# situation et famille ne sont volontairement PAS regroupés :
+# situation = faits sur l'utilisateur, famille = faits sur des tiers.
+#
+# `preoccupation / concerns / inquietude` a été retirée : `concerns` est la cible SCALAIRE
+# de `_SCALAR_CANONICAL["inquietude"]`, donc le même jeton était à la fois un scalaire et
+# un préfixe de namespace. Une clé est l'un ou l'autre.
 _NS_FAMILY: dict[str, frozenset] = {
-    "hobby": frozenset({"hobby", "interest", "loisir", "passion", "activite", "sport"}),
-    "skill": frozenset({"skill", "competence"}),
-    "tech": frozenset({"technologie", "outil"}),
+    "loisir": frozenset(
+        {"loisir", "sport", "interet", "apprecie", "hobby", "interest", "passion", "activite"}
+    ),
+    "competence": frozenset({"competence", "technologie", "skill", "outil"}),
     "placement": frozenset({"placement", "investissement", "epargne"}),
-    "projet": frozenset({"projet", "project"}),
-    "preoccupation": frozenset({"preoccupation", "concerns", "inquietude"}),
-    "etude": frozenset({"etude", "matiere", "specialite", "option", "note"}),
-    # situation and famille are intentionally NOT grouped together:
-    # situation = facts about the user, famille = facts about third parties.
+    "etude": frozenset({"etude", "matiere", "matière", "specialite", "option", "note"}),
+    "preference": frozenset({"preference", "aversion"}),
+    "objectif": frozenset({"objectif", "projet", "project"}),
 }
 
 
@@ -186,15 +209,15 @@ def _normalize_profile_keys_batch(
                             "RÈGLE : deux clés sont des doublons UNIQUEMENT si elles décrivent "
                             "le MÊME sujet ET le MÊME concept. Même préfixe ≠ doublon.\n"
                             "Exemples VRAIS doublons (namespace synonyme, même sujet) :\n"
-                            '  existantes: ["hobby:kart"] nouvelles: ["loisir:kart"] '
-                            '→ {"matches": [{"new": "loisir:kart", "match": "hobby:kart"}]}\n'
+                            '  existantes: ["sport:kart"] nouvelles: ["loisir:kart"] '
+                            '→ {"matches": [{"new": "loisir:kart", "match": "sport:kart"}]}\n'
                             "Exemples NON doublons (même préfixe, sujets ou concepts différents) :\n"
                             '  existantes: ["situation:parents_location"] nouvelles: ["situation:lieu_residence"] '
                             '→ {"matches": [{"new": "situation:lieu_residence", "match": null}]}\n'
                             '  existantes: ["competence:ia"] nouvelles: ["competence:bricolage"] '
                             '→ {"matches": [{"new": "competence:bricolage", "match": null}]}\n'
-                            '  existantes: ["hobby:kart"] nouvelles: ["hobby:tennis"] '
-                            '→ {"matches": [{"new": "hobby:tennis", "match": null}]}'
+                            '  existantes: ["loisir:kart"] nouvelles: ["loisir:tennis"] '
+                            '→ {"matches": [{"new": "loisir:tennis", "match": null}]}'
                         ),
                     },
                     {"role": "user", "content": prompt},
@@ -301,12 +324,12 @@ def _normalize_profile_key(
                         "RÈGLE : deux clés sont des doublons UNIQUEMENT si elles décrivent "
                         "le MÊME sujet ET le MÊME concept. Même préfixe ≠ doublon.\n"
                         "Exemples VRAIS doublons (namespace synonyme, même sujet) :\n"
-                        '  "hobby:kart" vs "loisir:kart" → {"match": "hobby:kart"}\n'
-                        '  "hobby:ia" vs "interest:ia" → {"match": "hobby:ia"}\n'
+                        '  "sport:kart" vs "loisir:kart" → {"match": "sport:kart"}\n'
+                        '  "technologie:ia" vs "competence:ia" → {"match": "technologie:ia"}\n'
                         "Exemples NON doublons (même préfixe, sujets ou concepts différents) :\n"
                         '  "situation:parents_location" vs "situation:lieu_residence" → {"match": null}\n'
                         '  "competence:ia" vs "competence:bricolage" → {"match": null}\n'
-                        '  "hobby:kart" vs "hobby:tennis" → {"match": null}'
+                        '  "loisir:kart" vs "loisir:tennis" → {"match": null}'
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -378,6 +401,11 @@ def update_user_profile(user_code: str, key: str, value: str | None):
     profile_redis_key = f"user:{user_code}:profile"
     profile_ts_key = f"user:{user_code}:profile:ts"
 
+    # La liste blanche de namespaces ne s'applique QU'À L'ÉCRITURE, délibérément. Des
+    # profils portent encore des clés écrites avant elle — `specialite:`, `option:`,
+    # `matière:` chez ZSXEDC au 21/08/2026. Les soumettre au même filtre les rendrait
+    # indélébiles : le nettoyage curatif ne pourrait plus jamais s'en défaire. On garde
+    # donc la suppression ouverte à toute clé.
     if not value:  # None or empty string → delete
         old_val = r.hget(profile_redis_key, key)
         r.hdel(profile_redis_key, key)
@@ -440,6 +468,18 @@ _ALLOWED_PROFILE_NAMESPACES = frozenset(
         "langue",
     }
 )
+
+# Chaque famille doit contenir AU MOINS un namespace inscriptible : c'est vers lui que la
+# déduplication fait converger, et une famille qui n'en contient aucun ne pourrait
+# rapprocher que des clés mortes entre elles. On ne vérifie pas l'inverse — une famille
+# contient par construction des synonymes legacy, non inscriptibles, et c'est sa raison
+# d'être.
+for _nom, _membres in _NS_FAMILY.items():  # pragma: no cover - garde de démarrage
+    if not (_membres & _ALLOWED_PROFILE_NAMESPACES):
+        raise RuntimeError(
+            f"memory.profile: la famille {_nom!r} ne contient aucun namespace "
+            f"inscriptible — la déduplication n'aurait nulle part où converger."
+        )
 
 # Hard cap: never persist more than this many new facts per analyzer call.
 _MAX_FACTS_PER_BATCH = 6

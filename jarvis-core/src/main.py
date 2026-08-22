@@ -130,6 +130,30 @@ async def lifespan(app: FastAPI):
             ),
         )
 
+    # Index de payload — posés à CHAQUE démarrage, pas seulement à la création. Ils
+    # n'existaient nulle part dans le code : ceux en place avaient été créés à la main, et
+    # `timestamp` l'avait été en `integer` alors que le payload y écrit un flottant
+    # (time.time()). Un index integer n'indexe aucune valeur flottante : il contenait 0
+    # point sur 281, et `scroll(order_by="timestamp")` rendait une liste VIDE sans lever
+    # d'erreur. C'est ce que fait `_consolidate_user_memories` — la consolidation
+    # mensuelle épisodique → autobiographique n'a donc jamais rien consolidé.
+    # Constaté et corrigé le 21/08/2026. La création est idempotente.
+    for _champ, _schema in (
+        ("user_code", "keyword"),
+        ("memory_type", "keyword"),
+        ("status", "keyword"),
+        ("timestamp", "float"),
+    ):
+        try:
+            QDRANT_CLIENT.create_payload_index(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                field_name=_champ,
+                field_schema=_schema,
+            )
+        except Exception as exc:
+            # Déjà présent avec le bon schéma : Qdrant refuse, et c'est le cas nominal.
+            logger.debug("Index de payload %s (%s) : %s", _champ, _schema, type(exc).__name__)
+
     scheduler = None
     try:
         hour, minute = (int(x) for x in BRIEFING_TIME.split(":"))

@@ -6,7 +6,6 @@ Formatage des sections et appels aux deux prompts de réflexion (global / user).
 """
 
 import json
-import re
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -42,11 +41,12 @@ from prompts import get_prompt
 from .proposals import list_pending_proposals
 from .state import (
     _DEVICE_TOKEN_PREFIX,
-    _GAP_COUNTS_KEY,
     _KNOWLEDGE_GAPS_KEY,
     _PUSH_COOLDOWN_PREFIX,
+    _REFINE_COOLDOWN_PREFIX,
     _extract_behavioral_patterns,
     get_last_reflection,
+    slug_de_sujet,
 )
 
 logger = get_logger("jarvis-self")
@@ -124,20 +124,36 @@ def _check_memory_health() -> dict:
         stats: dict = {}
 
         # ── Qdrant episodic count + last timestamp ────────────────────────
+        #
+        # Le compte vient de `count(exact=True)` et non plus de la longueur d'un scroll
+        # plafonné à 500 : au-delà de 500 points, le chiffre rendu au modèle sous le nom de
+        # « total des points épisodiques » était simplement faux, et plafonné.
+        #
+        # La sonde de normes, elle, ne rapatrie plus que les 30 points les plus récents au
+        # lieu de 500 avec leurs vecteurs — soit 500 × 1024 flottants par utilisateur et par
+        # passage. `order_by` est possible depuis la correction de l'index `timestamp`
+        # (déclaré `integer` pour des valeurs flottantes, donc vide : voir main.py).
+        _filtre = {
+            "must": [
+                {"key": "user_code", "match": {"value": user_code}},
+                {"key": "memory_type", "match": {"value": "episodic"}},
+            ]
+        }
         try:
+            stats["episodic_count"] = qdrant.count(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                count_filter=_filtre,
+                exact=True,
+            ).count
+
             points, _ = qdrant.scroll(
                 collection_name=QDRANT_MEMORY_COLLECTION,
-                scroll_filter={
-                    "must": [
-                        {"key": "user_code", "match": {"value": user_code}},
-                        {"key": "memory_type", "match": {"value": "episodic"}},
-                    ]
-                },
-                limit=500,
+                scroll_filter=_filtre,
+                order_by={"key": "timestamp", "direction": "desc"},
+                limit=30,
                 with_payload=True,
                 with_vectors=True,
             )
-            stats["episodic_count"] = len(points)
 
             if points:
                 last_ts = max(p.payload.get("timestamp", 0) for p in points)
@@ -150,11 +166,8 @@ def _check_memory_health() -> dict:
                 stats["days_since"] = None
 
             # ── Sample norm check (30 most recent) ───────────────────────
-            sorted_pts = sorted(
-                points, key=lambda p: p.payload.get("timestamp", 0), reverse=True
-            )[:30]
             anomalies = 0
-            for pt in sorted_pts:
+            for pt in points:
                 if pt.vector:
                     norm = float(np.linalg.norm(pt.vector))
                     if abs(norm - 1.0) > 0.01:
@@ -241,35 +254,86 @@ def _get_user_activity(hours: int = 24) -> dict:
     return activity
 
 
-def _get_knowledge_gaps(n: int = 5) -> list[str]:
+# Au-delà, une lacune n'est plus une observation, c'est un vestige. Mesuré le 21/08/2026 :
+# les trois lacunes en base dataient des 08/04, 22/04 et 04/06 — injectées dans chaque
+# cycle depuis, sans jamais expirer, et décrivant pour deux d'entre elles le comportement
+# de boucle de Jarvis lui-même, c'est-à-dire la pathologie que le déplacement de
+# flag_knowledge_gap vers la revue nocturne devait justement supprimer.
+_GAP_MAX_AGE_DAYS = 60
+
+
+def _purger_lacunes_perimees(r) -> int:
+    """Retire du zset les lacunes trop vieilles.
+
+    Le balayage des compteurs a disparu avec les compteurs eux-mêmes (21/08/2026) : le
+    seuil de récurrence qu'ils alimentaient n'était lu nulle part, et le slug tronqué à
+    40 caractères sans rapprochement sémantique les rendait de toute façon incapables de
+    mesurer une récurrence. refine_prompt est désormais borné en débit.
     """
-    Return the most recently flagged knowledge gaps, annotated with their
-    cumulative occurrence count so the reflection LLM can decide when to
-    trigger a prompt refinement.
-    Gaps whose prompt already has a pending proposal are marked so the LLM
-    does not waste a cycle trying to re-propose.
+    limite = time.time() - _GAP_MAX_AGE_DAYS * 86400
+    perimees = r.zrangebyscore(_KNOWLEDGE_GAPS_KEY, "-inf", limite)
+    if perimees:
+        r.zremrangebyscore(_KNOWLEDGE_GAPS_KEY, "-inf", limite)
+        logger.info(
+            "Lacunes : %d entrée(s) purgée(s) (au-delà de %d jours)",
+            len(perimees), _GAP_MAX_AGE_DAYS,
+        )
+    return len(perimees)
+
+
+
+def _lacunes(n: int = 5) -> tuple[list[str], int]:
+    """Les lacunes récentes, et combien d'entre elles sont ACTIONNABLES.
+
+    Rend `(libellés, nombre d'actionnables)`. Une lacune est actionnable si son sujet n'a
+    ni proposition en attente ni sommeil en cours — c'est-à-dire s'il reste quelque chose
+    à faire dessus. Ce compte remplace `gap_max_count` dans le garde de matière de
+    l'engine : l'ancien lisait un compteur d'occurrences qui n'était jamais décrémenté et
+    laissait donc le garde ouvert à vie.
+
+    Le libellé porte désormais la DATE plutôt qu'un décompte. Le décompte a disparu avec
+    les compteurs (21/08/2026) ; la date, elle, dit au modèle si l'observation est fraîche,
+    ce qui est la seule chose qu'il puisse en faire.
     """
     r = get_redis()
+    _purger_lacunes_perimees(r)
+
+    # Sujets déjà couverts par une proposition en attente. Le marquage était annoncé par
+    # la docstring depuis l'origine et n'avait jamais été écrit : le modèle voyait une
+    # lacune ouverte là où une proposition dormait déjà, et relançait dessus.
+    en_attente = {
+        slug_de_sujet(p.get("topic", "")) for p in list_pending_proposals()
+    } - {""}
+
     raw = r.zrevrange(_KNOWLEDGE_GAPS_KEY, 0, n * 3 - 1)  # fetch extra to survive dedup
-    counts = r.hgetall(_GAP_COUNTS_KEY)
     seen_slugs: set[str] = set()
-    results = []
+    results: list[str] = []
+    actionnables = 0
     for item in raw:
+        date = ""
         try:
             d = json.loads(item)
             topic = d.get("topic", item)
+            date = (d.get("date") or "")[:10]
         except Exception:
             topic = item
-        slug = re.sub(r"\s+", "_", topic.lower())[:40]
+        slug = slug_de_sujet(topic)
         if slug in seen_slugs:
             continue
         seen_slugs.add(slug)
-        count = int(counts.get(slug, 0))
-        label = f"{topic} (flaggé ×{count})"
+
+        label = f"{topic}" + (f" (signalée le {date})" if date else "")
+        if slug in en_attente:
+            label += " — PROPOSITION DÉJÀ EN ATTENTE, ne pas reproposer"
+        elif r.ttl(f"{_REFINE_COOLDOWN_PREFIX}:{slug}") > 0:
+            label += " — sujet déjà tranché récemment, ne pas reproposer"
+        else:
+            actionnables += 1
+
         results.append(label)
         if len(results) >= n:
             break
-    return results
+    return results, actionnables
 
 
 def _fmt_pending_proposals() -> str:
@@ -286,7 +350,7 @@ def gather_global_context() -> dict:
     self_data = get_self_memory()
     health = _check_service_health()
     activity = _get_user_activity(24)
-    gaps = _get_knowledge_gaps(5)
+    gaps, gaps_actionnables = _lacunes(5)
     last_ref = get_last_reflection()
 
     # État de disparition + incidents : la réflexion doit VOIR ce qu'elle vient de
@@ -321,12 +385,11 @@ def gather_global_context() -> dict:
         "cve_conseil": cve_conseil,
         "user_activity": activity,
         "knowledge_gaps": gaps,
-        # Compteur brut le plus élevé, pour le garde mécanique de `run_self_reflection`.
-        # `knowledge_gaps` ne porte que des libellés d'affichage (« sujet (flaggé ×3) ») :
-        # les analyser à la regex serait lire une chaîne de présentation pour décider.
-        "gap_max_count": max(
-            (int(v) for v in get_redis().hgetall(_GAP_COUNTS_KEY).values()), default=0
-        ),
+        # Nombre de lacunes sur lesquelles il reste quelque chose à faire, pour le garde
+        # mécanique de `run_self_reflection`. Rendu séparément parce que `knowledge_gaps`
+        # ne porte que des libellés d'affichage : les analyser à la regex reviendrait à
+        # décider sur une chaîne de présentation.
+        "gaps_actionnables": gaps_actionnables,
         "pending_proposals": _fmt_pending_proposals(),
         "last_reflection": last_ref,
         "reflection_count": self_data.get("reflection_count", 0),

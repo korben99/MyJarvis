@@ -25,7 +25,7 @@ from config import (
     llm_timeout,
 )
 from helpers import (
-    call_llm,
+    call_llm_bg,
     extract_llm_json,
     get_logger,
     get_qdrant,
@@ -39,6 +39,11 @@ from .profile import get_interest_weights
 from .vectors import get_autobiographical_facts, store_autobiographical_event
 
 logger = get_logger("jarvis-memory")
+
+# Nombre de lots consécutifs entièrement dédupliqués au-delà duquel on arrête la passe.
+# Borne le cas où toute la fenêtre ancienne se résume en faits déjà connus : on avance
+# plutôt que de bloquer, mais on ne paie pas un appel LLM par lot indéfiniment.
+_MAX_LOTS_ECARTES = 5
 
 
 # ══════════════════════════════════════════════════
@@ -58,17 +63,42 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
     total_deleted = 0
     cutoff_ts = time.time() - EPISODIC_RETENTION_DAYS * 86400
 
+    def _filtre(borne_basse: float | None) -> dict:
+        plage: dict = {"lt": cutoff_ts}
+        if borne_basse is not None:
+            plage["gt"] = borne_basse
+        return {
+            "must": [
+                {"key": "user_code", "match": {"value": user_code}},
+                {"key": "memory_type", "match": {"value": "episodic"}},
+                {"key": "timestamp", "range": plage},
+            ]
+        }
+
+    # Sanité de l'index — le 21/08/2026, `timestamp` était indexé en `integer` alors que le
+    # payload y écrit un flottant (time.time()). Un index integer n'indexe aucune valeur
+    # flottante : il contenait 0 point sur 281, et `scroll(order_by="timestamp")` rendait
+    # une liste VIDE sans lever la moindre erreur. La consolidation sortait donc à son
+    # premier tour (`len(texts) < 5`), silencieusement, depuis toujours. On compare
+    # désormais ce que le scroll rend à ce que le compteur annonce.
+    try:
+        eligibles = qdrant.count(
+            collection_name=QDRANT_MEMORY_COLLECTION,
+            count_filter=_filtre(None),
+            exact=True,
+        ).count
+    except Exception as exc:
+        logger.warning("[%s] Consolidation: comptage impossible (%s)", user_code, exc)
+        eligibles = -1
+
+    borne_basse: float | None = None
+    lots_ecartes = 0
+
     while True:
         try:
             results = qdrant.scroll(
                 collection_name=QDRANT_MEMORY_COLLECTION,
-                scroll_filter={
-                    "must": [
-                        {"key": "user_code", "match": {"value": user_code}},
-                        {"key": "memory_type", "match": {"value": "episodic"}},
-                        {"key": "timestamp", "range": {"lt": cutoff_ts}},
-                    ]
-                },
+                scroll_filter=_filtre(borne_basse),
                 order_by={"key": "timestamp", "direction": "asc"},
                 limit=batch_size,
             )[0]
@@ -76,12 +106,22 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
             point_ids = [r.id for r in results]
             texts = [r.payload["text"] for r in results if r.payload.get("text")]
 
+            if not results and eligibles >= 5 and borne_basse is None:
+                logger.error(
+                    "[%s] Consolidation: %d point(s) épisodique(s) éligibles mais le "
+                    "scroll ordonné n'en rend AUCUN — l'index de payload `timestamp` est "
+                    "probablement absent ou du mauvais type (il doit être `float`). "
+                    "Consolidation impossible, aucune donnée touchée.",
+                    user_code, eligibles,
+                )
+                break
+
             if len(texts) < 5:
                 break  # Nothing left worth consolidating
 
             combined = "\n".join(texts)
 
-            raw = call_llm(
+            raw = call_llm_bg(
                 [
                     {
                         "role": "user",
@@ -130,15 +170,32 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
             )
 
             if not ecrits:
+                # On CONSERVE la source — c'était déjà le cas — mais on AVANCE au lieu de
+                # sortir. Sortir figeait la consolidation de cet utilisateur pour de bon :
+                # le lot suivant est sélectionné par « les plus anciens d'abord », donc le
+                # passage suivant resélectionnait exactement le même lot, le redéduplicait,
+                # et ressortait. Un lot dont tous les faits existent déjà bloquait tout ce
+                # qui était derrière lui.
+                lots_ecartes += 1
+                borne_basse = max(
+                    r.payload.get("timestamp", 0) for r in results
+                )
                 logger.warning(
                     "[%s] Consolidation: %d fait(s) tous écartés par la dédup autobio — "
-                    "%d point(s) épisodique(s) CONSERVÉ(S). Le lot sera réexaminé au "
-                    "prochain passage.",
+                    "%d point(s) épisodique(s) CONSERVÉ(S), on passe au lot suivant.",
                     user_code,
                     len(facts),
                     len(point_ids),
                 )
-                break
+                if lots_ecartes >= _MAX_LOTS_ECARTES:
+                    logger.warning(
+                        "[%s] Consolidation: %d lots consécutifs entièrement dédupliqués "
+                        "— passage interrompu.",
+                        user_code, lots_ecartes,
+                    )
+                    break
+                continue
+            lots_ecartes = 0
 
             qdrant.delete(
                 collection_name=QDRANT_MEMORY_COLLECTION,
@@ -217,7 +274,7 @@ def curative_profile_cleanup(user_code: str, stable_profile: dict | None = None)
         )
 
         parsed = extract_llm_json(
-            call_llm(
+            call_llm_bg(
                 [{"role": "user", "content": prompt}],
                 model=PRIMARY_MODEL,
                 api_url=PRIMARY_API_URL,
@@ -317,7 +374,7 @@ def update_profile_narrative(user_code: str, stable_profile: dict | None = None)
         stable_profile_str=stable_profile_str,
     )
 
-    content = call_llm(
+    content = call_llm_bg(
         [{"role": "user", "content": prompt}],
         model=PRIMARY_MODEL,
         api_url=PRIMARY_API_URL,

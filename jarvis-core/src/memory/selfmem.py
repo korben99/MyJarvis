@@ -6,6 +6,7 @@ l'écriture JSON atomique réutilisée ailleurs (proposals, etc.).
 
 import json
 import os
+import shutil
 import tempfile
 from datetime import datetime, timezone
 from threading import Lock
@@ -26,9 +27,18 @@ logger = get_logger("jarvis-memory")
 #  SELF MEMORY LOCK
 # ══════════════════════════════════════════════════
 
+
 # Shared lock for all read-modify-write cycles on jarvis-self.json.
 # Use as: with self_memory_lock: data = get_self_memory(); ...; save_self_memory(data)
 # threading.Lock works in both sync and async contexts (no await held while locked).
+#
+# Volontairement INTRA-PROCESSUS. Un verrou inter-processus (flock) a été écrit puis retiré
+# le 22/08/2026 : les seuls autres écrivains de ce fichier sont deux scripts manuels et
+# rares — `scripts/purge_user.py` et `scripts/migrate_introspection.py`. Leur imposer un
+# verrou partagé revenait à porter cinquante lignes de mécanique dans le chemin chaud du
+# service pour couvrir une concurrence qui ne se produit qu'à la main. Ces deux scripts
+# refusent désormais de tourner si Jarvis est démarré, ce qui règle le problème là où il
+# se pose et laisse ce verrou tel qu'il était.
 self_memory_lock = Lock()
 
 
@@ -148,39 +158,133 @@ def _avertir_si_non_migre(data: dict) -> None:
         )
 
 
+def _defauts() -> dict:
+    return {
+        "identity": {
+            "name": "Jarvis",
+            "version": "6.0",
+            "created": datetime.now(timezone.utc).isoformat(),
+            "personality": "Helpful, concise, direct. Dry humor when appropriate.",
+        },
+        "opinions": [],
+        "self_introspection": {},
+        "growth_log": [],
+        "reflection_count": 0,
+    }
+
+
+# Pas de cache ici, et c'est un choix. Un cache du dict analysé obligerait à en rendre une
+# copie à chaque appel — les cycles lire-modifier-écrire le mutent sur place — et une copie
+# profonde de 80 Ko coûte plus cher que le json.loads qu'elle éviterait. Un cache des seuls
+# OCTETS, lui, n'économise que le read() : mesuré à ~4 % du coût de l'appel, contre un
+# global, une invalidation à tenir en trois endroits et une fenêtre de péremption si deux
+# écritures partagent mtime et taille. Le jeu n'en vaut pas la chandelle.
+
+
 def get_self_memory() -> dict:
-    """Load jarvis-self.json; bootstrap with defaults if missing or corrupt."""
+    """Charge jarvis-self.json. Amorce les défauts si le fichier est absent.
+
+    Trois issues distinctes, et la distinction est le correctif du 21/08/2026 :
+
+      absent      → amorçage normal (installation neuve).
+      corrompu    → le fichier est MIS DE CÔTÉ avant l'amorçage. C'est la seule copie de
+                    l'état accumulé ; la remplacer sans la garder, c'était détruire la
+                    pièce à conviction en même temps que la donnée.
+      illisible   → on rend {} comme avant, pour ne casser aucun chemin de lecture (chat,
+                    routes, contexte). Le danger n'était jamais là : il était dans le
+                    `save` qui suit, et c'est `save_self_memory` qui le refuse désormais.
+    """
     try:
         with open(SELF_MEMORY_PATH, encoding="utf-8") as f:
             data = json.load(f)
         _avertir_si_non_migre(data)
         return data
-    except (FileNotFoundError, json.JSONDecodeError):
-        default = {
-            "identity": {
-                "name": "Jarvis",
-                "version": "6.0",
-                "created": datetime.now(timezone.utc).isoformat(),
-                "personality": "Helpful, concise, direct. Dry humor when appropriate.",
-            },
-            "opinions": [],
-            "self_introspection": {},
-            "growth_log": [],
-            "reflection_count": 0,
-        }
+    except FileNotFoundError:
+        default = _defauts()
         save_self_memory(default)
+        return default
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        mis_de_cote = f"{SELF_MEMORY_PATH}.corrompu.{int(datetime.now(timezone.utc).timestamp())}"
+        try:
+            shutil.copy2(SELF_MEMORY_PATH, mis_de_cote)
+            logger.error(
+                "jarvis-self.json illisible (%s) — copie conservée dans %s avant amorçage",
+                exc, mis_de_cote,
+            )
+        except OSError as copie_exc:
+            logger.error(
+                "jarvis-self.json illisible (%s) et copie de sauvegarde impossible (%s)",
+                exc, copie_exc,
+            )
+        # `force` : la copie de côté vient d'être prise, on a donc le droit de repartir
+        # d'un fichier propre. Sans ça le garde de rétrécissement refuserait l'amorçage et
+        # chaque appel recopierait le fichier corrompu à l'infini.
+        default = _defauts()
+        save_self_memory(default, force=True)
         return default
     except Exception as exc:
         logger.error("Could not load jarvis-self.json: %s", type(exc).__name__)
         return {}
 
 
-def save_self_memory(data: dict) -> None:
-    """Save jarvis-self.json atomically."""
+# Taille en dessous de laquelle un fichier existant est considéré comme un vestige et non
+# comme un état à protéger (un amorçage nu pèse ~400 octets).
+_TAILLE_VESTIGE = 600
+# Un état qui perd plus de la moitié de son volume d'un coup n'est pas un entretien. La
+# purge d'opinions, la seule suppression de masse du système, est plafonnée à 30 % d'UNE
+# liste : elle ne peut pas approcher ce seuil.
+_RATIO_RETRECISSEMENT_MAX = 0.5
+
+
+def save_self_memory(data: dict, force: bool = False) -> bool:
+    """Écrit jarvis-self.json de façon atomique. Rend True si l'écriture a eu lieu.
+
+    Deux refus, tous deux nés du même trou (21/08/2026) : `get_self_memory` rendait {} sur
+    erreur de lecture inattendue, et les cinq cycles lire-modifier-écrire enchaînaient
+    aussitôt un `save` — qui persistait alors trois champs par-dessus 83 Ko d'identité,
+    d'opinions, de relations et d'introspection. L'écriture étant atomique, la destruction
+    l'était aussi.
+
+    Le garde vit ICI et pas dans les appelants : c'est le seul passage obligé de toute
+    destruction, et le protéger une fois vaut mieux que cinq fois.
+    """
+    try:
+        charge = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        logger.error("jarvis-self.json non sérialisable (%s) — écriture refusée", exc)
+        return False
+
+    try:
+        taille_actuelle = os.path.getsize(SELF_MEMORY_PATH)
+    except OSError:
+        taille_actuelle = 0
+
+    if taille_actuelle > _TAILLE_VESTIGE and not force:
+        if "identity" not in data:
+            logger.error(
+                "Écriture de jarvis-self.json REFUSÉE : la charge n'a pas d'`identity` "
+                "alors que le fichier en fait %d octets. Signature d'un save consécutif à "
+                "une lecture en échec — l'état sur disque est conservé. Clés reçues : %s",
+                taille_actuelle, sorted(data)[:12],
+            )
+            return False
+        if len(charge) < taille_actuelle * _RATIO_RETRECISSEMENT_MAX:
+            logger.error(
+                "Écriture de jarvis-self.json REFUSÉE : %d octets contre %d sur disque "
+                "(perte de plus de la moitié). Aucun entretien ne rétrécit autant — "
+                "l'état sur disque est conservé.",
+                len(charge), taille_actuelle,
+            )
+            return False
+
     try:
         atomic_json_write(SELF_MEMORY_PATH, data)
+        return True
     except Exception as exc:
+        # Journalisé en ERROR et rendu à l'appelant : une écriture perdue en silence sous
+        # verrou laissait le cycle croire qu'il avait persisté.
         logger.error("Could not save jarvis-self.json: %s", type(exc).__name__)
+        return False
 
 
 # add_self_learning() supprimée le 20/08/2026 : jamais appelée depuis son écriture en

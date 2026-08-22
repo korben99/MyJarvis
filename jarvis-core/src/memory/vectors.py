@@ -154,15 +154,19 @@ def store_memory_vector(user_code: str, entry: dict):
                 {
                     "id": point_id,
                     "vector": vector,
+                    # Accès tolérants : ces trois champs étaient lus en entry[...], donc
+                    # une clé absente levait un KeyError avalé par l'`except Exception` du
+                    # dessous et journalisé « Vector memory store failed » — une erreur de
+                    # schéma rendue indiscernable d'une panne Qdrant.
                     "payload": {
                         "user_code": user_code,
                         "memory_type": "episodic",
                         "importance": importance,
-                        "session_id": entry["session_id"],
+                        "session_id": entry.get("session_id", ""),
                         "text": text,
-                        "timestamp": entry["timestamp"],
+                        "timestamp": entry.get("timestamp") or time.time(),
                         "topics": entry.get("topics", []),
-                        "mood": entry["mood"],
+                        "mood": entry.get("mood", "neutral"),
                         "novelty": novelty,
                     },
                 }
@@ -383,6 +387,9 @@ def get_autobiographical_facts(
         return []
 
 
+_SCOPES_CONNUS = frozenset({"auto", "episodic", "autobiographical", "profile"})
+
+
 def _build_memory_filter(user_code: str, scope: str) -> dict:
     """Build Qdrant query_filter for a memory search by scope."""
     user_clause = {"key": "user_code", "match": {"value": user_code}}
@@ -390,6 +397,12 @@ def _build_memory_filter(user_code: str, scope: str) -> dict:
         return {
             "must": [user_clause, {"key": "memory_type", "match": {"value": scope}}]
         }
+    if scope not in _SCOPES_CONNUS:
+        # Tout ce qui n'était pas reconnu retombait silencieusement sur « auto » : une
+        # faute de frappe ÉLARGISSAIT la recherche au lieu de la signaler.
+        logger.warning(
+            "search_memory: scope inconnu %r — recherche élargie aux deux couches", scope
+        )
     # "auto" — both layers; must_not absent types from slipping in
     return {
         "must": [
@@ -430,6 +443,13 @@ def search_memory(
         now = time.time()
         # Fetch once — avoids one Redis round-trip per result
         interest_weights = get_interest_weights(user_code)
+        # Motifs compilés UNE fois par appel. Ils l'étaient à chaque couple (terme,
+        # résultat) : sur `limit * 3` candidats et un hash d'intérêts qui grandit, la
+        # compilation dominait le coût de ce bloc — sur le chemin chaud du chat.
+        interest_patterns = [
+            (re.compile(r"(?<!\w)" + re.escape(term.lower()) + r"(?!\w)"), weight)
+            for term, weight in interest_weights.items()
+        ]
 
         for r in results:
             # Clamp to [0, 1]: the collection uses Distance.DOT so scores can exceed 1.0
@@ -463,17 +483,10 @@ def search_memory(
             # Interest-weight boost: user-declared topics nudge ranking gently.
             # Cap at 0.08 so a strong semantic match (Δ≥0.08) is never overridden.
             # weight 1.0 = neutral (no boost); weight 3.0 → +0.08 (max).
-            if interest_weights:
+            if interest_patterns:
                 text_lower = payload.get("text", "").lower()
                 best_weight = max(
-                    (
-                        w
-                        for term, w in interest_weights.items()
-                        if re.search(
-                            r"(?<!\w)" + re.escape(term.lower()) + r"(?!\w)",
-                            text_lower,
-                        )
-                    ),
+                    (w for motif, w in interest_patterns if motif.search(text_lower)),
                     default=1.0,
                 )
                 interest_boost = min(0.08, max(0.0, (best_weight - 1.0) * 0.04))
@@ -505,6 +518,11 @@ def search_memory(
         _REINFORCE_SIM_THRESHOLD = 0.82
         _reinforce_cap = MEMORY_DECAY_DURABLE_MIN - 0.05
         try:
+            # Un lot par valeur d'importance, et UN SEUL thread pour tout écrire. La
+            # version précédente démarrait un threading.Thread brut PAR point renforcé,
+            # sans pool ni join, à chaque recherche mémoire d'un tour de conversation —
+            # jusqu'à `limit` threads créés et abandonnés sur le chemin chaud du chat.
+            par_importance: dict[float, list] = {}
             for m in top:
                 if m["_mem_type"] != "autobiographical":
                     continue
@@ -515,15 +533,21 @@ def search_memory(
                 old_imp = m["_importance"]
                 new_imp = min(round(old_imp + 0.05, 4), _reinforce_cap)
                 if new_imp > old_imp:
-                    Thread(
-                        target=qdrant.set_payload,
-                        kwargs={
-                            "collection_name": QDRANT_MEMORY_COLLECTION,
-                            "payload": {"importance": new_imp},
-                            "points": [m["_id"]],
-                        },
-                        daemon=True,
-                    ).start()
+                    par_importance.setdefault(new_imp, []).append(m["_id"])
+
+            if par_importance:
+                def _renforcer(lots: dict) -> None:
+                    for imp, ids in lots.items():
+                        try:
+                            qdrant.set_payload(
+                                collection_name=QDRANT_MEMORY_COLLECTION,
+                                payload={"importance": imp},
+                                points=ids,
+                            )
+                        except Exception as exc:
+                            logger.warning("Renforcement mémoire en échec : %s", exc)
+
+                Thread(target=_renforcer, args=(par_importance,), daemon=True).start()
         except Exception as _e:
             logger.warning("Memory reinforcement failed (non-blocking): %s", _e)
 

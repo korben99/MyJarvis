@@ -469,7 +469,14 @@ AGENT_READONLY_ROOTS = tuple(
 )
 # ── Autocoding — prompt self-modification ─────────────────────────────────
 # Number of times a knowledge gap must be flagged before a prompt-refine is triggered
-REFINE_PROMPT_THRESHOLD = int(os.getenv("REFINE_PROMPT_THRESHOLD", "3"))
+# REFINE_PROMPT_THRESHOLD supprimé le 21/08/2026. Il exprimait « ne proposer une
+# amélioration de prompt que si la lacune revient au moins 3 fois », mais aucun code ne le
+# lisait — et le compteur qu'il aurait dû lire ne pouvait pas mesurer une récurrence : le
+# slug de sujet est tronqué à 40 caractères, sans rapprochement sémantique, donc deux
+# formulations du même problème comptaient séparément. refine_prompt est désormais borné en
+# DÉBIT (une proposition en vol, 30 j de sommeil par sujet tranché) plutôt qu'en récurrence,
+# parce que l'approbation humaine est déjà le filtre de pertinence : le garde n'a qu'à
+# éviter de noyer la personne qui relit.
 # Stores prompt_proposals.json + prompt_overrides.json (inside the /app/data volume)
 PROMPT_DATA_DIR = os.path.join(os.path.dirname(SELF_MEMORY_PATH), "prompts")
 
@@ -491,7 +498,36 @@ CHAT_LOG_TTL = (
 
 # ── Memory thresholds ─────────────────────────────────────────────────────
 IMPORTANCE_THRESHOLD = 0.35
-RECALL_MEMORY_SIMILARITY_THRESHOLD = 0.7
+
+# Similarité minimale pour qu'un souvenir soit seulement CANDIDAT au rappel (search_memory).
+# Passé de 0.7 à 0.45 le 21/08/2026. 0.7 datait du 21/03 et n'avait jamais été mesuré : il
+# rendait la recherche vectorielle quasi inerte.
+#
+# Calibré sur 183 paires étiquetées tirées du convlog réel — le message d'un échange face au
+# résumé produit par CE MÊME échange (positif), et face aux résumés de tous les autres
+# (négatif, n=33306) :
+#
+#     positifs   médiane 0.532   p10 0.247   p90 0.749
+#     négatifs   médiane 0.109   p10 -0.018  p90 0.271
+#
+#     seuil   rappel   bruit
+#      0.70    18.6 %   0.02 %      <- ancien réglage
+#      0.55    47.5 %   0.26 %
+#      0.45    62.8 %   1.00 %      <- retenu
+#      0.40    67.8 %   2.07 %
+#
+# Les deux distributions sont largement séparées ; le coût du rappel supplémentaire est
+# donc faible. En dessous de 0.45 on paie 1 point de bruit pour 2 à 3 points de rappel, et
+# le gain s'aplatit. Ordre de grandeur cohérent avec OPINIONS_EMBED_THRESHOLD (0.40),
+# calibré le même jour sur le même modèle d'embedding ; on reste un cran plus strict ici
+# parce qu'un souvenir est injecté comme un FAIT sur l'utilisateur, là où une opinion ne
+# porte qu'un ton.
+#
+# Ce seuil ne gouverne que l'ADMISSION. Le classement (similarité 0.50 + importance 0.30 +
+# récence 0.20, puis top-N) reste inchangé et écarte les candidats faibles.
+RECALL_MEMORY_SIMILARITY_THRESHOLD = float(
+    os.getenv("RECALL_MEMORY_SIMILARITY_THRESHOLD", "0.45")
+)
 AUTOBIO_IMPORTANCE_THRESHOLD = 0.45
 NOVELTY_THRESHOLD = 0.25
 PROJECT_THRESHOLD = 0.6
@@ -520,10 +556,25 @@ AUTOBIO_DEDUP_THRESHOLD = float(os.getenv("AUTOBIO_DEDUP_THRESHOLD", "0.82"))
 # DECAY_THRESHOLD     : en dessous, le souvenir est supprimé de Qdrant.
 # DECAY_DURABLE_MIN   : importance initiale >= cette valeur → exempt de décroissance.
 # CONSOLIDATION_IMPORTANCE : score assigné aux milestones issus de la consolidation mensuelle.
-#                            Doit être == DECAY_DURABLE_MIN pour que ces souvenirs soient permanents.
+#
+# DECAY_DURABLE_MIN est passé de 1.0 à 0.85 le 21/08/2026, parce qu'à 1.0 l'exemption était
+# INATTEIGNABLE pour tout ce que Jarvis apprend des conversations :
+#   • la revue nocturne borne l'importance de ses faits durables à [0.5, 0.9]
+#     (self/nightly.py) — donc jamais 1.0, donc jamais exempt ;
+#   • le renforcement au rappel plafonne à DURABLE_MIN - 0.05 (memory/vectors.py),
+#     délibérément SOUS la ligne — donc aucun rappel, si fréquent soit-il, ne pouvait
+#     rendre un souvenir permanent ;
+#   • seule la consolidation mensuelle écrivait à 1.0, exactement sur la ligne.
+# Le seul souvenir immortel était donc le résumé de lot produit par la machine, et les
+# faits que le modèle avait jugés durables mouraient tous. Mesuré sur les 156 points de la
+# collection : 24 immortels (les lots compressés), 132 mortels, dont 80 déjà sous 0,31.
+#
+# À 0.85 : un fait que la revue nocturne a jugé « significatif » (0.85–0.9) devient
+# permanent, ce qui est exactement ce que la docstring promettait. En dessous, il décroît.
+# Le plafond de renforcement devient 0.80 : le rappel renforce, il n'affranchit pas.
 MEMORY_DECAY_FACTOR = float(os.getenv("MEMORY_DECAY_FACTOR", "0.85"))
 MEMORY_DECAY_THRESHOLD = float(os.getenv("MEMORY_DECAY_THRESHOLD", "0.15"))
-MEMORY_DECAY_DURABLE_MIN = float(os.getenv("MEMORY_DECAY_DURABLE_MIN", "1.0"))
+MEMORY_DECAY_DURABLE_MIN = float(os.getenv("MEMORY_DECAY_DURABLE_MIN", "0.85"))
 MEMORY_CONSOLIDATION_IMPORTANCE = float(
     os.getenv("MEMORY_CONSOLIDATION_IMPORTANCE", "1.0")
 )
