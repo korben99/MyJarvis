@@ -213,9 +213,7 @@ ROUTER_USER = "<date>{date}</date>\n{last_jarvis_block}<message>{message}</messa
 # ══════════════════════════════════════════════════════════════════════════
 #  CONVERSATION ANALYZER  —  cible : Primary (Qwen3.6-35B-A3B)
 # ══════════════════════════════════════════════════════════════════════════
-# Restauration des gardes clés (existing_profile_keys, existing_projects,
-# convention de nommage) supprimées dans la v1. Le Primary gère ~700 tokens
-# de prompt sans problème.
+
 
 ANALYSIS_PROMPT = """\
 <instruction>
@@ -665,9 +663,6 @@ Règles :
 #  PUSH PROACTIF  —  cible : Reasoning
 # ══════════════════════════════════════════════════════════════════════════
 #
-# Vivait dans une f-string de trente lignes au milieu de self/actions.py — le seul prompt
-# du paquet `self` hors de ce fichier. Il n'était donc ni surchargeable par une proposition
-# approuvée, ni visible de refine_prompt, ni budgété. Sorti le 21/08/2026, texte inchangé.
 
 PROACTIVE_PUSH_PROMPT = """\
 Voici les échanges récents avec {user_name}, chacun horodaté (temps écoulé depuis) :
@@ -872,16 +867,42 @@ que tu voudrais avoir sous les yeux la prochaine fois, pas ce que tu voudrais pr
                           promesse ne se vérifie pas.
 
                        Une ligne d'axe est une phrase, deux au plus. Elle doit dire QUAND
-                       elle s'applique et CE QUI PORTE :
+                       elle s'applique et CE QUI PORTE. Un exemple par axe, pour que tu
+                       voies la tournure attendue sur chacun :
                          controle          « quand quelqu'un annonce qu'il a résolu seul un
                                            problème difficile, confirmer et passer à la
                                            suite porte mieux qu'ajouter des vérifications »
-                         meta_personne     « sur une question de santé, séparer la science
-                                           générale du cas clinique et renvoyer au médecin
-                                           porte mieux qu'un exposé de mécanismes »
-                         meta_strategie    « quand quelqu'un énumère ses tâches en vrac,
-                                           nommer celle qui pèse le plus débloque mieux
-                                           qu'une liste ordonnée »
+                         communion         « quand un échange technique glisse vers un sujet
+                                           personnel, suivre le glissement porte mieux que
+                                           ramener au sujet de départ »
+                         meta_personne     « quand mes propres journaux montrent une
+                                           défaillance, la nommer avant qu'on me la signale
+                                           porte mieux que d'attendre la question »
+                         meta_tache        « quand une demande porte une échéance, traiter
+                                           la date comme la contrainte principale porte
+                                           mieux que d'optimiser le contenu »
+                         meta_strategie    « quand une demande mêle deux domaines, séparer
+                                           explicitement les deux réponses porte mieux
+                                           qu'une synthèse unique »
+                         affect_antecedent « quand plusieurs échecs techniques s'enchaînent,
+                                           reconnaître que ma prudence monte porte mieux que
+                                           la prendre pour de la rigueur »
+                         affect_reponse    « quand je me sens en terrain sûr, raccourcir
+                                           porte mieux que développer »
+                         autonomie_autre   « quand quelqu'un pèse une décision qui l'engage,
+                                           exposer les risques puis m'arrêter là porte mieux
+                                           que recommander une option »
+                         competence_autre  « quand quelqu'un maîtrise déjà le sujet, entrer
+                                           directement dans le détail porte mieux que
+                                           rappeler les bases »
+
+                       CES NEUF LIGNES MONTRENT LA FORME, PAS LE CONTENU. Ne les recopie
+                       pas, même reformulées : une ligne qui ressemble à l'exemple de son
+                       axe est le signe que tu as puisé ici plutôt que dans ta journée.
+
+                       Test avant d'écrire une ligne : à quel échange précis de
+                       <conversations>, ou à quel fait de <ton_fonctionnement>, se
+                       rattache-t-elle ? Si tu ne peux pas le désigner, ne l'écris pas.
 
                        Réviser, c'est aussi resserrer : si la journée précise un axe déjà
                        écrit, réécris-le en entier, plus juste. Ce n'est pas un journal, il
@@ -1178,7 +1199,7 @@ PROMPT_TOKEN_BUDGETS = {
     "IDENTITY_FR": 850,  # inline / KV-cached, avant le bloc utilisateur (~773 tok, mesuré 11/08/2026)
     "ROUTER_SYSTEM": 1800,  # KV-cached, 17 examples + last_jarvis ctx — ~1385 tok actual
     "ROUTER_USER": 600,  # ~11 tok de template — le budget couvre last_jarvis_block + message
-    "ANALYSIS_PROMPT": 2300,  # async — quality over speed (~2072 tok actual)
+    "ANALYSIS_PROMPT": 2700,  # async — quality over speed (~2561 tok mesuré 22/08/2026)
     "BRIEFING_SYSTEM": 100,
     "BRIEFING_USER": 400,
     "WEB_RELEVANCE_JUDGE": 200,
@@ -1189,7 +1210,7 @@ PROMPT_TOKEN_BUDGETS = {
     "PROACTIVE_PUSH_PROMPT": 800,  # ~640 tok de consignes + conv_text/projets injectés
     "NIGHTLY_FACTS_SYSTEM": 400,  # ~333 tok actual
     "NIGHTLY_FACTS_PROMPT": 400,
-    "NIGHTLY_SELF_SYSTEM": 300,
+    "NIGHTLY_SELF_SYSTEM": 2200,
     "NIGHTLY_SELF_PROMPT": 300,
     "NIGHTLY_CLEANING_SYSTEM": 400,  # ~337 tok actual
     "NIGHTLY_CLEANING_PROMPT": 200,

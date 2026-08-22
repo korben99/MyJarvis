@@ -15,9 +15,11 @@ import pytz
 from config import (
     DEFAULT_TEMP,
     MAX_TOKENS_COMPACT,
+    MAX_TOKENS_THINK_MEDIUM,
     REASONING_API_KEY,
     REASONING_API_URL,
     REASONING_MODEL,
+    THINKING_BUDGET_MEDIUM,
     USER_ADMINS,
     USER_CODES,
     USER_EMAILS,
@@ -873,10 +875,11 @@ async def generate_proactive_push(user_code: str) -> str:
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=DEFAULT_TEMP,
-            max_tokens=MAX_TOKENS_COMPACT,
+            max_tokens=MAX_TOKENS_THINK_MEDIUM,
+            thinking_budget=THINKING_BUDGET_MEDIUM,
             json_response=True,
-            no_think=True,
-            timeout=llm_timeout(MAX_TOKENS_COMPACT),
+            no_think=False,
+            timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
         )
         message = extract_llm_json(content).get("message")
     except Exception as exc:

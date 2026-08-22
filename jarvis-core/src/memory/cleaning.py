@@ -15,11 +15,13 @@ from config import (
     MEMORY_DECAY_DURABLE_MIN,
     MEMORY_DECAY_FACTOR,
     MEMORY_DECAY_THRESHOLD,
+    MAX_TOKENS_THINK_MEDIUM,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
     PROFILE_NARRATIVE_TOKENS,
     QDRANT_MEMORY_COLLECTION,
+    THINKING_BUDGET_MEDIUM,
     USER_CODES,
     USERS,
     llm_timeout,
@@ -134,10 +136,11 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
                 api_url=PRIMARY_API_URL,
                 api_key=PRIMARY_API_KEY,
                 temperature=DEFAULT_TEMP,
-                max_tokens=MAX_TOKENS_COMPACT,
+                max_tokens=MAX_TOKENS_THINK_MEDIUM,
+                thinking_budget=THINKING_BUDGET_MEDIUM,
                 json_response=True,
-                no_think=True,
-                timeout=llm_timeout(MAX_TOKENS_COMPACT),
+                no_think=False,
+                timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
             )
 
             parsed = extract_llm_json(raw)

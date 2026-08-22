@@ -15,13 +15,14 @@ import numpy as np
 from config import (
     BRIEFING_TIMEZONE,
     DEFAULT_TEMP,
-    MAX_TOKENS_MEDIUM,
+    MAX_TOKENS_THINK_MEDIUM,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
     REASONING_API_KEY,
     REASONING_API_URL,
     REASONING_MODEL,
+    THINKING_BUDGET_MEDIUM,
     USER_CODES,
     USER_TIMEZONES,
     llm_timeout,
@@ -561,10 +562,11 @@ async def _call_global_reflection_llm(
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=DEFAULT_TEMP,
-            max_tokens=MAX_TOKENS_MEDIUM,
+            max_tokens=MAX_TOKENS_THINK_MEDIUM,
+            thinking_budget=THINKING_BUDGET_MEDIUM,
             json_response=True,
-            no_think=True,
-            timeout=llm_timeout(MAX_TOKENS_MEDIUM),
+            no_think=False,
+            timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
         )
         return extract_llm_json(content)
     except ValueError as exc:
@@ -625,20 +627,21 @@ async def _call_user_reflection_llm(
     ]
     for attempt in range(2):
         try:
-            # Workaround DWQ (Qwen3-30B-A3B-4bit-DWQ-0508) : ce checkpoint sortait du bloc
-            # think prématurément (EOS mid-reasoning, pas de </think>), retournant une
-            # réponse vide. Désactivé depuis la migration vers Qwen3.6 (non-DWQ).
-            # no_think=True,
+            # Le vestige du workaround DWQ (Qwen3-30B-A3B-4bit-DWQ-0508, qui sortait du
+            # bloc think sans émettre </think>) a été retiré le 22/08/2026 : il annonçait
+            # sa propre désactivation depuis la migration vers Qwen3.6 tout en laissant
+            # `no_think=True` en place.
             content = await call_llm_async_bg(
                 messages,
                 model=REASONING_MODEL,
                 api_url=REASONING_API_URL,
                 api_key=REASONING_API_KEY,
                 temperature=DEFAULT_TEMP,
-                max_tokens=MAX_TOKENS_MEDIUM,
+                max_tokens=MAX_TOKENS_THINK_MEDIUM,
+                thinking_budget=THINKING_BUDGET_MEDIUM,
                 json_response=True,
-                no_think=True,
-                timeout=llm_timeout(MAX_TOKENS_MEDIUM),
+                no_think=False,
+                timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
             )
             return extract_llm_json(content)
         except ValueError as exc:

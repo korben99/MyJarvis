@@ -20,10 +20,11 @@ from config import (
     INTROSPECTION_AXES,
     INTROSPECTION_LOG_MAX_ENTRIES,
     MAX_TOKENS_COMPACT,
-    MAX_TOKENS_NO_THINK,
+    MAX_TOKENS_THINK_MEDIUM,
     REASONING_API_KEY,
     REASONING_API_URL,
     REASONING_MODEL,
+    THINKING_BUDGET_MEDIUM,
     USER_CODES,
     USERS,
     llm_timeout,
@@ -123,10 +124,11 @@ async def _nightly_facts_user(
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=DEFAULT_TEMP,
-            max_tokens=MAX_TOKENS_NO_THINK,
+            max_tokens=MAX_TOKENS_THINK_MEDIUM,
+            thinking_budget=THINKING_BUDGET_MEDIUM,
             json_response=True,
-            no_think=True,
-            timeout=llm_timeout(MAX_TOKENS_NO_THINK),
+            no_think=False,
+            timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
         )
         return extract_llm_json(content)
     except Exception as exc:
@@ -224,6 +226,22 @@ async def _nightly_introspection(
     utilisateur jusqu'au 21/08/2026, donc exécuté N fois pour un modèle de soi qui est
     GLOBAL : chaque passage ne voyait qu'un utilisateur et réécrivait par-dessus le
     précédent. Les axes oscillaient entre les points de vue au lieu de se consolider.
+
+    EN MODE RAISONNANT, contrairement aux trois autres appels de la nuit. Ceux-là
+    extraient ou trient — le modèle classe et reformate, il n'a rien à intégrer. Celui-ci
+    doit rapprocher une journée de conversations et un état opérationnel d'une
+    connaissance de soi déjà écrite, puis décider si quelque chose a bougé. C'est
+    exactement la tâche où l'A/B du 19/08/2026 (DOCS/AGENTIC.md) a mesuré que `no_think`
+    ne fait pas gagner de temps et rend le modèle « confiant et faux » : il rédige depuis
+    ses a priori au lieu de ce qu'il vient de lire.
+
+    Ce que ça corrigeait concrètement, le 22/08/2026 : en `no_think`, la révision du
+    20/08 avait réécrit `meta_personne` avec une paraphrase à 76 % de l'exemple qui
+    figurait alors dans le prompt, sur une journée qui ne parlait ni de santé ni de
+    médecin — et avait ainsi effacé une observation juste. Signature d'une génération qui
+    puise dans son contexte de consignes faute d'avoir intégré sa matière. Les exemples du
+    prompt ont été portés à un par axe dans la même passe : trois seulement étaient
+    illustrés, et ce sont les seuls axes qui aient jamais été remplis.
     """
     data = get_self_memory()
     recent_opinions = [
@@ -249,10 +267,11 @@ async def _nightly_introspection(
             api_url=REASONING_API_URL,
             api_key=REASONING_API_KEY,
             temperature=DEFAULT_TEMP,
-            max_tokens=MAX_TOKENS_NO_THINK,
+            max_tokens=MAX_TOKENS_THINK_MEDIUM,
+            thinking_budget=THINKING_BUDGET_MEDIUM,
             json_response=True,
-            no_think=True,
-            timeout=llm_timeout(MAX_TOKENS_NO_THINK),
+            no_think=False,
+            timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
         )
         return extract_llm_json(content)
     except Exception as exc:
