@@ -95,21 +95,42 @@ def _historique(nom: str, jours: int) -> list:
 # Chacun rend (libellé, valeur affichable, alerte|None). Aucun ne lève : une sonde qui
 # plante est une sonde qui ment par omission.
 
-def _compter_par_type(depuis_iso: str) -> dict:
-    """Points Qdrant créés depuis `depuis_iso`, par memory_type."""
+def _compter_par_type(depuis_ts: float) -> dict:
+    """Points Qdrant créés depuis `depuis_ts` (horodatage Unix), par memory_type.
+
+    Comparaison NUMÉRIQUE, et c'est le correctif du 24/08/2026. La version précédente
+    prenait un seuil ISO et faisait `str(payload["timestamp"]) >= depuis_iso`, soit une
+    comparaison LEXICALE entre un flottant Unix rendu en chaîne et une date ISO :
+
+        "1755890820.182871" >= "2026-08-23T07:25:11+00:00"
+
+    Le premier caractère suffit à trancher — '1' < '2' — et tout horodatage Unix commence
+    par 1 jusqu'en mai 2033. La condition était donc fausse pour TOUS les points, tous les
+    jours. Les deux compteurs enregistraient 0 en permanence, et l'alerte « aucune écriture
+    depuis 5 jours » ne pouvait que finir par se déclencher dès que l'historique atteignait
+    cinq entrées — ce qui est arrivé le 24/08, sur une mémoire parfaitement saine.
+
+    On interroge désormais l'index de payload plutôt que de balayer la collection entière :
+    `timestamp` est indexé en `float` depuis le 21/08/2026, donc un `count` filtré suffit.
+    """
     q = get_qdrant()
-    compte, off = {}, None
-    while True:
-        pts, off = q.scroll(collection_name=QDRANT_MEMORY_COLLECTION, limit=1000,
-                            offset=off, with_payload=True, with_vectors=False)
-        for p in pts:
-            pl = p.payload or {}
-            ts = str(pl.get("timestamp") or "")
-            if ts >= depuis_iso:
-                t = pl.get("memory_type", "?")
-                compte[t] = compte.get(t, 0) + 1
-        if off is None:
-            break
+    compte = {}
+    for typ in ("autobiographical", "episodic"):
+        try:
+            compte[typ] = q.count(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                count_filter={
+                    "must": [
+                        {"key": "memory_type", "match": {"value": typ}},
+                        {"key": "timestamp", "range": {"gte": depuis_ts}},
+                    ]
+                },
+                exact=True,
+            ).count
+        except Exception as exc:
+            # Une sonde qui plante ment par omission : on rend le type absent plutôt
+            # qu'un zéro, que l'appelant lirait comme « rien écrit ».
+            print(f"[sonde] comptage {typ} impossible : {exc}", file=sys.stderr)
     return compte
 
 
@@ -120,12 +141,17 @@ def i01_02_ecritures_memoire() -> list:
     plusieurs jours d'affilée alors qu'il y a eu des conversations, la revue nocturne
     n'écrit plus — et personne ne s'en apercevrait autrement.
     """
-    hier = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    hier = (datetime.now(timezone.utc) - timedelta(days=1)).timestamp()
     compte = _compter_par_type(hier)
     out = []
     for typ, libelle in (("autobiographical", "Faits autobiographiques écrits"),
                          ("episodic", "Résumés épisodiques créés")):
-        n = compte.get(typ, 0)
+        if typ not in compte:
+            # Comptage indisponible : on n'enregistre RIEN. Ranger un zéro ferait croire
+            # à une absence d'écriture et finirait par déclencher l'alerte de silence.
+            out.append((libelle, "comptage indisponible", None))
+            continue
+        n = compte[typ]
         _enregistrer(typ, n)
         recents = _historique(typ, int(AUTOBIO_SILENCE_J))
         muet = len(recents) >= AUTOBIO_SILENCE_J and not any(recents)
@@ -155,6 +181,24 @@ def i03_profils() -> list:
     return [("Champs de profil", f"{detail} (δ={ecart})", alerte)]
 
 
+def _echanges_recents(jours: int) -> int:
+    """Nombre d'échanges journalisés sur la fenêtre, tous utilisateurs confondus.
+
+    Sert à distinguer « rien ne bouge parce que c'est cassé » de « rien ne bouge parce
+    qu'il ne s'est rien passé ». Plusieurs indicateurs n'ont de sens que rapportés à
+    l'activité réelle.
+    """
+    r = get_redis()
+    depuis = (datetime.now(timezone.utc) - timedelta(days=jours)).timestamp()
+    total = 0
+    for code in USER_CODES:
+        try:
+            total += r.zcount(f"convlog:{code}", depuis, "+inf")
+        except Exception:
+            pass
+    return total
+
+
 def i04_05_emotion() -> list:
     """Dimensions émotionnelles vivantes, et mobilité de chacune.
 
@@ -178,6 +222,13 @@ def i04_05_emotion() -> list:
 
     # Mobilité : échantillon quotidien, donc on ne mesure pas l'amplitude intra-journée
     # mais l'immobilité sur plusieurs jours. Indicateur honnête plutôt qu'amplitude fausse.
+    #
+    # Conditionné à l'EXISTENCE D'ÉCHANGES sur la fenêtre, depuis le 24/08/2026. La
+    # décroissance émotionnelle tourne en mode "exchange" (emotional_state._DECAY_MODE) :
+    # elle est indexée sur les conversations, pas sur l'horloge, et `get_state()` ne fait
+    # délibérément pas vieillir l'état à la lecture. Un état figé pendant cinq jours sans
+    # la moindre conversation est donc le comportement ATTENDU, pas une panne — et
+    # l'alerter revenait à reprocher au thermomètre de ne pas bouger dans une pièce vide.
     hist = _historique("emotion", int(CONFIANCE_FIGEE_J))
     figees = []
     if len(hist) >= CONFIANCE_FIGEE_J:
@@ -185,9 +236,17 @@ def i04_05_emotion() -> list:
             suite = [h.get(k) for h in hist if isinstance(h, dict)]
             if len(set(suite)) == 1:
                 figees.append(k)
-    out.append(("Mobilité émotionnelle",
-                f"figées depuis {int(CONFIANCE_FIGEE_J)} j : {', '.join(figees) or 'aucune'}",
-                f"{', '.join(figees)} n'a pas bougé" if figees else None))
+
+    echanges = _echanges_recents(int(CONFIANCE_FIGEE_J))
+    if figees and not echanges:
+        valeur = (f"figées depuis {int(CONFIANCE_FIGEE_J)} j — aucun échange sur la "
+                  f"période, immobilité normale")
+        alerte_mob = None
+    else:
+        valeur = f"figées depuis {int(CONFIANCE_FIGEE_J)} j : {', '.join(figees) or 'aucune'}"
+        alerte_mob = (f"{', '.join(figees)} n'a pas bougé malgré {echanges} échange(s)"
+                      if figees else None)
+    out.append(("Mobilité émotionnelle", valeur, alerte_mob))
     return out
 
 

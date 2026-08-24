@@ -284,10 +284,44 @@ async def _nightly_introspection(
 
 
 async def _nightly_cleaning_user(
-    user_code: str, user_name: str, user_insights: list[str], review_date: str
+    user_code: str, user_name: str, user_insights: list[str], review_date: str,
+    ecrits_ce_soir: set[str] | None = None,
 ) -> dict | None:
-    """Call 3 — memory curator: archive outdated facts, delete strict duplicates."""
+    """Call 3 — memory curator: archive outdated facts, delete strict duplicates.
+
+    `ecrits_ce_soir` : les textes que l'appel 1 vient d'écrire en autobiographie. Ils sont
+    RETIRÉS de la liste soumise à la curation, et c'est le correctif du 24/08/2026.
+
+    Sans ça, un fait fraîchement écrit arrivait des DEUX côtés du prompt — dans les
+    souvenirs existants (get_autobiographical_facts le remonte, il vient d'être stocké) et
+    dans `new_user_insights`. Le modèle constatait alors, à juste titre, qu'il était
+    identique à lui-même, et le classait en doublon à supprimer. Trace du 22/08/2026, cinq
+    secondes d'écart :
+
+        23:01:04  Autobiographical memory stored: « depuis août 2026, il privilégie la
+                  sécurité en externalisant… »
+        23:01:09  Autobio retracted 1 point(s) for « depuis août 2026, il privilégie la
+                  sécurité en externalisant »
+        23:01:09  Nightly cleaning — delete:1 — « Le souvenir n°48 est une copie
+                  quasi-identique (100 %) du premier fait dans nouveaux insights »
+
+    Relevé sur le journal complet : 12 faits durables détruits ainsi depuis le 14/06/2026,
+    soit la grande majorité des suppressions autobiographiques jamais enregistrées. La
+    revue effaçait presque chaque nuit ce qu'elle venait d'apprendre.
+
+    Les nouveaux insights restent dans le prompt comme CONTEXTE — c'était leur rôle : dire
+    au modèle « voici ce qui vient d'arriver, regarde si de VIEUX faits deviennent
+    redondants ». Ils ne doivent simplement pas être eux-mêmes candidats.
+    """
     autobio_facts = await asyncio.to_thread(get_autobiographical_facts, user_code, 40)
+    if ecrits_ce_soir:
+        avant = len(autobio_facts)
+        autobio_facts = [f for f in autobio_facts if f not in ecrits_ce_soir]
+        if avant != len(autobio_facts):
+            logger.info(
+                "Nightly cleaning %s : %d fait(s) écrit(s) ce soir retiré(s) des candidats",
+                user_code, avant - len(autobio_facts),
+            )
     if not autobio_facts:
         logger.info("Nightly cleaning skipped for %s — no autobio facts yet", user_code)
         return None
@@ -486,6 +520,7 @@ async def _revue_nocturne() -> None:
             user_code, user_name, conversations, review_date
         )
         user_insights: list[str] = []
+        ecrits_ce_soir: set[str] = set()
 
         if facts:
             durables = [i for i in facts.get("insights_durables", []) if i]
@@ -502,6 +537,10 @@ async def _revue_nocturne() -> None:
                     importance = 0.7
                 if insight:
                     store_autobiographical_event(user_code, insight, importance=importance)
+                    # Mémorisé pour être RETIRÉ des candidats de la curation : sans ça
+                    # elle recevait le fait des deux côtés et le supprimait comme doublon
+                    # de lui-même. Voir _nightly_cleaning_user.
+                    ecrits_ce_soir.add(insight)
 
             # Store tomorrow's suggestions in Redis (24h)
             suggestions = facts.get("tomorrow_suggestions", [])
@@ -575,7 +614,7 @@ async def _revue_nocturne() -> None:
 
         # ── Call 3: memory cleaning (Qdrant autobio) ─────────────────────
         cleaning = await _nightly_cleaning_user(
-            user_code, user_name, user_insights, review_date
+            user_code, user_name, user_insights, review_date, ecrits_ce_soir
         )
         if cleaning:
             # Hard cap: trust the prompt constraint but enforce it in code too.

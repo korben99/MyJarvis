@@ -1,5 +1,3 @@
-# AGENTS.md — Jarvis
-
 Assistant personnel : API FastAPI (`jarvis-core/src/`), LLM local MLX sur Mac Mini M4 Pro,
 Redis + Qdrant en conteneurs, clients Open WebUI et iOS.
 
