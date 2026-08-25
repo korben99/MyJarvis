@@ -144,7 +144,7 @@ cat <<EOF
        source venv/bin/activate && python scripts/download_models.py
   4. Start Jarvis:
        jarvis-start          # via launchd (open a new terminal first, or: source $SHELL_RC)
-       ./start.sh            # or run it directly in the foreground
+       bash scripts/jarvis-entrypoint.sh   # or run it directly in the foreground
   5. Verify:
        curl http://localhost:8000/status
 

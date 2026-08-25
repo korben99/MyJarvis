@@ -4,6 +4,12 @@
 # PAS de & et un `exec uvicorn` final : launchd doit rester parent direct du process pour
 # que KeepAlive fonctionne et que son SIGTERM d'arrêt atteigne uvicorn (shutdown gracieux).
 
+# Racine déduite de la position du script, jamais en dur : le plist est rendu depuis un
+# template paramétré (__JARVIS_HOME__), donc launchd peut nous lancer depuis n'importe quel
+# chemin d'installation. Un /opt/jarvis en dur ici démarrait l'infra et uvicorn d'une AUTRE
+# installation que celle que le plist désigne.
+JARVIS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 # Garde : si le port 8000 est déjà occupé, un Jarvis tourne déjà.
 # On sort proprement (exit 0) pour éviter la boucle KeepAlive.
 if lsof -iTCP:8000 -sTCP:LISTEN -t >/dev/null 2>&1; then
@@ -18,12 +24,12 @@ for i in $(seq 1 30); do
 done
 
 # Démarrer l'infra Docker
-cd /opt/jarvis
+cd "$JARVIS_HOME"
 docker compose up -d
 
 # Démarrer uvicorn (exec = launchd devient parent direct → KeepAlive fonctionne)
-source /opt/jarvis/venv/bin/activate
-cd /opt/jarvis/jarvis-core/src
+source "$JARVIS_HOME/venv/bin/activate"
+cd "$JARVIS_HOME/jarvis-core/src"
 
 export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS=1
