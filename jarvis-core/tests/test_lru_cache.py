@@ -1,5 +1,9 @@
 """
-test_lru_cache.py — Valide LRUPromptCache dans llm_local.py
+test_lru_cache.py — banc de mesure du LRUPromptCache de `llm/local.py`
+
+**Ce n'est pas un test unitaire, c'est un BANC.** Il charge le modèle réel (~20 Go),
+génère six tours, et exige que Jarvis soit arrêté pour ne pas se disputer le GPU. Il est
+donc ignoré par défaut : `pytest -m benchmark` pour le lancer délibérément.
 
 Simule une conversation de 6 échanges et mesure à chaque tour :
   • tokens du prompt déjà cachés (prefix hit) vs tokens restants à traiter
@@ -27,7 +31,10 @@ import subprocess
 import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "jarvis-core", "src"))
+# Le chemin d'import est posé par conftest.py. L'insertion qui vivait ici pointait sur
+# jarvis-core/jarvis-core/src — inexistant — et ce fichier n'a donc pas pu tourner depuis
+# le découpage de llm_local.py en llm/local.py.
+import pytest
 
 # Env vars AVANT import du module (ils sont lus au niveau module)
 os.environ.setdefault("LLM_LOCAL", "yes")
@@ -40,24 +47,29 @@ os.environ.setdefault("USE_THINKING_BUDGET_PROCESSOR", "yes")
 
 
 # ── Garde GPU ─────────────────────────────────────────────────────────────
-def _check_jarvis_not_running() -> None:
+def _jarvis_running() -> bool:
     # Pattern précis (uvicorn main:app) — "pgrep -f jarvis" matchait n'importe quel
-    # process dont la ligne de commande contient /opt/jarvis (shells, éditeurs…).
+    # process dont la ligne de commande contient le dépôt (shells, éditeurs…).
     try:
         out = subprocess.check_output(["pgrep", "-f", "uvicorn main:app"], text=True)
-        pids = [p for p in out.strip().splitlines() if p != str(os.getpid())]
-        if pids:
-            print(f"ERREUR : Jarvis tourne (pids {pids}).")
-            print("Arrête-le avant : jarvis-stop")
-            sys.exit(1)
+        return [p for p in out.strip().splitlines() if p != str(os.getpid())] != []
     except subprocess.CalledProcessError:
-        pass
+        return False
 
 
-_check_jarvis_not_running()
+# `sys.exit(1)` vivait ici, à l'import. Il ne signalait pas l'indisponibilité du banc : il
+# interrompait la COLLECTE pytest de tout le dépôt, suite complète comprise. Un skip dit la
+# même chose sans emporter les autres tests avec lui.
+pytestmark = [
+    pytest.mark.benchmark,
+    pytest.mark.skipif(
+        _jarvis_running(),
+        reason="Jarvis tourne — le banc a besoin du GPU seul (jarvis-stop)",
+    ),
+]
 
-import llm_local as lru_mod  # noqa: E402
-from llm_local import (  # noqa: E402
+import llm.local as lru_mod  # noqa: E402
+from llm.local import (  # noqa: E402
     LRU_KV_MAX_BYTES,
     LRU_KV_MAX_SIZE,
     _generate_sync,
@@ -73,7 +85,7 @@ from config import PRIMARY_MODEL, REASONING_MODEL, ROUTER_MODEL, THINKING_BUDGET
 # ── Conversation test ──────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
-    "Tu es Jarvis, assistant IA personnel de Sébastien. "
+    "Tu es Jarvis, assistant IA personnel de l’utilisateur. "
     "Tu réponds en français, de manière concise et précise. "
     "Tu mémorises le contexte de la conversation et fais référence aux échanges précédents."
 )

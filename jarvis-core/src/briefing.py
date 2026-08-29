@@ -320,7 +320,7 @@ async def _fetch_news(interests: list[str]) -> list[dict]:
             return []
 
     # Gabarit fixe. Une reformulation LLM a été essayée puis abandonnée le
-    # 17/08/2026 : à partir d'un intérêt nu ("Horlogerie"), le modèle n'a aucun
+    # à partir d'un intérêt nu ("Horlogerie"), le modèle n'a aucun
     # contexte à exploiter et se contente de rembourrer avec des synonymes de
     # domaine ("horlogerie horloge horloger"). Sans injecter beaucoup de contexte
     # utilisateur, la reformulation n'apporte rien qu'un gabarit ne donne déjà.

@@ -1,0 +1,42 @@
+[
+  {
+    "id": 1,
+    "firstname": "Alice",
+    "name": "Example",
+    "code": "ALICE1",
+    "admin": true,
+    "mail": "alice@example.com",
+    "city": "Paris",
+    "timezone": "Europe/Paris",
+    "language": "fr",
+    "briefing_enabled": true,
+    "trading": true,
+    "google": false
+  },
+  {
+    "id": 2,
+    "firstname": "Bob",
+    "name": "Example",
+    "code": "BOB2",
+    "mail": "bob@example.com",
+    "city": "Paris",
+    "timezone": "Europe/Paris",
+    "language": "fr",
+    "briefing_enabled": true,
+    "trading": false,
+    "google": false
+  },
+  {
+    "id": 3,
+    "firstname": "Test",
+    "name": "Account",
+    "code": "TEST",
+    "mail": "",
+    "city": "Paris",
+    "timezone": "Europe/Paris",
+    "language": "fr",
+    "briefing_enabled": false,
+    "trading": false,
+    "google": false
+  }
+]

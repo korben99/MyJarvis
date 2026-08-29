@@ -137,7 +137,7 @@ async def lifespan(app: FastAPI):
     # point sur 281, et `scroll(order_by="timestamp")` rendait une liste VIDE sans lever
     # d'erreur. C'est ce que fait `_consolidate_user_memories` — la consolidation
     # mensuelle épisodique → autobiographique n'a donc jamais rien consolidé.
-    # Constaté et corrigé le 21/08/2026. La création est idempotente.
+    # Constaté et corrigé. La création est idempotente.
     for _champ, _schema in (
         ("user_code", "keyword"),
         ("memory_type", "keyword"),

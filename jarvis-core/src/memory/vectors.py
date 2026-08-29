@@ -200,7 +200,7 @@ def store_autobiographical_event(
     when the write failed.
 
     Ce retour existe pour `_consolidate_user_memories`, qui SUPPRIME les points épisodiques
-    après avoir tenté d'écrire leurs résumés. Sans lui (avant le 21/08/2026), l'appelant ne
+    après avoir tenté d'écrire leurs résumés. Sans lui (auparavant), l'appelant ne
     pouvait pas distinguer « écrit » de « écarté par la dédup » : des faits tous
     silencieusement dédupliqués faisaient quand même détruire le lot d'origine. Les
     appelants qui ignorent la valeur de retour restent valides.

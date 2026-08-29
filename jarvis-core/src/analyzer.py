@@ -61,7 +61,7 @@ logger = get_logger("jarvis-analyzer")
 #
 # Le budget global seul ne suffit pas : au plafond normal de 800 car./message, 2000 car.
 # ne tiennent que deux tours — et le référent recherché est presque toujours plus haut.
-# Constaté sur le cas du 07/08/2026 : « Je dois préparer un Webinar Fortinet » était le
+# Constaté sur le cas : « Je dois préparer un Webinar Fortinet » était le
 # 1er des 4 tours antérieurs, donc le premier évincé, ce qui annulait tout l'intérêt.
 #
 # On coupe donc les tours d'historique bien plus court : pour lever un « ça », il faut
@@ -149,11 +149,11 @@ def _resume_depuis_extraction(result: dict) -> str:
     schéma. Le résumé dérivé ne peut donc rien inventer — il ne fait que rendre lisible ce
     qui était déjà structuré.
 
-    Pourquoi il faut le dériver plutôt que redemander : mesuré le 21/08/2026, le modèle
+    Pourquoi il faut le dériver plutôt que redemander : mesuré, le modèle
     renvoie régulièrement des `project_updates` AVEC `memory_summary: null`, ce qui est
     contradictoire selon la règle du prompt lui-même (null est réservé à l'échange « sans
     aucun contexte utilisateur — pas de projet, pas de décision »). Cas relevé le
-    17/08/2026 à 18 h 07 : quatre événements projet extraits — webinar fortinet ot clos,
+ à 18 h 07 : quatre événements projet extraits — webinar fortinet ot clos,
     pose store giroussens close, renouvellement vehicules et abattre chene créés — et
     résumé nul. La cascade est mécanique et silencieuse : `importance` est forcée à 0 par
     la garde `_has_summary`, puis `store_memory_vector` est sauté parce que sa condition

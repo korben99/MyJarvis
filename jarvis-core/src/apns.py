@@ -11,7 +11,7 @@ APNs JWT flow:
 Configuration (.env):
   APNS_KEY_ID      — 10-char key ID shown in Apple Developer → Keys
   APNS_TEAM_ID     — 10-char team ID (top-right of developer.apple.com)
-  APNS_BUNDLE_ID   — com.sebastienviou.JarvisApp
+  APNS_BUNDLE_ID   — bundle ID of the iOS app (e.g. com.example.JarvisApp)
   APNS_KEY_PATH    — absolute path to the downloaded AuthKey_XXXXXXXXXX.p8
   APNS_ENV         — "production" (TestFlight/App Store) or "sandbox" (Xcode direct)
 """

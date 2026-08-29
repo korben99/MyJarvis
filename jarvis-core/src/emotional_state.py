@@ -58,7 +58,7 @@ _DECAY_PER_HOUR: dict[str, float] = {
 
 # Minimum absolute value to be considered non-neutral (injected in prompt)
 #
-# Abaissé de 0.25 à 0.15 le 20/08/2026, après avoir posé l'arithmétique qui manquait.
+# Abaissé de 0.25 à 0.15, après avoir posé l'arithmétique qui manquait.
 # Une dimension n'est visible que tant que |valeur| ≥ seuil ; elle décroît de
 # _DECAY_PER_HOUR par heure, et l'analyzer ne la repousse que toutes les 60 minutes.
 # La durée de visibilité d'une poussée unique vaut donc :
@@ -96,7 +96,7 @@ _MOOD_DELTAS: dict[str, dict[str, float]] = {
     # +0.20 et non +0.10 : `energie` décroît de 0.15/h, donc une poussée de 0.10 répétée
     # toutes les 60 min (cadence de l'analyzer) est reprise en entier avant la suivante —
     # elle ne peut mathématiquement JAMAIS s'accumuler ni franchir le seuil. Or `focused`
-    # est l'humeur la plus fréquente : 51 des 129 analyses au 20/08/2026, soit la
+    # est l'humeur la plus fréquente : 51 des 129 analyses, soit la
     # dimension la plus sollicitée du système, et la seule à ne rien pouvoir produire.
     #
     # Deuxième règle, complémentaire de celle du seuil : la poussée d'une humeur

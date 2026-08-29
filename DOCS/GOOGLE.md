@@ -1,78 +1,82 @@
-# Jarvis — Google OAuth Setup
+# Google OAuth setup
 
-Ce guide explique comment connecter un compte Google (Gmail + Agenda) à Jarvis.
-Chaque utilisateur effectue la procédure **une seule fois**.
-
----
-
-## Codes utilisateur
-
-| Utilisateur | Code     | Email                            |
-|-------------|----------|----------------------------------|
-| Sébastien   | KORBEN99 | sebastien.viou@gmail.com         |
-| Hélène      | AQWZSX   | helene.viou@gmail.com            |
-| Mathilde    | ZSXEDC   | mathilde.rachelle.viou@gmail.com |
+This guide connects a Google account (Gmail + Calendar) to Jarvis. Each user goes through
+the procedure **once**.
 
 ---
 
-## Prérequis
+## User codes
 
-- Être physiquement devant la machine qui héberge Jarvis (le script ouvre un navigateur en local)
-- `google-auth-oauthlib` installé sur le host :
+The codes below are the placeholders used throughout this documentation. Yours are whatever
+you put in `users_list.json`.
+
+| User  | Code   | Email             |
+|-------|--------|-------------------|
+| Alice | ALICE1 | alice@example.com |
+| Bob   | BOB2   | bob@example.com   |
+| Carol | CAROL1 | carol@example.com |
+
+---
+
+## Prerequisites
+
+- Be physically at the machine hosting Jarvis — the script opens a local browser
+- `google-auth-oauthlib` installed on the host:
   ```bash
   pip install google-auth-oauthlib
   ```
-- Le fichier `client_secret.json` présent dans `/opt/jarvis/scripts/`
-  (téléchargeable depuis Google Cloud Console → APIs & Services → Credentials → ton OAuth Client ID → "Download JSON")
+- `client_secret.json` present in `/opt/jarvis/scripts/`, downloaded from Google Cloud
+  Console → APIs & Services → Credentials → your OAuth Client ID → *Download JSON*
 
 ---
 
-## Procédure
+## Procedure
 
-### Étape 1 — Lancer le script
+### Step 1 — Run the script
 
-Sur le **host** , exécute :
+On the **host**:
 
 ```bash
-python3 /opt/jarvis/scripts/generate_google_token.py --user AQWZSX
+python3 /opt/jarvis/scripts/generate_google_token.py --user BOB2
 ```
 
-Remplace `AQWZSX` par le code de l'utilisatrice concernée.
+Replace `BOB2` with the code of the user concerned.
 
-### Étape 2 — Autoriser l'accès dans le navigateur
+### Step 2 — Authorise in the browser
 
-1. Un navigateur s'ouvre automatiquement sur la page Google.
-2. **Connecte-toi avec le compte Google de l'utilisatrice** (helene.viou@gmail.com ou mathilde.rachelle.viou@gmail.com).
-3. Accepte toutes les permissions demandées (lecture Gmail, envoi Gmail, Agenda).
-4. La fenêtre se ferme toute seule. Le terminal affiche le token.
+1. A browser opens on the Google consent page.
+2. **Sign in with that user's Google account** (`bob@example.com`).
+3. Accept every requested permission (Gmail read, Gmail send, Calendar).
+4. The window closes on its own. The terminal prints the token.
 
-### Étape 3 — Copier le token dans `.env`
+### Step 3 — Copy the token into `.env`
 
-Le script affiche quelque chose comme :
+The script prints something like:
 
 ```
 SUCCESS — Add to /opt/jarvis/.env:
 ========================================
-GOOGLE_REFRESH_TOKEN_AQWZSX=1//04xXXXXXXXXXXXXXXXXXXXXX...
+GOOGLE_REFRESH_TOKEN_BOB2=1//04xXXXXXXXXXXXXXXXXXXXXX...
 ```
 
-Ouvre `/opt/jarvis/.env` et décommente / remplis la ligne correspondante :
+Open `/opt/jarvis/.env` and uncomment / fill in the matching line:
 
 ```bash
-# Avant :
-# GOOGLE_REFRESH_TOKEN_AQWZSX=<token for Hélène — generated via GOOGLE.md procedure>
+# Before:
+# GOOGLE_REFRESH_TOKEN_BOB2=<token for Bob — generated via GOOGLE.md procedure>
 
-# Après :
-GOOGLE_REFRESH_TOKEN_AQWZSX=1//04xXXXXXXXXXXXXXXXXXXXXX...
+# After:
+GOOGLE_REFRESH_TOKEN_BOB2=1//04xXXXXXXXXXXXXXXXXXXXXX...
 ```
 
-### Étape 4 — Activer dans `users_list.json`
+### Step 4 — Enable in `users_list.json`
 
-Dans `/opt/jarvis/jarvis-core/JarvisData/users_list.json`, ajoute `"google": true` à l'entrée de l'utilisatrice :
+In `/opt/jarvis/jarvis-core/JarvisData/users_list.json`, add `"google": true` to that user's
+entry:
 
 ```json
 {
-  "code": "AQWZSX",
+  "code": "BOB2",
   ...
   "briefing_enabled": true,
   "trading": false,
@@ -80,26 +84,32 @@ Dans `/opt/jarvis/jarvis-core/JarvisData/users_list.json`, ajoute `"google": tru
 }
 ```
 
-### Étape 5 — Redémarrer et vérifier
+### Step 5 — Restart and verify
+
+The Jarvis API runs **natively under launchd**, not as a Docker container — restarting the
+`jarvis-api` container will not pick up the new token, because there is no such container.
 
 ```bash
-cd /opt/jarvis
-docker compose restart jarvis-api
-docker logs jarvis-api --tail 30
+jarvis-restart
+tail -30 /opt/jarvis/logs/jarvis-service.log
 ```
 
-Dans les logs tu dois voir :
+You should see:
+
 ```
-Google access token refreshed for AQWZSX
+Google access token refreshed for BOB2
 ```
 
-Et dans le briefing du lendemain matin, l'agenda et les emails d'Hélène seront les siens.
+And in the next morning's briefing, that user's calendar and mail will be their own.
 
 ---
 
-## Sécurité
+## Security
 
-- Le token est stocké **uniquement** dans `.env` sur le host, jamais dans le code ni dans l'image Docker.
-- Chaque utilisateur accède exclusivement à **son propre** Gmail et Agenda — aucun accès croisé possible.
-- Pour révoquer l'accès : [myaccount.google.com/permissions](https://myaccount.google.com/permissions) → "Jarvis" → "Supprimer l'accès".
-- Ne jamais committer `.env` ou `client_secret.json` dans git.
+- The token is stored **only** in `.env` on the host — never in the code, never in a Docker
+  image.
+- Each user reaches exclusively **their own** Gmail and Calendar; no cross-access is
+  possible.
+- To revoke: [myaccount.google.com/permissions](https://myaccount.google.com/permissions) →
+  *Jarvis* → *Remove access*.
+- Never commit `.env` or `client_secret.json`.

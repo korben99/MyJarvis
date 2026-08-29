@@ -2,7 +2,8 @@
 echo "=== JARVIS STATUS ==="
 echo ""
 
-source /opt/jarvis/.env
+JARVIS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$JARVIS_HOME/.env"
 
 echo "── Local Services ──"
 for svc in jarvis-qdrant jarvis-redis jarvis-webui; do
@@ -77,18 +78,23 @@ fi
 
 echo ""
 echo "── Memory ──"
-FIRST_USER=$(python3 -c "
+FIRST_USER=$(USERS_LIST="${USERS_LIST:-$JARVIS_HOME/jarvis-core/JarvisData/users_list.json}" python3 -c "
 import json, os
-path = os.getenv('USERS_LIST', '/opt/jarvis/jarvis-core/JarvisData/users_list.json')
 try:
-    users = json.load(open(path))
-    print(users[0]['code'] if users else 'KORBEN99')
+    users = json.load(open(os.environ['USERS_LIST']))
+    print(users[0]['code'] if users else '')
 except Exception:
-    print('KORBEN99')
+    print('')
 " 2>/dev/null)
-FIRST_USER=${FIRST_USER:-KORBEN99}
 
-MEM_STATUS=$(curl -s "http://localhost:8000/memory/profile/${FIRST_USER}" 2>/dev/null)
+# Pas de code par défaut : sans users_list.json lisible, il n'y a aucun utilisateur à
+# interroger. Un code en dur ici n'aurait interrogé que l'installation qui l'a écrit.
+if [ -z "$FIRST_USER" ]; then
+    echo "  ⬜ users_list.json illisible — section mémoire ignorée"
+    MEM_STATUS=""
+else
+    MEM_STATUS=$(curl -s "http://localhost:8000/memory/profile/${FIRST_USER}" 2>/dev/null)
+fi
 if echo "$MEM_STATUS" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
     python3 -c "
 import json, sys

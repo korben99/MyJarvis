@@ -342,7 +342,7 @@ posée mécaniquement dans `write_file`).
 
 ## Phase 2 — Shell — LIVRÉ (2026-08-19)
 
-Jarvis tourne sous le compte `korben`, avec ses droits pleins. Le confinement n'est donc
+Jarvis tourne sous le compte de l’utilisateur, avec ses droits pleins. Le confinement n'est donc
 pas une option de configuration, c'est la condition d'existence de l'outil.
 
 - [x] Outil `shell(cmd, timeout)` — `cwd` forcé sur le workspace, `HOME` redirigé dessus
@@ -421,7 +421,7 @@ plus court qui soit.
 |---|---|
 | Écriture dans le workspace | autorisée |
 | Écriture dans `/opt/jarvis` | `Operation not permitted` |
-| `touch /Users/korben/PWNED` | `Operation not permitted` |
+| `touch $HOME/PWNED` | `Operation not permitted` |
 | Écriture via `python3 open(…,'w')` | `PermissionError` |
 | `cat /opt/jarvis/.env` | refusé (liste noire) |
 | `cat /opt/jarvis/.e''nv` — **contournement de la regex** | `Operation not permitted` (noyau) |

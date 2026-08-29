@@ -3,7 +3,7 @@
 
 Écrit pour retirer les données du compte TEST, qui polluent les étages de mémoire et
 faussent les indicateurs de la sonde — 92 clés Redis et 23 points vectoriels au
-20/08/2026. Rendu générique parce que la situation se reproduira à chaque campagne
+. Rendu générique parce que la situation se reproduira à chaque campagne
 d'essais.
 
 SIMULATION PAR DÉFAUT. Rien n'est supprimé sans --apply : la suppression est

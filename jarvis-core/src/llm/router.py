@@ -104,14 +104,14 @@ def _log_routing_sample(
       - routing   : the full RouterResult as a dict
       - model     : which router model produced this result
       - source    : "embed" (fast-path) ou "llm" (routeur LLM)
-      - last_jarvis : dernier tour assistant, ou null. Ajouté le 18/08/2026 : sans
+      - last_jarvis : dernier tour assistant, ou null. Ajouté : sans
                     lui, un message elliptique (« confirme », « la couronne ») est
                     inétiquetable — le ré-étiquetage du 17/08 a rabattu une vingtaine
                     de ces messages sur `web` faute d'antécédent, et le LoRA v2 a
                     appris l'erreur. C'est LA donnée manquante du corpus.
       - ok        : null = uncurated, true = validated, false = wrong
 
-    `source` existe parce que jusqu'au 17/08/2026 seul le routeur LLM
+    `source` existe parce que jusqu'ici seul le routeur LLM
     journalisait : le fast-path embedding tranchait la moitié du trafic sans
     laisser de trace. Le fichier ne contenait donc pas le trafic réel mais le
     RÉSIDU que l'embedding avait refusé de trancher — les échantillons les plus
@@ -150,7 +150,7 @@ def _log_routing_sample(
             "calendar_days": result.calendar_days if _in("calendar") else None,
             "weather_location": result.weather_location or None if _in("weather") else None,
             "rag_query": result.rag_query or None if _in("rag") else None,
-            # Absent des échantillons jusqu'au 17/08/2026, alors que ROUTER_SYSTEM
+            # Absent des échantillons jusqu'ici, alors que ROUTER_SYSTEM
             # impose la clé et que RouterResult la porte. router_lora_adapterv1.py
             # la lisait donc via .get() → None sur 100 % des exemples : le LoRA v1 a
             # appris à toujours émettre project_name:null, sans jamais pouvoir

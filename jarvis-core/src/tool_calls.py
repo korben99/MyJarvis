@@ -52,7 +52,7 @@ def _param_types(tool_schema: dict) -> dict[str, str]:
 
 
 # Le modèle n'écrit pas toujours du JSON strict pour les booléens : "True" (majuscule,
-# style Python) est fréquent, "yes"/"on" apparaissent aussi. Observé le 08/08/2026 sur un
+# style Python) est fréquent, "yes"/"on" apparaissent aussi. Observé sur un
 # paramètre boolean, où json.loads échouait et laissait passer la chaîne "True" — ce qui
 # fait échouer la validation de schéma côté client.
 _TRUE_LITERALS = {"true", "yes", "on", "1"}
@@ -129,7 +129,7 @@ def _coerce(raw: str, json_type: str, function_name: str, param_name: str):
 def _resolve_name(name: str, declared: dict, by_lower: dict) -> str:
     """Ramène un nom d'outil à l'orthographe exacte déclarée par le client.
 
-    Le modèle capitalise parfois : observé le 08/08/2026, `<function=Bash>` alors qu'OpenCode
+    Le modèle capitalise parfois : observé, `<function=Bash>` alors qu'OpenCode
     déclare `bash`. Le client valide le nom au caractère près et rejette l'appel — l'agent
     perd son tour pour une majuscule. On ne corrige QUE la casse : un nom réellement inventé
     doit rester visible plutôt que d'être rapproché de force du plus ressemblant.

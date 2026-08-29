@@ -5,7 +5,7 @@ primaires sont les sites de fuite en .onion que ces groupes opèrent eux-mêmes.
 agrégateurs les moissonnent en continu et republient en clearnet. On s'appuie sur eux
 plutôt que d'aller sur Tor : lecture seule, pas d'infrastructure, pas d'exposition.
 
-Sources retenues (vérifiées le 19/08/2026) :
+Sources retenues (vérifiées) :
 
   RansomLook    www.ransomlook.io/api    liste des groupes, posts récents. Libre, sans clé.
   ransomwatch   raw.githubusercontent    métadonnées des groupes (.onion, alias, notes) et

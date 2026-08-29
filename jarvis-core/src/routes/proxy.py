@@ -389,7 +389,7 @@ async def raw_chat(req: _RawChatRequest):
     messages = normalise_messages_for_template(messages)
 
     # Priorité : body explicite > palier d'effort choisi via `model` > env var.
-    # Défaut sans thinking passé à false le 08/08/2026 : le raisonnement est le principal
+    # Défaut sans thinking passé à false : le raisonnement est le principal
     # levier de qualité pour un agent de code (choix de l'outil, enchaînement lecture →
     # édition), et aucun client de cette route ne sait envoyer no_think.
     # "jarvis/jarvis-deep" → on ne garde que le nom du modèle.

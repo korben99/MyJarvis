@@ -27,9 +27,32 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+import os
+
+import pytest
+
+# Ces tests interrogent le VRAI web (DuckDuckGo, Tavily, Open-Meteo) et appellent le modèle
+# local : lents, dépendants du réseau, et consommateurs de quota API. Ils sortent donc de la
+# boucle de développement rapide.
+#
+# Deux gardes, et les deux comptent :
+#   • le marqueur `integration`, pour `-m "not integration"` ;
+#   • l'opt-in `JARVIS_INTEGRATION=1`, parce que le marqueur seul ne skippe rien quand on
+#     lance `pytest jarvis-core/tests/` sans argument.
+#
+# Ce sont par ailleurs des coroutines : sans plugin asyncio, pytest les compte en échec au
+# lieu de les ignorer. Le skip les écarte avant que la question se pose.
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        os.getenv("JARVIS_INTEGRATION", "").lower() not in ("1", "yes", "true"),
+        reason="pose JARVIS_INTEGRATION=1 — ces tests interrogent le vrai web",
+    ),
+]
+
 from web_search import (
     _llm_judge_relevance,
-    _refine_web_query,
+    _refine_web_queries,
     _ddg_text_deep,
     search_weather,
     search_news,
@@ -139,7 +162,7 @@ async def test_refiner():
     ]
 
     t0 = time.perf_counter()
-    refined = await _refine_web_query(question, current_query, thin_results)
+    refined = await _refine_web_queries(question, current_query, thin_results)
     elapsed = time.perf_counter() - t0
 
     print(f"  Original query : {current_query}")

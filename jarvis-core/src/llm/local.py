@@ -89,7 +89,7 @@ from mlx_lm.sample_utils import make_logits_processors, make_sampler
 # stored key is then a true *prefix* of the next turn's prompt, which fetch_nearest_cache
 # serves without any trim — so multi-turn reuse works despite the hybrid cache.
 # Measured on the 6-turn scripts/test_lru_cache.py conversation (Qwen3.6, --no-think):
-# tokens reused per turn 46/46/46/46/46/46 → 46/154/265/444/623/833 (turn 6: 5% → 96%).
+# tokens reused per turn/ → 46/154/265/444/623/833 (turn 6: 5% → 96%).
 
 HF_HOME = os.getenv("HF_HOME", "/opt/jarvis/models")
 os.environ["HF_HOME"] = HF_HOME
@@ -524,7 +524,7 @@ def _system_prefix_text(
     # Le template Qwen3.6 ouvre le bloc système par « # Tools » et les schémas, et ne
     # place le contenu système qu'ENSUITE (qwen36_ninja.jinja, lignes 50-59). Un candidat
     # construit sans outils n'est alors pas un préfixe du prompt réel — mesuré le
-    # 19/08/2026 : 499 tokens annoncés, 3 réellement communs. _lru_get_cache tranchait le
+    # 499 tokens annoncés, 3 réellement communs. _lru_get_cache tranchait le
     # prompt à 499 et faisait reprendre le modèle au milieu du JSON des outils, avec un
     # cache portant autre chose. Aucune exception, des réponses dégradées : noms d'outils
     # inventés, appels écrits en prose. Concernait l'agent ET OpenCode via /v1/raw.

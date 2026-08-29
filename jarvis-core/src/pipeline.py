@@ -140,7 +140,7 @@ def build_dynamic_prefix(
 
     if include_opinions:
         # Sélection par proximité sémantique (memory.select_opinions), et AUCUNE opinion
-        # quand rien ne correspond. Deux mesures du 21/08/2026, sur 261 messages réels :
+        # quand rien ne correspond. Deux mesures, sur 261 messages réels :
         #
         #   • le recouvrement lexical ne trouvait quelque chose que sur 20 % des tours,
         #     l'embedding sur 28 %, et il attrape ce qui ne partage aucun mot ;
@@ -388,7 +388,7 @@ def build_context(
         # `get_last_reflection` et non `get_reflection_log(1)` : la première écarte les
         # entrées d'un catalogue d'actions révolu. Le chemin brut annonçait encore en
         # conversation « Dernière action autonome : check_health », pour une action
-        # supprimée le 21/08/2026.
+        # supprimée.
         last_ref = get_last_reflection()
         last_action = last_ref.get("action", "none") if last_ref else "none"
         last_reason = last_ref.get("reason", "") if last_ref else ""

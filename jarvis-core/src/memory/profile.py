@@ -55,7 +55,7 @@ _SCALAR_CANONICAL: dict[str, str] = {
 # _ALLOWED_PROFILE_NAMESPACES. C'est la vraie fonction de cette table, et elle n'était dite
 # nulle part : elle sert de PASSERELLE DE MIGRATION, en permettant à une nouvelle clé
 # `etude:*` de se rapprocher d'une ancienne `specialite:*`. Le profil de ZSXEDC en porte
-# encore trois au 21/08/2026 : `specialite:`, `option:`, `matière:`.
+# encore trois : `specialite:`, `option:`, `matière:`.
 #
 # Ce qui était faux, en revanche, et corrigé ici : les exemples des deux prompts de dédup
 # enseignaient au modèle de rapprocher VERS le legacy (« loisir:kart → hobby:kart »),
@@ -403,7 +403,7 @@ def update_user_profile(user_code: str, key: str, value: str | None):
 
     # La liste blanche de namespaces ne s'applique QU'À L'ÉCRITURE, délibérément. Des
     # profils portent encore des clés écrites avant elle — `specialite:`, `option:`,
-    # `matière:` chez ZSXEDC au 21/08/2026. Les soumettre au même filtre les rendrait
+    # `matière:` chez ZSXEDC. Les soumettre au même filtre les rendrait
     # indélébiles : le nettoyage curatif ne pourrait plus jamais s'en défaire. On garde
     # donc la suppression ouverte à toute clé.
     if not value:  # None or empty string → delete

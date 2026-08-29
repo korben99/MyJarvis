@@ -32,8 +32,8 @@ logger = get_logger("jarvis-memory")
 # Use as: with self_memory_lock: data = get_self_memory(); ...; save_self_memory(data)
 # threading.Lock works in both sync and async contexts (no await held while locked).
 #
-# Volontairement INTRA-PROCESSUS. Un verrou inter-processus (flock) a été écrit puis retiré
-# le 22/08/2026 : les seuls autres écrivains de ce fichier sont deux scripts manuels et
+# Volontairement INTRA-PROCESSUS. Un verrou inter-processus (flock) a été écrit puis
+# retiré : les seuls autres écrivains de ce fichier sont deux scripts manuels et
 # rares — `scripts/purge_user.py` et `scripts/migrate_introspection.py`. Leur imposer un
 # verrou partagé revenait à porter cinquante lignes de mécanique dans le chemin chaud du
 # service pour couvrir une concurrence qui ne se produit qu'à la main. Ces deux scripts
@@ -105,7 +105,7 @@ def select_opinions(
 ) -> list[dict]:
     """Les opinions proches du message. Aucune si aucune ne l'est.
 
-    Pourquoi l'embedding et non keyword_overlap_score : mesuré le 21/08/2026 sur 261
+    Pourquoi l'embedding et non keyword_overlap_score : mesuré sur 261
     messages réels du convlog, le recouvrement lexical ne trouvait quelque chose que sur
     20 % des tours. L'embedding atteint 28 % au seuil retenu, et surtout il attrape ce qui
     ne partage aucun mot — « les gains de latence sont de 0,5 s » → `quantification_locale`.
@@ -184,7 +184,7 @@ def _defauts() -> dict:
 def get_self_memory() -> dict:
     """Charge jarvis-self.json. Amorce les défauts si le fichier est absent.
 
-    Trois issues distinctes, et la distinction est le correctif du 21/08/2026 :
+    Trois issues distinctes, et la distinction est le correctif :
 
       absent      → amorçage normal (installation neuve).
       corrompu    → le fichier est MIS DE CÔTÉ avant l'amorçage. C'est la seule copie de
@@ -239,7 +239,7 @@ _RATIO_RETRECISSEMENT_MAX = 0.5
 def save_self_memory(data: dict, force: bool = False) -> bool:
     """Écrit jarvis-self.json de façon atomique. Rend True si l'écriture a eu lieu.
 
-    Deux refus, tous deux nés du même trou (21/08/2026) : `get_self_memory` rendait {} sur
+    Deux refus, tous deux nés du même trou : `get_self_memory` rendait {} sur
     erreur de lecture inattendue, et les cinq cycles lire-modifier-écrire enchaînaient
     aussitôt un `save` — qui persistait alors trois champs par-dessus 83 Ko d'identité,
     d'opinions, de relations et d'introspection. L'écriture étant atomique, la destruction
@@ -287,7 +287,7 @@ def save_self_memory(data: dict, force: bool = False) -> bool:
         return False
 
 
-# add_self_learning() supprimée le 20/08/2026 : jamais appelée depuis son écriture en
+# add_self_learning supprimée : jamais appelée depuis son écriture en
 # mars, dans aucun commit. La revue nocturne écrit directement dans `self_introspection`
 # (self/nightly.py, sous self_memory_lock, en même temps que les opinions et le
 # growth_log) et refait sa propre troncature — il y avait donc deux chemins pour la même

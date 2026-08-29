@@ -1,12 +1,3 @@
-//
-//  AppSettings.swift
-//  JarvisApp
-//
-//  Created by sebastien viou on 09/03/2026.
-//
-
-
-
 // AppSettings.swift
 // Persistent settings for server connection and on-device ML
 
@@ -15,8 +6,10 @@ import Combine
 
 class AppSettings: ObservableObject {
     // Server
-    @AppStorage("localServerURL") var localServerURL: String = "http://192.168.1.50:8000"
-    @AppStorage("vpnServerURL")   var vpnServerURL:   String = "http://100.94.97.27:8000"
+    // Vides par défaut : les deux URL sont propres à chaque installation et se
+    // renseignent dans Réglages. JarvisAPI traite la chaîne vide comme « route absente ».
+    @AppStorage("localServerURL") var localServerURL: String = ""
+    @AppStorage("vpnServerURL")   var vpnServerURL:   String = ""
     let sessionID: String = "iphone-main"
 
     // Identity

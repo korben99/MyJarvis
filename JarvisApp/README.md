@@ -98,9 +98,9 @@ Recommended: `base` for daily use, `small` for accented speech or noisy environm
 
 | Setting | Description |
 |---------|-------------|
-| Local Server URL | Direct LAN IP (e.g. `http://192.168.1.50:8000`) |
+| Local Server URL | Direct LAN IP (e.g. `http://192.168.1.10:8000`) |
 | VPN / Tailscale URL | Tailscale IP for remote access |
-| User Code | Authentication code (e.g. `KORBEN99`) |
+| User Code | Authentication code (e.g. `ALICE1`) |
 | User Name | Display name |
 | Whisper Model | `tiny` / `base` / `small` |
 | Speak responses | Toggle AVSpeech TTS output |

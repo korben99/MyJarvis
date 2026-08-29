@@ -257,7 +257,7 @@ def build_memory_context(
     #
     # Injection PERMANENTE et non sélective, et c'est un choix mesuré, pas un renoncement :
     # une disposition ne se rappelle pas, elle est toujours là. Quatre mécanismes de tri
-    # ont échoué le 20/08/2026 (RESULTATS.md) pour une raison structurelle — une ligne
+    # ont échoué (RESULTATS.md) pour une raison structurelle — une ligne
     # d'introspection est écrite en méta, un message est concret, et sur une relance
     # (« et pour ma mère ? ») le message ne porte même plus de sujet. Le coût reste borné
     # par le nombre d'axes, ce que l'ancienne liste `learnings` ne garantissait pas.

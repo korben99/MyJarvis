@@ -23,8 +23,26 @@ DerivedData/
 
 #SECRETS#
 .env
+.env.*
+!.env.example
 scripts/client_secret.json
+client_secret*.json
 RESEARCH/
+
+# Clés de signature : APNs (.p8), certificats, clés privées.
+# Le dossier entier est ignoré — une clé oubliée ici ne doit jamais partir dans un commit.
+keys/
+*.p8
+*.pem
+*.key
+*.p12
+*.mobileprovision
 
 #AGENT#
 agent_workspace/
+
+# Notes de travail internes — pas destinées à la publication.
+AGENTS.md
+DOCS/AGENTS.md
+DOCS/jarvis_cheatsheet.md
+.claude/

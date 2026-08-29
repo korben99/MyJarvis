@@ -1,10 +1,19 @@
 import json
 import logging
 import os
+import pathlib
 
 from dotenv import load_dotenv
 
-load_dotenv("/opt/jarvis/.env")
+# Chemin du .env déduit de la position de ce fichier, et surchargeable par
+# JARVIS_ENV_FILE. Il était codé en dur sur /opt/jarvis : toute autre installation lisait
+# donc la configuration d'un dépôt qui n'était pas le sien, et la suite de tests chargeait
+# le .env de production — clés réelles et interrupteurs de l'exploitant compris.
+_ENV_FILE = os.getenv(
+    "JARVIS_ENV_FILE",
+    str(pathlib.Path(__file__).resolve().parents[2] / ".env"),
+)
+load_dotenv(_ENV_FILE)
 
 logger = logging.getLogger("jarvis-config")
 
@@ -289,7 +298,7 @@ RAG_TOP_K = int(os.getenv("RAG_TOP_K", os.getenv("QDRANT_TOP_K", "8")))
 # une fois un document adopté, l'étape 2 rend toujours des extraits, y compris par son
 # repli à score_threshold=0.0.
 #
-# Relevé de 0.40 à 0.55 le 19/08/2026, sur mesure et non au jugé. À 0.40, la requête
+# Relevé de 0.40 à 0.55, sur mesure et non au jugé. À 0.40, la requête
 # « Zero Bytes » (renseignement) adoptait une facture de piscine à 0.41 et injectait ses
 # extraits dans le contexte. Sur cette base : hors sujet plafonne à 0.41-0.52, une vraie
 # correspondance monte à 0.72-0.73. 0.55 sépare les deux avec de la marge des deux côtés.
@@ -339,7 +348,7 @@ AGENT_TASK_TIMEOUT_MINUTES = int(os.getenv("AGENT_TASK_TIMEOUT_MINUTES", "45"))
 # deux générations, donc ce plafond est le pire cas d'attente imposé à un tour de chat.
 # Mesuré ~50 tok/s sur Qwen3.6-35B-A3B-5bit ⇒ 1200 tok ≈ 24 s. Ne pas monter sans mesurer.
 # Les deux se partagent le MÊME budget : réflexion + sortie visible + appel d'outil.
-# Relevés le 19/08/2026 (1200/600) une fois le raisonnement du tour précédent réinjecté
+# Relevés (1200/600) une fois le raisonnement du tour précédent réinjecté
 # dans le contexte — à ce moment-là la réflexion sert vraiment à quelque chose, et 600
 # tokens devenaient courts pour arbitrer entre huit outils sur un contexte de 17 k tokens.
 # Le coût est une latence de chat : (AGENT_STEP_MAX_TOKENS ÷ 50 tok/s) secondes d'attente
@@ -353,7 +362,7 @@ AGENT_THINKING_BUDGET = int(os.getenv("AGENT_THINKING_BUDGET", "1000"))
 # Plafond du pas d'ÉCRITURE. Un livrable transite par le paramètre `content` de write_file :
 # il est donc généré à l'intérieur du bloc <tool_call>, et AGENT_STEP_MAX_TOKENS le coupe en
 # plein milieu — le bloc n'est jamais fermé, aucun appel n'est détecté, le pas est perdu
-# (mesuré le 19/08/2026 : 6 pas consécutifs perdus sur une note de synthèse). Ce budget-là
+# (mesuré : 6 pas consécutifs perdus sur une note de synthèse). Ce budget-là
 # n'est dépensé qu'en cas de troncature avérée, et sans raisonnement : ~2 min de GPU au pire.
 AGENT_WRITE_MAX_TOKENS = int(os.getenv("AGENT_WRITE_MAX_TOKENS", "6000"))
 
@@ -380,7 +389,7 @@ AGENT_WRITE_MAX_CHARS = int(
 AGENT_QUIET_SECONDS = float(os.getenv("AGENT_QUIET_SECONDS", "45"))
 
 # Troncature des sorties d'outil injectées dans le contexte (caractères).
-# Relevé de 6000 à 15000 le 19/08/2026, sur mesure. À 6000, une recherche web de 9984
+# Relevé de 6000 à 15000, sur mesure. À 6000, une recherche web de 9984
 # caractères perdait 40 % de sa matière — pendant qu'un contexte de tâche COMPLET pesait
 # 7784 tokens, soit 24 % du plafond pratique du modèle (~32 k). On affamait l'agent article
 # par article en laissant les trois quarts de la place vides.
@@ -390,7 +399,7 @@ AGENT_MAX_TOOL_OUTPUT = int(os.getenv("AGENT_MAX_TOOL_OUTPUT", "15000"))
 
 # Plafond d'UNE lecture de fichier (read_file). Plus haut que le plafond général : un
 # fichier source doit tenir en UNE lecture. La pagination est ce que le modèle rate le
-# plus mal — mesuré le 19/08/2026 sur vitals.py (25 168 caractères, donc 2 lectures à
+# plus mal — mesuré sur vitals.py (25 168 caractères, donc 2 lectures à
 # 15 000) : l'indication « reprends avec offset=318 » a été ignorée quatre fois de suite,
 # le modèle rejouant la même lecture jusqu'à épuiser la tâche. À 32 000, le fichier passe
 # d'un coup et le problème ne se pose plus. Coût : ~8 000 tokens de contexte pour un gros
@@ -405,12 +414,16 @@ AGENT_READ_MAX_CHARS = int(os.getenv("AGENT_READ_MAX_CHARS", "32000"))
 AGENT_PAGE_MAX_CHARS = int(os.getenv("AGENT_PAGE_MAX_CHARS", "14000"))
 
 # Score minimal pour qu'un extrait de la base documentaire soit rendu à l'agent.
-# Bien plus strict que RAG_SCORE_THRESHOLD (0.4), qui sert le chat : là, un extrait
-# faiblement pertinent est au pire une phrase de trop dans un contexte que l'utilisateur
-# relit. Pour l'agent, c'est du bruit qu'il ne peut PAS identifier comme tel et qui le fait
-# diverger — mesuré le 19/08/2026 : 5 appels, 19 435 caractères de règlement intérieur et
-# de factures sur une tâche de renseignement.
-# Abaissé de 0.60 à 0.35 le 19/08/2026, après contre-exemple. 0.60 venait d'une
+# Le bruit coûte plus cher ici qu'au chat : un extrait faiblement pertinent y est au pire
+# une phrase de trop dans un contexte que l'utilisateur relit, alors que l'agent ne peut
+# PAS l'identifier comme tel et se met à diverger — mesuré : 5 appels, 19 435 caractères de
+# règlement intérieur et de factures sur une tâche de renseignement.
+# Le seuil est pourtant PLUS BAS que RAG_SCORE_THRESHOLD (0.55) et c'est délibéré : les
+# deux scores ne portent pas sur la même chose. Le chat filtre une recherche sémantique
+# large, l'agent interroge la base avec des requêtes par titre ou acronyme, que
+# l'embedding multilingue encode mal. Le bruit y est borné par AGENT_MAX_TOOL_OUTPUT et par
+# le budget de pas, pas par ce seuil.
+# Abaissé de 0.60 à 0.35, après contre-exemple. 0.60 venait d'une
 # calibration sur 5 requêtes DESCRIPTIVES ; il rejetait les requêtes par TITRE ou
 # acronyme, que l'embedding multilingue encode mal : « VIT Conscienceness AI » → 0.53 et
 # « Consciensness AI TACL » → 0.45 sur un corpus de 10 documents pourtant consacrés au
@@ -469,7 +482,7 @@ AGENT_READONLY_ROOTS = tuple(
 )
 # ── Autocoding — prompt self-modification ─────────────────────────────────
 # Number of times a knowledge gap must be flagged before a prompt-refine is triggered
-# REFINE_PROMPT_THRESHOLD supprimé le 21/08/2026. Il exprimait « ne proposer une
+# REFINE_PROMPT_THRESHOLD supprimé. Il exprimait « ne proposer une
 # amélioration de prompt que si la lacune revient au moins 3 fois », mais aucun code ne le
 # lisait — et le compteur qu'il aurait dû lire ne pouvait pas mesurer une récurrence : le
 # slug de sujet est tronqué à 40 caractères, sans rapprochement sémantique, donc deux
@@ -500,7 +513,7 @@ CHAT_LOG_TTL = (
 IMPORTANCE_THRESHOLD = 0.35
 
 # Similarité minimale pour qu'un souvenir soit seulement CANDIDAT au rappel (search_memory).
-# Passé de 0.7 à 0.45 le 21/08/2026. 0.7 datait du 21/03 et n'avait jamais été mesuré : il
+# Passé de 0.7 à 0.45. 0.7 datait du 21/03 et n'avait jamais été mesuré : il
 # rendait la recherche vectorielle quasi inerte.
 #
 # Calibré sur 183 paires étiquetées tirées du convlog réel — le message d'un échange face au
@@ -557,7 +570,7 @@ AUTOBIO_DEDUP_THRESHOLD = float(os.getenv("AUTOBIO_DEDUP_THRESHOLD", "0.82"))
 # DECAY_DURABLE_MIN   : importance initiale >= cette valeur → exempt de décroissance.
 # CONSOLIDATION_IMPORTANCE : score assigné aux milestones issus de la consolidation mensuelle.
 #
-# DECAY_DURABLE_MIN est passé de 1.0 à 0.85 le 21/08/2026, parce qu'à 1.0 l'exemption était
+# DECAY_DURABLE_MIN est passé de 1.0 à 0.85, parce qu'à 1.0 l'exemption était
 # INATTEIGNABLE pour tout ce que Jarvis apprend des conversations :
 #   • la revue nocturne borne l'importance de ses faits durables à [0.5, 0.9]
 #     (self/nightly.py) — donc jamais 1.0, donc jamais exempt ;
@@ -597,7 +610,7 @@ GROWTH_LOG_MAX_ENTRIES = int(os.getenv("GROWTH_LOG_MAX_ENTRIES", "180"))
 # sur lui-même partait donc silencieusement, et rien ne permettait de le savoir ni de
 # l'ajuster sans toucher au code.
 #
-# Relevé le 20/08/2026 : opinions était À 50/50, donc en troncature permanente depuis un
+# Relevé : opinions était À 50/50, donc en troncature permanente depuis un
 # moment — chaque nouvelle opinion en effaçait une ancienne.
 #
 # Défauts = valeurs d'origine : aucun changement de comportement tant qu'on ne les règle
@@ -606,7 +619,7 @@ OPINIONS_MAX_ENTRIES = int(os.getenv("OPINIONS_MAX_ENTRIES", "120"))
 
 # ── Réinjection des opinions (<avis_jarvis>, pipeline.py) ─────────────────────
 # Sélection par proximité sémantique entre le message et `topic + opinion`. Mesuré le
-# 21/08/2026 sur 261 messages réels du convlog :
+# sur 261 messages réels du convlog :
 #
 #   lexical (keyword_overlap_score)  20 % des tours — et 80 % de repli sur la plus récente
 #   embedding, seuil 0,45            13 %
@@ -623,7 +636,7 @@ OPINIONS_MAX_ENTRIES = int(os.getenv("OPINIONS_MAX_ENTRIES", "120"))
 # la « voix » qu'il promettait — ~70 tokens sur 80 % des tours pour rien.
 OPINIONS_EMBED_THRESHOLD = float(os.getenv("OPINIONS_EMBED_THRESHOLD", "0.40"))
 OPINIONS_MAX_INJECTED = int(os.getenv("OPINIONS_MAX_INJECTED", "3"))
-# SELF_NOTES_MAX_ENTRIES retirée le 21/08/2026 avec la liste `self_notes` : son bloc
+# SELF_NOTES_MAX_ENTRIES retirée avec la liste `self_notes` : son bloc
 # d'injection en conversation lisait la mauvaise clé depuis avril et n'avait jamais rien
 # affiché, et la connaissance de soi tient désormais dans INTROSPECTION_AXES.
 
@@ -634,7 +647,7 @@ INTROSPECTION_LOG_MAX_ENTRIES = int(os.getenv("INTROSPECTION_LOG_MAX_ENTRIES", "
 
 # ── Introspection de Jarvis : 9 axes fixes ────────────────────────────────────────
 # Remplace la liste `learnings`, qui accumulait sans fin des aperçus indexés par SUJET.
-# Deux constats du 20/08/2026 (RESEARCH/RESULTATS.md) ont conduit à ce changement :
+# Deux constats (RESEARCH/RESULTATS.md) ont conduit à ce changement :
 #
 #   1. Sur 17 apprentissages produits indépendamment, le modèle redécouvrait les mêmes
 #      huit axes nuit après nuit. La liste ne grandissait pas en contenu, seulement en
@@ -749,6 +762,6 @@ for _code in USER_GOOGLE:
 # Key and identifiers from developer.apple.com → Certificates, IDs & Profiles → Keys
 APNS_KEY_ID   = os.getenv("APNS_KEY_ID",   "")   # 10-char alphanumeric key ID
 APNS_TEAM_ID  = os.getenv("APNS_TEAM_ID",  "")   # 10-char team ID
-APNS_BUNDLE_ID = os.getenv("APNS_BUNDLE_ID", "com.sebastienviou.JarvisApp")
+APNS_BUNDLE_ID = os.getenv("APNS_BUNDLE_ID", "com.example.JarvisApp")
 APNS_KEY_PATH = os.getenv("APNS_KEY_PATH", "")   # absolute path to AuthKey_XXXXXX.p8
 APNS_ENV      = os.getenv("APNS_ENV",      "production")  # "production" or "sandbox"

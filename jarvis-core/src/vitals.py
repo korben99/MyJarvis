@@ -209,7 +209,7 @@ def _cve_counts():
     Les comptes `cve_eleves` et `cve_moyennes` restent dans le cache CVE mais ne sont
     volontairement PAS exposés ici. Exposés, ils n'atteignaient que la réflexion (ils
     n'ont pas de seuil de saillance, donc jamais le bloc de tour, et seul le critique
-    pilote α) — et le 17/08/2026 la réflexion s'en est saisie pour pousser une alerte
+    pilote α) — et la réflexion s'en est saisie pour pousser une alerte
     « dette technique cumulative (45 CVEs) » sur un parc à 0 critique / 45 hautes /
     83 moyennes. Rien de tout cela n'est corrigeable à court terme : l'exposer ne
     produit que des relances stériles. Le canal actionnable est <vulnerabilites>,

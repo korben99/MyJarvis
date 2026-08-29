@@ -255,7 +255,7 @@ def _get_user_activity(hours: int = 24) -> dict:
     return activity
 
 
-# Au-delà, une lacune n'est plus une observation, c'est un vestige. Mesuré le 21/08/2026 :
+# Au-delà, une lacune n'est plus une observation, c'est un vestige. Mesuré :
 # les trois lacunes en base dataient des 08/04, 22/04 et 04/06 — injectées dans chaque
 # cycle depuis, sans jamais expirer, et décrivant pour deux d'entre elles le comportement
 # de boucle de Jarvis lui-même, c'est-à-dire la pathologie que le déplacement de
@@ -266,7 +266,7 @@ _GAP_MAX_AGE_DAYS = 60
 def _purger_lacunes_perimees(r) -> int:
     """Retire du zset les lacunes trop vieilles.
 
-    Le balayage des compteurs a disparu avec les compteurs eux-mêmes (21/08/2026) : le
+    Le balayage des compteurs a disparu avec les compteurs eux-mêmes : le
     seuil de récurrence qu'ils alimentaient n'était lu nulle part, et le slug tronqué à
     40 caractères sans rapprochement sémantique les rendait de toute façon incapables de
     mesurer une récurrence. refine_prompt est désormais borné en débit.
@@ -293,7 +293,7 @@ def _lacunes(n: int = 5) -> tuple[list[str], int]:
     laissait donc le garde ouvert à vie.
 
     Le libellé porte désormais la DATE plutôt qu'un décompte. Le décompte a disparu avec
-    les compteurs (21/08/2026) ; la date, elle, dit au modèle si l'observation est fraîche,
+    les compteurs ; la date, elle, dit au modèle si l'observation est fraîche,
     ce qui est la seule chose qu'il puisse en faire.
     """
     r = get_redis()
@@ -398,7 +398,7 @@ def gather_global_context() -> dict:
         "behavioral_patterns": _extract_behavioral_patterns(20),
         "emotional_state": emotional_state.get_state(),
         # Les neuf axes remplis remplacent l'ancienne liste `self_notes`, retirée le
-        # 21/08/2026 : la connaissance de soi n'a plus qu'un foyer, et c'est celui-ci.
+        # la connaissance de soi n'a plus qu'un foyer, et c'est celui-ci.
         "introspection": self_data.get("self_introspection", {}),
         "opinions": self_data.get("opinions", [])[-5:],
     }
@@ -628,7 +628,7 @@ async def _call_user_reflection_llm(
     for attempt in range(2):
         try:
             # Le vestige du workaround DWQ (Qwen3-30B-A3B-4bit-DWQ-0508, qui sortait du
-            # bloc think sans émettre </think>) a été retiré le 22/08/2026 : il annonçait
+            # bloc think sans émettre </think>) a été retiré : il annonçait
             # sa propre désactivation depuis la migration vers Qwen3.6 tout en laissant
             # `no_think=True` en place.
             content = await call_llm_async_bg(

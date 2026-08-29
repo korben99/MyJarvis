@@ -89,7 +89,7 @@ _MAX_FETCH_PAGES    = 3      # pages fetched in parallel per deep round
 #  WEATHER  (Open-Meteo)
 # ══════════════════════════════════════════════════════════════════════════
 
-# Supprimés le 17/08/2026, tous deux mesurés sans apport :
+# Supprimés, tous deux mesurés sans apport :
 #
 #   optimize_web_query()  Retirait quelques mots de remplissage puis TRONQUAIT à
 #       10 mots — sur 49 messages web réels (médiane 16 mots) il en tronquait 84 %,

@@ -33,7 +33,7 @@ from .sandbox import SandboxError, ensure_parent, relative, resolve
 logger = get_logger("jarvis-agent")
 
 # Fichiers de service de la boucle, présents dans chaque workspace. Masqués à l'agent :
-# au run du 19/08/2026 il a listé son dossier puis lu son PROPRE transcript au pas 2,
+# a l'usage il a listé son dossier puis lu son PROPRE transcript au pas 2,
 # dépensant un tour à relire sa propre trace. Ils ne lui apprennent rien qu'il n'ait déjà
 # dans son contexte, et messages.json en est une copie intégrale.
 _FICHIERS_INTERNES = frozenset({"transcript.jsonl", "messages.json", "messages.json.tmp"})
@@ -417,7 +417,7 @@ def render_plan(task: dict) -> str:
     C'est ce réaffichage qui fait tout le travail : le plan est une DONNÉE stable, pas du
     raisonnement réinjecté. Il ne peut donc ni être confondu avec une sortie attendue du
     modèle, ni être relu comme un ordre frais à ré-exécuter — les deux pannes du
-    19/08/2026. Le modèle avance dedans en marquant ses étapes, et sait toujours où il en
+. Le modèle avance dedans en marquant ses étapes, et sait toujours où il en
     est sans avoir à le redéduire.
     """
     steps = task.get("plan") or []
@@ -458,7 +458,7 @@ async def _plan(task: dict, args: dict) -> str:
         # Une replanification REPORTE l'avancement déjà acquis, au lieu de le remettre à
         # zéro. Le modèle replanifie en listant ce qu'il lui reste à faire, éventuellement
         # en reprenant des étapes au même intitulé : effacer leur état, c'était décocher
-        # derrière lui puis lui reprocher de ne pas cocher (observé le 19/08/2026 — plan
+        # derrière lui puis lui reprocher de ne pas cocher (observé — plan
         # final à 1 étape sur 3 alors que le travail était fait).
         previously_done = [s["text"] for s in (task.get("plan") or []) if s.get("done")]
         task["plan"] = [
@@ -479,7 +479,7 @@ async def _plan(task: dict, args: dict) -> str:
         if not 0 <= index < len(current):
             return f"Erreur : l'étape {done} n'existe pas (le plan en compte {len(current)})."
         # Re-cocher une étape déjà faite ne fait rien avancer : même tour perdu que reposer
-        # un plan inchangé, et le modèle y revenait autant (19/08/2026).
+        # un plan inchangé, et le modèle y revenait autant.
         if current[index]["done"] and unchanged:
             done = None
         else:
@@ -490,7 +490,7 @@ async def _plan(task: dict, args: dict) -> str:
 
     # Reposer le MÊME plan sans rien cocher ne fait rien avancer et consomme un pas. Le
     # modèle le fait en réaction à la relance de marquage, en renvoyant `steps` au lieu de
-    # `done` — observé le 19/08/2026 : 4 appels identiques d'affilée, un tiers du budget.
+    # `done` — observé : 4 appels identiques d'affilée, un tiers du budget.
     if unchanged and done is None:
         current = next((i for i, s in enumerate(task["plan"]) if not s.get("done")), None)
         hint = (
@@ -555,7 +555,7 @@ async def _read_file(task: dict, args: dict) -> str:
 
     # Le budget est en CARACTÈRES, pas en lignes. Un plafond de 200 lignes rendait 9 000
     # caractères là où 15 000 étaient permis, et obligeait à paginer un fichier de 525
-    # lignes en trois appels — que le modèle a préféré rejouer à l'identique (19/08/2026).
+    # lignes en trois appels — que le modèle a préféré rejouer à l'identique.
     # `limit` reste disponible pour une lecture ciblée, mais ne borne plus par défaut.
     budget = AGENT_READ_MAX_CHARS
     limit = int(args.get("limit") or 0)
@@ -579,7 +579,7 @@ async def _read_file(task: dict, args: dict) -> str:
         return body
 
     # L'avertissement est répété EN TÊTE : placé au seul pied d'un bloc de 15 000 à 32 000
-    # caractères de code, il est noyé — mesuré le 19/08/2026, ignoré quatre fois de suite.
+    # caractères de code, il est noyé — mesuré, ignoré quatre fois de suite.
     remaining = len(lines) - next_offset + 1
     warning = (
         f"[LECTURE PARTIELLE — lignes {offset} à {next_offset - 1} sur {len(lines)}. "
@@ -602,7 +602,7 @@ async def _write_file(task: dict, args: dict) -> str:
 
     # ── Garde anti-écrasement ────────────────────────────────────────────────
     # `append` par défaut à false : une écriture sans ce drapeau REMPLACE le fichier. Le
-    # 19/08/2026, un rapport bâti en cinq pas (11 ko) a été réduit à sa seule section
+    # un rapport bâti en cinq pas (11 ko) a été réduit à sa seule section
     # « Sources » (726 o) parce que le modèle, invité à compléter ses sources, a réécrit
     # sans append. Cinq pas de travail détruits par un booléen par défaut.
     #
@@ -624,7 +624,7 @@ async def _write_file(task: dict, args: dict) -> str:
             )
 
     # Un ajout qui démarre sans saut de ligne colle au contenu précédent et casse le
-    # markdown — mesuré le 19/08/2026 : « [5] https://…html## Contexte juridique ». Le
+    # markdown — mesuré : « [5] https://…html## Contexte juridique ». Le
     # modèle raisonne par blocs et ne pense pas à la jointure ; on la pose ici.
     if append and content and not content.startswith("\n") and os.path.exists(path):
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -639,7 +639,7 @@ async def _write_file(task: dict, args: dict) -> str:
         return f"Écriture impossible : {exc}"
     verb = "Ajouté à" if append else "Écrit"
     # On rend la FIN du fichier, pas seulement sa taille. Le modèle rédige par morceaux et
-    # ne se souvient pas de ce qu'il a déjà posé : au run du 19/08/2026 il a réécrit deux
+    # ne se souvient pas de ce qu'il a déjà posé : a l'usage il a réécrit deux
     # sections déjà présentes, dupliquant un paragraphe entier dans l'article final.
     # Lui montrer sa dernière phrase lui dit où reprendre.
     try:

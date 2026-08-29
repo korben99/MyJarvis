@@ -921,7 +921,7 @@ async def chat(req: ChatRequest):
     # la moitié du trafic, et c'est cette donnée qui porte l'antécédent des messages
     # elliptiques (« confirme », « la couronne »). Sans elle dans les échantillons, le
     # professeur du prochain ré-étiquetage aura le même angle mort et rabattra ces
-    # messages sur `web`, comme mesuré le 18/08/2026.
+    # messages sur `web`, comme mesuré.
     _last_jarvis_for_router: str | None = None
     try:
         _tail = REDIS_CLIENT.lrange(f"chat:{user_code}:{req.session_id}", -4, -1)

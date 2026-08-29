@@ -1,190 +1,258 @@
-# Redis — Guide opérationnel Jarvis
+# Redis — operations guide
 
-Connexion au container Redis :
+Connect to the Redis container:
+
 ```bash
 docker exec -it jarvis-redis redis-cli
 ```
 
+Throughout, `{code}` is a user code (e.g. `ALICE1`).
+
 ---
 
-## Carte des clés
+## Key map
 
-| Pattern | Type | Contenu |
+### Per user
+
+| Pattern | Type | Contents |
 |---|---|---|
-| `user:{code}:profile` | hash | Profil utilisateur (faits appris) |
-| `chat:{code}:{session}` | list | Historique de conversation |
-| `episodic:{code}:conversations` | zset | Mémoire épisodique (score = timestamp) |
-| `jarvis:self:reflection_log` | zset | Journal des réflexions autonomes |
-| `jarvis:self:knowledge_gaps` | zset | Lacunes de connaissance détectées |
-| `jarvis:self:gap_counts` | hash | Compteurs par lacune (slug → count) |
-| `jarvis:self:notif:{code}:{date}` | string | Garde anti-doublon email (TTL 24h) |
-| `jarvis:push:pending:{code}` | list | Notifications iOS en attente |
-| `jarvis:push:cooldown:{code}` | string | Cooldown push (TTL 2h) |
-| `jarvis:device:token:{code}` | string | Token APNs de l'app iOS |
-| `jarvis:{code}:pending_calendar_action` | string | Action calendrier en attente (TTL 10min) |
-| `jarvis:{code}:tomorrow_suggestions` | string | Suggestions du lendemain (TTL 24h) |
-| `trade:{code}:index` | set | Index ISINs du portefeuille |
-| `trade:{code}:pos:{isin}` | hash | Données d'une position (prix, seuils…) |
-| `trade:{code}:last_import_ts` | string | Timestamp dernier import CSV |
-| `trade:price_cache:{isin}` | string | Cache prix yfinance |
-| `trade:{code}:pending_alerts` | list | Alertes trading en attente |
+| `user:{code}:profile` | hash | User profile — learned stable facts |
+| `user:{code}:profile:ts` | hash | Per-field timestamps for the profile |
+| `user:{code}:profile_narrative` | string | Narrative rendering of the profile |
+| `user:{code}:preferences` | hash | Explicit user preferences |
+| `user:{code}:interest_weights` | hash | Interest weights used for briefing selection |
+| `user:{code}:projects` | string | User projects and their state |
+| `chat:{code}:{session}` | list | Conversation history for one session |
+| `episodic:{code}:conversations` | zset | Episodic memory (score = timestamp) |
 
-`{code}` = code utilisateur (ex: `KORBEN99`)
+### Self / reflection
+
+| Pattern | Type | Contents |
+|---|---|---|
+| `jarvis:self:reflection_log` | zset | Autonomous reflection journal |
+| `jarvis:self:knowledge_gaps` | zset | Detected knowledge gaps |
+| `jarvis:self:gap_cooldown:{slug}` | string | Per-topic cooldown after a gap is handled |
+| `jarvis:self:refine_cooldown` | string | Rate limit on `refine_prompt` proposals |
+| `jarvis:self:matiere_empreinte` | string | Fingerprint of persistent signals (TTL 7 d) |
+| `jarvis:self:stall` | — | Stalled-project tracking |
+| `jarvis:self:health_alert` | string | Internal-health alert guard |
+| `jarvis:self:last_consolidate` | string | Last memory consolidation pass |
+| `jarvis:self:last_prune` | string | Last memory prune pass |
+| `jarvis:self:notif:{code}:{date}` | string | Email dedup guard (TTL 24 h) |
+| `jarvis:emotional_state` | string | Three-dimensional emotional state |
+
+### Vitals, incidents, maintenance
+
+| Pattern | Type | Contents |
+|---|---|---|
+| `jarvis:vitals` | string | Vitals snapshot (TTL 15 min) |
+| `jarvis:incidents` | — | Consolidated incident buffer |
+| `jarvis:cve` | — | Latest CVE scan result |
+| `jarvis:maintenance` | string | Active maintenance window |
+| `jarvis:boot_at` | string | Last boot timestamp |
+| `jarvis:last_shutdown` | string | Last clean shutdown |
+| `jarvis:usage_counters` | hash | Usage counters |
+| `jarvis:metrics:{name}` | — | Runtime metrics |
+| `jarvis:admin_alert:cooldown` | string | `alert_admin` cooldown |
+
+### Push notifications
+
+| Pattern | Type | Contents |
+|---|---|---|
+| `jarvis:push:pending:{code}` | list | Pending iOS notifications |
+| `jarvis:push:cooldown:{code}` | string | Push cooldown (TTL 2 h) |
+| `jarvis:device:token:{code}` | string | APNs token of the iOS app |
+
+### Agent
+
+| Pattern | Type | Contents |
+|---|---|---|
+| `jarvis:agent:queue` | list | Task queue |
+| `jarvis:agent:index` | — | Task index |
+| `jarvis:agent:task:{id}` | — | One task's state |
+| `jarvis:agent:cancel:{id}` | string | Cancellation request |
+| `jarvis:agent:push:{id}` | — | Completion notification for a task |
+
+### Session-scoped
+
+| Pattern | Type | Contents |
+|---|---|---|
+| `jarvis:sticky_rag:{code}:{session}` | string | RAG chunks pinned across turns of a session |
+| `jarvis:{code}:pending_calendar_action` | string | Pending calendar action (TTL 10 min) |
+| `jarvis:{code}:tomorrow_suggestions` | string | Next-day suggestions (TTL 24 h) |
+| `jarvis:{code}:nightly_review:{date}` | string | Nightly review guard |
+| `jarvis:{code}:nightly_maint:{date}` | string | Nightly maintenance guard |
+
+### Trading
+
+| Pattern | Type | Contents |
+|---|---|---|
+| `trade:{code}:index` | set | Portfolio ISIN index |
+| `trade:{code}:pos:{isin}` | hash | One position (price, thresholds…) |
+| `trade:{code}:last_import_ts` | string | Last CSV import timestamp |
+| `trade:{code}:pending_alerts` | list | Pending trading alerts |
+| `trade:price_cache:{isin}` | string | yfinance price cache |
 
 ---
 
-## Lister des clés
+## Listing keys
 
 ```bash
-# Toutes les clés (dangereux sur gros volume — préférer SCAN)
+# Everything (dangerous on a large database — prefer SCAN)
 KEYS *
 
-# Par namespace
+# By namespace
 KEYS user:*
-KEYS chat:KORBEN99:*
+KEYS chat:ALICE1:*
 KEYS jarvis:self:*
-KEYS trade:KORBEN99:*
+KEYS trade:ALICE1:*
 
-# Scan paginé (safe en production)
+# Paginated scan (safe in production)
 SCAN 0 MATCH "jarvis:*" COUNT 50
 ```
 
 ---
 
-## Inspecter
+## Inspecting
 
 ```bash
-# Type d'une clé
-TYPE user:KORBEN99:profile
+# Type of a key
+TYPE user:ALICE1:profile
 
-# TTL (-1 = permanent, -2 = n'existe pas)
-TTL jarvis:self:notif:KORBEN99:2026-03-22
+# TTL (-1 = permanent, -2 = does not exist)
+TTL jarvis:self:notif:ALICE1:2026-03-22
 
-# Profil utilisateur complet
-HGETALL user:KORBEN99:profile
--> GET pour un string
+# Full user profile
+HGETALL user:ALICE1:profile
 
-# Nombre de champs du profil
-HLEN user:KORBEN99:profile
+# Number of profile fields
+HLEN user:ALICE1:profile
 
-# Une clé du profil
-HGET user:KORBEN99:profile hobby:kart
+# One profile field
+HGET user:ALICE1:profile hobby:kart
 
-# Dernières réflexions (les 5 plus récentes)
+# Five most recent reflections
 ZREVRANGE jarvis:self:reflection_log 0 4 WITHSCORES
 
-# Lacunes connaissance avec scores
+# Knowledge gaps with scores
 ZREVRANGE jarvis:self:knowledge_gaps 0 -1 WITHSCORES
 
-# Compteurs de lacunes
-HGETALL jarvis:self:gap_counts
+# Conversation history (last 50 messages)
+LRANGE chat:ALICE1:iphone-main -50 -1
 
-# Historique conversation (50 derniers messages)
-LRANGE chat:KORBEN99:iphone-main -50 -1
+# Recent episodic memory
+ZRANGEBYSCORE episodic:ALICE1:conversations -inf +inf LIMIT 0 10
 
-# Mémoire épisodique récente (dernières 24h)
-ZRANGEBYSCORE episodic:KORBEN99:conversations -inf +inf LIMIT 0 10
+# Pending iOS notifications
+LRANGE jarvis:push:pending:ALICE1 0 -1
 
-# Notifications iOS en attente
-LRANGE jarvis:push:pending:KORBEN99 0 -1
+# Vitals snapshot
+GET jarvis:vitals
 
-# Position trading
-HGETALL trade:KORBEN99:pos:FR0000131104
+# A trading position
+HGETALL trade:ALICE1:pos:FR0000131104
 ```
 
 ---
 
-## Nettoyer
+## Cleaning up
 
-### Profil utilisateur
+### User profile
+
 ```bash
-# Supprimer une clé du profil
-HDEL user:KORBEN99:profile hobby:tennis
+# Remove one profile field
+HDEL user:ALICE1:profile hobby:tennis
 
-# Corriger une valeur
-HSET user:KORBEN99:profile name Sébastien
+# Correct a value
+HSET user:ALICE1:profile name Alice
 
-# Vider tout le profil (irréversible)
-DEL user:KORBEN99:profile
+# Wipe the whole profile (irreversible)
+DEL user:ALICE1:profile
 ```
 
-### Lacunes de connaissance
+### Knowledge gaps
+
 ```bash
-# Vider toutes les lacunes (après acceptation d'une proposition)
+# Clear all gaps
 DEL jarvis:self:knowledge_gaps
-DEL jarvis:self:gap_counts
 
-# Réinitialiser un compteur spécifique
-HDEL jarvis:self:gap_counts test_validation
+# Lift the cooldown on one topic so it can be proposed again
+DEL jarvis:self:gap_cooldown:<slug>
 ```
 
-### Notifications et cooldowns
+### Notifications and cooldowns
+
 ```bash
-# Vider la file de push d'un utilisateur
-DEL jarvis:push:pending:KORBEN99
+# Empty a user's push queue
+DEL jarvis:push:pending:ALICE1
 
-# Lever le cooldown push (forcer un push immédiat possible)
-DEL jarvis:push:cooldown:KORBEN99
+# Lift the push cooldown (allows an immediate push)
+DEL jarvis:push:cooldown:ALICE1
 
-# Supprimer le token device (désactive les push)
-DEL jarvis:device:token:KORBEN99
+# Remove the device token (disables push)
+DEL jarvis:device:token:ALICE1
 ```
 
 ### Conversations
-```bash
-# Vider une session (aussi accessible via DELETE /conversations/{session_id})
-DEL chat:KORBEN99:iphone-main
 
-# Supprimer toutes les sessions d'un utilisateur
-# (depuis le shell, pas depuis redis-cli)
-docker exec jarvis-redis redis-cli --scan --pattern "chat:KORBEN99:*" | xargs docker exec jarvis-redis redis-cli DEL
+```bash
+# Clear one session (also available via DELETE /conversations/{session_id})
+DEL chat:ALICE1:iphone-main
+
+# Remove every session of a user (from the shell, not from redis-cli)
+docker exec jarvis-redis redis-cli --scan --pattern "chat:ALICE1:*" \
+  | xargs docker exec jarvis-redis redis-cli DEL
 ```
 
-### Mémoire épisodique
+### Episodic memory
+
 ```bash
-# Taille de la mémoire épisodique
-ZCARD episodic:KORBEN99:conversations
+# Size of episodic memory
+ZCARD episodic:ALICE1:conversations
 
-# Supprimer les entrées les plus anciennes (garder les 200 dernières)
-ZREMRANGEBYRANK episodic:KORBEN99:conversations 0 -201
+# Drop the oldest entries, keeping the last 200
+ZREMRANGEBYRANK episodic:ALICE1:conversations 0 -201
 
-# Vider complètement (irréversible — Qdrant non affecté)
-DEL episodic:KORBEN99:conversations
+# Wipe entirely (irreversible — Qdrant is not affected)
+DEL episodic:ALICE1:conversations
 ```
 
 ### Trading
+
 ```bash
-# Supprimer une position
-SREM trade:KORBEN99:index FR0000131104
-DEL trade:KORBEN99:pos:FR0000131104
+# Remove a position
+SREM trade:ALICE1:index FR0000131104
+DEL trade:ALICE1:pos:FR0000131104
 
-# Vider le cache prix
-docker exec jarvis-redis redis-cli --scan --pattern "trade:price_cache:*" | xargs docker exec jarvis-redis redis-cli DEL
+# Flush the price cache
+docker exec jarvis-redis redis-cli --scan --pattern "trade:price_cache:*" \
+  | xargs docker exec jarvis-redis redis-cli DEL
 
-# Forcer un réimport CSV au prochain cycle
-DEL trade:KORBEN99:last_import_ts
+# Force a CSV re-import on the next cycle
+DEL trade:ALICE1:last_import_ts
 ```
 
-### Réflexion autonome
+### Autonomous reflection
+
 ```bash
-# Vider le journal de réflexion (repart de zéro)
+# Clear the reflection journal (starts from scratch)
 DEL jarvis:self:reflection_log
 ```
 
 ---
 
-## Divers
+## Miscellaneous
 
 ```bash
-# Taille totale de la base (nombre de clés)
+# Total number of keys
 DBSIZE
 
-# Mémoire utilisée
+# Memory usage
 INFO memory
 
-# Monitorer les commandes en temps réel (ctrl+c pour stopper)
+# Watch commands live (ctrl+c to stop)
 MONITOR
 
-# Quitter
+# Quit
 EXIT
 ```

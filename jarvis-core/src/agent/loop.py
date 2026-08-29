@@ -151,7 +151,7 @@ def _context_for_model(messages: list[dict]) -> list[dict]:
     vivant dans le <think> qu'on jette. Le contexte se réduisait à un objectif suivi d'un
     tas de résultats bruts, et le modèle rejouait six fois la même recherche.
 
-    Mais le rapatrier par la tuyauterie a échoué DEUX fois le 19/08/2026, de deux façons
+    Mais le rapatrier par la tuyauterie a échoué DEUX fois, de deux façons
     distinctes, en figeant la boucle à chaque fois :
       1. fusionné dans le `content` du tour assistant → le modèle en déduit que « contenu
          assistant = mon raisonnement », émet sa réflexion, ferme </think>, puis réécrit le
@@ -178,7 +178,7 @@ def _fichiers_produits(task: dict) -> list[str]:
     """Fichiers réellement écrits dans le workspace, hors fichiers de service.
 
     Sert le cas où la tâche s'arrête sans passer par finish (budget épuisé, annulation) :
-    le livrable existe sur disque mais personne ne l'a déclaré. Au run du 19/08/2026,
+    le livrable existe sur disque mais personne ne l'a déclaré. A l'usage,
     l'article LinkedIn était écrit et complet, et l'utilisateur recevait « livrables: [] ».
     """
     from .tools import _FICHIERS_INTERNES
@@ -249,7 +249,7 @@ async def _generate(
     # (convention OpenAI) alors que le template itère `arguments|items` et exige un dict :
     # sans cette conversion le prompt est corrompu à partir du moment où l'historique
     # contient un appel d'outil, et le modèle n'émet plus rien du tout. Mesuré le
-    # 19/08/2026 : 20 pas vides en 5 s. Idempotent — un dict déjà converti est laissé tel
+    # 20 pas vides en 5 s. Idempotent — un dict déjà converti est laissé tel
     # quel — et non destructif : la fonction renvoie des copies, `messages` garde sa forme
     # OpenAI pour la persistance.
     messages = normalise_messages_for_template(_context_for_model(messages))
@@ -384,7 +384,7 @@ async def run_task(task: dict) -> dict:
 
     # Fenêtre glissante des derniers appels, et non compteur de répétitions CONSÉCUTIVES.
     # Un aller-retour A→B→A remettait le compteur à zéro à chaque alternance : mesuré le
-    # 19/08/2026, read_file / fetch_url / read_file en boucle sans jamais atteindre le
+    # read_file / fetch_url / read_file en boucle sans jamais atteindre le
     # seuil fatal. Compter les occurrences dans la fenêtre attrape les deux formes.
     recent_signatures: list[str] = []
 
@@ -461,7 +461,7 @@ async def run_task(task: dict) -> dict:
                 plan_result = await execute_tool(task, PLAN, _args_of(plan_call))
                 # Le pied porte le compteur de pas, l'alerte « workspace vide » et le
                 # plan : l'omettre ici privait le modèle de tout signal précisément sur les
-                # tours où il dérive en replanifiant — mesuré le 19/08/2026, 4 plan de
+                # tours où il dérive en replanifiant — mesuré, 4 plan de
                 # suite sans jamais voir qu'il n'avait rien écrit.
                 messages.append({
                     "role": "tool", "tool_call_id": plan_call["id"], "name": PLAN,
@@ -500,7 +500,7 @@ async def run_task(task: dict) -> dict:
             # Deuxième appel STRICTEMENT identique : on n'exécute pas, on le dit. Rejouer
             # rendrait le même résultat, que le modèle a déjà sous les yeux — et sans cet
             # avertissement il découvre le problème en se faisant tuer au troisième
-            # (mesuré le 19/08/2026 : read_file rejoué à l'identique, tâche perdue au pas 4
+            # (mesuré : read_file rejoué à l'identique, tâche perdue au pas 4
             # alors que le résultat portait « reprends avec offset=318 »).
             if seen == 1:
                 result = get_prompt("AGENT_REPEATED_CALL").format(name=name)
@@ -524,7 +524,7 @@ async def run_task(task: dict) -> dict:
 
         # ── Budget épuisé : PHASE DE CONCLUSION, outillée.
         # L'ancienne version demandait une synthèse en prose, SANS outils — le modèle ne
-        # pouvait donc rien sauvegarder. Deux tâches ont ainsi été perdues le 19/08/2026
+        # pouvait donc rien sauvegarder. Deux tâches ont ainsi été perdues
         # (article LinkedIn, analyse de logs) : le travail était fait, il ne manquait
         # qu'un tour pour l'écrire. On lui rend ce tour, avec de quoi écrire et conclure.
         return await _conclure(task, messages)
@@ -589,7 +589,7 @@ async def _conclure(task: dict, messages: list[dict], motif: str = "") -> dict:
 
         # `tools_override` ne restreint que ce qui est DÉCLARÉ au modèle : parse_tool_calls
         # ne filtre pas, et le modèle rappelle de mémoire les outils vus plus haut dans le
-        # contexte. Sans ce refus, la conclusion repartait analyser — mesuré le 19/08/2026,
+        # contexte. Sans ce refus, la conclusion repartait analyser — mesuré,
         # shell et plan exécutés pendant la phase censée être réduite à rendre.
         if name not in ("write_file", FINISH):
             messages.append({

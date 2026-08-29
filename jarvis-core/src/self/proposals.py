@@ -157,7 +157,7 @@ def reject_proposal(proposal_id: str) -> str:
 
     # Sommeil du SUJET, symétrique de celui posé à l'approbation. Il n'existait que côté
     # succès, ce qui revenait à récompenser l'échec : un rejet ne coûtait rien et le sujet
-    # pouvait revenir au cycle suivant. Mesuré sur prompt_proposals.json au 21/08/2026 —
+    # pouvait revenir au cycle suivant. Mesuré sur prompt_proposals.json —
     # 11 rejets sur 13, dont quatre sur le même sujet.
     topic_slug = slug_de_sujet(found.get("topic", ""))
     if topic_slug:
@@ -302,7 +302,7 @@ def _action_refine_prompt(params: dict) -> str:
     # lisait en code. Les deux ont échoué ensemble : le modèle sortait du premier en visant
     # un autre prompt, et le second était inatteignable parce que le slug de sujet, tronqué
     # à 40 caractères et sans rapprochement sémantique, comptait séparément deux
-    # formulations du même problème. Bilan mesuré au 21/08/2026 : 13 propositions,
+    # formulations du même problème. Bilan mesuré : 13 propositions,
     # 11 rejetées, dont QUATRE sur le même sujet visant quatre prompts différents.
     #
     # Le raisonnement qui remplace tout ça : l'approbation humaine EST déjà le filtre de

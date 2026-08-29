@@ -21,7 +21,7 @@ struct SettingsView: View {
                         Text("LOCAL NETWORK")
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
                             .foregroundColor(.gray)
-                        TextField("http://192.168.1.53:8000", text: $settings.localServerURL)
+                        TextField("http://192.168.1.10:8000", text: $settings.localServerURL)
                             .textFieldStyle(.roundedBorder)
                             .keyboardType(.URL)
                             .autocorrectionDisabled()

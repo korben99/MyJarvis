@@ -53,7 +53,7 @@ logger = get_logger("jarvis-self")
 
 # ── Catalogues d'actions ──────────────────────────────────────────────────
 #
-# Le cycle de réflexion N'APPREND PLUS, il AGIT. Découpage arrêté le 21/08/2026 : la nuit
+# Le cycle de réflexion N'APPREND PLUS, il AGIT. Découpage arrêté : la nuit
 # écrit ce que Jarvis sait (des conversations et de son état), la réflexion consomme ce
 # savoir pour faire des choses. Une seule question place n'importe quelle action —
 # est-ce que ça écrit ce que Jarvis sait, ou est-ce que ça fait quelque chose ?
@@ -112,7 +112,7 @@ if _MANQUANTES:  # pragma: no cover - garde de démarrage
 
 # Ensemble des actions qui portent sur UN utilisateur et ont donc besoin de `user_code`.
 # Dérivé du catalogue plutôt que réécrit à la main : la liste manuelle contenait encore
-# `correct_profile` et `store_insight` (supprimées le 21/08/2026) et il lui MANQUAIT
+# `correct_profile` et `store_insight` (supprimées) et il lui MANQUAIT
 # `flag_project_stall`, pourtant dans _USER_ACTIONS — l'action était donc morte par le
 # chemin LLM, où elle retombait sur « invalid user_code », et ne fonctionnait que par le
 # chemin mécanique qui passe user_code explicitement.
@@ -138,7 +138,7 @@ def _matiere_pour_agir_sur_soi(ctx: dict) -> str:
     ne peut répondre que « nothing ». Mesuré sur 95 cycles avant le découpage : 69 se
     concluaient ainsi. Autant ne pas payer l'appel.
 
-    DÉCLENCHEMENT SUR FRONT, corrigé le 21/08/2026. Trois des quatre signaux sont des
+    DÉCLENCHEMENT SUR FRONT, corrigé. Trois des quatre signaux sont des
     ÉTATS et non des événements : un service reste injoignable, une CVE critique reste
     ouverte, une lacune non traitée le reste. Le quatrième signal d'alors — un compteur
     d'occurrences de lacunes — n'était jamais décrémenté : une fois le seuil franchi, le
@@ -207,7 +207,7 @@ def _matiere_pour_agir_sur_soi(ctx: dict) -> str:
 def _obstacle_mecanique(action: str, params: dict) -> str | None:
     """L'obstacle EN DUR qui rend l'action impossible, ou None si la voie est libre.
 
-    Évalué avant l'auto-contestation, et c'est tout le point. Mesuré le 21/08/2026 à
+    Évalué avant l'auto-contestation, et c'est tout le point. Mesuré à
     15 h 12 : le contesteur a refusé un `queue_push` au motif que « le délai
     d'indisponibilité (17 h 31 restantes) empêche l'envoi » — c'est-à-dire le cooldown de
     push, que `_deliver_push` vérifie deux lignes plus loin par un simple `r.exists()`. Un
@@ -256,7 +256,7 @@ def _build_review_context(
 ) -> tuple[str, str]:
     """Return (context_str, criteria_str) tailored to the action being reviewed.
 
-    La branche `refine_prompt` a été retirée le 21/08/2026 : l'action avait quitté
+    La branche `refine_prompt` a été retirée : l'action avait quitté
     `_SELF_REVIEW_REQUIRED`, donc la branche était inatteignable depuis. Ses deux lectures
     utiles — le compteur de lacunes du sujet et l'historique des propositions du prompt —
     ont été déplacées dans `_action_refine_prompt`, où elles sont désormais journalisées
@@ -415,7 +415,7 @@ def _pas_marquant(steps: list[dict]) -> dict:
     L'en-tête de l'entrée de journal est lue par `_extract_behavioral_patterns`, par
     `/self/log`, et surtout injectée en conversation (« Dernière action autonome : … »).
     Elle prenait `all_steps[-1]`, ce qui produisait deux défauts mesurés sur les 30 entrées
-    du journal au 21/08/2026 :
+    du journal :
 
       • un `nothing` en fin de chaîne MASQUAIT tout ce qui l'avait précédé — 9 cycles sur
         30 journalisaient « nothing » alors qu'une action avait bien eu lieu, dont un
@@ -574,9 +574,9 @@ async def _reflechir() -> dict:
             # Le compromis d'origine acceptait de la perdre pour les utilisateurs
             # silencieux, au motif qu'« elle ne s'était jamais déclenchée sur la fenêtre
             # mesurée ». Cette fenêtre faisait 4 jours, et le seuil de relance est de 21 :
-            # elle ne pouvait donc pas contenir le phénomène qu'on supprimait. Conséquence
-            # relevée le 20/08/2026 — 5 projets en attente, dont trois de Mathilde à 87,
-            # 122 et 122 jours, tous invisibles parce qu'elle ne parlait plus.
+            # elle ne pouvait donc pas contenir le phénomène qu'on supprimait. En pratique,
+            # des projets restaient en attente plusieurs mois — jusqu'à 122 jours — sans
+            # jamais remonter, parce que leur propriétaire ne parlait plus.
             #
             # Or un projet en sommeil est PRÉCISÉMENT la signature d'un utilisateur
             # silencieux : la relance ne pouvait atteindre que ceux qui n'en avaient pas
@@ -743,7 +743,7 @@ async def _reflechir() -> dict:
         "health": global_ctx["health"],
         # Le catalogue EN VIGUEUR au moment où l'entrée a été écrite. C'est ce qui permet à
         # `_extract_behavioral_patterns` et à `get_last_reflection` d'ignorer les entrées
-        # d'un catalogue révolu. Sans lui, le 21/08/2026 : sur 30 entrées, 28 dataient
+        # d'un catalogue révolu. Sans lui, : sur 30 entrées, 28 dataient
         # d'avant le découpage, et le prompt annonçait au modèle que « check_health » était
         # choisie dans 47 % des cycles — une action supprimée. Le cycle de 14 h 07 l'a
         # dûment demandée, et l'a payée d'un appel de raisonnement pour rien.

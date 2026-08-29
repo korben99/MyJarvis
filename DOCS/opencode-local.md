@@ -1,50 +1,49 @@
-# OpenCode sur le LLM local de Jarvis
+# OpenCode on Jarvis's local LLM
 
-Remplace l'ancien montage Claude Code / proxy Anthropic (supprimé le 08/08/2026), qui
-émulait les appels d'outil au niveau du prompt et échouait dès qu'un appel était mal formé.
-OpenCode parle OpenAI nativement et le function calling est désormais réel : les schémas
-d'outils sont passés au template de chat, et le modèle répond dans le format sur lequel il
-a été entraîné.
+Replaces the earlier Claude Code / Anthropic-proxy setup, which emulated tool calls at the
+prompt level and broke as soon as one call came out malformed. OpenCode speaks OpenAI
+natively and function calling is now real: tool schemas are passed to the chat template, and
+the model answers in the format it was trained on.
 
 ## Architecture
 
 ```
 opencode  ──►  http://jarvis:8000/v1/raw/chat/completions  ──►  Qwen3.6-35B (MLX)
-             (Tailscale, depuis n'importe quelle machine)
+             (Tailscale, from any machine)
 ```
 
-`/v1/raw` et non `/v1/chat/completions` : la route principale est l'assistant personnel,
-elle ne garde que le dernier message, écrase le `system` du client, injecte profil, mémoire,
-RAG, Gmail et Calendar, et **écrit dans la mémoire** à chaque appel. Un agent de code y
-polluerait le convlog et Qdrant. `/v1/raw` ne fait rien de tout ça.
+`/v1/raw` and not `/v1/chat/completions`: the main route *is* the personal assistant. It
+keeps only the last message, overwrites the client's `system`, injects profile, memory, RAG,
+Gmail and Calendar, and **writes to memory** on every call. A coding agent would pollute the
+convlog and Qdrant. `/v1/raw` does none of that.
 
-## Installation
+## Install
 
 ```bash
-brew install opencode          # tire node + ripgrep
+brew install opencode          # pulls node + ripgrep
 mkdir -p ~/.config/opencode
 cp /opt/jarvis/DOCS/opencode.json.example ~/.config/opencode/opencode.json
 ```
 
-Sur une autre machine : même chose, seul le fichier de config est nécessaire — il pointe sur
-le nom Tailscale `jarvis`, pas sur `localhost`, donc il est valable partout tel quel.
-Prérequis : la machine doit être sur le tailnet, et le Mac Mini démarré.
+On another machine: same thing, the config file is all you need — it points at the Tailscale
+name `jarvis`, not `localhost`, so it works anywhere as-is. Prerequisites: the machine is on
+the tailnet, and the Mac Mini is up.
 
-## Réglages
+## Settings
 
-| Champ | Valeur | Pourquoi |
+| Field | Value | Why |
 |---|---|---|
-| `baseURL` | `http://jarvis:8000/v1/raw` | le client compose `/chat/completions` derrière |
-| `limit.output` | `8000` | = `RAW_MAX_TOKENS` (`routes/proxy.py`) |
-| `limit.context` | `32768` | prudent : le modèle annonce 262 144, mais le cache KV correspondant ne tient pas en RAM sur le Mac Mini. À monter progressivement en surveillant la latence. |
+| `baseURL` | `http://jarvis:8000/v1/raw` | the client appends `/chat/completions` |
+| `limit.output` | `8000` | matches `RAW_MAX_TOKENS` (`routes/proxy.py`) |
+| `limit.context` | `32768` | conservative: the model advertises 262 144, but the matching KV cache does not fit in RAM on the Mac Mini. Raise gradually while watching latency. |
 
-Le thinking est désactivé par défaut sur cette route (`RAW_NO_THINK=true`) et les blocs
-`<think>` sont strippés : OpenCode ne verra jamais de raisonnement dans ses réponses.
+Thinking is off by default on this route (`RAW_NO_THINK=true`) and `<think>` blocks are
+stripped: OpenCode never sees reasoning in its responses.
 
-## Fonctionnement du function calling
+## How function calling works
 
-Le template (`models/templates/qwen36_ninja.jinja`) rend les outils en tête du bloc système
-et impose ce format de réponse :
+The template (`models/templates/qwen36_ninja.jinja`) renders the tools at the top of the
+system block and imposes this response format:
 
 ```
 <tool_call>
@@ -56,25 +55,25 @@ src/main.py
 </tool_call>
 ```
 
-`jarvis-core/src/tool_calls.py` fait la traduction dans les deux sens :
-- **sortie modèle → OpenAI** : `parse_tool_calls()`, avec typage des paramètres d'après le
-  schéma JSON de l'outil (un `42` doit revenir en entier, pas en `"42"`, sinon la validation
-  côté client échoue) ;
-- **entrée OpenAI → template** : `normalise_messages_for_template()`, qui reconvertit
-  `arguments` de chaîne JSON en dict — le template itère `arguments|items` et n'accepte pas
-  une chaîne. Sans ça, le second tour produit un prompt corrompu.
+`jarvis-core/src/tool_calls.py` translates both ways:
 
-En présence d'outils, la réponse est bufferisée avant émission : tant que `<tool_call>` n'est
-pas clos, on ne peut pas savoir si le texte en cours est de la prose ou le début d'un appel.
+- **model output → OpenAI**: `parse_tool_calls()`, typing parameters from the tool's JSON
+  schema — a `42` must come back as an integer, not `"42"`, or client-side validation fails;
+- **OpenAI input → template**: `normalise_messages_for_template()`, which converts
+  `arguments` back from a JSON string to a dict. The template iterates `arguments|items` and
+  will not accept a string; without this, the second turn produces a corrupted prompt.
 
-## Sécurité — dette assumée
+When tools are present, the response is buffered before emission: until `<tool_call>` is
+closed, there is no way to tell whether the text in flight is prose or the start of a call.
 
-`/v1/raw` n'a **aucune authentification** et uvicorn écoute sur `0.0.0.0`. Acceptable tant que
-la machine reste sur le réseau domestique et que l'accès distant passe par Tailscale. À
-reprendre si elle se retrouve sur un réseau partagé.
+## Security — acknowledged debt
 
-## Diagnostic
+`/v1/raw` has **no authentication** and uvicorn listens on `0.0.0.0`. Acceptable as long as
+the machine stays on a home network and remote access goes through Tailscale. Revisit if it
+ever lands on a shared network. See [SECURITY.md](SECURITY.md).
+
+## Diagnostics
 
 ```bash
-./jarvis-status.sh          # section « Endpoint agents de code (OpenCode) »
+./scripts/jarvis-status.sh          # section "Endpoint agents de code (OpenCode)"
 ```

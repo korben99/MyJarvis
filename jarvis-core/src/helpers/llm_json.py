@@ -57,11 +57,10 @@ def filter_think_chunk(chunk: str, in_think: bool) -> tuple[str, str, bool]:
 def _excerpt(text: str, head: int = 200, tail: int = 120) -> str:
     """Début ET fin de la charge, pour les messages d'erreur.
 
-    Ne montrer que `text[:200]` a rendu deux échecs sur trois non diagnosticables
-    (12/07 et 09/08/2026) : les défauts de ces sorties se situent en FIN de charge —
-    celui du 14/08, seul dont la queue a survécu dans prompts.log, était un `)`
-    parasite entre le guillemet fermant de la dernière valeur et l'accolade. Le début
-    seul montrait un JSON parfaitement valide.
+    Ne montrer que `text[:200]` a rendu deux échecs sur trois non diagnosticables : les
+    défauts de ces sorties se situent en FIN de charge. Le seul dont la queue a survécu
+    dans prompts.log était un `)` parasite entre le guillemet fermant de la dernière
+    valeur et l'accolade — le début seul montrait un JSON parfaitement valide.
     """
     if len(text) <= head + tail:
         return text

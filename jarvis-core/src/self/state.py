@@ -123,7 +123,7 @@ def _upsert_opinion_inplace(data: dict, topic: str, opinion: str, date: str) -> 
        quand le même avis revenait sous une autre étiquette — or c'est le cas courant,
        le modèle nommant librement ses topics chaque nuit.
 
-    Seuil vérifié sur le corpus réel le 21/08/2026 : une paraphrase quasi littérale marque
+    Seuil vérifié sur le corpus réel : une paraphrase quasi littérale marque
     0,935, tandis que la paire d'opinions distinctes la plus proche des 50 en mémoire
     plafonne à 0,713 (médiane 0,309). L'écart est large — 0,85 ne fusionnera pas deux avis
     réellement différents.
@@ -216,7 +216,7 @@ def _du_catalogue_courant(logs: list[dict]) -> list[dict]:
     """Ne garde que les entrées écrites avec le catalogue d'actions EN VIGUEUR.
 
     Le catalogue change — actions retirées, actions ajoutées — et le journal, lui, garde
-    30 entrées. Le 21/08/2026, 28 des 30 dataient d'avant le découpage : `_extract_
+    30 entrées. Le, 28 des 30 dataient d'avant le découpage : `_extract_
     behavioral_patterns` annonçait au modèle que « check_health » était choisie dans 47 %
     de ses cycles, pour une action supprimée le matin même. Il l'a dûment redemandée au
     cycle de 14 h 07, et l'a payée d'un appel de raisonnement pour rien.

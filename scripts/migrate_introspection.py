@@ -5,7 +5,7 @@
 ne plante — mais la connaissance de soi accumulée cesse silencieusement d'être injectée en
 conversation, parce que le code ne lit plus `learnings`.
 
-Ce qui change, et pourquoi (RESEARCH/RESULTATS.md, 20/08/2026) : `learnings` accumulait des
+Ce qui change, et pourquoi (RESEARCH/RESULTATS.md) : `learnings` accumulait des
 aperçus indexés par sujet, sans plafond utile. Sur 17 apprentissages produits
 indépendamment, le modèle redécouvrait les mêmes huit axes nuit après nuit — la liste ne
 grandissait qu'en longueur. Elle est remplacée par neuf axes fixes (config.INTROSPECTION_AXES),

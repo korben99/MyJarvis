@@ -59,7 +59,7 @@ from .state import (
 
 logger = get_logger("jarvis-self")
 
-# _NS_GUARDS supprimés le 21/08/2026 avec _action_correct_profile, seule à les utiliser.
+# _NS_GUARDS supprimés avec _action_correct_profile, seule à les utiliser.
 # À noter : ils protégeaient les espaces `financial` et `travel` du profil (une valeur
 # écrite sous `placement:*` devait contenir un montant, un nom de fonds…). Cette
 # protection n'existait QUE sur ce chemin — ni l'analyseur ni la revue nocturne ne l'ont
@@ -99,7 +99,7 @@ def _action_nothing(params: dict) -> str:
     return f"no-op: {reason}"
 
 
-# _action_store_insight() supprimée le 21/08/2026 : la revue nocturne est propriétaire
+# _action_store_insight supprimée : la revue nocturne est propriétaire
 # de la mémoire autobiographique (Call 1, `insights_durables`), et elle décide sur les
 # conversations complètes de la journée là où cette action ne voyait qu'un résumé
 # d'activité. Il y avait trois écrivains pour la même destination.
@@ -162,9 +162,8 @@ def _action_flag_knowledge_gap(params: dict) -> str:
     # Plus de compteur d'occurrences. Le seuil « ×3 » qu'il alimentait n'a jamais été lu
     # en code, et il ne pouvait de toute façon pas mesurer la récurrence : le slug est
     # tronqué à 40 caractères sans rapprochement sémantique, si bien que deux formulations
-    # du même problème comptaient séparément (mesuré le 21/08/2026 —
-    # « gestion_des_notifications_techniques_ave » = 2 et
-    # « gestion_des_défaillances_de_notification » = 1, même sujet de fond, jamais 3).
+    # du même problème comptaient séparément : « gestion_des_notifications_techniques_ave »
+    # = 2 et « gestion_des_défaillances_de_notification » = 1, même sujet de fond, jamais 3.
     # refine_prompt est désormais borné en DÉBIT, pas en récurrence : voir
     # _action_refine_prompt.
     pipe = r.pipeline()
@@ -325,7 +324,7 @@ def _action_alert_admin(params: dict) -> str:
     return f"admin alerted ({admin}): {message[:80]}"
 
 
-# _action_correct_profile() supprimée le 21/08/2026 : `curative_profile_cleanup`
+# _action_correct_profile supprimée : `curative_profile_cleanup`
 # (revue nocturne, Call 4) applique des `updates` par hset autant que des suppressions,
 # donc elle corrige aussi les valeurs — avec le profil entier sous les yeux, ce que
 # cette action n'avait pas.
@@ -347,11 +346,11 @@ def _action_ask_user(params: dict) -> str:
     return _action_queue_push({"user_code": user_code, "message": question})
 
 
-# _action_update_self_note() et la liste `self_notes` supprimées le 21/08/2026.
+# _action_update_self_note et la liste `self_notes` supprimées.
 #
 # Le bloc <notes_jarvis> qui devait porter ces notes en conversation lisait la clé `text`
 # alors que l'écriture posait `note` : masqué par un `if n.get("text")`, il n'a JAMAIS rien
-# injecté depuis sa création le 25/04/2026. Les notes n'étaient donc lues que par le cycle
+# injecté depuis. Les notes n'étaient donc lues que par le cycle
 # qui les écrivait — un circuit fermé, dont le contenu observé portait la marque : six
 # notes en trois jours sur sa propre inertie, dont une constatant que les précédentes
 # étaient « redondantes et stériles ».
@@ -361,7 +360,7 @@ def _action_ask_user(params: dict) -> str:
 # il passera par l'axe `meta_personne` plutôt que par une seconde liste.
 
 
-# _action_consolidate_memory() supprimée le 21/08/2026 : la consolidation reste appelée
+# _action_consolidate_memory supprimée : la consolidation reste appelée
 # par la revue nocturne le 1er du mois (`consolidate_memories`). On perd le déclenchement
 # à la demande — c'est assumé : comprimer la mémoire n'est pas agir, et cette action
 # portait un cooldown de 48 h qui la rendait de toute façon rare.
@@ -376,7 +375,7 @@ def alerter_si_anomalie_critique(
     santé mémoire par cycle, chacune faisant un scroll Qdrant par utilisateur. Les sondes
     par défaut restent en place pour les appelants qui n'ont pas de contexte sous la main.
 
-    Était l'action `check_health` jusqu'au 21/08/2026. Ce n'en était pas une : la moitié
+    Était l'action `check_health` jusqu'ici. Ce n'en était pas une : la moitié
     du travail (sonder les services et la santé mémoire) est déjà faite par
     `gather_global_context`, et l'autre moitié — cette alerte — ne demandait aucun
     jugement. La laisser dans le catalogue rendait un signal critique dépendant du choix
@@ -484,7 +483,7 @@ def _action_prune_self_memory(params: dict) -> str:
     them from jarvis-self.json.
     Runs synchronously (called via asyncio.to_thread from run_self_reflection).
 
-    Ne porte plus que sur les opinions depuis le 21/08/2026 : `self_notes` a été supprimée,
+    Ne porte plus que sur les opinions depuis : `self_notes` a été supprimée,
     et `self_introspection` n'est pas purgeable — neuf axes fixes, révisés par la revue
     nocturne, jamais supprimés. Une purge par index n'aurait aucun sens sur un dict borné
     par construction, et un axe qu'on efface reviendrait vide le lendemain.
@@ -686,7 +685,7 @@ def _action_flag_project_stall(params: dict) -> str:
             # On NOTE et on continue, au lieu de sortir. Sortir au premier push non
             # livrable annulait toute la passe : les projets suivants n'étaient jamais
             # examinés, aucun cooldown n'était posé, et la passe repartait à l'identique au
-            # cycle suivant. Mesuré les 21/08/2026 sur trois cycles d'affilée, à la lettre
+            # cycle suivant. Mesuré les sur trois cycles d'affilée, à la lettre
             # près : « ZSXEDC — push indisponible : no device registered ». Il n'y a pas
             # d'appareil enregistré et il n'y en aura pas tant que l'utilisateur n'en
             # enregistre pas un ; la tentative se rejouait toutes les cinq heures.

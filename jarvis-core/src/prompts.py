@@ -912,7 +912,7 @@ que tu voudrais avoir sous les yeux la prochaine fois, pas ce que tu voudrais pr
 
                        Tu es le seul à pouvoir les repérer : tu as les conversations sous
                        les yeux. Le cycle de réflexion, lui, ne voit que des compteurs —
-                       c'est pour ça que cette liste t'appartient depuis le 21/08/2026.
+                       c'est pour ça que cette liste t'appartient.
 
                        `context` doit citer l'échec OBSERVÉ, pas une inquiétude générale :
                        ce que la personne demandait, et en quoi ta réponse a manqué. Une
@@ -1195,11 +1195,11 @@ Sinon :
 # Token budget map — used by self.py to pass limits to REFINE_PROMPT_USER.
 # Values must stay in sync with the budget table in REFINE_PROMPT_SYSTEM above.
 PROMPT_TOKEN_BUDGETS = {
-    "SYSTEM_BASE_FR": 450,  # inline / KV-cached — keep tight (~431 tok actual, mesuré 04/08/2026)
-    "IDENTITY_FR": 850,  # inline / KV-cached, avant le bloc utilisateur (~773 tok, mesuré 11/08/2026)
+    "SYSTEM_BASE_FR": 450,  # inline / KV-cached — keep tight (~431 tok actual, mesuré)
+    "IDENTITY_FR": 850,  # inline / KV-cached, avant le bloc utilisateur (~773 tok, mesuré)
     "ROUTER_SYSTEM": 1800,  # KV-cached, 17 examples + last_jarvis ctx — ~1385 tok actual
     "ROUTER_USER": 600,  # ~11 tok de template — le budget couvre last_jarvis_block + message
-    "ANALYSIS_PROMPT": 2700,  # async — quality over speed (~2561 tok mesuré 22/08/2026)
+    "ANALYSIS_PROMPT": 2700,  # async — quality over speed (~2561 tok mesuré)
     "BRIEFING_SYSTEM": 100,
     "BRIEFING_USER": 400,
     "WEB_RELEVANCE_JUDGE": 200,
@@ -1355,7 +1355,7 @@ Tu disposes de {max_steps} pas au total, celui-ci compris."""
 AGENT_STEP_FOOTER = "\n\n[pas {step}/{max_steps}]{hint}"
 
 # Relance de mi-parcours. Un troisième palier existait pour les derniers pas (« écris
-# maintenant ») : supprimé le 19/08/2026, la phase de conclusion garantit désormais
+# maintenant ») : supprimé, la phase de conclusion garantit désormais
 # mécaniquement la fin de partie qu'il protégeait par la parole.
 #
 # Formulée en termes de CONVERGENCE, et non de rédaction. La version précédente disait

@@ -77,7 +77,7 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
             ]
         }
 
-    # Sanité de l'index — le 21/08/2026, `timestamp` était indexé en `integer` alors que le
+    # Sanité de l'index —, `timestamp` était indexé en `integer` alors que le
     # payload y écrit un flottant (time.time()). Un index integer n'indexe aucune valeur
     # flottante : il contenait 0 point sur 281, et `scroll(order_by="timestamp")` rendait
     # une liste VIDE sans lever la moindre erreur. La consolidation sortait donc à son
@@ -161,7 +161,7 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
 
             # On compte ce qui est RÉELLEMENT entré en mémoire avant de détruire la source.
             # store_autobiographical_event écarte silencieusement un fait trop proche d'un
-            # souvenir existant : sans ce comptage (avant le 21/08/2026), un lot dont tous
+            # souvenir existant : sans ce comptage (auparavant), un lot dont tous
             # les faits étaient dédupliqués voyait quand même ses 50 points épisodiques
             # supprimés — la source détruite, rien de gagné. Le garde `if not facts`
             # ci-dessus ne voit pas ce cas, puisque la génération, elle, a réussi.

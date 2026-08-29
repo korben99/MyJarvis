@@ -1,6 +1,6 @@
 """Revue nocturne (APScheduler 23:00) — LA NUIT APPREND, elle n'agit jamais vers l'extérieur.
 
-Deux temps, depuis le découpage du 21/08/2026 :
+Deux temps, depuis le découpage :
   • par utilisateur ayant conversé : faits durables, curation autobio, dédup et narratif
     de profil — 4 appels chacun ;
   • une fois, sur la journée entière : révision des axes d'introspection et des opinions,
@@ -149,7 +149,7 @@ def _normalise_introspection(brut, actuel: dict | None = None) -> dict[str, str]
     empêche la liste de redevenir un tas. Un objet vide — le cas attendu la plupart des
     nuits — ne produit aucune écriture.
 
-    Une réécriture À L'IDENTIQUE est écartée : mesuré le 20/08/2026, le modèle réémet
+    Une réécriture À L'IDENTIQUE est écartée : mesuré, le modèle réémet
     parfois un axe au mot près. Sans effet sur le contenu, mais elle gonflerait
     introspection_log et ferait croire à une révision là où il n'y en a pas.
     """
@@ -188,7 +188,7 @@ def _etat_operationnel() -> str:
 
     Sans ce bloc, l'introspection ne se nourrit que des conversations et l'axe
     `meta_personne` ne peut rien apprendre de son propre fonctionnement — un angle mort
-    relevé le 21/08/2026, quand `self_notes` (la seule à voir ces signaux) a été retirée.
+    relevé, quand `self_notes` (la seule à voir ces signaux) a été retirée.
 
     Déterministe et tolérant : si une sonde est indisponible, on n'invente rien, la ligne
     disparaît.
@@ -223,7 +223,7 @@ async def _nightly_introspection(
     """Apprendre sur soi — révision des axes d'introspection et des opinions.
 
     UN SEUL appel par nuit, toutes conversations confondues. Était dans la boucle
-    utilisateur jusqu'au 21/08/2026, donc exécuté N fois pour un modèle de soi qui est
+    utilisateur jusqu'ici, donc exécuté N fois pour un modèle de soi qui est
     GLOBAL : chaque passage ne voyait qu'un utilisateur et réécrivait par-dessus le
     précédent. Les axes oscillaient entre les points de vue au lieu de se consolider.
 
@@ -231,11 +231,11 @@ async def _nightly_introspection(
     extraient ou trient — le modèle classe et reformate, il n'a rien à intégrer. Celui-ci
     doit rapprocher une journée de conversations et un état opérationnel d'une
     connaissance de soi déjà écrite, puis décider si quelque chose a bougé. C'est
-    exactement la tâche où l'A/B du 19/08/2026 (DOCS/AGENTIC.md) a mesuré que `no_think`
+    exactement la tâche où l'A/B (DOCS/AGENTIC.md) a mesuré que `no_think`
     ne fait pas gagner de temps et rend le modèle « confiant et faux » : il rédige depuis
     ses a priori au lieu de ce qu'il vient de lire.
 
-    Ce que ça corrigeait concrètement, le 22/08/2026 : en `no_think`, la révision du
+    Ce que ça corrigeait concrètement, : en `no_think`, la révision du
     20/08 avait réécrit `meta_personne` avec une paraphrase à 76 % de l'exemple qui
     figurait alors dans le prompt, sur une journée qui ne parlait ni de santé ni de
     médecin — et avait ainsi effacé une observation juste. Signature d'une génération qui
@@ -290,12 +290,12 @@ async def _nightly_cleaning_user(
     """Call 3 — memory curator: archive outdated facts, delete strict duplicates.
 
     `ecrits_ce_soir` : les textes que l'appel 1 vient d'écrire en autobiographie. Ils sont
-    RETIRÉS de la liste soumise à la curation, et c'est le correctif du 24/08/2026.
+    RETIRÉS de la liste soumise à la curation, et c'est le correctif.
 
     Sans ça, un fait fraîchement écrit arrivait des DEUX côtés du prompt — dans les
     souvenirs existants (get_autobiographical_facts le remonte, il vient d'être stocké) et
     dans `new_user_insights`. Le modèle constatait alors, à juste titre, qu'il était
-    identique à lui-même, et le classait en doublon à supprimer. Trace du 22/08/2026, cinq
+    identique à lui-même, et le classait en doublon à supprimer. Trace, cinq
     secondes d'écart :
 
         23:01:04  Autobiographical memory stored: « depuis août 2026, il privilégie la
@@ -305,7 +305,7 @@ async def _nightly_cleaning_user(
         23:01:09  Nightly cleaning — delete:1 — « Le souvenir n°48 est une copie
                   quasi-identique (100 %) du premier fait dans nouveaux insights »
 
-    Relevé sur le journal complet : 12 faits durables détruits ainsi depuis le 14/06/2026,
+    Relevé sur le journal complet : 12 faits durables détruits ainsi depuis,
     soit la grande majorité des suppressions autobiographiques jamais enregistrées. La
     revue effaçait presque chaque nuit ce qu'elle venait d'apprendre.
 
@@ -435,7 +435,7 @@ async def run_nightly_interaction_review() -> None:
     """
     Nightly per-user conversation review. Called by APScheduler at 23:00.
 
-    LA NUIT APPREND — elle n'agit jamais vers l'extérieur. Découpage arrêté le 21/08/2026 :
+    LA NUIT APPREND — elle n'agit jamais vers l'extérieur. Découpage arrêté :
     ce qui SORT (push, mail, alerte) appartient au cycle de réflexion, ce qui S'ÉCRIT en
     mémoire appartient ici.
 
@@ -662,8 +662,8 @@ async def _revue_nocturne() -> None:
             if isinstance(o, dict) and o.get("topic") and o.get("opinion")
         ]
 
-        # Lacunes de connaissance — déplacées ici depuis le cycle de réflexion le
-        # 21/08/2026. Elles exigent de décrire un échec CONCRET, et seule la nuit a les
+        # Lacunes de connaissance — déplacées ici depuis le cycle de réflexion.
+        # Elles exigent de décrire un échec CONCRET, et seule la nuit a les
         # conversations sous les yeux : la réflexion ne voyait que des compteurs, et
         # produisait donc des lacunes sur son propre comportement de boucle faute d'autre
         # matière observable. On réutilise l'action telle quelle — elle porte déjà les
@@ -684,7 +684,7 @@ async def _revue_nocturne() -> None:
                 data = get_self_memory()
                 # Un axe est RÉÉCRIT, jamais empilé : une seule ligne par axe, la dernière.
                 # C'est ce qui borne le coût de réinjection et évite que la connaissance de
-                # soi redevienne la liste sans fin qu'elle était avant le 20/08/2026.
+                # soi redevienne la liste sans fin qu'elle était auparavant.
                 axes = data.setdefault("self_introspection", {})
                 for axe, texte in revisions.items():
                     axes[axe] = texte
@@ -710,7 +710,7 @@ async def _revue_nocturne() -> None:
 
     # ── Entretien de la mémoire de soi ────────────────────────────────────
     # Hors boucle utilisateur : les opinions sont globales, pas per-user. Déplacé ici
-    # depuis le catalogue d'actions le 21/08/2026 — purger n'est pas agir, et le cycle de
+    # depuis le catalogue d'actions — purger n'est pas agir, et le cycle de
     # réflexion ne fait plus qu'agir. Le cooldown de 24 h vit dans l'action elle-même,
     # donc un appel par nuit ne peut pas emballer la purge.
     try:

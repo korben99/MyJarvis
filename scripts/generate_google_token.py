@@ -13,7 +13,7 @@ Usage:
     python3 generate_google_token.py
 
     # Per-user token (outputs GOOGLE_REFRESH_TOKEN_<CODE>)
-    python3 generate_google_token.py --user KORBEN99
+    python3 generate_google_token.py --user ALICE1
 
 The script will open a browser window for Google sign-in.
 Sign in with the account of the user specified via --user.
@@ -42,7 +42,7 @@ CLIENT_SECRET_FILE = "/opt/jarvis/scripts/client_secret.json"
 
 parser = argparse.ArgumentParser(description="Generate a Google OAuth refresh token for Jarvis.")
 parser.add_argument("--user", metavar="CODE", default="",
-                    help="User code (e.g. KORBEN99). Outputs GOOGLE_REFRESH_TOKEN_<CODE>.")
+                    help="User code (e.g. ALICE1). Outputs GOOGLE_REFRESH_TOKEN_<CODE>.")
 args = parser.parse_args()
 
 user_code = args.user.strip().upper()

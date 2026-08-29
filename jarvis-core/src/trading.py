@@ -350,7 +350,7 @@ def fetch_live_prices(user_code: str) -> dict[str, dict]:
             # Aucune validation du prix : on fait confiance à Yahoo.
             #
             # Il y avait ici un garde-fou qui comparait le cours live au dernier prix du CSV
-            # Boursorama et invalidait le ticker au-delà de 30 % d'écart. Retiré le 17/08/2026 :
+            # Boursorama et invalidait le ticker au-delà de 30 % d'écart. Retiré :
             # la référence CSV est un instantané figé dont l'âge n'est pas borné, donc toute
             # tendance réelle finissait par la franchir. Valneva (FR0004056851 → VLA.PA) est
             # passée de 2,17 le 5 août à 3,08 le 17 : +40 %, hausse authentique, prise pour une

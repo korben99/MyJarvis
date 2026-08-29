@@ -98,7 +98,7 @@ def _historique(nom: str, jours: int) -> list:
 def _compter_par_type(depuis_ts: float) -> dict:
     """Points Qdrant créés depuis `depuis_ts` (horodatage Unix), par memory_type.
 
-    Comparaison NUMÉRIQUE, et c'est le correctif du 24/08/2026. La version précédente
+    Comparaison NUMÉRIQUE, et c'est le correctif. La version précédente
     prenait un seuil ISO et faisait `str(payload["timestamp"]) >= depuis_iso`, soit une
     comparaison LEXICALE entre un flottant Unix rendu en chaîne et une date ISO :
 
@@ -111,7 +111,7 @@ def _compter_par_type(depuis_ts: float) -> dict:
     cinq entrées — ce qui est arrivé le 24/08, sur une mémoire parfaitement saine.
 
     On interroge désormais l'index de payload plutôt que de balayer la collection entière :
-    `timestamp` est indexé en `float` depuis le 21/08/2026, donc un `count` filtré suffit.
+    `timestamp` est indexé en `float` depuis, donc un `count` filtré suffit.
     """
     q = get_qdrant()
     compte = {}
@@ -202,7 +202,7 @@ def _echanges_recents(jours: int) -> int:
 def i04_05_emotion() -> list:
     """Dimensions émotionnelles vivantes, et mobilité de chacune.
 
-    Le 20/08/2026, `humeur` et `energie` étaient à 0,0 : seul `confiance` est écrit par la
+    Le, `humeur` et `energie` étaient à 0,0 : seul `confiance` est écrit par la
     boucle de réflexion. Deux tiers de la vie émotionnelle étaient inertes depuis des mois.
     C'est l'indicateur qui l'aurait dit dès le premier jour.
     """
@@ -223,7 +223,7 @@ def i04_05_emotion() -> list:
     # Mobilité : échantillon quotidien, donc on ne mesure pas l'amplitude intra-journée
     # mais l'immobilité sur plusieurs jours. Indicateur honnête plutôt qu'amplitude fausse.
     #
-    # Conditionné à l'EXISTENCE D'ÉCHANGES sur la fenêtre, depuis le 24/08/2026. La
+    # Conditionné à l'EXISTENCE D'ÉCHANGES sur la fenêtre, depuis. La
     # décroissance émotionnelle tourne en mode "exchange" (emotional_state._DECAY_MODE) :
     # elle est indexée sur les conversations, pas sur l'horloge, et `get_state()` ne fait
     # délibérément pas vieillir l'état à la lecture. Un état figé pendant cinq jours sans
@@ -325,7 +325,7 @@ def i08_09_reflexion() -> list:
 def i10_listes_self() -> list:
     """Remplissage des listes de jarvis-self.json face à leurs plafonds.
 
-    `growth_log` était à 114/180 le 20/08/2026. À saturation il tronque silencieusement :
+    `growth_log` était à 114/180. À saturation il tronque silencieusement :
     c'est la mémoire longue de Jarvis sur lui-même qui part par le haut, sans un mot.
     """
     try:
@@ -357,7 +357,7 @@ def i10_listes_self() -> list:
     # Les neuf axes d'introspection n'ont pas de plafond — ils sont bornés par
     # construction. Ce qu'on surveille chez eux, c'est l'inverse : un axe qui ne se
     # remplit JAMAIS est un axe qui ne mord pas sur ce qu'est Jarvis, et c'est le signal
-    # qui dit s'il faut le retirer ou le reformuler (RESULTATS.md, 20/08/2026).
+    # qui dit s'il faut le retirer ou le reformuler (RESULTATS.md).
     from config import INTROSPECTION_AXES
 
     axes = d.get("self_introspection") or {}

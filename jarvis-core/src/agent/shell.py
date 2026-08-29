@@ -27,6 +27,7 @@ l'est pas, et c'est le chemin d'exfiltration le plus court qui soit.
 
 import asyncio
 import os
+import pathlib
 import re
 import shlex
 
@@ -39,6 +40,12 @@ from config import (
 from helpers import get_logger
 
 logger = get_logger("jarvis-agent")
+
+# Racine du dépôt et home du compte, déduits à l'exécution : ces chemins servent à
+# INTERDIRE l'accès aux secrets. Codés en dur, ils protégeaient les secrets d'une seule
+# installation — sur toute autre, le bac à sable laissait passer .env et les clés.
+_RACINE = str(pathlib.Path(__file__).resolve().parents[3])
+_HOME = str(pathlib.Path.home())
 
 # Motifs refusés avant même d'atteindre le bac à sable. Volontairement courts et lisibles :
 # une liste noire n'est PAS une barrière de sécurité (elle se contourne), c'est un garde-fou
@@ -54,7 +61,7 @@ _INTERDITS: tuple[tuple[str, str], ...] = (
     (r">\s*/dev/(disk|rdisk)", "écriture disque brute"),
     (r"\bdd\b[^|]*\bof=/dev/", "écriture disque brute"),
     (r"\b(diskutil|fdisk|newfs)\b", "manipulation de volumes"),
-    (r"/opt/jarvis/\.env|/opt/jarvis/keys", "accès aux secrets"),
+    (rf"{re.escape(_RACINE)}/\.env|{re.escape(_RACINE)}/keys", "accès aux secrets"),
 )
 
 
@@ -73,8 +80,8 @@ def _profil_seatbelt(workspace: str) -> str:
         f'(allow file-write* (subpath "{workspace}") (subpath "/private/tmp") (subpath "/tmp")',
         '    (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr")',
         '    (literal "/dev/dtracehelper") (subpath "/private/var/folders"))',
-        '(deny file-read* (subpath "/opt/jarvis/keys") (literal "/opt/jarvis/.env")',
-        '    (subpath "/Users/korben/.ssh") (subpath "/Users/korben/Library/Keychains"))',
+        f'(deny file-read* (subpath "{_RACINE}/keys") (literal "{_RACINE}/.env")',
+        f'    (subpath "{_HOME}/.ssh") (subpath "{_HOME}/Library/Keychains"))',
     ]
     if not AGENT_SHELL_NETWORK:
         lignes.append("(deny network*)")
