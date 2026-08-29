@@ -545,8 +545,7 @@ plus accès à internet en ce moment…"* — instead of silently returning no r
 │                               # reflection-prompts
 │                               # opencode-prompts · agent-prompts
 └── DOCS/
-    ├── ROADMAP.md              # Decision journal — history, not current state
-    ├── AGENT.md · AGENTIC.md   # Agentic loop: reference, then design and phases
+    ├── AGENT.md                # Agentic loop: tools, budgets, sandbox, API
     ├── ARCHITECTURE.md · MEMORY.md · API.md · CONFIGURATION.md · INSTALL.md
     ├── PERFORMANCE.md · OPERATIONS.md · SECURITY.md · GOOGLE.md · REDIS.md
     ├── opencode-local.md · opencode.json.example

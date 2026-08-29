@@ -127,7 +127,6 @@ Full walkthrough in **[DOCS/INSTALL.md](DOCS/INSTALL.md)**.
 | **[OPERATIONS.md](DOCS/OPERATIONS.md)** | Logs, diagnostics, dependency upgrades |
 | **[GOOGLE.md](DOCS/GOOGLE.md)** | Connecting Gmail and Google Calendar |
 | **[REDIS.md](DOCS/REDIS.md)** | Redis key map and operational recipes |
-| **[ROADMAP.md](DOCS/ROADMAP.md)** | What is done, partial, or planned |
 | **[JarvisApp](JarvisApp/README.md)** | The iOS app: voice, wake word, push notifications |
 
 ---

@@ -181,5 +181,4 @@ Every variable, with its default:
 | `AGENT_SHELL_NETWORK` | `false` | network inside the sandbox |
 | `AGENT_READONLY_ROOTS` | `src`, `scripts`, `DOCS` | paths the agent may read outside its workspace |
 
-See also **[AGENTIC.md](AGENTIC.md)** for the design notes and the phased plan, and
-**[SECURITY.md](SECURITY.md)** for the threat model.
+See **[SECURITY.md](SECURITY.md)** for the threat model.
