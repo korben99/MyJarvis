@@ -31,7 +31,9 @@ services:
       - WEBUI_NAME=Jarvis
       - OPENAI_API_KEY=${OPENAI_API_KEY:-local}
       - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
-      - WEBUI_SECRET_KEY=jarvisopenwebui
+      # Signe les jetons de session Open WebUI. Lu depuis .env : en dur ici, la valeur
+      # devenait le secret partagé par tous les clones du dépôt.
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?renseignez WEBUI_SECRET_KEY dans .env}
       - ENABLE_API_KEYS=true
       - USER_PERMISSIONS_FEATURES_API_KEYS=true
       - VECTOR_DB=qdrant

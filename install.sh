@@ -95,6 +95,24 @@ else
     ok ".env already exists — left untouched"
 fi
 
+# Secret de session Open WebUI. docker-compose.yml le rend obligatoire : en dur dans le
+# compose, il devenait la même valeur pour tous les clones du dépôt. On en génère un par
+# installation, et on ne touche pas à celui qui existe déjà — le changer déconnecterait
+# toutes les sessions Open WebUI en cours.
+if grep -qE '^WEBUI_SECRET_KEY=.+' .env 2>/dev/null; then
+    ok "WEBUI_SECRET_KEY already set — left untouched"
+else
+    _secret="$(openssl rand -hex 32)"
+    if grep -qE '^WEBUI_SECRET_KEY=' .env 2>/dev/null; then
+        # BSD sed (macOS) : -i exige un suffixe de sauvegarde, ici vide.
+        sed -i '' "s|^WEBUI_SECRET_KEY=.*|WEBUI_SECRET_KEY=$_secret|" .env
+    else
+        printf '\nWEBUI_SECRET_KEY=%s\n' "$_secret" >> .env
+    fi
+    unset _secret
+    ok "Generated a WEBUI_SECRET_KEY in .env"
+fi
+
 USERS_LIST=jarvis-core/JarvisData/users_list.json
 if [[ ! -f "$USERS_LIST" ]]; then
     cp DOCS/examples/users_list.example.json "$USERS_LIST"
