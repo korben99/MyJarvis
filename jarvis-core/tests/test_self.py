@@ -114,3 +114,73 @@ class TestPromptNocturne:
             texte = getattr(prompts, nom)
             dates = re.findall(r"\d{2}/\d{2}/20\d{2}", texte)
             assert not dates, f"{nom} contient une date de session : {dates}"
+
+
+# ── Autocoding : liste blanche et résolution des prompts ─────────────────────
+
+class TestPromptsResolvent:
+    """Trois défauts réels, trouvés en production, gardés ici.
+
+    `get_prompt` rendait `""` sur un nom inconnu. Un prompt vide part au modèle sans lever
+    la moindre erreur : le seul symptôme est une dégradation des réponses, constatée des
+    jours plus tard et impossible à rattacher à sa cause.
+    """
+
+    def test_get_prompt_leve_sur_un_nom_inconnu(self):
+        with pytest.raises(KeyError):
+            prompts.get_prompt("CE_PROMPT_NEXISTE_PAS")
+
+    def test_tous_les_noms_litteraux_du_code_resolvent(self):
+        """C'est ce test qui a trouvé `AGENT_CAPABILITY_FR`, appelé par pipeline.py sans
+        jamais avoir été écrit — la capacité agent n'était donc annoncée à aucun admin."""
+        import pathlib
+        import re
+        src = pathlib.Path(prompts.__file__).parent
+        noms: set[str] = set()
+        for f in src.rglob("*.py"):
+            noms |= set(re.findall(r'get_prompt\(\s*"([A-Z_][A-Z0-9_]*)"', f.read_text()))
+        noms.discard("NAME")  # exemple cité dans une docstring
+        introuvables = sorted(n for n in noms if not isinstance(getattr(prompts, n, None), str))
+        assert not introuvables, (
+            f"get_prompt est appelé avec {introuvables}, qui n'existent pas. "
+            "Le prompt correspondant partirait vide au modèle."
+        )
+
+
+class TestListeBlancheRefinePrompt:
+    """La liste des prompts modifiables n'existait qu'en PROSE dans REFLECTION_PROMPT.
+
+    Côté code, le seul garde était « la constante existe » : les 41 prompts du module
+    étaient donc acceptés, dont ceux de la boucle agentique et REFINE_PROMPT_SYSTEM
+    lui-même, que le modèle pouvait ainsi réécrire.
+    """
+
+    def test_tous_les_refinables_existent(self):
+        fantomes = sorted(
+            n for n in prompts.REFINABLE_PROMPTS
+            if not isinstance(getattr(prompts, n, None), str)
+        )
+        assert not fantomes, f"REFINABLE_PROMPTS cite des constantes inexistantes : {fantomes}"
+
+    def test_la_prose_et_le_code_disent_la_meme_chose(self):
+        """Le garde qui manquait. Un nom annoncé au modèle mais refusé par le code fait
+        payer un appel de raisonnement pour un refus — visible seulement dans le journal."""
+        import re
+        bloc = prompts.REFLECTION_PROMPT.split("Noms valides :")[1].split("• Routing")[0]
+        annonces = set(re.findall(r"\b([A-Z][A-Z0-9_]{4,})\b", bloc))
+        assert annonces == set(prompts.REFINABLE_PROMPTS), (
+            f"annoncés au modèle mais refusés par le code : "
+            f"{sorted(annonces - set(prompts.REFINABLE_PROMPTS))} · "
+            f"acceptés par le code mais jamais annoncés : "
+            f"{sorted(set(prompts.REFINABLE_PROMPTS) - annonces)}"
+        )
+
+    def test_les_prompts_de_lagent_ne_sont_pas_modifiables(self):
+        """Ils se jugent sur un livrable, pas sur un échange : le cycle de réflexion n'a
+        aucune observation qui les concerne."""
+        agent = {n for n in vars(prompts) if n.startswith("AGENT_")}
+        assert not (agent & prompts.REFINABLE_PROMPTS)
+
+    def test_refine_prompt_ne_peut_pas_se_reecrire_lui_meme(self):
+        for n in ("REFINE_PROMPT_SYSTEM", "REFINE_PROMPT_USER"):
+            assert n not in prompts.REFINABLE_PROMPTS

@@ -1407,6 +1407,22 @@ AGENT_NO_TOOL_NUDGE = (
     "l'objectif est atteint."
 )
 
+# Annonce de la capacité agent, injectée dans le prompt système des SEULS administrateurs
+# quand la boucle est active (pipeline.build_system_prompt).
+#
+# `pipeline.py` l'appelait déjà, mais la constante n'a jamais été écrite : get_prompt
+# rendait "" et la ligne était donc vide depuis l'introduction du fast-track. La capacité
+# existait sans que personne n'en soit informé.
+#
+# Volontairement courte : elle vit du côté du prompt qui diverge PAR UTILISATEUR, donc
+# chaque ligne y est reprocessée pour chaque administrateur au premier tour.
+AGENT_CAPABILITY_FR = (
+    "{firstname} peut te confier une tâche de fond : un message qui commence par "
+    "« tâche agent: » suivi de l'objectif la met en file, et tu réponds alors par "
+    "« agent: statut » pour en donner l’avancement. N'invente jamais ce préfixe à sa "
+    "place, et ne prétends pas avoir lancé une tâche que tu n'as pas lancée."
+)
+
 # Dernier tour : plus d'outils, on demande la synthèse en texte libre. Sert quand le
 # modèle a épuisé son budget sans jamais appeler finish — on récupère quand même une
 # réponse utile plutôt qu'un échec sec.
@@ -1419,6 +1435,42 @@ partiel, même imparfait. Ce qui n'est pas sur disque à la fin de ce tour est p
 Puis appelle finish avec un compte rendu bref, en français, et la liste de tes fichiers.
 
 OBJECTIF INITIAL : {objective}"""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PROMPTS MODIFIABLES PAR L'AUTOCODING
+# ══════════════════════════════════════════════════════════════════════════
+# Source unique de vérité pour `refine_prompt`. La liste n'existait qu'en PROSE, dans
+# REFLECTION_PROMPT ; côté code, le seul garde était « la constante existe », si bien que
+# les 41 prompts du module étaient acceptés — 24 hors de la liste annoncée au modèle,
+# dont AGENT_SYSTEM et REFINE_PROMPT_SYSTEM lui-même.
+#
+# Ne sont refinables que les prompts dont un échec est OBSERVABLE dans une conversation ou
+# dans un cycle : identité, routage, analyse, briefing, réflexion, revue nocturne. En sont
+# exclus les prompts de la boucle agentique (jugés sur un livrable, pas sur un échange) et
+# les prompts de service courts, où une réécriture coûte plus qu'elle ne rapporte.
+REFINABLE_PROMPTS: frozenset[str] = frozenset({
+    "SYSTEM_BASE_FR", "IDENTITY_FR",
+    "ROUTER_SYSTEM", "ROUTER_USER",
+    "ANALYSIS_PROMPT", "BRIEFING_USER", "WEB_RELEVANCE_JUDGE",
+    "NIGHTLY_FACTS_PROMPT", "NIGHTLY_FACTS_SYSTEM",
+    "NIGHTLY_SELF_PROMPT", "NIGHTLY_SELF_SYSTEM",
+    "NIGHTLY_CLEANING_PROMPT", "NIGHTLY_CLEANING_SYSTEM",
+    "REFLECTION_PROMPT", "REFLECTION_SYSTEM",
+    "REFLECTION_USER_PROMPT", "REFLECTION_USER_SYSTEM",
+})
+
+# Garde de démarrage, sur le modèle de celui de `self/engine.py` pour le catalogue
+# d'actions : un nom annoncé au modèle mais sans constante derrière produirait une
+# proposition sur un prompt fantôme, et l'échec ne serait visible qu'au moment d'appliquer
+# la surcharge. On préfère refuser de démarrer.
+_REFINABLES_FANTOMES = sorted(
+    n for n in REFINABLE_PROMPTS if not isinstance(globals().get(n), str)
+)
+if _REFINABLES_FANTOMES:  # pragma: no cover - garde de démarrage
+    raise RuntimeError(
+        f"prompts: REFINABLE_PROMPTS cite des constantes inexistantes : {_REFINABLES_FANTOMES}"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1476,4 +1528,11 @@ def get_prompt(name: str) -> str:
         _override_mtime = -1.0
     if name in _override_cache:
         return _override_cache[name]
-    return globals().get(name, "")
+    valeur = globals().get(name)
+    if not isinstance(valeur, str):
+        # Rendait `""` jusqu'ici. Un prompt vide part au modèle sans lever la moindre
+        # erreur : le seul symptôme est une dégradation des réponses, constatée des jours
+        # plus tard et impossible à rattacher à sa cause. Même famille que le champ
+        # pydantic supprimé en silence par `extra=ignore`.
+        raise KeyError(f"prompt inconnu : {name!r}")
+    return valeur

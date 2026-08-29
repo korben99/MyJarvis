@@ -29,7 +29,7 @@ from config import (
 from google_services import is_google_available, send_gmail_message
 from helpers import call_llm_bg, extract_llm_json, get_logger, get_redis
 from memory import atomic_json_write
-from prompts import PROMPT_TOKEN_BUDGETS, get_prompt
+from prompts import PROMPT_TOKEN_BUDGETS, REFINABLE_PROMPTS, get_prompt
 
 from .state import (
     _KNOWLEDGE_GAPS_KEY,
@@ -291,9 +291,16 @@ def _action_refine_prompt(params: dict) -> str:
     if user_code and user_code not in USER_CODES:
         return f"refine_prompt: unknown user_code {user_code!r}"
 
+    # La liste blanche AVANT la lecture, et non l'inverse. Le garde d'origine se contentait
+    # de « la constante existe », donc les 41 prompts du module passaient — dont ceux de la
+    # boucle agentique et REFINE_PROMPT_SYSTEM lui-même, que le modèle pouvait ainsi
+    # réécrire. La liste annoncée dans REFLECTION_PROMPT n'était que de la prose.
+    if prompt_name not in REFINABLE_PROMPTS:
+        return (
+            f"refine_prompt: {prompt_name!r} n'est pas modifiable "
+            f"(valides : {', '.join(sorted(REFINABLE_PROMPTS))})"
+        )
     current_text = get_prompt(prompt_name)
-    if not current_text:
-        return f"refine_prompt: unknown prompt {prompt_name!r}"
 
     # ── Limite de DÉBIT, et non seuil de récurrence ──────────────────────────
     #
