@@ -154,6 +154,18 @@ The script checks prerequisites, creates the venv, installs dependencies, prepar
 directories and registers the launchd service. Three things are left to do by hand: fill in
 `.env`, describe your users in `users_list.json`, and download the models.
 
+For the first of those there is a **configuration page** — one self-contained HTML file, no
+server and no dependency. Open it, drop your `.env` onto it, and work through the 127
+settings grouped by purpose with their documentation inline:
+
+```bash
+jarvis-config          # or simply open configuration.html
+```
+
+Chrome and Edge write back to the file directly; elsewhere it downloads and shows you the
+command. A blank secret field means *leave it alone*, and the file is rewritten line by
+line so your comments survive.
+
 Full walkthrough in **[DOCS/INSTALL.md](DOCS/INSTALL.md)**.
 
 ---
@@ -166,7 +178,7 @@ Full walkthrough in **[DOCS/INSTALL.md](DOCS/INSTALL.md)**.
 | **[ARCHITECTURE.md](DOCS/ARCHITECTURE.md)** | Components, 4-tier LLM routing, prompt assembly, request flow |
 | **[MEMORY.md](DOCS/MEMORY.md)** | The five layers, introspection, emotional state, growth caps |
 | **[AGENT.md](DOCS/AGENT.md)** | The agentic loop: tools, budgets, sandbox, phases |
-| **[CONFIGURATION.md](DOCS/CONFIGURATION.md)** | Every `.env` variable, tier by tier |
+| **[CONFIGURATION.md](DOCS/CONFIGURATION.md)** | Every `.env` variable, tier by tier — and the configuration page |
 | **[API.md](DOCS/API.md)** | Endpoint reference |
 | **[PERFORMANCE.md](DOCS/PERFORMANCE.md)** | TTFT measurements, KV cache, LLM call map |
 | **[SECURITY.md](DOCS/SECURITY.md)** | Threat model, network exposure, agent sandbox |

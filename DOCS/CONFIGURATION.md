@@ -1,5 +1,36 @@
 # Configuration variables
 
+## Editing them
+
+Everything lives in `.env`, plain text, editable with any editor. For a guided pass there is
+a single self-contained page — **no server, no script, no dependency**:
+
+```bash
+jarvis-config          # or simply open configuration.html
+```
+
+Load your `.env` (drag it onto the page, or pick it), edit, save.
+
+> **The file picker will not show `.env`.** macOS hides dot-files in Open dialogs. Press
+> <kbd>⌘</kbd><kbd>⇧</kbd><kbd>.</kbd> to reveal them, or <kbd>⌘</kbd><kbd>⇧</kbd><kbd>G</kbd>
+> and paste the path — `jarvis-config` puts it on your clipboard for exactly that.
+
+On Chrome and Edge the page writes back to the same file; on Firefox and Safari it downloads
+and shows you the `mv` command.
+
+Three properties worth knowing:
+
+- **A blank secret field means "leave it alone".** The page never receives your key values,
+  and clearing a field it did not fill will not wipe the key — that distinction is what
+  keeps a stray keystroke from costing you an API credential.
+- **`.env` is rewritten line by line.** Only the values you changed move; comments, ordering
+  and section headers survive intact — they carry most of the configuration documentation.
+- **Variables absent from the form are preserved**, and the page tells you how many it saw.
+
+The fields are written out by hand in the page, mirroring this document. Adding a variable
+means adding one line to the `CHAMPS` table at the top of the `<script>`.
+
+Nothing hot-reloads: `.env` is read once at startup, so `jarvis-restart` is always required.
 
 All variables go in `/opt/jarvis/.env`.
 

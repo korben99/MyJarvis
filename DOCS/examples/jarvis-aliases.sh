@@ -15,3 +15,16 @@ alias jarvis-stop="$JARVIS_LAUNCHD stop"
 alias jarvis-restart="$JARVIS_LAUNCHD restart"
 alias jarvis-reload="$JARVIS_LAUNCHD restart"
 alias jarvis-status="$JARVIS_LAUNCHD status"
+
+# Éditeur de configuration : ouvre la page locale (aucun serveur, aucun script).
+#
+# Le chemin du .env est copié dans le presse-papier au passage : macOS masque les fichiers
+# commençant par un point dans les boîtes de dialogue, et le plus court est d'y faire
+# ⌘⇧G puis ⌘V plutôt que d'aller chercher le raccourci d'affichage des fichiers cachés.
+jarvis-config() {
+  local racine
+  racine="$(cd "$(dirname "$JARVIS_LAUNCHD")/.." && pwd)"
+  printf '%s' "$racine/.env" | pbcopy 2>/dev/null \
+    && echo "chemin du .env copié — dans le sélecteur : ⌘⇧G puis ⌘V"
+  open "$racine/configuration.html"
+}

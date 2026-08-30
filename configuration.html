@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<title>Configuration Jarvis</title>
+<!--
+  Éditeur de configuration Jarvis — document autonome, sans serveur ni dépendance.
+
+  Champs   définis dans la table CHAMPS ci-dessous. Ajouter une variable = ajouter
+           une entrée à cette table.
+  Lecture  le fichier est désigné via le sélecteur ; `fetch()` sur file:// est bloqué
+           par le navigateur.
+  Écriture File System Access (Chrome, Edge) réécrit le fichier en place ; ailleurs
+           la page produit un téléchargement.
+  Format   réécriture ligne à ligne — seules les valeurs modifiées sont remplacées,
+           commentaires et ordre sont conservés.
+-->
+<style>
+:root{--bg:#faf9f7;--fg:#1c1b19;--mut:#6b6863;--bd:#e0ddd7;--card:#fff;--acc:#8b5e34;--warn:#8a5a00;--warnbg:#fdf6e3;--ok:#3f6b3f}
+@media(prefers-color-scheme:dark){:root{--bg:#16150f;--fg:#eeece6;--mut:#9a968d;--bd:#332f27;--card:#1e1c16;--acc:#c99a6b;--warn:#e0b45f;--warnbg:#2a2213;--ok:#8fbf8f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+header{position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--bd);padding:14px 24px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;z-index:10}
+h1{font-size:17px;margin:0;font-weight:600}
+.sp{flex:1}
+.chemin{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--mut)}
+button{font:inherit;font-weight:550;padding:8px 17px;border-radius:7px;border:1px solid var(--bd);background:var(--card);color:var(--fg);cursor:pointer}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff}
+button:disabled{opacity:.4;cursor:default}
+button.mini{padding:3px 10px;font-size:12px;font-weight:500}
+main{max-width:900px;margin:0 auto;padding:24px}
+.bloc{background:var(--warnbg);border:1px solid var(--bd);border-left:3px solid var(--warn);border-radius:8px;padding:13px 17px;margin-bottom:18px;font-size:13.5px}
+.bloc.ok{border-left-color:var(--ok)}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:rgba(128,128,128,.14);padding:1px 5px;border-radius:4px;font-size:.92em}
+pre{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:12px 14px;overflow-x:auto;font-size:12.5px;margin:9px 0 0;line-height:1.5}
+.accueil{text-align:center;padding:64px 20px;border:2px dashed var(--bd);border-radius:14px;background:var(--card)}
+.accueil.survol{border-color:var(--acc);background:var(--warnbg)}
+.accueil h2{margin:0 0 8px;font-size:19px}
+.accueil p{color:var(--mut);font-size:14px;margin:0 auto 20px;max-width:540px}
+.accueil .astuce{margin:22px auto 0;font-size:13px;line-height:1.9;background:var(--warnbg);border:1px solid var(--bd);border-radius:8px;padding:11px 15px;max-width:560px}
+kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;border:1px solid var(--bd);border-bottom-width:2px;border-radius:5px;padding:1px 6px;background:var(--card);margin:0 1px}
+section{background:var(--card);border:1px solid var(--bd);border-radius:10px;margin-bottom:12px;overflow:hidden}
+section>h2{font-size:14px;margin:0;padding:13px 18px;cursor:pointer;user-select:none;display:flex;align-items:center;gap:9px;font-weight:600}
+section>h2::before{content:"▸";color:var(--mut);transition:transform .15s}
+section.open>h2::before{transform:rotate(90deg)}
+section>h2 .n{margin-left:auto;font-weight:400;font-size:12px;color:var(--mut)}
+.corps{display:none;padding:2px 18px 14px}
+section.open .corps{display:block}
+.champ{padding:11px 0;border-top:1px solid var(--bd)}
+label{display:block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;font-weight:600;margin-bottom:3px}
+label .req{color:var(--acc);margin-left:6px;font-family:inherit;font-size:11px;font-weight:600}
+.aide{font-size:12.5px;color:var(--mut);margin:0 0 6px}
+input,select{width:100%;padding:7px 10px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+input:focus,select:focus{outline:2px solid var(--acc);outline-offset:-1px}
+input.touche,select.touche{border-color:var(--acc);background:var(--card)}
+.etat{font-size:13px;color:var(--mut)}.etat b{color:var(--acc)}
+details{margin-top:20px;border:1px solid var(--bd);border-radius:10px;background:var(--card);padding:0 17px}
+summary{cursor:pointer;padding:13px 0;font-weight:600;font-size:14px}
+details[open] summary{border-bottom:1px solid var(--bd);margin-bottom:12px}
+details .in{padding-bottom:16px;font-size:13.5px}
+details h4{margin:15px 0 4px;font-size:13px}
+.cmd{display:flex;gap:8px;align-items:flex-start;margin:8px 0}.cmd pre{flex:1;margin:0}
+</style></head><body>
+
+<header>
+  <h1>Configuration Jarvis</h1><span class="chemin" id="chemin"></span>
+  <span class="sp"></span><span class="etat" id="etat"></span>
+  <button id="tout" hidden>Tout déplier</button>
+  <button class="p" id="save" hidden disabled>Enregistrer</button>
+</header>
+
+<main>
+  <div id="accueil" class="accueil">
+    <h2>Sélectionner le fichier <code>.env</code></h2>
+    <p>Glissez-le sur cette zone, ou utilisez le sélecteur. Pour des raisons de sécurité,
+       un document ouvert localement ne peut pas accéder au disque de lui-même.</p>
+    <button class="p" id="ouvrir">Parcourir…</button>
+    <p class="astuce">
+      <b>Le fichier n'apparaît pas dans la liste ?</b> macOS masque par défaut les fichiers
+      dont le nom commence par un point.<br>
+      <kbd>⌘</kbd><kbd>⇧</kbd><kbd>.</kbd> affiche les fichiers masqués &nbsp;·&nbsp;
+      <kbd>⌘</kbd><kbd>⇧</kbd><kbd>G</kbd> permet de saisir directement
+      <code>/opt/jarvis/.env</code>
+    </p>
+    <input type="file" id="fichier" hidden>
+  </div>
+
+  <div id="editeur" hidden>
+    <div class="bloc">
+      <b>Champs sensibles</b> — un champ laissé vide conserve sa valeur actuelle ; seule une
+      saisie explicite la remplace.<br>
+      <b>Prise en compte</b> — la configuration est lue au démarrage uniquement. Un
+      <code>jarvis-restart</code> est nécessaire, suivi d'environ deux minutes de chargement
+      du modèle.
+    </div>
+    <div id="corps"></div>
+    <div id="apres"></div>
+
+    <details>
+      <summary>Commandes d'installation (Google, modèles, diagnostic)</summary>
+      <div class="in">
+        <p style="color:var(--mut);margin-top:0">
+          Un document ouvert dans un navigateur ne peut pas exécuter de commande sur la
+          machine : c'est une restriction du navigateur, sans contournement. Les commandes
+          ci-dessous sont à exécuter dans un terminal ; les boutons les copient dans le
+          presse-papier.
+        </p>
+        <h4>Connecter un compte Google (Gmail + Agenda)</h4>
+        <div class="cmd"><pre id="c1">cd /opt/jarvis
+./venv/bin/python scripts/generate_google_token.py --user ALICE1</pre><button class="mini" data-c="c1">Copier</button></div>
+        <p class="aide">Le script affiche un <code>GOOGLE_REFRESH_TOKEN_&lt;CODE&gt;</code>, à
+          reporter dans le champ correspondant. Procédure complète : <code>DOCS/GOOGLE.md</code>.</p>
+        <h4>Télécharger les modèles locaux</h4>
+        <div class="cmd"><pre id="c2">cd /opt/jarvis
+./venv/bin/python scripts/download_models.py</pre><button class="mini" data-c="c2">Copier</button></div>
+        <h4>Vérifier l'état des services après redémarrage</h4>
+        <div class="cmd"><pre id="c3">cd /opt/jarvis
+./scripts/jarvis-status.sh</pre><button class="mini" data-c="c3">Copier</button></div>
+        <h4>Exécution directe depuis la page</h4>
+        <p class="aide">Trois approches sont envisageables, par complexité croissante.
+          Un <b>service local</b> lié à <code>127.0.0.1</code> et démarré à la demande :
+          quelques dizaines de lignes, au prix d'un processus supplémentaire à gérer.
+          Un <b>gestionnaire de schéma d'URL</b> (<code>jarvis://</code>) enregistré par un
+          bundle <code>.app</code> : un clic suffit, mais le bundle doit être signé et
+          maintenu. Un <b>raccourci Shortcuts</b> invoqué via
+          <code>shortcuts://run-shortcut?name=…</code> : l'approche la plus légère, le
+          raccourci restant à créer manuellement. Aucune ne se justifie pour trois commandes
+          exécutées une seule fois à l'installation.</p>
+      </div>
+    </details>
+  </div>
+</main>
+
+<script>
+"use strict";
+
+// ══════════════════════════════════════════════════════════════════════════
+//  Définition des champs
+//  n : nom · a : aide · d : valeur par défaut · t : type (texte si absent)
+//  o : options (type select) · s : secret (masqué, vide = conservé) · r : requis
+// ══════════════════════════════════════════════════════════════════════════
+const CHAMPS = [
+["Démarrage", [
+  {n:"JARVIS_LANG", d:"fr", t:"select", o:["fr","en"], r:1,
+   a:"Langue de l'instance : jeu de prompts, lexique de reconnaissance et réponses. Une seule langue par instance, choisie au démarrage."},
+  {n:"LLM_LOCAL", d:"yes", t:"select", o:["yes","no"], r:1,
+   a:"yes = tout tourne sur la machine via MLX, aucune clé nécessaire. no = bascule sur les fournisseurs cloud ci-dessous."},
+  {n:"WEBUI_SECRET_KEY", s:1, r:1,
+   a:"Signe les jetons de session Open WebUI. Obligatoire : docker-compose refuse de démarrer sans. Génération : openssl rand -hex 32"},
+  {n:"USERS_LIST", d:"/opt/jarvis/jarvis-core/JarvisData/users_list.json", r:1,
+   a:"Comptes autorisés à utiliser Jarvis. Ce fichier ne doit jamais être versionné : le champ « code » a valeur de mot de passe."},
+]],
+["Modèles locaux (MLX)", [
+  {n:"ROUTER_MODEL_LOCAL", d:"mlx-community/Qwen2.5-1.5B-Instruct-4bit", a:"Tier 1 — classification d'intention. Ce que download_models.py récupère si vide."},
+  {n:"PRIMARY_MODEL_LOCAL", d:"spicyneuron/Qwen3.6-35B-A3B-MLX-5.4bit", a:"Tier 2 — toutes les réponses courantes."},
+  {n:"REASONING_MODEL_LOCAL", a:"Tier 3 — vide = identique au primaire."},
+  {n:"VISION_MODEL_LOCAL", d:"lmstudio-community/Qwen3-VL-8B-Instruct-MLX-5bit", a:"Analyse d'image."},
+  {n:"HF_TOKEN", s:1, a:"Uniquement si un modèle choisi est sous accès restreint sur Hugging Face."},
+  {n:"HF_HOME", d:"/opt/jarvis/models"},
+  {n:"QUANT_KV", d:"no", t:"select", o:["no","yes"], a:"Quantifie le cache KV : moins de mémoire, légère perte de qualité."},
+  {n:"QUANT_KV_BITS", d:"4", t:"number"},
+  {n:"LRU_KV_SIZE", d:"4", t:"number", a:"Nombre de séquences gardées en cache KV. Chaque agent en occupe une, en croissance continue."},
+  {n:"LRU_KV_GB", d:"4.0", a:"Plafond mémoire du cache KV."},
+  {n:"QWEN38_REASONING_EFFORT", a:"Qwen3.8 seulement : low | medium | xhigh. Vide = défaut du modèle."},
+]],
+["Fournisseurs cloud (si LLM_LOCAL=no)", [
+  {n:"OPENAI_API_KEY", s:1, a:"Repli partagé par tous les tiers non configurés individuellement."},
+  {n:"OPENAI_API_URL", d:"https://api.openai.com/v1"},
+  {n:"ROUTER_MODEL", d:"gpt-4.1-nano"},
+  {n:"ROUTER_API_URL"}, {n:"ROUTER_API_KEY", s:1},
+  {n:"PRIMARY_MODEL", d:"gpt-4o-mini"},
+  {n:"PRIMARY_API_URL"}, {n:"PRIMARY_API_KEY", s:1},
+  {n:"REASONING_MODEL"}, {n:"REASONING_API_URL"}, {n:"REASONING_API_KEY", s:1},
+  {n:"VISION_MODEL"}, {n:"VISION_API_URL"}, {n:"VISION_API_KEY", s:1},
+]],
+["Google Workspace", [
+  {n:"GOOGLE_CLIENT_ID", s:1, a:"Identifiants OAuth créés sur console.cloud.google.com. Voir DOCS/GOOGLE.md."},
+  {n:"GOOGLE_CLIENT_SECRET", s:1},
+  {n:"GOOGLE_CALENDAR_ID", d:"primary"},
+]],
+["Notifications iOS (APNs)", [
+  {n:"APNS_KEY_ID", s:1, a:"Clé créée sur developer.apple.com → Certificates, IDs & Profiles → Keys."},
+  {n:"APNS_TEAM_ID"},
+  {n:"APNS_BUNDLE_ID", d:"com.example.JarvisApp"},
+  {n:"APNS_KEY_PATH", s:1, d:"/opt/jarvis/keys/AuthKey_XXXXXXXXXX.p8"},
+  {n:"APNS_ENV", d:"production", t:"select", o:["production","sandbox"]},
+]],
+["Recherche web", [
+  {n:"TAVILY_API_KEY", s:1, a:"Backend principal. Sans clé, repli gratuit sur DuckDuckGo."},
+]],
+["Infrastructure et RAG", [
+  {n:"REDIS_URL", d:"redis://localhost:6379/0"},
+  {n:"QDRANT_URL", d:"http://localhost:6333"},
+  {n:"QDRANT_COLLECTION", d:"open-webui_knowledge"},
+  {n:"QDRANT_MEMORY_COLLECTION", d:"jarvis_memory"},
+  {n:"RAG_TOP_K", d:"8", t:"number"},
+  {n:"RAG_SCORE_THRESHOLD", d:"0.55", a:"Score minimal d'un extrait rendu au chat."},
+  {n:"MAX_UPLOAD_SIZE", d:"5242880", t:"number"},
+  {n:"OPENWEBUI_API_KEY", s:1, a:"Utilisée par scripts/uploadrag.py pour indexer RAGData/."},
+]],
+["Briefing matinal", [
+  {n:"BRIEFING_ENABLED", d:"true", t:"select", o:["true","false"]},
+  {n:"BRIEFING_TIME", d:"07:30", a:"HH:MM, dans le fuseau ci-dessous."},
+  {n:"BRIEFING_TIMEZONE", d:"Europe/Paris"},
+]],
+["Mémoire et rétention", [
+  {n:"CHAT_MAX_MESSAGES", d:"100", t:"number"},
+  {n:"IOS_MAX_MESSAGES", d:"50", t:"number"},
+  {n:"CHAT_LOG_TTL_DAYS", d:"90", t:"number"},
+  {n:"EPISODIC_RETENTION_DAYS", d:"45", t:"number", a:"Durée de vie d'un souvenir épisodique avant consolidation ou oubli."},
+  {n:"AUTOBIO_RECENCY_WINDOW_DAYS", d:"365", t:"number", a:"Fenêtre de récence de l'autobiographique. Plus large que l'épisodique : un jalon d'il y a six mois ne doit pas être écrasé par un événement trivial récent."},
+  {n:"AUTOBIO_DEDUP_THRESHOLD", d:"0.82"},
+  {n:"MEMORY_DECAY_FACTOR", d:"0.85", a:"Facteur d'oubli appliqué à chaque passe."},
+  {n:"MEMORY_DECAY_THRESHOLD", d:"0.15", a:"Sous ce score, le souvenir disparaît."},
+  {n:"MEMORY_DECAY_DURABLE_MIN", d:"0.85"},
+  {n:"MEMORY_CONSOLIDATION_IMPORTANCE", d:"1.0"},
+  {n:"DONE_PROJECT_TTL_DAYS", d:"180", t:"number", a:"Durée de conservation d'un projet terminé."},
+  {n:"OPINIONS_MAX_ENTRIES", d:"120", t:"number"},
+  {n:"OPINIONS_EMBED_THRESHOLD", d:"0.40", a:"Proximité minimale pour réinjecter une opinion."},
+  {n:"OPINIONS_MAX_INJECTED", d:"3", t:"number"},
+  {n:"GROWTH_LOG_MAX_ENTRIES", d:"180", t:"number"},
+  {n:"INTROSPECTION_LOG_MAX_ENTRIES", d:"200", t:"number"},
+  {n:"HIST_CONV_TOKEN_BUDGET", d:"1000", t:"number"},
+  {n:"SESSION_SUMMARY_TOKENS", d:"600", t:"number"},
+  {n:"HIST_CONV_SUMMARIZE_THRESHOLD", d:"1500", t:"number"},
+  {n:"PROFILE_NARRATIVE_TOKENS", d:"600", t:"number"},
+]],
+["État émotionnel", [
+  {n:"EMOTION_DECAY_MODE", d:"exchange", t:"select", o:["exchange","clock"], a:"exchange = un pas de décroissance par analyse de conversation. clock = décroissance horaire."},
+  {n:"EMOTION_DECAY_STEP", d:"0.20"},
+  {n:"EMOTION_THRESHOLD", d:"0.15", a:"En deçà, le bloc n'est pas injecté du tout."},
+  {n:"EMOTION_DECAY_HUMEUR", d:"0.10", a:"Taux horaires — utilisés uniquement en mode clock."},
+  {n:"EMOTION_DECAY_CONFIANCE", d:"0.05"},
+  {n:"EMOTION_DECAY_ENERGIE", d:"0.15"},
+]],
+["Réflexion autonome", [
+  {n:"REFLECTION_INTERVAL_HOURS", d:"6", t:"number"},
+  {n:"CONV_ANALYSIS_INTERVAL_MINUTES", d:"60", t:"number"},
+  {n:"MAX_CHAIN_ITERATIONS", d:"3", t:"number", a:"Actions enchaînées par cycle."},
+]],
+["Boucle agentique", [
+  {n:"AGENT_ENABLED", d:"false", t:"select", o:["false","true"], a:"Tâches de fond confiées par un admin. Voir DOCS/AGENT.md."},
+  {n:"AGENT_WORKSPACE", d:"/opt/jarvis/agent_workspace"},
+  {n:"AGENT_MAX_STEPS", d:"20", t:"number"},
+  {n:"AGENT_TASK_TIMEOUT_MINUTES", d:"45", t:"number"},
+  {n:"AGENT_STEP_MAX_TOKENS", d:"2200", t:"number", a:"Pire cas d'attente imposé à un tour de chat."},
+  {n:"AGENT_THINKING_BUDGET", d:"1000", t:"number"},
+  {n:"AGENT_WRITE_MAX_TOKENS", d:"6000", t:"number", a:"Budget de reprise quand un bloc d'appel d'outil est coupé en plein vol."},
+  {n:"AGENT_WRITE_MAX_CHARS", d:"2400", t:"number"},
+  {n:"AGENT_QUIET_SECONDS", d:"45", t:"number", a:"Ne démarre un pas que si aucun chat n'a demandé le GPU depuis N secondes."},
+  {n:"AGENT_MAX_TOOL_OUTPUT", d:"15000", t:"number"},
+  {n:"AGENT_PAGE_MAX_CHARS", d:"14000", t:"number"},
+  {n:"AGENT_READ_MAX_CHARS", d:"32000", t:"number", a:"Dimensionné pour qu'un fichier source tienne en une seule lecture : la pagination est la principale source d'échec observée."},
+  {n:"AGENT_DOCS_MIN_SCORE", d:"0.35"},
+  {n:"AGENT_TASK_TTL_DAYS", d:"30", t:"number"},
+  {n:"AGENT_EMAIL_REPORT", d:"true", t:"select", o:["true","false"]},
+  {n:"AGENT_EMAIL_MAX_CHARS", d:"120000", t:"number"},
+  {n:"AGENT_READONLY_ROOTS", d:"/opt/jarvis/jarvis-core/src,/opt/jarvis/scripts,/opt/jarvis/DOCS"},
+]],
+["Shell de l'agent (bac à sable)", [
+  {n:"AGENT_SHELL_ENABLED", d:"false", t:"select", o:["false","true"],
+   a:"Accorde un shell au modèle, sous le compte qui exécute Jarvis. Le confinement (seatbelt, liste noire, budgets) est décrit dans DOCS/SECURITY.md. À n'activer qu'en connaissance de cause."},
+  {n:"AGENT_SHELL_TIMEOUT", d:"60", t:"number", a:"Délai maximal d'une commande, en secondes."},
+  {n:"AGENT_SHELL_MAX_CALLS", d:"25", t:"number", a:"Quota d'appels pour une tâche entière."},
+  {n:"AGENT_SHELL_NETWORK", d:"false", t:"select", o:["false","true"],
+   a:"À laisser désactivé : l'agent dispose de web_search et fetch_url, journalisés et bornés par le code de Jarvis. Un accès réseau direct depuis le shell ne l'est pas."},
+]],
+["Route /v1/raw (agents de code)", [
+  {n:"RAW_NO_THINK", d:"false", t:"select", o:["false","true"], a:"Le raisonnement constitue le principal levier de qualité pour un agent de code ; la désactivation est déconseillée."},
+  {n:"RAW_THINKING_BUDGET", d:"3000", t:"number", a:"Ne pas laisser à 0 lorsque le raisonnement est actif : rien ne le bornerait, et il partagerait RAW_MAX_TOKENS avec la réponse."},
+  {n:"RAW_MAX_TOKENS", d:"16000", t:"number"},
+  {n:"RAW_PRIORITY", d:"bg", t:"select", o:["bg","chat"], a:"bg : la route cède le GPU aux requêtes de conversation."},
+]],
+["Budgets de tokens", [
+  {n:"TOKEN_SPEED_TPS", d:"50", t:"number", a:"Vitesse estimée — calibre les délais d'attente."},
+  {n:"TIMEOUT_MARGIN", d:"1.3"},
+  {n:"USE_THINKING_BUDGET_PROCESSOR", d:"yes", t:"select", o:["yes","no"]},
+  {n:"THINKING_BUDGET_COMPACT", d:"1024", t:"number"},
+  {n:"THINKING_BUDGET_MEDIUM", d:"2048", t:"number"},
+  {n:"THINKING_BUDGET_DEEP", d:"4000", t:"number"},
+  {n:"MAX_TOKENS_TINY", d:"80", t:"number"},
+  {n:"MAX_TOKENS_SHORT", d:"300", t:"number"},
+  {n:"MAX_TOKENS_COMPACT", d:"600", t:"number"},
+  {n:"MAX_TOKENS_MEDIUM", d:"1000", t:"number"},
+  {n:"MAX_TOKENS_NO_THINK", d:"1500", t:"number"},
+  {n:"MAX_TOKENS_BRIEFING", d:"3000", t:"number"},
+  {n:"MAX_TOKENS_SYNTHESIS", d:"8000", t:"number"},
+  {n:"MAX_TOKENS_REASONING", d:"10000", t:"number"},
+  {n:"MAX_TOKENS_HARD_CAP", d:"16000", t:"number", a:"Coupe-circuit absolu, tous appels locaux."},
+]],
+["Journaux", [
+  {n:"LLM_DEBUG_PROMPTS", d:"no", t:"select", o:["no","yes"], a:"logs/prompts.log enregistre les prompts complets en clair : mémoire, courriels et documents inclus. À traiter comme une donnée personnelle."},
+  {n:"RAW_DEBUG_PROMPTS", d:"true", t:"select", o:["true","false"]},
+  {n:"AGENT_DEBUG_PROMPTS", d:"true", t:"select", o:["true","false"]},
+  {n:"PROMPT_LOG_MAX_MB", d:"20", t:"number"},
+  {n:"PROMPT_LOG_BACKUPS", d:"3", t:"number"},
+]],
+["Activation steering (avancé, désactivé par défaut)", [
+  {n:"STEER_VECTOR", a:"Chemin d'un vecteur .npy. Vide = désactivé. Ajoute une direction conceptuelle au flux résiduel."},
+  {n:"STEER_LAYER", d:"20", t:"number"},
+  {n:"STEER_ALPHA", d:"0.36", a:"Intensité nominale, à risque de disparition nul."},
+  {n:"STEER_ALPHA_CEILING", d:"0.5", a:"Plafond vers lequel vitals.risk_scalar() amplifie α. Au-delà de 0.54 le raisonnement factuel se dégrade."},
+]],
+];
+
+const LIGNE = /^(\s*)(#?)\s*([A-Z_][A-Z0-9_]*)(\s*)=(.*)$/;
+let brut = "", nomEnv = ".env", handle = null;
+const touches = new Map();      // nom → valeur saisie
+const remplis = new Set();      // secrets DÉJÀ renseignés dans le .env chargé
+const $ = i => document.getElementById(i);
+const esc = t => { const d = document.createElement("div"); d.textContent = t ?? ""; return d.innerHTML; };
+
+function valeurs(texte){
+  const v = {};
+  texte.split("\n").forEach(l => { const m = l.match(LIGNE); if (m && !m[2]) v[m[3]] = m[5].trim(); });
+  return v;
+}
+
+async function charger(fichier){
+  brut = await fichier.text();
+  nomEnv = fichier.name;
+  const vals = valeurs(brut);
+  remplis.clear();
+  CHAMPS.flatMap(([, cs]) => cs).forEach(c => { if (c.s && (vals[c.n] ?? "") !== "") remplis.add(c.n); });
+
+  const corps = $("corps"); corps.innerHTML = "";
+  CHAMPS.forEach(([titre, champs], i) => {
+    const n = champs.filter(c => (vals[c.n] ?? "") !== "").length;
+    const sec = document.createElement("section");
+    sec.innerHTML = `<h2>${esc(titre)}<span class="n">${n}/${champs.length}</span></h2><div class="corps"></div>`;
+    const c = sec.querySelector(".corps");
+    champs.forEach(ch => c.appendChild(champ(ch, vals[ch.n])));
+    sec.querySelector("h2").onclick = () => sec.classList.toggle("open");
+    if (i === 0) sec.classList.add("open");
+    corps.appendChild(sec);
+  });
+
+  // Les variables absentes du formulaire sont conservées telles quelles ; leur nombre
+  // est signalé dans l'en-tête.
+  const connus = new Set(CHAMPS.flatMap(([, cs]) => cs.map(c => c.n)));
+  const inconnues = Object.keys(vals).filter(n => !connus.has(n));
+  $("chemin").textContent = nomEnv + (inconnues.length ? `  ·  ${inconnues.length} variable(s) hors formulaire, conservée(s)` : "");
+
+  $("accueil").hidden = true; $("editeur").hidden = false;
+  $("tout").hidden = false; $("save").hidden = false;
+}
+
+function champ(c, actuelle){
+  const d = document.createElement("div"); d.className = "champ";
+  const rempli = (actuelle ?? "") !== "";
+  const ph = c.s && rempli ? "•••••••• renseignée — laisser vide pour ne pas changer" : (c.d || "");
+  let ctrl;
+  if (c.t === "select"){
+    ctrl = `<select>${c.o.map(o => `<option${o === (actuelle || c.d) ? " selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+  } else {
+    const val = c.s ? "" : (actuelle ?? "");
+    ctrl = `<input type="${c.s ? "password" : (c.t === "number" ? "text" : "text")}" value="${esc(val)}" placeholder="${esc(ph)}">`;
+  }
+  d.innerHTML = `<label>${esc(c.n)}${c.r ? '<span class="req">requis</span>' : ""}</label>`
+    + (c.a ? `<p class="aide">${esc(c.a)}</p>` : "") + ctrl;
+  const e = d.querySelector("input,select");
+  e.oninput = e.onchange = () => { e.classList.add("touche"); touches.set(c.n, e.value.trim()); maj(); };
+  return d;
+}
+
+function maj(){
+  const n = aRetenir().size;
+  $("etat").innerHTML = n ? `<b>${n}</b> modification${n > 1 ? "s" : ""}` : "";
+  $("save").disabled = n === 0;
+}
+
+// Un champ secret déjà renseigné et laissé vide signifie « conserver la valeur »,
+// et non « effacer ».
+function aRetenir(){
+  const m = new Map();
+  for (const [nom, val] of touches){
+    if (val === "" && remplis.has(nom)) continue;
+    m.set(nom, val);
+  }
+  return m;
+}
+
+// Réécriture ligne à ligne : seules les valeurs retenues sont remplacées, de manière à
+// préserver les commentaires et l'ordre du fichier.
+function produire(){
+  const restants = aRetenir();
+  const sortie = brut.split("\n").map(l => {
+    const m = l.match(LIGNE);
+    if (!m || !restants.has(m[3])) return l;
+    const nom = m[3], v = restants.get(nom);
+    restants.delete(nom);
+    if (v === "" && m[2]) return l;
+    if (v === "") return `${m[1]}# ${nom}${m[4]}=`;
+    return `${m[1]}${nom}${m[4]}=${v}`;
+  });
+  const ajouts = [...restants].filter(([, v]) => v !== "");
+  if (ajouts.length){
+    const d = new Date().toISOString().slice(0, 16).replace("T", " ");
+    sortie.push("", `# — ajouté depuis la page de configuration le ${d} —`,
+                ...ajouts.map(([k, v]) => `${k}=${v}`));
+  }
+  return sortie.join("\n");
+}
+
+$("save").onclick = async () => {
+  const n = aRetenir().size, texte = produire();
+  if (handle){
+    try {
+      if ((await handle.queryPermission({mode:"readwrite"})) !== "granted" &&
+          (await handle.requestPermission({mode:"readwrite"})) !== "granted") throw 0;
+      const w = await handle.createWritable(); await w.write(texte); await w.close();
+      brut = texte; fini(n, `<b>Écrit dans <code>${esc(handle.name)}</code>.</b> Puis :<pre>jarvis-restart</pre>`);
+      return;
+    } catch (e) {}
+  }
+  if (window.showSaveFilePicker){
+    try {
+      const h = await window.showSaveFilePicker({suggestedName: nomEnv});
+      const w = await h.createWritable(); await w.write(texte); await w.close();
+      brut = texte; fini(n, `<b>Écrit dans <code>${esc(h.name)}</code>.</b> Puis :<pre>jarvis-restart</pre>`);
+      return;
+    } catch (e) { if (e && e.name === "AbortError") return; }
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([texte], {type:"text/plain"}));
+  a.download = "env.txt"; a.click(); URL.revokeObjectURL(a.href);
+  brut = texte;
+  fini(n, `<b>Téléchargé.</b> Ton navigateur ne permet pas l'écriture directe :
+    <pre>cp /opt/jarvis/.env /opt/jarvis/.env.bak
+mv ~/Downloads/env.txt /opt/jarvis/.env
+jarvis-restart</pre>`);
+};
+
+function fini(n, msg){
+  $("apres").innerHTML = `<div class="bloc ok">${n} valeur${n > 1 ? "s" : ""} enregistrée${n > 1 ? "s" : ""}. ${msg}</div>`;
+  touches.clear();
+  document.querySelectorAll(".touche").forEach(e => e.classList.remove("touche"));
+  maj();
+  $("apres").scrollIntoView({behavior:"smooth", block:"center"});
+}
+
+// showOpenFilePicker fournit un descripteur réutilisable en écriture, ce qui permet la
+// réécriture en place. L'<input type="file"> n'autorise que la lecture : utilisé en repli.
+$("ouvrir").onclick = async () => {
+  if (window.showOpenFilePicker){
+    try {
+      const [h] = await window.showOpenFilePicker();
+      handle = h; charger(await h.getFile()); return;
+    } catch (e) { if (e && e.name === "AbortError") return; }
+  }
+  $("fichier").click();
+};
+$("fichier").onchange = e => { handle = null; if (e.target.files[0]) charger(e.target.files[0]); };
+
+const acc = $("accueil");
+["dragenter","dragover"].forEach(t => acc.addEventListener(t, e => { e.preventDefault(); acc.classList.add("survol"); }));
+["dragleave","drop"].forEach(t => acc.addEventListener(t, e => { e.preventDefault(); acc.classList.remove("survol"); }));
+acc.addEventListener("drop", e => { handle = null; if (e.dataTransfer.files[0]) charger(e.dataTransfer.files[0]); });
+
+$("tout").onclick = e => {
+  const s = [...document.querySelectorAll("section")];
+  const ouvrir = !s.every(x => x.classList.contains("open"));
+  s.forEach(x => x.classList.toggle("open", ouvrir));
+  e.target.textContent = ouvrir ? "Tout replier" : "Tout déplier";
+};
+
+document.querySelectorAll("[data-c]").forEach(b => b.onclick = async () => {
+  try {
+    await navigator.clipboard.writeText($(b.dataset.c).textContent);
+    const t = b.textContent; b.textContent = "Copié"; setTimeout(() => b.textContent = t, 1200);
+  } catch { alert("Copie refusée — sélectionne le texte à la main."); }
+});
+</script></body></html>
