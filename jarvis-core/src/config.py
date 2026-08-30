@@ -493,6 +493,19 @@ AGENT_READONLY_ROOTS = tuple(
 # Stores prompt_proposals.json + prompt_overrides.json (inside the /app/data volume)
 PROMPT_DATA_DIR = os.path.join(os.path.dirname(SELF_MEMORY_PATH), "prompts")
 
+# ── Langue de l'instance ──────────────────────────────────────────────────
+# Choisit le jeu de prompts chargé par `prompts.py` (`prompts_fr` / `prompts_en`).
+#
+# UNE LANGUE PAR INSTANCE, pas par utilisateur. Le choix est fait au démarrage et ne change
+# plus : c'est ce qui permet aux 48 sites d'appel de `get_prompt()` de rester ignorants de
+# la langue, et ce qui met l'autocoding à l'abri du mélange — une surcharge approuvée ne
+# peut pas être servie dans une langue où l'échec n'a jamais été observé.
+#
+# `prompts.py` relit cette variable directement dans l'environnement plutôt que de
+# l'importer d'ici : `config` importe `helpers`, qui importe `llm/local`, qui importe
+# `prompts`. La déclarer ici sert la documentation et `/status`, pas la résolution.
+JARVIS_LANG = os.getenv("JARVIS_LANG", "fr").strip().lower()
+
 # ── Router training data collector ────────────────────────────────────────
 # JSONL file of (message, routing_json) pairs for future LoRA fine-tuning.
 # Mount on host: ./RouterData:/app/router_data  (see docker-compose.yml)

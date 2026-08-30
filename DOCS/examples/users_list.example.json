@@ -8,7 +8,6 @@
     "mail": "alice@example.com",
     "city": "Paris",
     "timezone": "Europe/Paris",
-    "language": "fr",
     "briefing_enabled": true,
     "trading": false,
     "google": false,

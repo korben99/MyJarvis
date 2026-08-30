@@ -110,7 +110,7 @@ class TestPromptNocturne:
         """Une date de développement dans un prompt part au modèle à chaque appel et
         invalide le cache LRU sans rien lui apprendre."""
         import re
-        for nom in ("NIGHTLY_SELF_SYSTEM", "ANALYSIS_PROMPT", "SYSTEM_BASE_FR", "IDENTITY_FR"):
+        for nom in ("NIGHTLY_SELF_SYSTEM", "ANALYSIS_PROMPT", "SYSTEM_BASE", "IDENTITY"):
             texte = getattr(prompts, nom)
             dates = re.findall(r"\d{2}/\d{2}/20\d{2}", texte)
             assert not dates, f"{nom} contient une date de session : {dates}"
@@ -131,7 +131,7 @@ class TestPromptsResolvent:
             prompts.get_prompt("CE_PROMPT_NEXISTE_PAS")
 
     def test_tous_les_noms_litteraux_du_code_resolvent(self):
-        """C'est ce test qui a trouvé `AGENT_CAPABILITY_FR`, appelé par pipeline.py sans
+        """C'est ce test qui a trouvé `AGENT_CAPABILITY`, appelé par pipeline.py sans
         jamais avoir été écrit — la capacité agent n'était donc annoncée à aucun admin."""
         import pathlib
         import re

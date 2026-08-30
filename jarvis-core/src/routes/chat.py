@@ -654,7 +654,14 @@ def _handle_agent_task(
     lowered = unicodedata.normalize("NFD", stripped.lower())
     lowered = "".join(c for c in lowered if unicodedata.category(c) != "Mn")
 
-    for prefix in ("tache agent:", "tache agent :", "agent:", "agent :"):
+    # Les préfixes anglais sont acceptés QUELLE QUE SOIT `JARVIS_LANG`, en plus des
+    # français. Une commande n'est pas de la prose : reconnaître les deux ne coûte rien,
+    # évite un lexique par langue pour quatre motifs, et rend le fast-track utilisable par
+    # un anglophone sur une instance française comme l'inverse.
+    for prefix in (
+        "tache agent:", "tache agent :", "agent:", "agent :",
+        "agent task:", "agent task :", "task:", "task :",
+    ):
         if lowered.startswith(prefix):
             objective = stripped[len(prefix):].strip()
             break
@@ -668,7 +675,10 @@ def _handle_agent_task(
 
     # Consultation depuis l'iPhone : sans ça la fonctionnalité serait à sens unique,
     # curl n'étant pas une option sur un téléphone.
-    if objective.lower() in ("statut", "status", "etat", "état", "où en es-tu", "ou en es-tu"):
+    if objective.lower() in (
+        "statut", "status", "etat", "état", "où en es-tu", "ou en es-tu",
+        "state", "where are you", "how is it going",
+    ):
         tasks = list_tasks(5, user_code=user_code)
         if not tasks:
             return _instant_reply(req, user_code, "Tu n'as aucune tâche agent enregistrée.")
@@ -709,7 +719,11 @@ async def _handle_calendar_pending(
     msg_lower = req.message.lower().strip()
     # "oui" seul confirme aussi — réponse naturelle à « Confirmes ? » (la regex
     # d'origine exigeait confirme/ok/yes et laissait "oui" retomber dans le pipeline).
-    if re.match(r"^(oui[,\s]*)?(confirme[sz]?|ok|yes)\s*[!.]?$|^oui\s*[!.]?$", msg_lower):
+    if re.match(
+        r"^(oui|yes|yep)[,\s]*(confirme[sz]?|confirm|ok|okay)?\s*[!.]?$"
+        r"|^(confirme[sz]?|confirm|ok|okay|sure|go ahead)\s*[!.]?$",
+        msg_lower,
+    ):
         try:
             pending = json.loads(pending_raw)
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
@@ -743,7 +757,11 @@ async def _handle_calendar_pending(
         )
         return _instant_reply(req, user_code, reply)
 
-    if re.match(r"^(non[,\s]*)?(annule[r]?)\s*[!.]?$", msg_lower):
+    if re.match(
+        r"^(non|no|nope)[,\s]*(annule[r]?|cancel)?\s*[!.]?$"
+        r"|^(annule[r]?|cancel|forget it|never mind)\s*[!.]?$",
+        msg_lower,
+    ):
         REDIS_CLIENT.delete(f"jarvis:{user_code}:pending_calendar_action")
         return _instant_reply(
             req, user_code, "D'accord, j'annule. L'événement n'a pas été créé."

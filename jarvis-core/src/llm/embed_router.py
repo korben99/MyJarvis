@@ -28,6 +28,17 @@ import threading
 import numpy as np
 from helpers import get_logger
 from .router import RouterResult, _log_routing_sample
+from .lexique import (
+    BRIEFING_EXACT,
+    CITY_AFTER_PREP_RE,
+    INTENT_EXAMPLES,
+    RAG_CMD_RE,
+    RAG_LEAD_NOISE_RE,
+    REASON_EXACT,
+    REASON_REGEX,
+    SMALL_TALK_EXACT,
+    TEMPORAL_WORDS,
+)
 
 logger = get_logger("jarvis-embed-router")
 
@@ -40,337 +51,10 @@ EMBED_ROUTE_THRESHOLD: float = 0.74
 # Si les deux meilleurs intents sont à moins de cette marge, c'est ambigu → LLM
 AMBIGUITY_MARGIN: float = 0.06
 
-# ── Phrases-exemples par intent (toutes en français) ─────────────────────────
-#
-# Règles d'édition :
-#   • 8 à 15 phrases par intent — assez pour couvrir les formulations courantes
-#   • Phrases courtes, naturelles, telles qu'un utilisateur les taperait
-#   • Pas de doublons inter-intents (sinon l'ambiguïté monte)
-#   • Pas de noms propres sauf si vraiment caractéristiques (ex: "PEA" pour portfolio)
-
-INTENT_EXAMPLES: dict[str, list[str]] = {
-    # ── Conversation / mémoire générale ──────────────────────────────────────
-    "memory": [
-        # questions / demandes d'aide — nécessitent le profil pour personnaliser
-        "c'est quoi ton avis là-dessus ?",
-        "aide-moi à rédiger un email",
-        "explique-moi comment ça marche",
-        "qu'est-ce que tu penses de ça ?",
-        "aide-moi avec ce code",
-        "qu'est-ce que tu sais sur moi ?",
-        "résume ce texte",
-        "donne-moi des idées pour",
-        "c'est quoi la différence entre",
-        # partage d'informations personnelles — profil à mettre à jour
-        "je viens de décider de",
-        "j'ai changé d'avis sur",
-        "depuis quelque temps je",
-        "j'adore ce sport",
-        "je déteste travailler le soir",
-        "j'ai toujours préféré",
-        "je ne supporte pas le",
-        # référence au passé / continuité de conversation
-        "tu te souviens de",
-        "comme je t'avais expliqué",
-        "rappelle-toi ce projet",
-        "on avait parlé de",
-        "tu sais ce que j'ai fait hier",
-    ],
-    # ── Météo ────────────────────────────────────────────────────────────────
-    "weather": [
-        "quelle est la météo à",
-        "quel temps fait-il ?",
-        "météo à Paris demain",
-        "température ce week-end",
-        "météo de la semaine prochaine",
-        "prévisions météo pour demain matin",
-        "quel temps demain ?",
-    ],
-    # ── Emails / Gmail ───────────────────────────────────────────────────────
-    "gmail": [
-        "lit mon dernier mail",
-        "lit mes mails non lus",
-        "lit mes mails",
-        "vérifie mes emails",
-        "résume mes emails non lus",
-        "recherche dans mes mails",
-        "check mes mails",
-        "regarde dans mes mails",
-    ],
-    # ── Agenda / Calendrier ──────────────────────────────────────────────────
-    "calendar": [
-        "mon agenda aujourd'hui",
-        "qu'est-ce que j'ai de prévu ?",
-        "planning cette semaine",
-        "mes rendez-vous du jour",
-        "agenda de la semaine",
-        "qu'est-ce que j'ai prévu ce soir ?",
-        "montre-moi mon calendrier",
-        "regarde dans mon agenda",
-    ],
-    # ── Briefing matinal ─────────────────────────────────────────────────────
-    "briefing": [
-        "briefing du matin",
-        "briefing matinal",
-        "lance le briefing",
-        "donne-moi le briefing",
-        "le point du matin",
-        "briefing s'il te plaît",
-    ],
-    # ── Recherche web / actualités ───────────────────────────────────────────
-    "web": [
-        "les news du jour",
-        "cours actuel du pétrole",
-        "qui a gagné le match hier",
-        "cherche sur internet",
-        "cherche sur le net",
-        "dernières actualités",
-        "recherche des infos",
-        "recherche sur le net",
-        "trouve-moi des informations",
-        "quelles sont les news",
-        "recherche en ligne",
-    ],
-    # ── Documents personnels / RAG ───────────────────────────────────────────
-    "rag": [
-        "cherche dans mes documents",
-        "j'ai un fichier sur ce sujet",
-        "retrouve le document sur",
-        "cherche dans ma base documentaire",
-        "regarde dans mes fichiers",
-        "dans mes fichiers",
-        "dans mes documents",
-        "RAG",
-        "lis ma fiche",
-        "lis un extrait de mon fichier",
-        "base-toi sur mon fichier",
-        "base-toi sur ma fiche",
-        "ma fiche sur",
-        "extrait de mon document",
-        "depuis mon RAG",
-        "qui est dans le rag",
-        "montre-moi ma fiche",
-        "consulte mon fichier",
-    ],
-    # ── Portefeuille boursier ────────────────────────────────────────────────
-    "portfolio": [
-        "mon portefeuille",
-        "mon PEA",
-        "mes actions",
-        "performance de mes actions",
-        "analyse mon portefeuille",
-        "mes positions boursières",
-        "comment va mon portefeuille ?",
-    ],
-    # ── Questions sur l'état d'un projet ────────────────────────────────────
-    # Couvre les requêtes de STATUS ("où en est", "comment avance").
-    # Les mises à jour conversationnelles ("j'ai avancé sur X") routent vers
-    # "memory" — la mémoire épisodique fournit le contexte, l'analyzer capture
-    # l'update dans la timeline. L'injection de détail n'est pas nécessaire
-    # quand l'utilisateur donne une information (il connaît son propre projet).
-    "project": [
-        "comment avance le projet",
-        "où en est le projet",
-        "état d'avancement du projet",
-        "donne-moi l'avancement",
-        "mets à jour le projet",
-        "j'ai avancé sur le projet",
-        "j'ai terminé la partie",
-        "j'ai fini le projet",
-        "on avance sur le projet",
-        "prochaine étape du projet",
-        "il reste encore à faire",
-        "j'ai commencé un nouveau projet",
-    ],
-    # ── État interne de Jarvis ───────────────────────────────────────────────
-    "self": [
-        "comment vas-tu Jarvis ?",
-        "Salut Jarvis, en forme ?",
-        "qu'est-ce que tu fais en ce moment ?",
-        "ton état interne",
-        "tes dernières réflexions",
-        "qu'est-ce que tu as appris récemment ?",
-        "comment tu te sens ?",
-        "donne-moi ton introspection",
-        "tu as réfléchi à quoi récemment ?",
-        "tes auto-réflexions",
-        "tes réflexions",
-        "montre les propositions de prompt",
-        "montre les prompts en attente",
-        "montre les prompts",
-        "liste les propositions en attente",
-        "accepte la proposition",
-        "rejette la proposition",
-        "montre la proposition",
-        "approuve la proposition de prompt",
-        "parle-moi de toi",
-        "ton identité",
-    ],
-}
 
 # ── Cache des embeddings d'exemples (initialisé une seule fois) ───────────────
 _cache_lock = threading.Lock()
 _examples_vectors: dict[str, np.ndarray] | None = None  # intent → (N, D) matrix
-
-
-_REASON_EXACT = {
-    "mode expert",
-    "analyse approfondie",
-    "analyse complète",
-    "analyse détaillée",
-    "réflexion approfondie",
-    "réfléchis en profondeur",
-    "réfléchis bien",
-    "prends le temps de réfléchir",
-    "prends le temps d'analyser",
-    "debug complet",
-}
-
-_REASON_REGEX = re.compile(
-    r"\braisonne\b|\bréfléchis\b|\bétape par étape\b|\bpas à pas\b|\ben profondeur\b",
-    re.IGNORECASE,
-)
-
-# ── Small talk — acquiescements purs (≤ 50 chars, pas de ?, pas de contenu) ──
-# Bypasse profil, mémoire et opinions : le LLM n'a besoin que de l'historique.
-# WHITELIST conservative : uniquement mots qui n'apportent aucun fait nouveau.
-# Critères bloquants : présence de "?" OU longueur > 50 chars → jamais small talk.
-_SMALL_TALK_EXACT = {
-    "merci",
-    "merci !",
-    "merci beaucoup",
-    "super merci",
-    "merci bien",
-    "parfait",
-    "c'est parfait",
-    "top",
-    "génial",
-    "excellent",
-    "nickel",
-    "super",
-    "très bien",
-    "bien",
-    "c'est bon",
-    "c'est bien",
-    "ok",
-    "okay",
-    "oki",
-    "d'accord",
-    "ok ok",
-    "oui oui",
-    "non non",
-    "vas-y",
-    "go",
-    "continue",
-    "allez",
-    "fais-le",
-    "fais",
-    "bonne idée",
-    "oui bonne idée",
-    "oui c'est ça",
-    "ah ok",
-    "ah je vois",
-    "ah d'accord",
-    "ah oui",
-    "je vois",
-    "j'ai compris",
-    "compris",
-    "reçu",
-    "haha",
-    "lol",
-    "😄",
-    "👍",
-    # Salutations pures (ajoutées)
-    "bonjour",
-    "salut",
-    "salut jarvis",
-    "hello",
-    "hey",
-    "yo",
-    "coucou",
-    "bonsoir",
-    "hi",
-    "hola",
-    "re",
-    "rebonjour",
-}
-
-# Briefing exact (avant l'embedding, ces formulations sont sans ambiguïté)
-_BRIEFING_EXACT = {
-    "briefing",
-    "mon briefing",
-    "briefing matinal",
-    "briefing du matin",
-    "lance le briefing",
-    "le briefing",
-    "fais le briefing",
-}
-
-# Liants minuscules dans les noms de villes françaises
-_FR_CITY_LIANTS = r"(?:de|du|des|le|la|les|aux|en|sur|sous|sainte?|saint)"
-
-# Capture une ville après préposition, en préservant les noms composés :
-# La Rochelle · Aix-en-Provence · Saint-Germain-en-Laye · Boulogne-sur-Mer
-_CITY_AFTER_PREP_RE = re.compile(
-    r"\b(?:à|au|aux|pour|sur|vers|en)\s+"
-    r"("
-    r"[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜÇ][\wÀ-ÿ'\-]*"
-    r"(?:[-\s]+(?:" + _FR_CITY_LIANTS + r"[-\s]+)?"
-    r"[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜÇ]?[\wÀ-ÿ'\-]+){0,3}"
-    r")"
-)
-
-# Faux positifs fréquents après préposition (jours, moments)
-_TEMPORAL_WORDS = {
-    "aujourd'hui",
-    "demain",
-    "hier",
-    "lundi",
-    "mardi",
-    "mercredi",
-    "jeudi",
-    "vendredi",
-    "samedi",
-    "dimanche",
-    "matin",
-    "soir",
-    "midi",
-}
-
-
-# ── RAG query extraction ─────────────────────────────────────────────────────
-# Phase 1: strip command/routing phrases (compound patterns first, then single verbs)
-_RAG_CMD_RE = re.compile(
-    r"(?:"
-    r"base-toi sur (?:mon|ma)\s*|"
-    r"lis (?:un extrait de )?(?:mon|ma)\s*|"
-    r"montre(?:-moi)? (?:mon|ma)\s*|"
-    r"extrait de (?:mon|ma)\s*|"
-    r"consulte(?:r)? (?:mon|ma|mes)\s*|"
-    r"depuis (?:le |la |mon |ma |mes )?RAG\b\s*|"
-    r"dans (?:le |la |mon |ma |mes )?RAG\b\s*|"
-    r"sur (?:le |la |mon |ma |mes )?RAG\b\s*|"
-    r"qui est dans le RAG\b\s*|"
-    r"dans mes (?:documents?|notes?|fichiers?|base documentaire)\s*|"
-    r"dans (?:mon|ma) (?:document|fichier|fiche|note)\s*|"
-    r"(?:mes|mon|ma) (?:documents?|notes?|fichiers?)\s*|"
-    r"j'ai (?:un|une) (?:fichier|fiche|document|note) sur\s*|"
-    r"retrouve(?:r)? (?:le |la |un |une )?(?:document|fichier|fiche) sur\s*|"
-    r"\b(?:"
-    r"cherche(?:r)?|retrouve(?:r)?|trouve(?:r)?|recherche(?:r)?|"
-    r"regarde(?:r)?|consulte(?:r)?|montre(?:-moi)?|lis|lit|"
-    r"extrais?|extrait"
-    r")\b\s*|"
-    r"\bRAG\b\s*"
-    r")",
-    re.IGNORECASE,
-)
-
-# Phase 2: strip leading articles/possessives left after command removal
-_RAG_LEAD_NOISE_RE = re.compile(
-    r"^(?:(?:mon|ma|mes|le|la|les|l'|un|une|du|de|des|d')\s+)+",
-    re.IGNORECASE,
-)
 
 
 def preload_embed_router() -> None:
@@ -420,11 +104,11 @@ def _extract_weather_location(message: str) -> str:
       - 'météo à Lyon et Paris' (multi-villes) → 'Lyon' seulement
     """
     # ── 1. Séquence capitalisée après préposition ──
-    m = _CITY_AFTER_PREP_RE.search(message)
+    m = CITY_AFTER_PREP_RE.search(message)
     if m:
         city = m.group(1).strip(" ,;:!?.")
         first_word = city.split()[0].lower().rstrip("-")
-        if first_word not in _TEMPORAL_WORDS:
+        if first_word not in TEMPORAL_WORDS:
             return city
 
     # ── 2. Fallback (minuscules, villes simples) ──
@@ -460,9 +144,9 @@ def _extract_calendar_days(message: str) -> int:
 
 def _extract_rag_query(message: str) -> str:
     """Strip RAG routing phrases, return semantic topic keywords."""
-    cleaned = _RAG_CMD_RE.sub(" ", message)
+    cleaned = RAG_CMD_RE.sub(" ", message)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ?,!.")
-    cleaned = _RAG_LEAD_NOISE_RE.sub("", cleaned).strip()
+    cleaned = RAG_LEAD_NOISE_RE.sub("", cleaned).strip()
     return cleaned or message
 
 
@@ -542,14 +226,14 @@ def _embed_route(message: str, google_available: bool = True) -> RouterResult | 
 
     # Commandes explicites de raisonnement ("mode expert", "analyse approfondie"…) :
     # retour immédiat memory+reasoning, sans embedding ni LLM router.
-    if any(t in msg_lower for t in _REASON_EXACT):
-        logger.debug("Embed router: _REASON_EXACT → memory + use_reasoning=True")
+    if any(t in msg_lower for t in REASON_EXACT):
+        logger.debug("Embed router: REASON_EXACT → memory + use_reasoning=True")
         result = _build_result("memory", msg, google_available)
         result.use_reasoning = True
         return result
 
     # Détection reasoning via regex (flag, pas intent) — doit précéder les early-returns
-    force_reasoning = bool(_REASON_REGEX.search(msg_lower))
+    force_reasoning = bool(REASON_REGEX.search(msg_lower))
 
     # URL → memory (la page est déjà fetchée automatiquement en amont)
     if re.search(r"https?://", msg):
@@ -600,11 +284,11 @@ def _embed_route(message: str, google_available: bool = True) -> RouterResult | 
 
     if len(msg) <= 50 and "?" not in msg:
         _norm = msg_lower.rstrip(" !.,")
-        if _norm in _SMALL_TALK_EXACT:
+        if _norm in SMALL_TALK_EXACT:
             logger.debug("Embed router: small talk → no context injection")
             return _build_result("small_talk", msg, google_available)
 
-    if msg_lower.rstrip("! ?,") in _BRIEFING_EXACT:
+    if msg_lower.rstrip("! ?,") in BRIEFING_EXACT:
         logger.debug("Embed router: briefing exact → briefing")
         return _build_result("briefing", msg, google_available)
 

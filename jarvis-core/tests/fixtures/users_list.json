@@ -8,7 +8,6 @@
     "mail": "alice@example.com",
     "city": "Paris",
     "timezone": "Europe/Paris",
-    "language": "fr",
     "briefing_enabled": true,
     "trading": true,
     "google": false
@@ -21,7 +20,6 @@
     "mail": "bob@example.com",
     "city": "Paris",
     "timezone": "Europe/Paris",
-    "language": "fr",
     "briefing_enabled": true,
     "trading": false,
     "google": false
@@ -34,7 +32,6 @@
     "mail": "",
     "city": "Paris",
     "timezone": "Europe/Paris",
-    "language": "fr",
     "briefing_enabled": false,
     "trading": false,
     "google": false
