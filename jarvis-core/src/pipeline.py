@@ -397,6 +397,54 @@ def build_context(
         )
         pending_proposals = list_pending_proposals()
 
+        # Vulnérabilités — CRITIQUES seules, et seulement sur intent `self`.
+        #
+        # Le canal CVE n'existait que pour la réflexion nocturne : à la question « tu as des
+        # CVE critiques ? », le modèle n'avait aucun fait et a extrapolé (scan inventé,
+        # `brew audit`, chiffres sortis de nulle part) alors que le résultat réel était en
+        # cache Redis. On branche ici la MÊME source, sans rien recalculer.
+        #
+        # Critiques seules : ce sont les seules sur lesquelles on agit dans la journée. Les
+        # hautes/moyennes se comptent en dizaines en permanence — les injecter ferait du bruit
+        # de fond, exactement ce que `_cve_counts` refuse déjà côté vitals.
+        #
+        # DANS <internal_state>, et pas dans un bloc <vulnerabilites> voisin. Tout le contexte
+        # assemblé arrive dans le tour UTILISATEUR : un tag neutre s'y lit « donnée que tu m'as
+        # fournie », et le modèle a effectivement répondu « le bloc que tu m'as injecté
+        # indique… ». Le nom <internal_state> est ce qui revendique la propriété du fait —
+        # c'est son état, pas une pièce jointe.
+        #
+        # Le zéro est dit EXPLICITEMENT, avec la fraîcheur du scan ET son PÉRIMÈTRE : une
+        # ligne absente se lit « aucune donnée » et rouvre la porte à l'extrapolation, alors
+        # que « aucune critique, scan il y a 5h sur 4 sources » est un fait.
+        #
+        # Le périmètre n'est pas décoratif, il est mesuré. Sans lui, le négatif est nu — le
+        # modèle lisait « rien ne m'a été signalé » et refusait d'énoncer le zéro (« mieux
+        # vaut supposer qu'un trou existe »). En nommant ce qui a été scanné, il répond
+        # « le scan n'a rien signalé de critique ». On donne l'ÉTENDUE, jamais les compteurs
+        # de hautes/moyennes : injectés, ils ramènent le bruit qu'on écarte partout ailleurs,
+        # et le format par source (`0/48/65`) s'est fait relire de travers en « 48 sur 65 ».
+        vuln_ligne = ""
+        try:
+            from cve import get_cve, render_advice
+
+            _cve = get_cve()
+            if not _cve:
+                vuln_ligne = "\nVulnérabilités : aucun scan abouti à ce jour"
+            else:
+                _n = _cve.get("cve_critiques", 0)
+                _quand = (f", dernier scan {rel_time_fr(_cve['scanned_at'])}"
+                          if _cve.get("scanned_at") else "")
+                _srcs = list(_cve.get("par_source") or {})
+                _ou = f" sur {len(_srcs)} sources ({', '.join(_srcs)})" if _srcs else ""
+                vuln_ligne = "\nVulnérabilités : " + (
+                    f"{_n} CVE critique(s) corrigeable(s) sur ma pile{_quand}{_ou}\n"
+                    + render_advice(critical_only=True)
+                    if _n else f"aucune CVE critique corrigeable sur ma pile{_quand}{_ou}"
+                )
+        except Exception as exc:  # jamais bloquant pour un tour de conversation
+            logger.debug("cve indisponible pour le bloc self (%s)", exc)
+
         # RELATION already injected in build_dynamic_prefix prefix — skip here
         # to avoid double injection (~80 tokens) when use_self=True.
         self_ctx = (
@@ -411,6 +459,7 @@ def build_context(
                 if pending_proposals
                 else ""
             )
+            + vuln_ligne
             + "\n</internal_state>"
         )
         context_parts.append(self_ctx)

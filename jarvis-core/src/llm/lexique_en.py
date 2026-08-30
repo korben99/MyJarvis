@@ -174,6 +174,16 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "approve the prompt proposal",
         "tell me about yourself",
         "your identity",
+        # Security of ITS OWN stack. The possessive ("your") is what separates these from a
+        # general security question, which must stay in web/memory: "your CVEs" = internal
+        # state, "the log4j flaw" = external information.
+        "do you have any critical CVEs?",
+        "give me a rundown of your critical CVEs",
+        "your critical vulnerabilities",
+        "where does your vulnerability scan stand?",
+        "is your stack up to date security-wise?",
+        "your vitals",
+        "your system state",
     ],
 }
 

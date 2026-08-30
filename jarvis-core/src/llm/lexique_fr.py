@@ -189,6 +189,16 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "approuve la proposition de prompt",
         "parle-moi de toi",
         "ton identité",
+        # Sécurité de SA propre pile. Le possessif ("tes", "ton") est ce qui sépare ces
+        # phrases d'une question de sécurité générale, qui doit rester en web/memory :
+        # « tes CVE » = état interne, « la faille log4j » = information externe.
+        "tu as des CVE critiques ?",
+        "fais-moi un point sur tes CVE critiques",
+        "tes vulnérabilités critiques",
+        "où en est ton scan de vulnérabilités ?",
+        "ta pile est à jour côté sécurité ?",
+        "ton état vitals",
+        "ton état système",
     ],
 }
 
