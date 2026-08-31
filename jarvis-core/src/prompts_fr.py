@@ -201,6 +201,9 @@ use_reasoning=true pour réaliser un diagnostic, calcul multi-étapes, conseil m
 "Comment se comportent mes actions aujourd'hui ?"
 {"intents":["portfolio"]}
 
+"j'hésite à acheter du Engie, tu peux analyser l'action et son intégration dans mon portefeuille ?"
+{"intents":["web","portfolio"]}
+
 "C'est quoi tes dernières réflexions Jarvis ?"
 {"intents":["self"]}
 """

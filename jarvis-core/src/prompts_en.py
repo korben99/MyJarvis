@@ -205,6 +205,9 @@ use_reasoning=true for a diagnosis, a multi-step calculation, medical/tax/legal/
 "How are my shares doing today?"
 {"intents":["portfolio"]}
 
+"I'm hesitating to buy some Engie, can you analyse the stock and how it fits my portfolio?"
+{"intents":["web","portfolio"]}
+
 "What are your latest reflections Jarvis?"
 {"intents":["self"]}
 """
