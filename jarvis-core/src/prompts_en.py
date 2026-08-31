@@ -1166,7 +1166,11 @@ SESSION_SUMMARY_PROMPT = """\
 
 Summarise these exchanges in two compact parts:
 1. What the user said/asked explicitly (facts, figures, decisions, questions asked).
-2. What Jarvis answered of substance (advice given, information provided, positions taken).
+2. What YOU yourself answered of substance (advice given, information provided, positions taken).
+   Write this part in the FIRST person ("I explained…", "I suggested…"). This summary comes
+   back to you as your own recollection of the exchange: in the third person it would read as
+   a report handed to you about yourself, and in the second person as data the user is giving
+   you. Never call yourself "Jarvis".
 Interpret nothing. Short sentences. If a part is empty, omit it.
 Strict limit: 1800 characters. End on a complete sentence."""
 

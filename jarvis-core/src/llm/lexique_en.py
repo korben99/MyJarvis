@@ -99,26 +99,32 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "find me some information",
         "what's in the news",
         "look it up online",
+        "the Engie share price",
+        "analysis of the Total share, its valuation and outlook",
+        "what is this stock's valuation?",
     ],
     # ── Personal documents / RAG ─────────────────────────────────────────────
+    # COMPLETE phrases only, never fragments.
+    #
+    # A truncated example ("my note about", "in my documents", "RAG") encodes only its
+    # structure — determiner plus possessive — and no meaning. Any short phrase of similar
+    # shape then latches onto it, scoring above the routing threshold without talking about
+    # documents at all. Completing the examples removes those false positives at no cost to
+    # the genuine ones.
     "rag": [
         "search my documents",
         "I have a file on this subject",
-        "find the document about",
+        "find the document about this subject",
         "search my document base",
         "look in my files",
-        "in my files",
-        "in my documents",
-        "RAG",
-        "read my note",
+        "search for that in my documents",
+        "read my note on this subject",
         "read an extract from my file",
         "base your answer on my file",
-        "base your answer on my note",
-        "my note about",
+        "show me my note on this subject",
         "extract from my document",
-        "from my RAG",
-        "what's in the rag",
-        "show me my note",
+        "search my RAG",
+        "look in the RAG",
         "check my file",
     ],
     # ── Stock portfolio ──────────────────────────────────────────────────────
@@ -130,6 +136,9 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "analyse my portfolio",
         "my stock positions",
         "how is my portfolio doing?",
+        "I'm hesitating to buy this stock, does it belong in my portfolio?",
+        "adding a new stock to my portfolio",
+        "should I buy some Engie?",
     ],
     # ── Questions about a project's state ────────────────────────────────────
     # Covers STATUS queries ("where is", "how is it coming along").

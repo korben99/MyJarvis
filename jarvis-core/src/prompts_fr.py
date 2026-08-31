@@ -1161,7 +1161,11 @@ SESSION_SUMMARY_PROMPT = """\
 
 Résume ces échanges en deux volets compacts :
 1. Ce que l'utilisateur a dit/demandé explicitement (faits, chiffres, décisions, questions posées).
-2. Ce que Jarvis a répondu de substantiel (conseils donnés, informations fournies, positions prises).
+2. Ce que TOI tu as répondu de substantiel (conseils donnés, informations fournies, positions prises).
+   Écris ce volet à la PREMIÈRE personne (« j'ai expliqué… », « j'ai proposé… »). Ce résumé
+   te revient ensuite comme ton propre souvenir de l'échange : à la troisième personne il se
+   lirait comme un rapport qu'on te remet sur toi-même, et à la deuxième comme une donnée que
+   l'utilisateur t'apporte. Ne dis jamais « Jarvis » pour te désigner.
 N'interprète rien. Phrases courtes. Si un volet est vide, omets-le.
 Limite stricte : 1800 caractères. Termine sur une phrase complète."""
 

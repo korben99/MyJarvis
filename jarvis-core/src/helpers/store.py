@@ -5,6 +5,7 @@ wrappers redis_get_json / redis_set_json encapsulent le motif get/set + json.
 """
 
 import json
+import os
 from threading import Lock
 
 import redis
@@ -63,6 +64,22 @@ def set_session_summary_data(user_code: str, session_id: str, text: str, last_ts
 
 _STICKY_RAG_PREFIX = "jarvis:sticky_rag:"
 
+# TTL PROPRE au contexte documentaire, et non celui des journaux de chat.
+#
+# `CHAT_LOG_TTL` (90 j) était réutilisé ici : un document ouvert une fois se réinjectait donc
+# à chaque tour mémoire pendant trois mois. Constaté en production — un extrait de 21 caractères
+# du PV de réception de la piscine suivait la session iPhone avec 76 jours encore à courir.
+# Le collant sert à tenir un document pendant qu'on en PARLE, ce qui se compte en heures, pas
+# en trimestres. Passé ce délai, une vraie question relancera un vrai RAG.
+STICKY_RAG_TTL = int(os.getenv("STICKY_RAG_TTL_HOURS", "6")) * 3600
+
+# Longueur minimale d'un extrait jugé digne d'être retenu. La 2e étape du RAG cherche DANS le
+# document déjà identifié avec `score_threshold=0.0` (rag.py) — délibéré, mais elle laisse
+# alors passer des fragments vides de sens qu'aucun seuil de score n'arrête. Filtrer ici plutôt
+# que d'abaisser ce seuil : le fragment reste utilisable pour le tour en cours, il n'est
+# simplement pas jugé assez substantiel pour être REJOUÉ sur les tours suivants.
+_STICKY_MIN_CHARS = int(os.getenv("STICKY_RAG_MIN_CHARS", "200"))
+
 
 def get_sticky_rag(user_code: str, session_id: str) -> list | None:
     """Return the last RAG chunks stored for this session, or None."""
@@ -76,12 +93,19 @@ def get_sticky_rag(user_code: str, session_id: str) -> list | None:
 
 
 def set_sticky_rag(user_code: str, session_id: str, chunks: list) -> None:
-    """Persist RAG chunks for automatic re-injection on subsequent memory turns."""
+    """Persist RAG chunks for automatic re-injection on subsequent memory turns.
+
+    Les fragments trop courts sont écartés : ils ne portent pas de quoi nourrir un tour
+    ultérieur, et ce sont eux qui polluaient le contexte le plus longtemps."""
+    retenus = [c for c in chunks if len(c.get("text") or "") >= _STICKY_MIN_CHARS]
+    if not retenus:
+        logger.debug("set_sticky_rag: %d extrait(s) trop court(s) — rien de retenu", len(chunks))
+        return
     try:
         get_redis().setex(
             f"{_STICKY_RAG_PREFIX}{user_code}:{session_id}",
-            CHAT_LOG_TTL,
-            json.dumps(chunks, ensure_ascii=False),
+            STICKY_RAG_TTL,
+            json.dumps(retenus, ensure_ascii=False),
         )
     except Exception as exc:
         logger.warning("set_sticky_rag failed: %s", exc)

@@ -52,7 +52,7 @@
 | **`rag.py`** | Python module | Two-stage RAG: Stage 1 identifies the target document (title keyword match → semantic confirmation, or global semantic fallback); Stage 2 does focused semantic retrieval within that document. Doc-name cache lazy-loaded in memory. |
 | **`pipeline.py`** | Python module | System prompt construction, 7-source context assembly, post-exchange logging |
 | **`analyzer.py`** | Python module | Scheduled batch analysis (every 60 min): fact extraction, ESS scoring, Qdrant vectorisation |
-| **`embed_router.py`** | Python module | Fast-path intent classifier via cosine similarity — bypasses LLM router for ~80 % of requests |
+| **`embed_router.py`** | Python module | Fast-path intent classifier via cosine similarity — decides ~5 % of requests without the LLM router (measured on 959 real messages) |
 | **`routes/chat.py`** | Python module | Main chat pipeline: routing → context gather → auto-web fallback → LLM → SSE stream |
 | **`routes/proxy.py`** | Python module | OpenAI-compatible proxy `/v1/*` for Open WebUI — strips OWUI RAG templates, handles OWUI system calls (title generation, follow-up suggestions) at proxy level without touching the Jarvis pipeline |
 | **`prompts.py`** | Python module | Single source of truth for all LLM prompts — supports live overrides via `get_prompt()` |
@@ -66,8 +66,9 @@ Jarvis routes every request through a layered model stack. All tiers run locally
 
 ```
 Tier 0 — EMBED ROUTER  Zero-LLM fast path — cosine similarity against pre-embedded examples
-                        ~2-5 ms, bypasses Tier 1 for ~80 % of unambiguous requests
-                        Falls through to Tier 1 if score < 0.74 or ambiguity margin < 0.06
+                        ~2-5 ms. Measured on 959 real messages: it decides ~5 % of traffic.
+                        Falls through to Tier 1 if score < 0.74, ambiguity margin < 0.06,
+                        or the message is ≥ EMBED_MAX_CHARS (130) — see below.
 
 Tier 1 — ROUTER        Full LLM intent classifier, JSON only
                         Target: Qwen2.5-1.5B-router-v1-4bit (local MLX, ~1 GB)
@@ -109,7 +110,7 @@ When `LLM_LOCAL=yes`, Jarvis uses `mlx_lm` directly (no HTTP server) — models 
 - Applied to **all inference paths**: `stream_local` (streaming chat), `_generate_sync` (router, analyzer, self-reflection, web judge, trading).
 - Session benefit: turn N computes only the new user message (~200–600 tok); everything before is cached. Hit rate grows linearly with conversation length — by turn 4+, 85–95 % of prompt tokens are free.
 - Multi-user / multi-session safe: 8 slots cover concurrent sessions (iPhone + OpenWebUI) plus background tasks (analyzer, trading, self-reflection) without eviction.
-- **Sticky RAG**: `routes/chat.py` re-injects the same RAG chunks across turns of a session → the previous user message (with its RAG context) is exact in the trie → perfect cache hit on history.
+- **Sticky RAG**: `routes/chat.py` re-injects the same RAG chunks across turns of a session → the previous user message (with its RAG context) is exact in the trie → perfect cache hit on history. Bounded on two axes (`helpers/store.py`): its own `STICKY_RAG_TTL_HOURS` (6 h) instead of the chat-log TTL it used to borrow — a document opened once was followed for 90 days — and `STICKY_RAG_MIN_CHARS` (200), because the second RAG stage searches inside the already-identified document with `score_threshold=0.0` and lets through fragments with no substance. Such a fragment stays usable for the turn that retrieved it; it is simply not replayed.
 - **Qwen3.6 multi-turn limitation**: the hybrid architecture (KVCache + non-trimmable ArraysCache) means only the system prompt (~231 tok) is cached between turns. Conversational context is re-prefilled every turn. Cache hit is limited to the system prompt; the gain is ≈231 tok avoided out of ~1700–2000 remaining.
 - The system message must remain **token-identical** every turn — enforced by the `build_dynamic_prefix` / `build_context` split. All dynamic content (date, memory, RAG, opinions) goes into the user message prefix.
 
@@ -245,8 +246,21 @@ outside the request loop; `vitals` reads the cache.
 
 **Salience-based injection**: each turn receives only the facts OUTSIDE the nominal range
 (including `cve_critiques > 0`) and recent incidents; a healthy system yields
-`<etat_systeme>nominal</etat_systeme>`. The full snapshot plus the **actionable list of
-vulnerable packages** (`<vulnerabilites>`) is reserved for self-reflection — which sees
+`<etat_systeme>nominal</etat_systeme>`.
+
+**On `intent=self`, the chat turn also carries a `Vulnérabilités` line inside
+`<internal_state>`** — critical CVEs only, with scan freshness and the scanned perimeter
+(`4 sources (venv, jarvis-redis, …)`). Three deliberate choices. *Critical only*: highs and
+mediums run into the dozens permanently and would be background noise — the same reason
+`_cve_counts` withholds them from vitals. *Inside `<internal_state>`, not a sibling
+`<vulnerabilites>` block*: the assembled context arrives in the USER turn, where a neutral
+tag reads as "data you handed me" — the model answered "the block you injected says…" until
+the line was folded in. *The zero is stated explicitly*, with the perimeter: a bare negative
+was read as "nothing was reported to me" and the model refused to assert it, while "no
+critical CVE, scan 5h ago across 4 sources" is a fact it will state.
+
+The full snapshot plus the **actionable list of
+vulnerable packages** (`<vulnerabilites>`) also goes to self-reflection — which sees
 `<etat_disparition>` + `<incidents_recents>` + `<vulnerabilites>`, can **alert the
 administrator** (action `alert_admin`, dedicated iOS push) with a precise upgrade, and
 consolidates incidents into `jarvis-self.json`. No risk scalar is ever injected as text — see
@@ -261,7 +275,8 @@ The date sits at the **end of the prefix**, immediately before the user message,
 
 **Per-turn assembled context** — appended after the dynamic prefix, before the user's raw message:
 ```
-<conversation_summary> … </conversation_summary>  — only if a session summary exists (see below)
+<resume_conversation> … </resume_conversation>    — only if a session summary exists (see below)
+<echanges_recents> … </echanges_recents>          — uncovered turns, verbatim, when a summary exists
     ↓
 <web_results> / <user_memories> / <documents> / <agenda> / <emails>  — fetched in parallel
     ↓
@@ -274,7 +289,7 @@ The date sits at the **end of the prefix**, immediately before the user message,
 </user_message>
 ```
 
-The final user message = `dynamic_prefix + [conversation_summary] + assembled_context + <user_message>{raw_message}</user_message>`. Storing this in Redis history preserves the full context per turn; the `/history` endpoint strips the prefix to show only the raw message to the iOS app.
+The final user message = `dynamic_prefix + [resume_conversation + echanges_recents] + assembled_context + <user_message>{raw_message}</user_message>`. Storing this in Redis history preserves the full context per turn; the `/history` endpoint strips the prefix to show only the raw message to the iOS app.
 
 **Session conversation compression** (`_update_session_summary` in `routes/chat.py`):
 
@@ -282,12 +297,14 @@ Triggered as a background task after each response (post-LLM, GPU free). When un
 
 Watermarking is timestamp-based, not count-based: comparing against message count fails once the Redis list is capped at `CHAT_MAX_MESSAGES` (100) because `llen = total_covered` → `uncovered = 0` forever. With `last_ts`, any message with `ts > last_ts` is uncovered regardless of list capacity.
 
+**Person matters** (`SESSION_SUMMARY_PROMPT`). Part 1 — what the user said — is third person. Part 2 — what Jarvis answered — is written in the **first** person ("j'ai expliqué…"). The summary is re-injected into Jarvis's own context inside the USER turn: in the third person it reads as a report handed to him about himself, and in the second person as data the user is supplying. Both framings cost ownership of the recollection — the same effect measured on the `<vulnerabilites>` block, where a neutral tag made the model answer "the block you injected says…". Only the first person makes it his memory. The verbatim transcript that follows (`<echanges_recents>`) keeps speaker *names* (`Utilisateur` / `Jarvis`) rather than pronouns: it is a record, not a recollection.
+
 **Injection cycle:**
 
 | State | `hist_slice` injected | Summary block |
 |---|---|---|
 | No summary yet | Last N messages trimmed to `HIST_CONV_TOKEN_BUDGET` | — |
-| Summary exists | Messages with `ts > last_ts` (uncovered), trimmed to `HIST_CONV_TOKEN_BUDGET` | `<conversation_summary>` injected before context |
+| Summary exists | Messages with `ts > last_ts` (uncovered), trimmed to `HIST_CONV_TOKEN_BUDGET` | `<resume_conversation>` injected before context, followed by `<echanges_recents>` |
 
 When a new summary is generated, `last_ts` advances to the timestamp of the newest covered message. On the next turn, all messages with `ts ≤ last_ts` are covered → no raw history for those, only the summary block. Accumulation restarts from there. If the uncovered slice has no assistant turn, the last covered user+assistant exchange is prepended as an anchor.
 
@@ -303,7 +320,7 @@ The cumulative prompt overhead is bounded at `HIST_CONV_TOKEN_BUDGET + SESSION_S
 | `SUJETS RÉCENTS (24h)` | Topics from last 10 conversations in Redis | Only if topics exist |
 | `ÉTAT ÉMOTIONNEL` | `emotional_state.render_prompt_lines()` → `<etat_emotionnel_jarvis>` | Only if any dim ≥ 0.25 |
 | `<introspection_jarvis>` | `jarvis-self.json → self_introspection` | All non-empty axes, every turn |
-| `FRISE CHRONOLOGIQUE` | Top 5 autobio Qdrant points by importance+recency — each prefixed with a French relative timestamp (`il y a 3 jours`, `il y a 2 semaines`, …) | Only if autobio exists |
+| `FRISE CHRONOLOGIQUE` | Top 7 autobio Qdrant points by importance+recency, **capped at `TIMELINE_MAX_AGE_DAYS` (120)** — each prefixed with a French relative timestamp (`il y a 3 jours`, `il y a 2 semaines`, …) | Only if autobio exists |
 | `SUJETS À ABORDER AUJOURD'HUI` | Redis `jarvis:{code}:tomorrow_suggestions` (TTL 24h, written by nightly review) | Only if key exists |
 | `RELATION AVEC CET UTILISATEUR` | `jarvis-self.json → user_relations[user_code]` | Always — affinity, style, mood (compact). On `intent=self`, enriched with full tonal directives via `build_context`. |
 

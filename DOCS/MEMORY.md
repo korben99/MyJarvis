@@ -285,7 +285,9 @@ final_score   = min(1.0, base_score + interest_boost)
 
 The recency window is **type-aware**: episodic memories use a 30-day window, autobiographical memories use a 365-day window (`AUTOBIO_RECENCY_WINDOW_DAYS`). Without this distinction, a stable milestone from 6 months ago (e.g. "Alice gave a talk at a security conference") would always score `recency_bonus = 0` and be outranked by trivial recent events.
 
-`build_memory_context()` surfaces the **top 5 autobiographical events by importance + recency** (importance weight 0.7, recency 0.3 over a 1-year window) rather than the 5 most recent — so a critical event from months ago is not displaced by routine recent exchanges. Facts with `status="past"` are excluded from `build_memory_context()` via `get_user_timeline()` (`must_not` filter in Qdrant scroll).
+`build_memory_context()` surfaces the **top 7 autobiographical events by importance + recency** (importance weight 0.7, recency 0.3 over a 1-year window) rather than the 7 most recent — so a critical event from months ago is not displaced by routine recent exchanges. Facts with `status="past"` are excluded from `build_memory_context()` via `get_user_timeline()` (`must_not` filter in Qdrant scroll).
+
+**Age cap** (`TIMELINE_MAX_AGE_DAYS`, default 120 days). Ranking alone has no upper bound on age: importance weighs 0.7 against 0.3 for a recency spread over a full year, so a five-month-old milestone outranks a recent ordinary one indefinitely. Measured on a live profile, four of the seven slots were held by five-month-old entries — one of them describing Jarvis's own work rather than the user's life. The cap is applied **before** truncating to 7, so freed slots go to recent events instead of staying empty; ranking by importance keeps its full role inside the window. Nothing is lost: events beyond the window remain reachable through `search_memory` — it is the permanent injection that is bounded, not the memory. Set to 0 to disable.
 
 ### Autobiographical Memory Deduplication and Reinforcement
 

@@ -4,6 +4,7 @@ projets actifs + état émotionnel + apprentissages/notes + relation utilisateur
 """
 
 import json
+import os
 import time
 
 from config import QDRANT_MEMORY_COLLECTION
@@ -28,6 +29,11 @@ logger = get_logger("jarvis-memory")
 
 
 _TIMELINE_CACHE_TTL = 300  # 5 minutes — invalidated on new autobio store
+
+# Fenêtre de la frise injectée à chaque tour. 120 jours : assez large pour couvrir un projet
+# qui s'étale sur une saison, assez étroite pour qu'un fait de cinq mois cesse d'occuper une
+# place. Réglable par TIMELINE_MAX_AGE_DAYS ; mettre 0 désactive la borne.
+TIMELINE_MAX_AGE_DAYS = int(os.getenv("TIMELINE_MAX_AGE_DAYS", "120")) or 10**6
 
 
 def get_user_timeline(user_code: str, limit: int = 20):
@@ -274,13 +280,27 @@ def build_memory_context(
         )
 
     # User Timeline — served from pipeline cache hit [4]; fallback to Qdrant on miss
+    #
+    # BORNE D'ÂGE, appliquée ici et pas dans le classement. `get_user_timeline` classe sur
+    # `importance × 0.7 + récence × 0.3`, la récence étant étalée sur un an : un événement
+    # important de cinq mois bat donc largement un événement récent et banal, et rien
+    # d'autre ne l'écarte. Résultat constaté : quatre des sept places prises par des entrées
+    # de cinq mois, dont une qui relatait le travail de Jarvis et non la vie de l'utilisateur.
+    #
+    # On coupe sur l'âge AVANT de tronquer à 7, pour que les places libérées profitent aux
+    # événements récents au lieu de rester vides. Le classement par importance garde tout son
+    # rôle à l'intérieur de la fenêtre — on ne fait que refuser qu'elle soit sans fin. Ce qui
+    # sort de la frise reste consultable par search_memory : c'est l'injection permanente
+    # qu'on borne, pas la mémoire.
     if _timeline_cached:
         try:
-            timeline = json.loads(_timeline_cached)[:7]
+            timeline = json.loads(_timeline_cached)
         except Exception:
-            timeline = get_user_timeline(user_code, limit=7)
+            timeline = get_user_timeline(user_code, limit=50)
     else:
-        timeline = get_user_timeline(user_code, limit=7)
+        timeline = get_user_timeline(user_code, limit=50)
+    _limite_age = time.time() - TIMELINE_MAX_AGE_DAYS * 86400
+    timeline = [e for e in timeline if e.get("timestamp", 0) >= _limite_age][:7]
     if timeline:
         plines = [
             f"({rel_time_fr(event['timestamp'])}) {event['text']}" for event in timeline

@@ -114,26 +114,33 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "trouve-moi des informations",
         "quelles sont les news",
         "recherche en ligne",
+        "le cours de l'action Engie",
+        "analyse de l'action Total, sa valorisation et ses perspectives",
+        "quelle est la valorisation de cette action ?",
     ],
     # ── Documents personnels / RAG ───────────────────────────────────────────
+    # Phrases COMPLÈTES uniquement, jamais de fragments.
+    #
+    # Un exemple tronqué (« ma fiche sur », « dans mes documents », « RAG ») n'encode plus
+    # que sa structure — déterminant + possessif — et non un sens. N'importe quelle phrase
+    # courte de forme voisine s'y accroche alors : « par curiosité » et « donne moi mon
+    # portefeuille » décrochaient 0.78 sur ce pool, au-dessus du seuil de routage, alors
+    # qu'aucun des deux ne parle de documents. Compléter les exemples ramène ces deux-là
+    # sous le seuil sans rien coûter aux vrais positifs.
     "rag": [
         "cherche dans mes documents",
         "j'ai un fichier sur ce sujet",
-        "retrouve le document sur",
+        "retrouve le document sur ce sujet",
         "cherche dans ma base documentaire",
         "regarde dans mes fichiers",
-        "dans mes fichiers",
-        "dans mes documents",
-        "RAG",
-        "lis ma fiche",
+        "cherche ça dans mes documents",
+        "lis ma fiche sur ce sujet",
         "lis un extrait de mon fichier",
         "base-toi sur mon fichier",
-        "base-toi sur ma fiche",
-        "ma fiche sur",
+        "montre-moi ma fiche sur ce sujet",
         "extrait de mon document",
-        "depuis mon RAG",
-        "qui est dans le rag",
-        "montre-moi ma fiche",
+        "cherche dans mon RAG",
+        "regarde dans le RAG",
         "consulte mon fichier",
     ],
     # ── Portefeuille boursier ────────────────────────────────────────────────
@@ -145,6 +152,9 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "analyse mon portefeuille",
         "mes positions boursières",
         "comment va mon portefeuille ?",
+        "j'hésite à acheter cette action, elle a sa place dans mon portefeuille ?",
+        "intégrer une nouvelle action à mon portefeuille",
+        "est-ce que je devrais acheter du Engie ?",
     ],
     # ── Questions sur l'état d'un projet ────────────────────────────────────
     # Couvre les requêtes de STATUS ("où en est", "comment avance").

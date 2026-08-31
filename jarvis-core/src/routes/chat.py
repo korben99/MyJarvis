@@ -1366,16 +1366,27 @@ async def chat(req: ChatRequest):
     if dynamic_prefix:
         msg_parts.append(dynamic_prefix)
     if _session_summary:
+        # Balises en français, comme toutes les autres du contexte injecté — la règle est
+        # posée dans prompts_en.py (« The XML tag names stay French ») et ces deux-là y
+        # échappaient. Elles ne sont citées par aucun prompt, seulement écrites ici, donc
+        # renommables sans rien casser. Ce n'est pas de la cosmétique : deux balises
+        # anglaises au milieu d'un contexte français sont deux repères de moins pour le
+        # modèle. (`<context>`, lui, reste tel quel : SYSTEM_BASE le cite par son nom.)
         msg_parts.append(
-            "<conversation_summary>\n" + _session_summary + "\n</conversation_summary>"
+            "<resume_conversation>\n" + _session_summary + "\n</resume_conversation>"
         )
         if hist_slice:
-            _role_label = {"user": "User", "assistant": "Jarvis"}
+            # Étiquettes de locuteur : deux noms, pas deux pronoms. Dans une transcription
+            # verbatim, « Utilisateur » et « Jarvis » désignent qui a parlé sans ambiguïté,
+            # là où un « moi »/« toi » se heurterait au fait que ce bloc arrive dans le tour
+            # utilisateur. Le point de vue à la première personne vit dans le résumé
+            # (SESSION_SUMMARY_PROMPT), qui est un souvenir ; ceci est un relevé.
+            _role_label = {"user": "Utilisateur", "assistant": "Jarvis"}
             _hist_lines = "\n".join(
                 f"{_role_label.get(m['role'], m['role'])} : {m['content']}"
                 for m in hist_slice
             )
-            msg_parts.append("<recent_exchanges>\n" + _hist_lines + "\n</recent_exchanges>")
+            msg_parts.append("<echanges_recents>\n" + _hist_lines + "\n</echanges_recents>")
     if assembled:
         msg_parts.append(assembled)
     if _project_detail_block:

@@ -51,6 +51,9 @@ EMBED_ROUTE_THRESHOLD: float = 0.74
 # Si les deux meilleurs intents sont à moins de cette marge, c'est ambigu → LLM
 AMBIGUITY_MARGIN: float = 0.06
 
+# Longueur au-delà de laquelle on n'essaie même pas l'embedding — voir _embed_route().
+EMBED_MAX_CHARS: int = int(os.getenv("EMBED_MAX_CHARS", "130"))
+
 
 # ── Cache des embeddings d'exemples (initialisé une seule fois) ───────────────
 _cache_lock = threading.Lock()
@@ -221,6 +224,31 @@ def _embed_route(message: str, google_available: bool = True) -> RouterResult | 
         return None
 
     msg_lower = msg.lower()
+
+    # Message long → routeur LLM directement, sans calculer d'embedding.
+    #
+    # Les phrases-exemples font 4 à 21 jetons (médiane 7). Un message long est encodé en un
+    # vecteur moyenné sur toutes ses propositions : sa similarité maximale avec un exemple
+    # court s'effondre mécaniquement, quelle que soit la clarté de l'intention. Mesuré sur
+    # 959 messages réels — part de messages franchissant le seuil, par longueur :
+    #
+    #     0-10 jetons  33 %      20-30 jetons   1 %
+    #     10-15        10 %      30-45          0 %   (185 messages)
+    #     15-20         4 %      45 et plus     0 %   (270 messages)
+    #
+    # Au-delà de 30 jetons, le fast-path n'a jamais tranché : le calcul est perdu d'avance.
+    # La barrière est donc gratuite en décisions et elle borne un risque à venir — enrichir
+    # les pools d'exemples finit par produire des accrochages fortuits sur des messages longs,
+    # là où le score n'a plus de sens.
+    #
+    # Seuil exprimé en CARACTÈRES pour rester sans coût : tokeniser juste pour décider de ne
+    # pas tokeniser n'aurait aucun intérêt. 130 caractères est calibré sur le même corpus —
+    # aucun message de moins de 30 jetons n'y est écarté.
+    if len(msg) >= EMBED_MAX_CHARS:
+        logger.debug(
+            "Embed router: message long (%d car.) → LLM router sans embedding", len(msg)
+        )
+        return None
 
     # ── 1. Règles déterministes ───────────────────────────────────────────────
 
