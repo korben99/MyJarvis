@@ -180,7 +180,7 @@ whether `ThinkingBudgetProcessor` engages.
 | `_generate_optimized_query` | ROUTER | `no_think` | `MAX_TOKENS_TINY` (80) | — | Query rewrite — simple task |
 | `_refine_web_queries` | ROUTER | `no_think` | `MAX_TOKENS_TINY` (80) | — | Same, two refined queries |
 
-### Trading (`trading.py`)
+### Trading (`trading/core.py`)
 
 | Function | Model | Think | Budget | Processor | Rationale |
 |---|---|---|---|---|---|

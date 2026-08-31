@@ -57,6 +57,7 @@ from helpers import (
 from memory import get_interest_weights, get_user_profile, get_user_projects
 from prompts import get_prompt
 from trading import get_portfolio_summary_text
+from trading.market import render_briefing_block as render_market_block
 from web_search import search_news, search_weather
 
 logger = get_logger("jarvis-briefing")
@@ -407,6 +408,9 @@ async def _assemble_with_llm(
     portfolio_text = _esc(
         sections.get("portfolio") or "Aucune donnée de portefeuille disponible."
     )
+    market_text = _esc(
+        sections.get("market") or "Aucune donnée de marché disponible."
+    )
 
     prompt = get_prompt("BRIEFING_USER").format(
         user_name=user_name,
@@ -418,6 +422,7 @@ async def _assemble_with_llm(
         interests=interests_text,
         projects=projects_text,
         portfolio=portfolio_text,
+        market=market_text,
     )
 
     try:
@@ -484,6 +489,11 @@ async def gather_briefing(user_code: str) -> BriefingResult:
     weather_task = search_weather(city)
     news_task = _fetch_news(interests)
     portfolio_task = asyncio.to_thread(get_portfolio_summary_text, user_code)
+    # Perspectives de marché : un an d'historique par ligne + les grands indices. Lent la
+    # première fois (~5 s, une quinzaine de téléchargements), instantané ensuite — le cache
+    # Redis tient 20 h, donc le briefing du matin paie le coût et personne d'autre.
+    # C'est aussi pour ça que ça vit ici et pas dans la boucle horaire de trading.core.
+    market_task = asyncio.to_thread(render_market_block, user_code)
 
     try:
         results = await asyncio.wait_for(
@@ -493,13 +503,14 @@ async def gather_briefing(user_code: str) -> BriefingResult:
                 weather_task,
                 news_task,
                 portfolio_task,
+                market_task,
                 return_exceptions=True,
             ),
             timeout=35.0,
         )
     except asyncio.TimeoutError:
         logger.warning("Briefing data gather timed out after 35s — using empty sources")
-        results = [[], [], "", [], ""]
+        results = [[], [], "", [], "", ""]
 
     calendar = _unwrap(results[0], [])
     gmail = _unwrap(results[1], [])
@@ -510,6 +521,7 @@ async def gather_briefing(user_code: str) -> BriefingResult:
     weather = "\n".join(r["body"] for r in weather_hits) if weather_hits else ""
     news = _unwrap(results[3], [])
     portfolio = _unwrap(results[4], "")
+    market = _unwrap(results[5], "")
 
     sections = {
         "calendar": calendar,
@@ -519,6 +531,7 @@ async def gather_briefing(user_code: str) -> BriefingResult:
         "interests": interests,
         "projects": projects,
         "portfolio": portfolio,
+        "market": market,
     }
 
     text, html = await _assemble_with_llm(user_name, user_code, sections)

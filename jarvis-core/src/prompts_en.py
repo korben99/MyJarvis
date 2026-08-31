@@ -418,6 +418,7 @@ Interests: {interests}
 <actualites>{news}</actualites>
 <projets>{projects}</projets>
 <portefeuille>{portfolio}</portefeuille>
+<perspectives_marche>{market}</perspectives_marche>
 </data_sources>
 <task>
 Generate two versions in JSON:
@@ -428,6 +429,7 @@ Generate two versions in JSON:
   Calendar: detail each event (time, place if stated, context if useful).
   News: cover each article in 2-3 sentences — headline + summary of the key information. Cite the source if available.
   Portfolio: mention notable moves (>1% intraday) or active alerts; omit if no data.
+  Market: in 3-5 sentences, put the portfolio IN PERSPECTIVE using <perspectives_marche> — the general orientation (indices, VIX, EUR/USD), the trend of the lines that are moving, and the deadlines coming up. Read every move against that line's normal daily variation: a swing smaller than that is noise, not an event. Flag a divergence when there is one (a recent rise inside a downward underlying trend is still a rebound, not a reversal).
   Projects: briefly recall the state of each active project.
   Omit sections with no data — do not mention that a section is empty.
 
@@ -436,6 +438,8 @@ Generate two versions in JSON:
   News: end each article with <a href="URL">Read the article</a> if a URL is provided.
 
 WEATHER RULE: use ONLY the data provided in <meteo>. Never invent a temperature, condition or forecast. If <meteo> is empty, state "no usable weather data".
+
+MARKET RULE: use ONLY the figures in <perspectives_marche> and <portefeuille>. Never invent a price, a performance, a deadline or an index level. These figures are those of the LAST KNOWN SESSION, which may be a few days old: never present them as today's. You put things in perspective — you explain how a move reads in its context — you NEVER give a buy, sell or reallocation instruction, and you never predict a future price. If <perspectives_marche> is empty, omit the section without mentioning it.
 
 Expected format: {{"text":"...","html":"..."}}
 JSON only.

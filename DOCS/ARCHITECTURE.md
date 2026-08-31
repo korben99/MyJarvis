@@ -162,9 +162,9 @@ Token budgets use per-task config variables (see `config.py`). Timeouts are deri
 | Profile key dedup | `memory.py` | Tier 1 — ROUTER | `True` | `MAX_TOKENS_SHORT` (300) | — | Namespace-scoped key dedup |
 | Memory consolidate | `memory.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_COMPACT` (600) | — | Deduplicate / merge episodic memories |
 | Profile curative cleanup | `memory.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_COMPACT` (600) | — | Curative profile cleanup |
-| Ticker extraction | `trading.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_TINY` (80) | — | Extract ticker symbol from text |
-| Alert evaluation | `trading.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_MEDIUM` (1 000) | — | Evaluate price alert thresholds |
-| Threshold suggestion | `trading.py` | Tier 2 — PRIMARY | `False` | `MAX_TOKENS_THINK_MEDIUM` (5 048) | `THINKING_BUDGET_MEDIUM` (2 048) | Quantitative reasoning on price thresholds |
+| Ticker extraction | `trading/core.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_TINY` (80) | — | Extract ticker symbol from text |
+| Alert evaluation | `trading/core.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_MEDIUM` (1 000) | — | Evaluate price alert thresholds |
+| Threshold suggestion | `trading/core.py` | Tier 2 — PRIMARY | `False` | `MAX_TOKENS_THINK_MEDIUM` (5 048) | `THINKING_BUDGET_MEDIUM` (2 048) | Quantitative reasoning on price thresholds |
 
 **`no_think=True`**: structured/short output, latency-sensitive — router, briefing, calendar, web, push, nightly extractions.
 
@@ -495,8 +495,9 @@ plus accès à internet en ce moment…"* — instead of silently returning no r
 │   │   ├── emotional_state.py  # Continuous emotional state (Redis, 3 dimensions)
 │   │   ├── vitals.py · cve.py  # Measured disappearance state · SBOM/grype scan
 │   │   ├── steering.py         # Activation steering (off by default)
-│   │   ├── rag.py · web_search.py · trading.py · briefing.py · google_services.py
-│   │   ├── apns.py · deps.py · tool_calls.py · trade_keys.py
+│   │   ├── rag.py · web_search.py · briefing.py · google_services.py
+│   │   ├── apns.py · deps.py · tool_calls.py
+│   │   ├── trading/            # keys.py · core.py (CSV, prices, alerts) · market.py (trends)
 │   │   ├── llm/                # client.py · local.py (MLX, cache LRU) · router.py · embed_router.py
 │   │   ├── memory/             # THE FIVE LAYERS + curation
 │   │   │   ├── shortterm.py · episodic.py · vectors.py   # Redis · Qdrant

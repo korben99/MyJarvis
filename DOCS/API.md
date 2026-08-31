@@ -101,7 +101,7 @@ Mise en place côté client : voir `DOCS/opencode-local.md`.
 | `POST` | `/briefing/generate/{user_code}` | Generate and cache a new briefing |
 | `GET` | `/briefing/{user_code}` | Retrieve the cached briefing |
 
-The morning briefing aggregates: calendar events, unread emails, weather, news headlines, active tasks, and portfolio performance (if positions are loaded).
+The morning briefing aggregates: calendar events, unread emails, weather, news headlines, active tasks, portfolio performance (if positions are loaded), and a market perspective — index/VIX/EUR-USD orientation, per-line trend, and upcoming earnings or ex-dividend dates (see `DOCS/TRADING.md`).
 
 ## Self / Proto-Self
 

@@ -45,7 +45,7 @@ from memory import (
     self_memory_lock,
 )
 from prompts import get_prompt
-from trade_keys import idx_key, pos_key
+from trading.keys import idx_key, pos_key
 
 from .context import _check_memory_health, _check_service_health, _fmt_memory_health
 from .proposals import _action_refine_prompt, _load_proposals

@@ -415,6 +415,7 @@ Centres d'intérêt : {interests}
 <actualites>{news}</actualites>
 <projets>{projects}</projets>
 <portefeuille>{portfolio}</portefeuille>
+<perspectives_marche>{market}</perspectives_marche>
 </data_sources>
 <task>
 Génère deux versions en JSON :
@@ -425,6 +426,7 @@ Génère deux versions en JSON :
   Agenda : détaille chaque événement (heure, lieu si précisé, contexte si utile).
   Actualités : couvre chaque article en 2-3 phrases — titre + résumé de l'information clé. Cite la source si disponible.
   Portefeuille : mentionne les mouvements notables (>1% intraday) ou alertes actives ; omet si aucune donnée.
+  Marché : en 3-5 phrases, mets le portefeuille EN PERSPECTIVE avec <perspectives_marche> — l'orientation générale (indices, VIX, EUR/USD), la tendance des lignes qui bougent, et les échéances qui approchent. Lis chaque mouvement à l'aune de la variation quotidienne normale de la ligne : un écart inférieur à celle-ci est du bruit, pas un événement. Signale une discordance quand il y en a une (une hausse récente dans une tendance de fond baissière reste un rebond, pas un retournement).
   Projets : rappelle brièvement l'état de chaque projet actif.
   Omet les sections sans données — ne mentionne pas qu'une section est vide.
 
@@ -433,6 +435,8 @@ Génère deux versions en JSON :
   Actualités : termine chaque article par <a href="URL">Lire l'article</a> si une URL est fournie.
 
 RÈGLE MÉTÉO : utilise UNIQUEMENT les données fournies dans <meteo>. N'invente jamais de température, condition ou prévision. Si <meteo> est vide, indique "pas de données météo exploitables".
+
+RÈGLE MARCHÉ : utilise UNIQUEMENT les chiffres de <perspectives_marche> et <portefeuille>. N'invente jamais un cours, une performance, une date d'échéance ni un niveau d'indice. Ces chiffres sont ceux de la DERNIÈRE SÉANCE CONNUE, qui peut dater de quelques jours : ne les présente jamais comme ceux d'aujourd'hui. Tu mets en perspective — tu expliques comment se lit un mouvement dans son contexte —, tu ne donnes JAMAIS d'ordre d'achat, de vente ou d'arbitrage, et tu ne prédis aucun cours futur. Si <perspectives_marche> est vide, omets la section sans la mentionner.
 
 Format attendu : {{"text":"...","html":"..."}}
 JSON uniquement.

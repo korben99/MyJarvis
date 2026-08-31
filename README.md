@@ -113,6 +113,12 @@ And Jarvis **follows up**. A project active but silent for more than three weeks
 
 Import your positions from a broker CSV, or set them one at a time. Every two hours Jarvis checks the prices, evaluates your alert thresholds and queues an alert when one is crossed. It can also **suggest thresholds**: given your positions and their price history, a reasoning pass proposes high and low bounds, and the autonomous loop can revise a threshold on its own when a price has drifted far from it.
 
+Alerting is **relative to each line, not to a flat number**. A year of daily history gives every position its own normal daily variation, and a move only counts as abnormal past two standard deviations of *that*. A flat 3 % rule treats an MSCI World ETF (±0.7 %/day) and a small cap (±6.5 %/day) as the same thing — it shouts at one constantly and never notices the other.
+
+The morning briefing carries a **market perspective** built from the same history: where the indices, the VIX and EUR/USD stand, the trend of each of your lines, and the earnings or ex-dividend dates coming up — read from the broker feed rather than typed in by hand. Trend is defined explicitly from the 50- and 200-day moving averages, so a rise inside a longer decline is named for what it is: a rebound, not a reversal. Two rules bound it — the figures are always those of the last known session and never presented as today's, and Jarvis puts moves in perspective without ever advising a buy, a sale or a reallocation.
+
+See `DOCS/TRADING.md`.
+
 ### It serves a household, not a user
 
 Multi-user is not a login screen bolted on. Every memory key, every vector filter and every Google token carries the user code, so **one person's memory is unreachable from another's session** — and the system prompt says so explicitly, so Jarvis will not mention what it knows about someone else.
@@ -184,6 +190,7 @@ Full walkthrough in **[DOCS/INSTALL.md](DOCS/INSTALL.md)**.
 | **[SECURITY.md](DOCS/SECURITY.md)** | Threat model, network exposure, agent sandbox |
 | **[OPERATIONS.md](DOCS/OPERATIONS.md)** | Logs, diagnostics, dependency upgrades |
 | **[GOOGLE.md](DOCS/GOOGLE.md)** | Connecting Gmail and Google Calendar |
+| **[TRADING.md](DOCS/TRADING.md)** | Portfolio surveillance, trend statistics, volatility-relative alerts |
 | **[REDIS.md](DOCS/REDIS.md)** | Redis key map and operational recipes |
 | **[JarvisApp](JarvisApp/README.md)** | The iOS app: voice, wake word, push notifications |
 

@@ -91,7 +91,13 @@ Throughout, `{code}` is a user code (e.g. `ALICE1`).
 | `trade:{code}:pos:{isin}` | hash | One position (price, thresholds…) |
 | `trade:{code}:last_import_ts` | string | Last CSV import timestamp |
 | `trade:{code}:pending_alerts` | list | Pending trading alerts |
-| `trade:price_cache:{isin}` | string | yfinance price cache |
+| `trade:price_cache:{isin}` | string | yfinance price cache (55 min) |
+| `jarvis:market:hist:{ticker}` | string | One year of daily closes, JSON (20 h) |
+| `jarvis:market:dates:{ticker}` | string | Upcoming ex-dividend / earnings dates (20 h) |
+
+The `jarvis:market:*` keys back the trend statistics and the briefing's market section — see
+`DOCS/TRADING.md`. Only the closes are stored, not the full OHLC: everything derives from
+them, and a list of floats reads back without pandas.
 
 ---
 
@@ -226,6 +232,10 @@ DEL trade:ALICE1:pos:FR0000131104
 
 # Flush the price cache
 docker exec jarvis-redis redis-cli --scan --pattern "trade:price_cache:*" \
+  | xargs docker exec jarvis-redis redis-cli DEL
+
+# Force a fresh history download on the next call (trends, market context, dates)
+docker exec jarvis-redis redis-cli --scan --pattern "jarvis:market:*" \
   | xargs docker exec jarvis-redis redis-cli DEL
 
 # Force a CSV re-import on the next cycle

@@ -54,7 +54,7 @@ from config import (
     llm_timeout,
 )
 from helpers import call_llm_async, extract_llm_json, get_logger, get_redis
-from trade_keys import alert_queue_key, idx_key, import_ts_key, pos_key, price_cache_key
+from .keys import alert_queue_key, idx_key, import_ts_key, pos_key, price_cache_key
 
 logger = get_logger("jarvis-trading")
 
@@ -489,9 +489,12 @@ Analyse les positions et décide si une alerte mérite d'être envoyée maintena
 Sois conservateur — n'alerte pas pour du bruit de marché normal.
 N'alerte QUE si au moins une des conditions suivantes est vraie :
   - Un cours a franchi threshold_high ou threshold_low défini par l'utilisateur
-  - Variation intraday > 3 % sur une position individuelle
+  - Variation intraday ANORMALE : |J| dépasse le seuil_anormal indiqué sur la ligne.
+    Ce seuil vaut deux fois la variation quotidienne habituelle de CETTE valeur — un
+    mouvement plus petit est du bruit propre à la valeur, même s'il paraît grand dans
+    l'absolu. Quand la ligne ne porte pas de seuil_anormal, applique 3 %.
   - Perte journalière totale du portefeuille > 2 %
-  - Dividende prévu dans moins de 5 jours calendaires"""
+  - Dividende ou résultats prévus dans moins de 5 jours calendaires"""
 
 _ALERT_USER = """\
 Variation journalière totale du portefeuille : {daily_pnl_pct:+.2f}%
@@ -503,6 +506,36 @@ Réponds UNIQUEMENT avec ce JSON, sans texte autour :
 {{"alert": true, "message": "raison courte"}}  ← si alerte
 {{"alert": false, "message": ""}}               ← si pas d'alerte
 """
+
+
+def _stats_cache(ticker: str | None) -> dict:
+    """Statistiques de tendance en cache, sans réseau. Dict vide si rien n'est en cache.
+
+    Import tardif et isolé : `market` tire yfinance et lit `get_portfolio` d'ici même —
+    l'importer paresseusement évite tout cycle et garde la boucle horaire insensible à une
+    panne du module de marché."""
+    if not ticker:
+        return {}
+    try:
+        from .market import stats_ligne
+
+        return stats_ligne(ticker, telecharger=False)
+    except Exception as exc:
+        logger.debug("trading: stats de %s indisponibles (%s)", ticker, type(exc).__name__)
+        return {}
+
+
+def _dates_cache(ticker: str | None) -> dict:
+    """Échéances (détachement, résultats) en cache, sans réseau. Dict vide sinon."""
+    if not ticker:
+        return {}
+    try:
+        from .market import dates_a_venir
+
+        return dates_a_venir(ticker, telecharger=False)
+    except Exception as exc:
+        logger.debug("trading: échéances de %s indisponibles (%s)", ticker, type(exc).__name__)
+        return {}
 
 
 async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
@@ -557,8 +590,29 @@ async def evaluate_alerts(user_code: str) -> tuple[bool, str]:
                 line += f" seuil_haut={p['threshold_high']}€"
             if p.get("threshold_low"):
                 line += f" seuil_bas={p['threshold_low']}€"
-            if p.get("dividend_date"):
-                line += f" dividende_prévu={p['dividend_date']}"
+
+            # Seuil d'anormalité PROPRE À LA VALEUR, à deux écarts-types de sa variation
+            # quotidienne habituelle. Le seuil absolu de 3 % traitait à l'identique un ETF
+            # World (±0,69 %/jour) et 2CRSI (±6,5 %/jour) : il criait sans arrêt sur la
+            # seconde et restait muet sur la première, alors qu'un +2 % sur un ETF World est
+            # un événement bien plus rare qu'un +5 % sur 2CRSI.
+            #
+            # Lecture du cache SEULE (`telecharger=False`) : on est dans la boucle horaire,
+            # une quinzaine de téléchargements Yahoo n'y a pas sa place. Cache froid — avant
+            # le premier briefing du jour — et la ligne ne porte pas de seuil : le modèle
+            # retombe alors sur les 3 % historiques, explicitement prévus dans _ALERT_SYSTEM.
+            infos = _stats_cache(p.get("yahoo_ticker"))
+            if (vq := infos.get("volatilite_quotidienne_pct")):
+                line += f" seuil_anormal={vq * 2:.1f}%"
+
+            # Échéances : Yahoo d'abord, saisie manuelle en repli. Le champ dividend_date
+            # n'existait que si l'utilisateur l'avait renseigné à la main, donc la règle
+            # « dividende dans moins de 5 jours » ne se déclenchait quasiment jamais.
+            dates = _dates_cache(p.get("yahoo_ticker"))
+            if (d := dates.get("detachement_dividende") or p.get("dividend_date")):
+                line += f" dividende_prévu={d}"
+            if (d := dates.get("resultats")):
+                line += f" résultats_prévus={d}"
             lines.append(line)
         except Exception:
             pass

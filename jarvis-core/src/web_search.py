@@ -294,6 +294,23 @@ def _is_news_query(query: str) -> bool:
     return any(k in q for k in _NEWS_KEYWORDS)
 
 
+# `backend` laissé à "auto" ici, à CONTRECŒUR et à titre provisoire — voir plus bas.
+#
+# Mesuré le 31/08/2026 : sur la catégorie `news`, ddgs 9.14.1 enregistre trois moteurs
+# (bing, duckduckgo, yahoo) et **seul bing répond**. Rafale de 13 requêtes au rythme réel
+# du briefing, après 15 min de repos pour écarter toute limitation de débit :
+#     backend="duckduckgo,yahoo"       →  0/13 servies
+#     backend="duckduckgo,yahoo,bing"  → 13/13 servies
+# Ce n'est pas un bannissement d'IP : au même moment, la catégorie `text` répond
+# normalement sur duckduckgo comme sur brave/mojeek. Ce sont les moteurs d'actualité
+# duckduckgo_news et yahoo_news qui sont hors service (yahoo_news est d'ailleurs déjà
+# mis en sourdine dans logging_setup.py pour un IndexError chronique).
+#
+# Exclure bing ici priverait donc le briefing de toute actualité, en silence.
+# Google n'est pas un recours : `ddgs/engines/google.py` porte `disabled = True` en amont.
+#
+# La sortie n'est pas dans ddgs mais dans Tavily, déjà primaire dans search_web() et
+# éprouvé sur `topic=news` — c'est le seul chemin qui retire réellement Bing.
 def _ddg_news_sync(query: str, max_results: int, region: str = "", timelimit: str = "") -> list[dict]:
     results = []
     kwargs: dict = {"max_results": max_results}
