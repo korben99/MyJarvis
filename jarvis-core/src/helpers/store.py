@@ -66,11 +66,9 @@ _STICKY_RAG_PREFIX = "jarvis:sticky_rag:"
 
 # TTL PROPRE au contexte documentaire, et non celui des journaux de chat.
 #
-# `CHAT_LOG_TTL` (90 j) était réutilisé ici : un document ouvert une fois se réinjectait donc
-# à chaque tour mémoire pendant trois mois. Constaté en production — un extrait de 21 caractères
-# du PV de réception de la piscine suivait la session iPhone avec 76 jours encore à courir.
-# Le collant sert à tenir un document pendant qu'on en PARLE, ce qui se compte en heures, pas
-# en trimestres. Passé ce délai, une vraie question relancera un vrai RAG.
+# Le collant sert à tenir un document pendant qu'on en PARLE, ce qui se compte en heures.
+# Réutiliser `CHAT_LOG_TTL` (90 j) ferait se réinjecter un document ouvert une fois à chaque
+# tour mémoire pendant trois mois. Passé ce délai, une vraie question relance un vrai RAG.
 STICKY_RAG_TTL = int(os.getenv("STICKY_RAG_TTL_HOURS", "6")) * 3600
 
 # Longueur minimale d'un extrait jugé digne d'être retenu. La 2e étape du RAG cherche DANS le

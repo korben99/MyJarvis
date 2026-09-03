@@ -683,12 +683,10 @@ def _action_flag_project_stall(params: dict) -> str:
             sent.append(f"{name} (échéance {due[:10]})" if overdue else f"{name} ({days}j)")
         else:
             # On NOTE et on continue, au lieu de sortir. Sortir au premier push non
-            # livrable annulait toute la passe : les projets suivants n'étaient jamais
-            # examinés, aucun cooldown n'était posé, et la passe repartait à l'identique au
-            # cycle suivant. Mesuré les sur trois cycles d'affilée, à la lettre
-            # près : « ZSXEDC — push indisponible : no device registered ». Il n'y a pas
-            # d'appareil enregistré et il n'y en aura pas tant que l'utilisateur n'en
-            # enregistre pas un ; la tentative se rejouait toutes les cinq heures.
+            # livrable annulerait toute la passe : projets suivants jamais examinés, aucun
+            # cooldown posé, et passe repartant à l'identique au cycle suivant. La cause la
+            # plus courante — un compte sans appareil enregistré — ne se résout pas d'elle-
+            # même, donc la même tentative se rejouerait indéfiniment toutes les cinq heures.
             injoignables.append(name)
 
     parts = []

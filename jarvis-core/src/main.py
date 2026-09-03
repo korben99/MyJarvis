@@ -130,14 +130,13 @@ async def lifespan(app: FastAPI):
             ),
         )
 
-    # Index de payload — posés à CHAQUE démarrage, pas seulement à la création. Ils
-    # n'existaient nulle part dans le code : ceux en place avaient été créés à la main, et
-    # `timestamp` l'avait été en `integer` alors que le payload y écrit un flottant
-    # (time.time()). Un index integer n'indexe aucune valeur flottante : il contenait 0
-    # point sur 281, et `scroll(order_by="timestamp")` rendait une liste VIDE sans lever
-    # d'erreur. C'est ce que fait `_consolidate_user_memories` — la consolidation
-    # mensuelle épisodique → autobiographique n'a donc jamais rien consolidé.
-    # Constaté et corrigé. La création est idempotente.
+    # Index de payload — posés à CHAQUE démarrage, pas seulement à la création : c'est ce
+    # qui garantit qu'ils existent et qu'ils ont le bon type, y compris sur une collection
+    # dont les index ont été créés à la main. La création est idempotente.
+    # `timestamp` en `float` n'est pas négociable : le payload y écrit time.time(), et un
+    # index `integer` n'indexerait aucune de ces valeurs. `scroll(order_by="timestamp")`
+    # rendrait alors une liste VIDE sans lever d'erreur — c'est ce que fait
+    # `_consolidate_user_memories`, qui cesserait silencieusement de consolider.
     for _champ, _schema in (
         ("user_code", "keyword"),
         ("memory_type", "keyword"),

@@ -247,11 +247,18 @@ def _model_profile(model_path: str) -> _ModelProfile:
     hybrides, qui partagent l'architecture. À revérifier après une bascule.
     """
     if is_qwen3_hybrid(model_path):
+        # repetition_penalty > 1 requis : c'est la seule pénalité MULTIPLICATIVE, donc la
+        # seule qui creuse un écart entre un token déjà vu et le reste. À 1.0 elle est un
+        # no-op et il ne reste que presence (forfait) et frequency (×n), toutes deux
+        # additives — sur une boucle qui sature la fenêtre elles retranchent quelques
+        # logits à TOUS les candidats de la boucle, sans différentiel exploitable.
+        # Plafond 1.1 sur cette famille (recommandation Qwen) : au-delà, la reprise
+        # légitime d'un terme technique est rabotée.
         return _ModelProfile(
             temp_think=1.0, temp_nothink=0.7,
             top_p_think=0.95, top_p_nothink=0.80,
             top_k=20, min_p=0.0,
-            repetition_penalty=1.0, repetition_context_size=256,
+            repetition_penalty=1.05, repetition_context_size=256,
             frequency_penalty=0.15, presence_penalty=1.5,
             use_quant_kv=QUANT_KV, stop_tokens=(),
         )
@@ -1421,6 +1428,7 @@ async def stream_local(
         first = True
         _generation_ok = True
         _truncated_by_stop = False
+        _tok_generes = 0
         model_short = model.split("/")[-1]
         prompt_text = ""
         prompt_tokens = 0
@@ -1455,6 +1463,9 @@ async def stream_local(
             ):
                 if stop_flag.is_set():
                     break
+                # Compté AVANT le filtre sur chunk.text : un pas rendu vide par le
+                # tampon du détokeniseur consomme quand même un token du budget.
+                _tok_generes += 1
                 if not chunk.text:
                     continue
 
@@ -1498,9 +1509,16 @@ async def stream_local(
             # Only insert on clean completion (not on error, stop_flag abort, or
             # stop-token truncation — truncation leaves tokens in the KV cache that
             # the re-encoded key would not declare → misaligned future partial hits).
+            #
+            # Le plafond max_tokens exclut aussi : une génération qui butte sur `budget`
+            # s'arrête au milieu d'une phrase, donc la séquence stockée ne peut être le
+            # préfixe d'aucun prompt futur. L'entrée ne resservira jamais et, étant la plus
+            # longue possible, évince des entrées utiles d'un LRU qui ne compte que 4 à 8
+            # slots.
             if (
                 lru_cache is not None and raw_resp and _generation_ok
                 and not stop_flag.is_set() and not _truncated_by_stop
+                and _tok_generes < budget
             ):
                 _lru_insert(model, mlx_model, tok_ids, raw_resp, lru_cache, tokenizer)
 

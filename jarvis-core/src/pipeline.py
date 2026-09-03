@@ -180,9 +180,17 @@ def build_dynamic_prefix(
         from vitals import incr_usage, render_prompt_block, risk_scalar
 
         incr_usage(user_code)
-        bloc_vitals = render_prompt_block()
-        if bloc_vitals:
-            parts.append(bloc_vitals)
+        # Admins seulement — même raison que la capacité agent dans build_system_prompt.
+        # Ce bloc porte l'âge des sauvegardes, les CVE critiques et le compte d'erreurs, et
+        # le prompt d'identité ORDONNE de l'énoncer comme un fait : injecté, il ressort
+        # dans la réponse, chiffres compris. C'est donc une donnée à ne pas faire descendre
+        # jusqu'au modèle, pas un comportement à corriger par une consigne. `incr_usage` et
+        # `set_risk` restent hors de la garde : l'usage se compte pour tout le monde, et le
+        # corps subit le risque quel que soit l'interlocuteur.
+        if user_code in USER_ADMINS:
+            bloc_vitals = render_prompt_block()
+            if bloc_vitals:
+                parts.append(bloc_vitals)
 
         # Le corps réagit au réel : le même état de disparition qui alimente le texte pilote
         # aussi l'intensité du steering. α reste nominal à risque nul, monte quand ça se

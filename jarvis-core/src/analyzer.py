@@ -61,8 +61,8 @@ logger = get_logger("jarvis-analyzer")
 #
 # Le budget global seul ne suffit pas : au plafond normal de 800 car./message, 2000 car.
 # ne tiennent que deux tours — et le référent recherché est presque toujours plus haut.
-# Constaté sur le cas : « Je dois préparer un Webinar Fortinet » était le
-# 1er des 4 tours antérieurs, donc le premier évincé, ce qui annulait tout l'intérêt.
+# Le tour qui porte le sujet est typiquement le plus ancien des quatre ou cinq précédents,
+# donc le premier évincé par le budget, ce qui annule tout l'intérêt du rappel d'historique.
 #
 # On coupe donc les tours d'historique bien plus court : pour lever un « ça », il faut
 # savoir DE QUOI on parle, pas les détails. Le sujet tient dans les premiers caractères,

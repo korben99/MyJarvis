@@ -77,12 +77,12 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
             ]
         }
 
-    # Sanité de l'index —, `timestamp` était indexé en `integer` alors que le
-    # payload y écrit un flottant (time.time()). Un index integer n'indexe aucune valeur
-    # flottante : il contenait 0 point sur 281, et `scroll(order_by="timestamp")` rendait
-    # une liste VIDE sans lever la moindre erreur. La consolidation sortait donc à son
-    # premier tour (`len(texts) < 5`), silencieusement, depuis toujours. On compare
-    # désormais ce que le scroll rend à ce que le compteur annonce.
+    # Sanité de l'index. `timestamp` doit être indexé en `float` — c'est ce que le payload
+    # y écrit (time.time()). Un index `integer` n'indexe aucune valeur flottante, et
+    # `scroll(order_by="timestamp")` rend alors une liste VIDE sans lever la moindre
+    # erreur : la consolidation sortirait à son premier tour (`len(texts) < 5`) sans que
+    # rien ne le signale. D'où ce comptage — on compare ce que le scroll rend à ce que le
+    # compteur annonce, la seule façon de distinguer « plus rien à faire » de « index muet ».
     try:
         eligibles = qdrant.count(
             collection_name=QDRANT_MEMORY_COLLECTION,
@@ -108,7 +108,13 @@ def _consolidate_user_memories(user_code: str, batch_size: int = 50):
             point_ids = [r.id for r in results]
             texts = [r.payload["text"] for r in results if r.payload.get("text")]
 
-            if not results and eligibles >= 5 and borne_basse is None:
+            # Garde limitée au PREMIER tour : `eligibles` est un instantané pris avant la
+            # boucle, et ne décrit plus l'état réel dès qu'un lot a été supprimé. Il faut
+            # les DEUX conditions — `borne_basse is None` ne couvre que la branche « lot
+            # entièrement dédupliqué », qui est la seule à poser cette borne ; sur un
+            # parcours nominal elle reste None de bout en bout et laisserait la sortie
+            # normale de boucle, stock épuisé, franchir la garde.
+            if not results and eligibles >= 5 and borne_basse is None and not total_deleted:
                 logger.error(
                     "[%s] Consolidation: %d point(s) épisodique(s) éligibles mais le "
                     "scroll ordonné n'en rend AUCUN — l'index de payload `timestamp` est "
