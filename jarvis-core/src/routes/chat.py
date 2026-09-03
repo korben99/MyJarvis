@@ -5,7 +5,6 @@ The main Jarvis pipeline: routing → context gathering → LLM → streaming SS
 """
 
 import asyncio
-import contextlib
 import json
 import re
 import time
@@ -252,16 +251,6 @@ async def _timed_thread(fn, *args, timeout: float = 15.0) -> list:
     except asyncio.TimeoutError:
         logger.warning("Google API call timed out: %s", fn.__name__)
         return []
-
-
-async def _prefetched_or_empty(value) -> list:
-    """Retourne la valeur préchargée si disponible, sinon liste vide.
-
-    Remplace la closure _resolved_memory() qui était définie inline dans chat()
-    pour accéder à _prefetched_memory. Rend la coroutine compatible avec
-    asyncio.gather() sans fermeture sur des variables locales.
-    """
-    return value if value is not None else []
 
 
 # ── SSE streaming helpers ──────────────────────────────────────────────────────
@@ -963,19 +952,13 @@ async def chat(req: ChatRequest):
     user_name = USER_CODES.get(user_code)
     system_prompt = build_system_prompt(user_code)
 
-    # Speculative memory search — started immediately, in parallel with routing.
-    # Memory is the most common intent (~80 % of requests); the embedding call
-    # (~2–3 s on CPU) was previously sequential with routing, adding 2–3 s to TTFT.
-    # If routing decides use_memory=False the result is discarded (cost: one
-    # embedding call, ~2–3 s CPU, no GPU impact).
-    # Guard: skip for very short messages (< 15 chars) — almost always small-talk
-    # ("ok", "merci", "oui"). asyncio cancel() doesn't stop the underlying thread,
-    # so avoiding the launch entirely is the only way to prevent wasted CPU.
-    _spec_mem_skipped = len(_history_user_msg.strip()) < 15
-    _spec_mem_task: asyncio.Task = asyncio.ensure_future(
-        _empty() if _spec_mem_skipped
-        else async_search_memory(user_code, _history_user_msg, 5)
-    )
+    # Le rappel mémoire est appelé au moment où le routage l'a décidé (dans _gather2),
+    # pas par anticipation. Une recherche spéculative lancée en parallèle du routage a
+    # existé ici, justifiée par un appel d'embedding à « 2–3 s sur CPU » : `search_memory`
+    # complet — encodage, requête Qdrant, poids d'intérêts, classement — tient en 13 ms
+    # médian, modèle préchargé. Anticiper 13 ms ne valait ni la tâche annulable, ni les
+    # trois branches d'annulation, ni le chemin de repli pour les messages courts que la
+    # spéculation sautait.
 
     if _embed_result is not None:
         # Fast-path: no LLM router — load prefix, history, memory in parallel.
@@ -989,28 +972,17 @@ async def chat(req: ChatRequest):
         if _embed_result.use_small_talk:
             # Small talk (acquiescements purs) — pas de profil, pas de recall mémoire.
             # Seul l'historique de conversation suffit.
-            _spec_mem_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await _spec_mem_task
             tz = USER_TIMEZONES.get(user_code, "Europe/Paris")
             dynamic_prefix = f"Date : {fmt_now_fr(tz)}."
             _self_mem = {}
             hist = await asyncio.to_thread(
                 get_conversation, user_code, req.session_id, _HIST_FETCH_N
             )
-            _prefetched_memory = None
             logger.debug(
                 "[TTFT] small talk — prefix minimal, no memory — %.3fs",
                 time.time() - _t0,
             )
         else:
-            if not _embed_result.use_memory:
-                _spec_mem_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await _spec_mem_task
-                _prefetched_memory_coro = asyncio.create_task(_empty())
-            else:
-                _prefetched_memory_coro = _spec_mem_task
             _gather_ep = await asyncio.gather(
                 asyncio.to_thread(
                     build_dynamic_prefix,
@@ -1025,7 +997,6 @@ async def chat(req: ChatRequest):
                 asyncio.to_thread(
                     get_conversation, user_code, req.session_id, _HIST_FETCH_N
                 ),
-                _prefetched_memory_coro,
                 return_exceptions=True,
             )
             _pfx = _gather_ep[0]
@@ -1037,11 +1008,6 @@ async def chat(req: ChatRequest):
             hist = _gather_ep[1] if not isinstance(_gather_ep[1], BaseException) else []
             if isinstance(_gather_ep[1], BaseException):
                 logger.error("get_conversation failed: %s", _gather_ep[1])
-            _prefetched_memory = (
-                _gather_ep[2] if not isinstance(_gather_ep[2], BaseException) else None
-            )
-            if isinstance(_gather_ep[2], BaseException):
-                logger.warning("speculative memory search failed: %s", _gather_ep[2])
 
         llm_result = _embed_result
         logger.debug(
@@ -1063,7 +1029,6 @@ async def chat(req: ChatRequest):
             asyncio.to_thread(
                 get_conversation, user_code, req.session_id, _HIST_FETCH_N
             ),
-            _spec_mem_task,
             return_exceptions=True,
         )
         _pfx = _gather1[0]
@@ -1074,17 +1039,12 @@ async def chat(req: ChatRequest):
             dynamic_prefix, _self_mem = _pfx
         llm_result = _gather1[1] if not isinstance(_gather1[1], BaseException) else None
         hist = _gather1[2] if not isinstance(_gather1[2], BaseException) else []
-        _prefetched_memory = (
-            _gather1[3] if not isinstance(_gather1[3], BaseException) else None
-        )
         if isinstance(_gather1[1], BaseException):
             logger.error("llm_route failed: %s", _gather1[1])
         if isinstance(_gather1[2], BaseException):
             logger.error("get_conversation failed: %s", _gather1[2])
-        if isinstance(_gather1[3], BaseException):
-            logger.warning("speculative memory search failed: %s", _gather1[3])
         logger.debug(
-            "[TTFT] gather1 done (LLM router+dynamic_prefix+hist+mem) — %.3fs",
+            "[TTFT] gather1 done (LLM router+dynamic_prefix+hist) — %.3fs",
             time.time() - _t0,
         )
 
@@ -1187,19 +1147,11 @@ async def chat(req: ChatRequest):
         time.time() - _t0,
     )
 
-    # _prefetched_or_empty() remplace la closure _resolved_memory() — voir module level.
     _gather2 = await asyncio.gather(
         search_documents(_llm_rag_query or req.message)
         if (req.use_rag or use_rag)
         else _empty(),
-        # Si la recherche spéculative a été sautée (message < 15 chars) mais que le
-        # routeur veut la mémoire (ex. « et mon vélo ? »), on la lance ici — sinon
-        # le recall était silencieusement perdu pour les messages courts.
-        async_search_memory(user_code, _history_user_msg, 5)
-        if (use_memory and _spec_mem_skipped)
-        else _prefetched_or_empty(_prefetched_memory)
-        if use_memory
-        else _empty(),
+        async_search_memory(user_code, _history_user_msg, 5) if use_memory else _empty(),
         search_weather(_weather_query)
         if use_weather_auto
         else search_web(req.message, original_message=req.message)
