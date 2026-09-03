@@ -4,7 +4,8 @@ Jarvis Trading Module
 Monitors a Boursorama stock portfolio from CSV exports.
 
 Data flow:
-  1. User drops a Boursorama CSV export in TRADE_DATA_DIR (default /app/trade_data).
+  1. User drops a Boursorama CSV export in TRADE_DATA_DIR/<USER_CODE>/ — un dossier par
+     utilisateur, l'export ne portant pas le nom de son détenteur (cf. _find_latest_csv).
   2. Every hour the scheduler calls run_trade_check():
        - import_csv_to_redis()  : parses the most recent CSV (mtime-gated, skips if unchanged)
        - fetch_live_prices()    : yfinance per ISIN → current price + intraday %
@@ -46,7 +47,6 @@ from config import (
     DEFAULT_TEMP,
     MAX_TOKENS_MEDIUM,
     MAX_TOKENS_THINK_MEDIUM,
-    MAX_TOKENS_TINY,
     THINKING_BUDGET_MEDIUM,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
@@ -79,9 +79,18 @@ def _parse_french_float(val: str) -> float:
     )
 
 
-def _find_latest_csv() -> str | None:
-    """Return path of the most recently modified CSV in TRADE_DATA_DIR."""
-    files = glob.glob(os.path.join(TRADE_DATA_DIR, "*.csv"))
+def _find_latest_csv(user_code: str) -> str | None:
+    """CSV le plus récent DU dossier de cet utilisateur : TRADE_DATA_DIR/<USER_CODE>/*.csv.
+
+    Un dossier par utilisateur, et aucun repli sur la racine. Un export Boursorama ne porte
+    pas le nom de son propriétaire, donc un répertoire commun ne permet pas de savoir à qui
+    appartient un fichier : tout utilisateur qui importe reçoit le dernier CSV déposé, quel
+    qu'en soit l'auteur. Le dossier est la seule marque de propriété disponible.
+
+    Sans dossier, on rend None — l'import est un no-op. C'est le bon défaut : mieux vaut
+    n'importer aucune position qu'importer celles de quelqu'un d'autre.
+    """
+    files = glob.glob(os.path.join(TRADE_DATA_DIR, user_code, "*.csv"))
     if not files:
         return None
     return max(files, key=os.path.getmtime)
@@ -127,12 +136,12 @@ def parse_boursorama_csv(path: str) -> list[dict]:
 
 def import_csv_to_redis(user_code: str) -> int:
     """
-    Find the most recent CSV in TRADE_DATA_DIR and upsert positions into Redis.
+    Find the most recent CSV in TRADE_DATA_DIR/<user_code>/ and upsert positions into Redis.
     Skips silently if the file hasn't changed since the last import (mtime check).
     Preserves all Jarvis-managed fields that already exist in Redis.
-    Returns number of positions imported (0 = nothing new).
+    Returns number of positions imported (0 = nothing new, or no folder for this user).
     """
-    path = _find_latest_csv()
+    path = _find_latest_csv(user_code)
     if not path:
         return 0
 
@@ -209,105 +218,86 @@ def _resolve_ticker(
     Resolve ISIN → Yahoo Finance ticker.
     Priority:
       1. Redis cache
-      2. yfinance Search(isin)
-      3. yfinance Search(name)
-      4. LLM fallback (PRIMARY_MODEL) — last resort when yfinance yields nothing
+      2. yfinance Search(isin)  — premier candidat qui rend une série
+      3. yfinance Search(name)  — idem
     Result is cached in Redis. Cache is cleared by fetch_live_prices on failure.
+
+    **Pas de repli génératif.** Résoudre un ISIN est une consultation d'annuaire : soit une
+    source trouve un titre réel, soit la réponse est « je ne sais pas ». Un modèle de langage
+    interrogé sur un symbole en produit toujours un de forme plausible, qu'il existe ou non,
+    et un contrôle de forme ne distingue pas les deux. Écrit dans `yahoo_ticker`, un symbole
+    inventé est suivi comme une vraie ligne : cours, plus-value, seuils d'alerte, résumé de
+    portefeuille. Le cas bénin est celui qui n'existe pas — Yahoo répond 404 et ça se voit.
+    Le cas grave est celui qui existe et désigne un AUTRE titre : tout fonctionne en
+    apparence et la ligne rapporte les chiffres d'une autre société, sans rien dans les
+    journaux. Aucun contrôle automatique ne rattrape ce second cas : l'identité par ISIN
+    rendue par yfinance n'est pas fiable (cf. le commentaire de `fetch_live_prices`).
+    Non résolu → `UNKNOWN` et correction manuelle via PUT /portfolio/position.
+
+    Les candidats sont VÉRIFIÉS avant d'être retenus : une recherche peut rendre une ligne
+    d'un autre marché ou un instrument sans historique exploitable. La vérification porte
+    sur l'existence (« Yahoo rend-il une série ? »), jamais sur la plausibilité d'un cours —
+    un contrôle de plausibilité se déclenche sur une vraie variation, cf. `fetch_live_prices`.
     """
     cached = r.hget(pos_key, "yahoo_ticker")
     if cached:
         return None if cached == "UNKNOWN" else cached
 
-    ticker = None
-
-    # 1. ISIN search
-    try:
-        results = yf.Search(isin, max_results=1)
-        quotes = results.quotes
-        if quotes:
-            ticker = quotes[0].get("symbol")
-            logger.info("Resolved ticker %s → %s (via ISIN search)", isin, ticker)
-    except Exception as exc:
-        logger.warning("yfinance ISIN lookup failed for %s: %s", isin, exc)
-
-    # 2. Name search
-    if not ticker and name:
+    def _candidats(requete: str, via: str) -> list[tuple[str, str]]:
         try:
-            results = yf.Search(name, max_results=1)
-            quotes = results.quotes
-            if quotes:
-                ticker = quotes[0].get("symbol")
-                logger.info(
-                    "Resolved ticker %s → %s (via name search '%s')", isin, ticker, name
-                )
+            quotes = yf.Search(requete, max_results=5).quotes
         except Exception as exc:
-            logger.warning("yfinance name lookup failed for '%s': %s", name, exc)
+            logger.warning("yfinance %s lookup failed for '%s': %s", via, requete, exc)
+            return []
+        return [(q["symbol"], via) for q in quotes if q.get("symbol")]
 
-    # 3. LLM fallback
-    if not ticker:
-        logger.warning(
-            "TICKER NOT FOUND via yfinance for ISIN=%s name='%s' — trying LLM fallback",
-            isin,
-            name,
-        )
-        ticker = _resolve_ticker_llm(isin, name)
-        if ticker:
-            logger.info("Resolved ticker %s → %s (via LLM fallback)", isin, ticker)
-        else:
-            logger.error(
-                "TICKER UNRESOLVABLE: ISIN=%s name='%s' — position will be skipped until manually set via PUT /portfolio/position",
-                isin,
-                name,
-            )
+    candidats = _candidats(isin, "ISIN")
+    if name:
+        candidats += _candidats(name, "name")
+
+    vus: set[str] = set()
+    ticker = None
+    for symbole, via in candidats:
+        if symbole in vus:
+            continue
+        vus.add(symbole)
+        if _ticker_repond(symbole):
+            ticker = symbole
+            logger.info("Resolved ticker %s → %s (via %s search)", isin, ticker, via)
+            break
+        logger.debug("Candidat %s écarté pour %s : aucune série", symbole, isin)
 
     if ticker:
         r.hset(pos_key, "yahoo_ticker", ticker)
     else:
+        logger.error(
+            "TICKER UNRESOLVABLE: ISIN=%s name='%s' (%d candidat(s) examiné(s), aucun ne "
+            "rend de série) — position will be skipped until manually set via "
+            "PUT /portfolio/position",
+            isin, name, len(vus),
+        )
         # Cache the failure sentinel so we don't retry every hourly run
         r.hset(pos_key, "yahoo_ticker", "UNKNOWN")
     return ticker
 
 
-async def _ticker_llm_call_async(prompt: str) -> str:
-    """Async LLM call for ticker resolution — run via asyncio.run()."""
-    return (
-        await call_llm_async(
-            [{"role": "user", "content": prompt}],
-            model=PRIMARY_MODEL,
-            api_url=PRIMARY_API_URL,
-            api_key=PRIMARY_API_KEY,
-            temperature=DEFAULT_TEMP,
-            max_tokens=MAX_TOKENS_TINY,
-            json_response=False,
-            no_think=True,
-            timeout=llm_timeout(MAX_TOKENS_TINY),
-        )
-    ).strip()
+def _ticker_repond(symbole: str) -> bool:
+    """Vrai si Yahoo rend une série pour ce symbole. Appelé UNIQUEMENT à la résolution.
 
-
-def _resolve_ticker_llm(isin: str, name: str) -> str | None:
+    Jamais sur un ticker déjà en cache : re-valider un ticker établi, c'est la boucle qui a
+    fait retirer le garde-fou de `fetch_live_prices` — invalidation, re-résolution rendant
+    le même symbole, re-déclenchement. Ici le résultat sert à CHOISIR entre candidats, une
+    seule fois, et jamais à défaire un choix déjà inscrit.
     """
-    Ask PRIMARY_MODEL to guess the Yahoo Finance ticker for an ISIN + name.
-    Synchronous, called only when yfinance search yields nothing.
-    Returns the ticker string or None if the LLM can't determine it.
-    """
-    prompt = (
-        f"What is the Yahoo Finance ticker symbol for this security?\n"
-        f"ISIN: {isin}\n"
-        f"Name: {name}\n\n"
-        f"Reply with the ticker symbol only (e.g. 'SAN.PA', 'AAPL', 'IWDA.AS'). "
-        f"If you are not confident, reply with 'UNKNOWN'."
-    )
     try:
-        raw = asyncio.run(_ticker_llm_call_async(prompt))
-        if raw and raw.upper() != "UNKNOWN" and " " not in raw and len(raw) <= 12:
-            return raw
-        logger.warning(
-            "LLM ticker resolution returned unusable value '%s' for %s", raw, isin
-        )
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return not yf.Ticker(symbole).history(period="5d", interval="1d").empty
     except Exception as exc:
-        logger.warning("LLM ticker fallback failed for %s: %s", isin, exc)
-    return None
+        logger.debug("Vérification de %s impossible (%s)", symbole, type(exc).__name__)
+        return False
 
 
 def fetch_live_prices(user_code: str) -> dict[str, dict]:

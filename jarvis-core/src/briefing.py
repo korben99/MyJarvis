@@ -38,6 +38,7 @@ from config import (
     USER_EMAILS,
     USERS,
     USER_TIMEZONES,
+    USER_TRADING,
 )
 from google_services import (
     fetch_calendar_events,
@@ -488,12 +489,26 @@ async def gather_briefing(user_code: str) -> BriefingResult:
     )
     weather_task = search_weather(city)
     news_task = _fetch_news(interests)
-    portfolio_task = asyncio.to_thread(get_portfolio_summary_text, user_code)
+    # Portefeuille et marché : réservés aux comptes dont le trading est activé, sur le
+    # modèle de `has_google` ci-dessus. `USER_TRADING` est le drapeau qui décide qu'un
+    # compte a un portefeuille ; sans cette garde le briefing sert un bloc boursier à
+    # quelqu'un qui n'en a pas — le bloc marché est global, donc il se remplit même pour
+    # un compte sans la moindre position.
+    has_trading = user_code in USER_TRADING
+    portfolio_task = (
+        asyncio.to_thread(get_portfolio_summary_text, user_code)
+        if has_trading
+        else asyncio.sleep(0, result="")
+    )
     # Perspectives de marché : un an d'historique par ligne + les grands indices. Lent la
     # première fois (~5 s, une quinzaine de téléchargements), instantané ensuite — le cache
     # Redis tient 20 h, donc le briefing du matin paie le coût et personne d'autre.
     # C'est aussi pour ça que ça vit ici et pas dans la boucle horaire de trading.core.
-    market_task = asyncio.to_thread(render_market_block, user_code)
+    market_task = (
+        asyncio.to_thread(render_market_block, user_code)
+        if has_trading
+        else asyncio.sleep(0, result="")
+    )
 
     try:
         results = await asyncio.wait_for(

@@ -73,6 +73,15 @@ def setup_logging(log_file: str = "/opt/jarvis/logs/jarvis-api.log") -> None:
     ):
         logging.getLogger(suppress).setLevel(logging.ERROR)
 
+    # yfinance journalise en ERROR des conditions que l'appelant traite : un 404 sur un
+    # symbole inconnu et « possibly delisted » remontent au niveau ERROR alors que
+    # `trading/market.py` les convertit en None et journalise déjà l'échec avec le ticker.
+    # CRITICAL et non ERROR : c'est précisément le niveau ERROR qui est bruyant. Ces lignes
+    # comptent dans `erreurs_log_24h`, qui alimente les vitals — donc un symbole invalide
+    # dans un portefeuille lèverait un incident `degradation_interne` et ferait monter α,
+    # pour une cause qui n'a rien d'une dégradation interne.
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
 
 def get_logger(name: str) -> logging.Logger:
     """Return a named Jarvis logger. Thin wrapper around logging.getLogger."""
