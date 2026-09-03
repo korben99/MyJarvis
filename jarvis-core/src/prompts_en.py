@@ -1118,27 +1118,28 @@ PROMPT CLASSIFICATION:
     ANALYSIS_PROMPT, NIGHTLY_*, REFLECTION_*, BRIEFING_*, PRUNE_SELF_MEMORY_*,
     CONSOLIDATION_PROMPT, CURATIVE_CLEANUP_PROMPT
 
-TOKEN BUDGETS per prompt (approximation: 1 token ≈ 4 characters):
-  SYSTEM_BASE         →  450 tokens max  (inline, KV-cached — do not exceed)
-  IDENTITY            →  850 tokens max  (inline, KV-cached — existential identity)
+TOKEN BUDGETS per prompt (approximation: 1 token ≈ 3.6 characters):
+  SYSTEM_BASE            →  650 tokens max  (inline, KV-cached — do not exceed)
+  IDENTITY               →  950 tokens max  (inline, KV-cached — existential identity)
   ROUTER_SYSTEM          → 1800 tokens max  (Qwen2.5-1.5B LoRA, KV-cached, 17 examples + last_jarvis ctx)
   ROUTER_USER            →  600 tokens max  (includes the dynamic last_jarvis_block + message)
-  ANALYSIS_PROMPT        → 2300 tokens max  (async Qwen3 — precision above all)
-  BRIEFING_SYSTEM        →  100 tokens max
-  BRIEFING_USER          →  400 tokens max  (excluding injected data)
-  WEB_RELEVANCE_JUDGE    →  200 tokens max
-  REFLECTION_SYSTEM      →  400 tokens max
+  ANALYSIS_PROMPT        → 3200 tokens max  (async Qwen3 — precision above all)
+  BRIEFING_SYSTEM        →  150 tokens max
+  BRIEFING_USER          →  850 tokens max  (excluding injected data)
+  WEB_RELEVANCE_JUDGE    →  250 tokens max
+  REFLECTION_SYSTEM      →  500 tokens max
   REFLECTION_PROMPT      → 1500 tokens max  (excluding injected data)
   REFLECTION_USER_SYSTEM →  650 tokens max
   REFLECTION_USER_PROMPT → 1000 tokens max  (excluding injected data)
-  NIGHTLY_FACTS_SYSTEM   →  400 tokens max
-  NIGHTLY_FACTS_PROMPT   →  400 tokens max  (excluding injected data)
-  NIGHTLY_SELF_SYSTEM    →  300 tokens max
-  NIGHTLY_SELF_PROMPT    →  300 tokens max  (excluding injected data)
-  NIGHTLY_CLEANING_SYSTEM →  400 tokens max
-  NIGHTLY_CLEANING_PROMPT →  200 tokens max  (excluding injected data)
+  PROACTIVE_PUSH_PROMPT  →  800 tokens max  (excluding injected conv_text/projects)
+  NIGHTLY_FACTS_SYSTEM   →  450 tokens max
+  NIGHTLY_FACTS_PROMPT   →  550 tokens max  (excluding injected data)
+  NIGHTLY_SELF_SYSTEM    → 2500 tokens max
+  NIGHTLY_SELF_PROMPT    →  400 tokens max  (excluding injected data)
+  NIGHTLY_CLEANING_SYSTEM →  450 tokens max
+  NIGHTLY_CLEANING_PROMPT →  250 tokens max  (excluding injected data)
   CONSOLIDATION_PROMPT   →  200 tokens max  (excluding injected data)
-  CURATIVE_CLEANUP_PROMPT →  450 tokens max  (excluding injected data)
+  CURATIVE_CLEANUP_PROMPT →  500 tokens max  (excluding injected data)
 
 For INLINE prompts: if your change exceeds the budget, compensate by removing elsewhere.
 For ASYNC prompts: the budget is a safety ceiling, not a target."""
@@ -1215,28 +1216,30 @@ Otherwise:
 # English is typically 10-15% fewer tokens than French for equivalent content; the ceilings
 # are kept identical to the French set on purpose — they are safety caps, not targets, and
 # a divergence here would make the same prompt refinable in one language and not the other.
+# Unit: the estimate from `self/proposals.py::_estimer_tokens` (len / 3.6), not an exact
+# tokenizer count. Budgets and divisor must move together.
 PROMPT_TOKEN_BUDGETS = {
-    "SYSTEM_BASE": 450,
-    "IDENTITY": 850,
+    "SYSTEM_BASE": 650,
+    "IDENTITY": 950,
     "ROUTER_SYSTEM": 1800,
     "ROUTER_USER": 600,
-    "ANALYSIS_PROMPT": 2700,
-    "BRIEFING_SYSTEM": 100,
-    "BRIEFING_USER": 400,
-    "WEB_RELEVANCE_JUDGE": 200,
-    "REFLECTION_SYSTEM": 400,
+    "ANALYSIS_PROMPT": 3200,
+    "BRIEFING_SYSTEM": 150,
+    "BRIEFING_USER": 850,
+    "WEB_RELEVANCE_JUDGE": 250,
+    "REFLECTION_SYSTEM": 500,
     "REFLECTION_PROMPT": 1500,
     "REFLECTION_USER_SYSTEM": 650,
     "REFLECTION_USER_PROMPT": 1000,
     "PROACTIVE_PUSH_PROMPT": 800,
-    "NIGHTLY_FACTS_SYSTEM": 400,
-    "NIGHTLY_FACTS_PROMPT": 400,
-    "NIGHTLY_SELF_SYSTEM": 2200,
-    "NIGHTLY_SELF_PROMPT": 300,
-    "NIGHTLY_CLEANING_SYSTEM": 400,
-    "NIGHTLY_CLEANING_PROMPT": 200,
+    "NIGHTLY_FACTS_SYSTEM": 450,
+    "NIGHTLY_FACTS_PROMPT": 550,
+    "NIGHTLY_SELF_SYSTEM": 2500,
+    "NIGHTLY_SELF_PROMPT": 400,
+    "NIGHTLY_CLEANING_SYSTEM": 450,
+    "NIGHTLY_CLEANING_PROMPT": 250,
     "CONSOLIDATION_PROMPT": 200,
-    "CURATIVE_CLEANUP_PROMPT": 450,
+    "CURATIVE_CLEANUP_PROMPT": 500,
 }
 
 

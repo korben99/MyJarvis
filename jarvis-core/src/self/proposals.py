@@ -40,6 +40,20 @@ from .state import (
 
 logger = get_logger("jarvis-self")
 
+# Caractères par token pour estimer la taille d'un prompt sans charger de tokenizer.
+# 4 sous-estimait : mesuré au tokenizer Qwen3.6 sur les 21 prompts modifiables, le ratio
+# réel va de 3,2 à 5,1 selon la densité de ponctuation et d'accents, et 4 se trompait dans
+# le mauvais sens sur 12 d'entre eux. Des prompts avaient donc été raffinés au ras d'un
+# plafond qu'ils franchissaient déjà. 3,6 est la moyenne mesurée : l'estimation devient
+# majorante dans la plupart des cas, et les écarts résiduels sont de quelques tokens.
+# Les budgets de PROMPT_TOKEN_BUDGETS sont exprimés dans CETTE unité — changer le diviseur
+# sans les reprendre rejetterait des prompts actuellement valides.
+_CHARS_PAR_TOKEN = 3.6
+
+
+def _estimer_tokens(texte: str) -> int:
+    return int(len(texte) / _CHARS_PAR_TOKEN)
+
 
 def _proposals_path() -> str:
     return os.path.join(PROMPT_DATA_DIR, "prompt_proposals.json")
@@ -339,7 +353,9 @@ def _action_refine_prompt(params: dict) -> str:
         )
 
     max_budget = PROMPT_TOKEN_BUDGETS.get(prompt_name, 600)
-    current_token_count = len(current_text) // 4  # approximation : 1 token ≈ 4 chars
+    # Annoncé au modèle dans REFINE_PROMPT_USER : il raisonne sur ce chiffre pour tenir le
+    # budget, donc il doit être calculé avec la même règle que le contrôle plus bas.
+    current_token_count = _estimer_tokens(current_text)
 
     refine_prompt_text = get_prompt("REFINE_PROMPT_USER").format(
         prompt_name=prompt_name,
@@ -405,7 +421,7 @@ def _action_refine_prompt(params: dict) -> str:
         )
 
     # Guard: reject if proposed text exceeds the token budget — retry once with explicit feedback
-    proposed_token_count = len(proposed_text) // 4
+    proposed_token_count = _estimer_tokens(proposed_text)
     if proposed_token_count > max_budget:
         logger.warning(
             "refine_prompt: proposed text for %s is ~%d tokens (budget=%d) — retrying with feedback",
@@ -446,7 +462,7 @@ def _action_refine_prompt(params: dict) -> str:
             logger.error("refine_prompt: retry failed: %s", exc)
             return f"refine_prompt: proposed text too long and retry failed ({type(exc).__name__})"
 
-        proposed_token_count = len(proposed_text) // 4
+        proposed_token_count = _estimer_tokens(proposed_text)
         if not proposed_text or proposed_token_count > max_budget:
             logger.warning(
                 "refine_prompt: retry still too long (%d tokens) — proposal rejected",

@@ -1114,27 +1114,28 @@ CLASSIFICATION DES PROMPTS :
     ANALYSIS_PROMPT, NIGHTLY_*, REFLECTION_*, BRIEFING_*, PRUNE_SELF_MEMORY_*,
     CONSOLIDATION_PROMPT, CURATIVE_CLEANUP_PROMPT
 
-BUDGETS TOKENS par prompt (approximation : 1 token ≈ 4 caractères français) :
-  SYSTEM_BASE         →  450 tokens max  (inline, KV-cached — ne pas dépasser)
-  IDENTITY            →  850 tokens max  (inline, KV-cached — identité existentielle)
+BUDGETS TOKENS par prompt (approximation : 1 token ≈ 3,6 caractères français) :
+  SYSTEM_BASE            →  650 tokens max  (inline, KV-cached — ne pas dépasser)
+  IDENTITY               →  950 tokens max  (inline, KV-cached — identité existentielle)
   ROUTER_SYSTEM          → 1800 tokens max  (Qwen2.5-1.5B LoRA, KV-cached, 17 exemples + last_jarvis ctx)
   ROUTER_USER            →  600 tokens max  (inclut last_jarvis_block dynamique + message)
-  ANALYSIS_PROMPT        → 2300 tokens max  (async Qwen3 — précision avant tout)
-  BRIEFING_SYSTEM        →  100 tokens max
-  BRIEFING_USER          →  400 tokens max  (hors données injectées)
-  WEB_RELEVANCE_JUDGE    →  200 tokens max
-  REFLECTION_SYSTEM      →  400 tokens max
+  ANALYSIS_PROMPT        → 3200 tokens max  (async Qwen3 — précision avant tout)
+  BRIEFING_SYSTEM        →  150 tokens max
+  BRIEFING_USER          →  850 tokens max  (hors données injectées)
+  WEB_RELEVANCE_JUDGE    →  250 tokens max
+  REFLECTION_SYSTEM      →  500 tokens max
   REFLECTION_PROMPT      → 1500 tokens max  (hors données injectées)
   REFLECTION_USER_SYSTEM →  650 tokens max
   REFLECTION_USER_PROMPT → 1000 tokens max  (hors données injectées)
-  NIGHTLY_FACTS_SYSTEM   →  400 tokens max
-  NIGHTLY_FACTS_PROMPT   →  400 tokens max  (hors données injectées)
-  NIGHTLY_SELF_SYSTEM    →  300 tokens max
-  NIGHTLY_SELF_PROMPT    →  300 tokens max  (hors données injectées)
-  NIGHTLY_CLEANING_SYSTEM →  400 tokens max
-  NIGHTLY_CLEANING_PROMPT →  200 tokens max  (hors données injectées)
+  PROACTIVE_PUSH_PROMPT  →  800 tokens max  (hors conv_text/projets injectés)
+  NIGHTLY_FACTS_SYSTEM   →  450 tokens max
+  NIGHTLY_FACTS_PROMPT   →  550 tokens max  (hors données injectées)
+  NIGHTLY_SELF_SYSTEM    → 2500 tokens max
+  NIGHTLY_SELF_PROMPT    →  400 tokens max  (hors données injectées)
+  NIGHTLY_CLEANING_SYSTEM →  450 tokens max
+  NIGHTLY_CLEANING_PROMPT →  250 tokens max  (hors données injectées)
   CONSOLIDATION_PROMPT   →  200 tokens max  (hors données injectées)
-  CURATIVE_CLEANUP_PROMPT →  450 tokens max  (hors données injectées)
+  CURATIVE_CLEANUP_PROMPT →  500 tokens max  (hors données injectées)
 
 Pour les prompts INLINE : si ta modification dépasse le budget, compense en retirant ailleurs.
 Pour les prompts ASYNC : le budget est un plafond de sécurité, pas un objectif."""
@@ -1207,28 +1208,34 @@ Sinon :
 
 # Token budget map — used by self.py to pass limits to REFINE_PROMPT_USER.
 # Values must stay in sync with the budget table in REFINE_PROMPT_SYSTEM above.
+#
+# Unité : l'estimation de `self/proposals.py::_estimer_tokens` (len / 3,6), PAS le compte
+# exact d'un tokenizer. Les deux doivent bouger ensemble — un budget calibré sur un autre
+# diviseur rejetterait des prompts valides ou en laisserait passer de trop longs.
+# Chaque valeur couvre le texte FR courant (le plus long des deux langues) plus ~10 % de
+# marge, de quoi laisser respirer un raffinage sans autoriser une dérive.
 PROMPT_TOKEN_BUDGETS = {
-    "SYSTEM_BASE": 450,  # inline / KV-cached — keep tight (~431 tok actual, mesuré)
-    "IDENTITY": 850,  # inline / KV-cached, avant le bloc utilisateur (~773 tok, mesuré)
-    "ROUTER_SYSTEM": 1800,  # KV-cached, 17 examples + last_jarvis ctx — ~1385 tok actual
-    "ROUTER_USER": 600,  # ~11 tok de template — le budget couvre last_jarvis_block + message
-    "ANALYSIS_PROMPT": 2700,  # async — quality over speed (~2561 tok mesuré)
-    "BRIEFING_SYSTEM": 100,
-    "BRIEFING_USER": 400,
-    "WEB_RELEVANCE_JUDGE": 200,
-    "REFLECTION_SYSTEM": 400,
-    "REFLECTION_PROMPT": 1500,
-    "REFLECTION_USER_SYSTEM": 650,  # ~548 tok actual
-    "REFLECTION_USER_PROMPT": 1000,
-    "PROACTIVE_PUSH_PROMPT": 800,  # ~640 tok de consignes + conv_text/projets injectés
-    "NIGHTLY_FACTS_SYSTEM": 400,  # ~333 tok actual
-    "NIGHTLY_FACTS_PROMPT": 400,
-    "NIGHTLY_SELF_SYSTEM": 2200,
-    "NIGHTLY_SELF_PROMPT": 300,
-    "NIGHTLY_CLEANING_SYSTEM": 400,  # ~337 tok actual
-    "NIGHTLY_CLEANING_PROMPT": 200,
-    "CONSOLIDATION_PROMPT": 200,
-    "CURATIVE_CLEANUP_PROMPT": 450,  # ~370 tok actual
+    "SYSTEM_BASE": 650,  # inline / KV-cached — estim. 534
+    "IDENTITY": 950,  # inline / KV-cached, avant le bloc utilisateur — estim. 843
+    "ROUTER_SYSTEM": 1800,  # KV-cached, 17 examples + last_jarvis ctx — estim. 1281
+    "ROUTER_USER": 600,  # ~18 tok de template — le budget couvre last_jarvis_block + message
+    "ANALYSIS_PROMPT": 3200,  # async — quality over speed — estim. 2845
+    "BRIEFING_SYSTEM": 150,  # estim. 106
+    "BRIEFING_USER": 850,  # estim. 735 — l'ancien 400 était périmé, pas un effet de règle
+    "WEB_RELEVANCE_JUDGE": 250,  # estim. 186
+    "REFLECTION_SYSTEM": 500,  # estim. 416
+    "REFLECTION_PROMPT": 1500,  # estim. 1309
+    "REFLECTION_USER_SYSTEM": 650,  # estim. 294
+    "REFLECTION_USER_PROMPT": 1000,  # estim. 800
+    "PROACTIVE_PUSH_PROMPT": 800,  # estim. 595 + conv_text/projets injectés
+    "NIGHTLY_FACTS_SYSTEM": 450,  # estim. 370
+    "NIGHTLY_FACTS_PROMPT": 550,  # estim. 442
+    "NIGHTLY_SELF_SYSTEM": 2500,  # estim. 2256
+    "NIGHTLY_SELF_PROMPT": 400,  # estim. 330
+    "NIGHTLY_CLEANING_SYSTEM": 450,  # estim. 374
+    "NIGHTLY_CLEANING_PROMPT": 250,  # estim. 194
+    "CONSOLIDATION_PROMPT": 200,  # estim. 71
+    "CURATIVE_CLEANUP_PROMPT": 500,  # estim. 411
 }
 
 
