@@ -82,7 +82,9 @@ initialisation and is ignored afterwards. Symptom when disabled:
 
 ## 7. Import trading portfolio (optional)
 
-Export your Boursorama positions as CSV (*Mes comptes → Exporter*) and drop the file in `RAGData/Trade/`. Jarvis imports it automatically on the next hourly tick, or immediately on restart.
+Export your Boursorama positions as CSV (*Mes comptes → Exporter*) and drop the file in **your own subfolder**, `RAGData/Trade/{USER_CODE}/` (create it if needed). Jarvis imports it automatically on the next hourly tick, or immediately on restart.
+
+The subfolder is required — there is no fallback to `RAGData/Trade/` itself, because a broker export carries no mark of its owner. A CSV left at the root is simply never imported. The user must also be flagged `"trading": true` in `users_list.json`.
 
 ## macOS launchd Service
 

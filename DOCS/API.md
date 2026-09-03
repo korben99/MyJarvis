@@ -328,10 +328,25 @@ Affinity is expressed as a semantic label (`forte` ≥ 0.8 · `bonne` ≥ 0.6 ·
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/portfolio/{user_code}` | Full portfolio with live P&L |
-| `POST` | `/portfolio/import/{user_code}` | Force re-parse of the latest CSV in `RAGData/Trade/` |
+| `POST` | `/portfolio/import/{user_code}` | Force re-parse of the latest CSV in `RAGData/Trade/{USER_CODE}/` |
 | `POST` | `/portfolio/upload/{user_code}` | Upload a CSV directly (multipart/form-data) |
 | `PUT` | `/portfolio/position/{user_code}/{isin}` | Patch Jarvis-managed fields on a position |
 | `GET` | `/portfolio/analysis/{user_code}` | On-demand AI analysis of the portfolio |
+| `POST` | `/portfolio/suggest-thresholds/{user_code}` | Ask the LLM to suggest `threshold_high` / `threshold_low` |
+
+**Authorization** — every one of these endpoints goes through the same guard
+(`routes/portfolio.py::_garde`), which requires all three:
+
+1. The Bearer token carries **the code of `{user_code}` itself**. A token identifying some
+   other known user is rejected — holding a valid token does not grant access to anyone
+   else's portfolio.
+2. `{user_code}` is a known user → `404`.
+3. Trading is enabled for that user (`"trading": true`) → otherwise `403 Trading not
+   enabled for this user`. A user without the flag has no portfolio, and these endpoints
+   must not create one for them.
+
+There is no admin exception: an admin token cannot read or modify another user's
+portfolio.
 
 **Jarvis-managed fields** (set via `PUT /portfolio/position`, never overwritten by CSV imports):
 
@@ -346,7 +361,7 @@ Affinity is expressed as a semantic label (`forte` ≥ 0.8 · `bonne` ≥ 0.6 ·
 
 **Scheduled jobs:**
 - **Every hour** (weekdays 09:00–17:35 Paris): fetch live prices via yfinance, evaluate alert conditions with PRIMARY_MODEL. Fired alerts are queued in Redis and injected into the user's next chat message.
-- **Every hour (always)**: check `RAGData/Trade/` for a new CSV (mtime-gated); import automatically if a newer file is found.
+- **Every hour (always)**: check `RAGData/Trade/{USER_CODE}/` for a new CSV (mtime-gated); import automatically if a newer file is found. Only users with `"trading": true` are checked.
 - **Morning briefing**: portfolio performance summary included as a section when positions are loaded.
 
 **Alert conditions** — PRIMARY_MODEL fires an alert only when at least one of these is true:
@@ -359,21 +374,38 @@ Rate limit: the same position cannot trigger a second alert within 4 hours. Queu
 
 ### Ticker Resolution
 
-Jarvis resolves ISIN → Yahoo Finance ticker dynamically at runtime — there is no hardcoded ticker list. When a new CSV is imported, each position goes through a four-step resolution pipeline:
+Jarvis resolves ISIN → Yahoo Finance ticker dynamically at runtime — there is no hardcoded ticker list. When a new CSV is imported, each position goes through a three-step resolution pipeline:
 
 | Step | Method | Notes |
 |------|--------|-------|
 | 1 | Redis cache (`yahoo_ticker` field) | Instant — skips all lookups if already resolved |
-| 2 | `yf.Search(isin)` | Most reliable for standard securities |
-| 3 | `yf.Search(name)` | Fallback using the position name from the CSV |
-| 4 | LLM fallback (`PRIMARY_MODEL`) | Last resort — asks the model to identify the ticker |
+| 2 | `yf.Search(isin)` (5 candidates) | Most reliable — the ISIN is discriminating |
+| 3 | `yf.Search(name)` (5 candidates) | Fallback using the position name from the CSV |
+
+Candidates from steps 2 and 3 are walked in order and **each is verified** before being
+accepted: `_ticker_repond()` keeps a symbol only if Yahoo returns a price series for it.
+The check is on *existence*, never on the plausibility of a price — a plausibility check
+fires on genuine market moves (see the comment in `fetch_live_prices`). It runs **only at
+resolution time, never against an already-cached ticker**: re-validating an established
+ticker creates an invalidate → re-resolve → same symbol → re-trigger loop.
+
+**There is no generative fallback.** Resolving an ISIN is a directory lookup: either a
+source finds a real security, or the answer is "unknown". A language model asked for a
+ticker always returns a well-formed symbol whether or not it exists, and a format check
+cannot tell the two apart. Written into `yahoo_ticker`, an invented symbol is then followed
+like a real holding — price, P&L, alert thresholds, briefing. The benign failure is a
+symbol that does not exist (Yahoo 404s, and it shows). The dangerous one is a symbol that
+*does* exist but designates another security: everything works, and the position silently
+reports another company's figures. No automatic check catches that second case — the ISIN
+reported by yfinance is not reliable enough to cross-check against. Unresolved therefore
+means `UNKNOWN` plus a manual fix, never a guess.
 
 **Log levels during resolution:**
-- `INFO` — ticker resolved successfully (indicates which step found it)
-- `WARNING TICKER NOT FOUND via yfinance` — steps 2 and 3 both failed, LLM fallback is being attempted
-- `ERROR TICKER UNRESOLVABLE` — all four steps failed; position is skipped until you set the ticker manually
+- `INFO Resolved ticker … (via ISIN|name search)` — a verified candidate was accepted
+- `DEBUG Candidat … écarté` — a candidate returned no series and was skipped
+- `ERROR TICKER UNRESOLVABLE` — no candidate returned a series; the position is skipped until you set the ticker manually
 
-**When a price fetch fails** (delisted/invalid ticker), the cached `yahoo_ticker` is automatically deleted from Redis so the next hourly run retries resolution from scratch rather than re-using a known-bad ticker.
+**When a price fetch fails** (delisted/invalid ticker), the cached `yahoo_ticker` is automatically deleted from Redis so the next hourly run retries resolution from scratch rather than re-using a known-bad ticker. That retry now terminates: re-resolution either accepts a verified candidate or writes `UNKNOWN`, which stops further attempts. It could not terminate while a generative fallback was able to re-supply the same unverified symbol on every pass.
 
 **Manual override** (always takes precedence — set once, cached permanently):
 ```bash

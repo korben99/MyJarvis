@@ -61,6 +61,27 @@ Consequences to accept:
 - Memory is **partitioned by user code**: Redis keys and Qdrant filters all carry the code.
   One user cannot read another's memory.
 
+**Partitioning by key prefix is not authorization.** Namespacing data by user code only
+protects it if every endpoint checks that the caller *is* the user it names in the path.
+An endpoint that merely verifies "the token is a known user code" grants every valid token
+access to everyone's data, because the path parameter chooses the namespace. Both checks are
+required, and they are different:
+
+```python
+_auth(authorization) in USER_CODES     # the caller is someone — NOT an authorization check
+_auth(authorization) == user_code      # the caller is THIS someone — the actual check
+```
+
+The `/portfolio/*` endpoints are the reference implementation
+(`routes/portfolio.py::_garde`): caller identity, user exists, feature enabled for that
+user. Any new per-user endpoint must apply the same three, and there is deliberately **no
+admin exception** — an admin token gives no access to another user's financial data.
+
+**A feature flag is an authorization boundary too.** `"trading": true` decides whether a
+user has a portfolio at all. Checking it in the scheduler alone is not enough: the HTTP
+endpoints and the briefing injection each reach the same data by their own path, and each
+must check it. A flag consulted in one place out of three is not a flag.
+
 ---
 
 ## Secrets

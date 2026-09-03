@@ -1,5 +1,13 @@
 # SBOM & dependency review — 2026-07-29
 
+> **Ce document est l'archive d'un audit ponctuel.** Il n'est pas tenu à jour.
+> La SBOM **vivante** est `sbom-venv.json`, réécrite à chaque scan quotidien par
+> `cve.py::_persister_sbom` : c'est elle qui décrit le venv réel, et un diff dessus signale
+> qu'une dépendance a bougé. C'est désormais le seul fichier de ce dossier qui vaille comme
+> état courant. La surveillance passe par `grype` + le cache Redis `jarvis:cve` ; les
+> commandes manuelles sont dans le cheatsheet, section « Sécurité — vérifier les CVE à la
+> main ».
+
 **Statut : appliqué.** Les 3 groupes ci-dessous ont été installés dans
 `/opt/jarvis/venv` et figés dans `requirements.txt` le 2026-07-29 :
 mlx/mlx-metal → 0.32.0, mlx-vlm → 0.6.8, et les 5 CVE (pillow, torch,

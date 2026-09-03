@@ -33,8 +33,16 @@ runs **once a day**. Merging them would drop a slow network call into a frequent
 
 ## Data flow
 
-1. You drop a Boursorama CSV export into `TRADE_DATA_DIR` (`/opt/jarvis/RAGData/Trade` by
-   default). **CSV only** — the importer globs `*.csv`, an `.xlsx` is ignored.
+1. You drop a Boursorama CSV export into **your own subfolder**,
+   `TRADE_DATA_DIR/{USER_CODE}/` (`/opt/jarvis/RAGData/Trade/KORBEN99/` by default layout).
+   **CSV only** — the importer globs `*.csv`, an `.xlsx` is ignored.
+
+   The per-user subfolder is not cosmetic: a broker export carries no mark of its owner, so
+   a shared directory makes "whose file is this?" unanswerable, and every user importing
+   receives the most recently dropped CSV whoever produced it. The folder is the only
+   ownership marker available. There is **no fallback to the root directory** — a user with
+   no subfolder imports nothing, which is the right default: importing zero positions beats
+   importing someone else's.
 2. The scheduler calls `run_trade_check()`:
    - `import_csv_to_redis()` — parses the most recent CSV. **mtime-gated**: an unchanged file
      is skipped, so quantities and buying prices stay frozen at the date of your last export.
@@ -193,8 +201,18 @@ entered value is left alone and used as the fallback.
   portfolio.
 - **ISIN identity does not replace it either**: yfinance returns `-` for VLA.PA and 2CRSI.PA,
   and `FR001400UEY9` instead of `FR0000120578` for Sanofi.
-- yfinance logs an HTTP 404 to stderr when asked for ETF fundamentals (`WPEA.PA`, `CMU.PA`).
-  Non-fatal; the calendar simply comes back empty.
+- **A wrong-but-real ticker is not detectable.** Resolution verifies that a symbol *returns a
+  series*, not that it designates the right security. A symbol that exists but points at
+  another company produces plausible prices, P&L and alerts with nothing in the logs. Removing
+  the generative fallback closed the main source of this (search results are at least already
+  associated by Yahoo with the ISIN or name); the residual risk is a same-name listing on
+  another exchange, which is why ISIN search runs before name search.
+- yfinance logs an HTTP 404 at `ERROR` level when asked for ETF fundamentals (`WPEA.PA`,
+  `CMU.PA`), and again for any symbol it does not know. Non-fatal — the calendar simply comes
+  back empty and `market.py` handles it. The `yfinance` logger is therefore pinned to
+  `CRITICAL` in `helpers/logging_setup.py`: these lines are a handled condition, and left at
+  `ERROR` they count towards `erreurs_log_24h`, which feeds vitals — an invalid symbol in a
+  portfolio would raise a `degradation_interne` incident and push α up.
 
 ---
 

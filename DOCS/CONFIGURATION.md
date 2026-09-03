@@ -162,7 +162,7 @@ Measured effect (direct axis, 120 items): `+0.119` in combination with `IDENTITY
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TRADE_DATA_DIR` | `/opt/jarvis/RAGData/Trade` | CSV drop directory. The `/app/trade_data` container path predates the native launchd install |
+| `TRADE_DATA_DIR` | `/opt/jarvis/RAGData/Trade` | Root of the CSV drop directories. Each user has **their own subfolder**, `TRADE_DATA_DIR/{USER_CODE}/` — a broker export carries no owner, so a shared directory would hand every importer the last CSV dropped by anyone. No fallback to the root: a user without a subfolder imports nothing |
 
 ## User Management
 
@@ -174,7 +174,15 @@ Users are defined in `jarvis-core/JarvisData/users_list.json`. Each entry contai
 - `trading` — boolean — set to `true` to enable hourly portfolio surveillance for this user
 - `profile` — object of stable biographical facts injected into the cached system prompt (never in the dynamic prefix). Fields: `famille`, `taille`, `poids`, `année de naissance`, `habitation`, `travail`, `intérêts`, `voiture`. Add/remove keys freely — all non-empty values are rendered as `k : v` in `<profil_utilisateur>`. Update here, not via the analyzer (which tracks dynamic facts in Redis).
 
-Only users with `"trading": true` participate in scheduled trade checks (CSV import, price fetch, alert evaluation). Users without this flag are never included, regardless of whether a CSV exists in `RAGData/Trade/`.
+Only users with `"trading": true` have a portfolio at all. The flag gates three separate
+paths, and all three must honour it — it is not enough for the scheduler alone to check it:
+
+- **scheduled trade checks** (CSV import, price fetch, alert evaluation) — `main.py`;
+- **the `/portfolio/*` endpoints** — `403` otherwise, so an import cannot open a portfolio
+  for someone who should not have one (`routes/portfolio.py::_garde`);
+- **the morning briefing** — the `<portefeuille>` and `<perspectives_marche>` blocks are
+  skipped entirely. The market block is global, so without this gate it fills in and gets
+  delivered even to a user holding no positions at all.
 
 An entry is loaded as soon as it has a `code`: there is no enable flag. Disabling a user
 means removing their entry from the file. `JarvisData/` is git-ignored, so this file is not

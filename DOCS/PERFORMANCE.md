@@ -184,7 +184,6 @@ whether `ThinkingBudgetProcessor` engages.
 
 | Function | Model | Think | Budget | Processor | Rationale |
 |---|---|---|---|---|---|
-| `_ticker_llm_call_async` | PRIMARY | `no_think` | `MAX_TOKENS_TINY` (80) | — | Ticker symbol extraction — very short answer |
 | `evaluate_alerts` | PRIMARY | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Alert threshold evaluation — technical classification |
 | `suggest_thresholds_llm` | PRIMARY | `think` | `MAX_TOKENS_THINK_MEDIUM` (5 048) | ✅ `THINKING_BUDGET_MEDIUM` (2 048) | Quantitative reasoning on price thresholds. ~3 000 tok left for multi-position JSON. |
 

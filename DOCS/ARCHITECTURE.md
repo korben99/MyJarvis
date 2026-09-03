@@ -248,6 +248,24 @@ outside the request loop; `vitals` reads the cache.
 (including `cve_critiques > 0`) and recent incidents; a healthy system yields
 `<etat_systeme>nominal</etat_systeme>`.
 
+**Admins only.** The block is injected solely for users in `USER_ADMINS` (`pipeline.py`).
+It carries backup age, critical CVEs and the error count, and IDENTITY *instructs* the model
+to state injected data as fact — so injected to everyone, it comes back out in the answer,
+figures included. That is a datum that must not reach the model for a non-admin, not a
+behaviour to correct with an instruction. IDENTITY therefore also states that the block's
+absence is not a fault, is not to be flagged or commented on, and that its contents are
+shared with no one — otherwise the "if a block is missing, say so" rule would have Jarvis
+announce the gap, which is the same leak in quieter form. That sentence sits in the shared
+IDENTITY text, so it stays token-identical for every user and costs no LRU prefix.
+`incr_usage` and `steering.set_risk` stay **outside** the gate: usage counts for everyone,
+and the body reacts to real exposure whoever is talking.
+
+**SBOM on disk.** The venv SBOM is persisted to `DOCS/sbom/sbom-venv.json` at every scan
+(`SBOM_PATH`), normalised: `serialNumber` and `metadata.timestamp` are stripped because they
+change on every generation and would produce a daily meaningless diff. The rest is
+deterministic, so an unchanged venv leaves the file byte-identical and it is not rewritten —
+**a diff on that file means a dependency moved**.
+
 **On `intent=self`, the chat turn also carries a `Vulnérabilités` line inside
 `<internal_state>`** — critical CVEs only, with scan freshness and the scanned perimeter
 (`4 sources (venv, jarvis-redis, …)`). Three deliberate choices. *Critical only*: highs and
@@ -557,7 +575,7 @@ plus accès à internet en ce moment…"* — instead of silently returning no r
 │   ├── adapters/ · data/ · lora/ · orpo/ · bench/ · ablation/ · concept-vectors/
 │   └── prompts/                # Successive versions of IDENTITY_FR (v1→v11)
 ├── RAGData/                    # Documents to index (personal, work, documents…)
-│   └── Trade/                  # Broker CSV exports (TRADE_DATA_DIR)
+│   └── Trade/{USER_CODE}/      # Broker CSV exports, one folder per user (TRADE_DATA_DIR)
 ├── logs/                       # jarvis-api · jarvis-debug
 │                               # prompts · analyzer-prompts · nightly-prompts
 │                               # reflection-prompts

@@ -59,6 +59,9 @@ DOCKER_BIN = os.getenv("DOCKER_BIN", "/usr/local/bin/docker")
 CONTAINERS = [c.strip() for c in os.getenv(
     "CVE_CONTAINERS", "jarvis-redis,jarvis-qdrant,jarvis-webui").split(",") if c.strip()]
 _SCAN_TIMEOUT = int(os.getenv("CVE_SCAN_TIMEOUT", "300"))
+# SBOM du venv conservée à un chemin stable : c'est la pièce qui dit ce qui tourne
+# réellement, et elle n'a de valeur que tenue à jour. Le scan la réécrit à chaque passage.
+SBOM_PATH = os.getenv("SBOM_PATH", "/opt/jarvis/DOCS/sbom/sbom-venv.json")
 
 # Liste blanche d'exclusion : paquets délibérément RETIRÉS du décompte, avec motif obligatoire.
 # Ce n'est pas « masquer parce qu'il y en a beaucoup » (le réflexe refusé partout ailleurs) :
@@ -89,6 +92,49 @@ def _est_exclu(paquet: str | None, source: str) -> dict | None:
         if regle["paquet"].lower() == pl and regle.get("source") in (None, source):
             return regle
     return None
+
+
+def _persister_sbom(source: str) -> None:
+    """Recopie la SBOM générée vers SBOM_PATH, NORMALISÉE, et seulement si elle a changé.
+
+    Deux champs varient à chaque génération sans que rien n'ait bougé dans le venv :
+    `serialNumber` (UUID tiré au hasard) et `metadata.timestamp`. Les laisser rendrait le
+    fichier différent tous les jours et produirait un commit quotidien vide de sens — le
+    bruit ferait cesser de lire les diffs, donc perdre la seule chose qu'on veut voir : un
+    paquet qui apparaît, disparaît ou change de version. Les deux champs sont optionnels au
+    schéma CycloneDX ; la date de génération, c'est git qui la porte.
+
+    Le reste de la SBOM est déterministe (ordre des composants compris, vérifié sur deux
+    générations consécutives), donc à venv inchangé le fichier est identique à l'octet et
+    l'écriture n'a pas lieu.
+
+    Ne lève jamais : la persistance est un effet de bord du scan, pas sa raison d'être.
+    """
+    try:
+        with open(source, encoding="utf-8") as f:
+            doc = json.load(f)
+        doc.pop("serialNumber", None)
+        doc.get("metadata", {}).pop("timestamp", None)
+        rendu = json.dumps(doc, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+        ancien = None
+        if os.path.isfile(SBOM_PATH):
+            with open(SBOM_PATH, encoding="utf-8") as f:
+                ancien = f.read()
+        if ancien == rendu:
+            logger.debug("cve: SBOM venv inchangée (%s)", SBOM_PATH)
+            return
+
+        os.makedirs(os.path.dirname(SBOM_PATH), exist_ok=True)
+        with open(SBOM_PATH, "w", encoding="utf-8") as f:
+            f.write(rendu)
+        n = len(doc.get("components", []))
+        logger.info(
+            "cve: SBOM venv mise à jour (%s, %d composants) — %s",
+            SBOM_PATH, n, "créée" if ancien is None else "contenu modifié",
+        )
+    except Exception as exc:
+        logger.warning("cve: persistance SBOM impossible (%s) — scan non affecté", exc)
 
 
 def _generate_sbom(path: str) -> bool:
@@ -213,6 +259,7 @@ def scan() -> dict | None:
         try:
             if _generate_sbom(tmp.name):
                 sources += agrege(_scan_target(f"sbom:{tmp.name}", "venv"), "venv")
+                _persister_sbom(tmp.name)
             else:
                 logger.warning("cve: génération SBOM venv échouée")
         finally:
