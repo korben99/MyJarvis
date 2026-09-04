@@ -102,6 +102,12 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "the Engie share price",
         "analysis of the Total share, its valuation and outlook",
         "what is this stock's valuation?",
+        # Looking for a business or service IN a city. Without these, "in <City>" only
+        # existed in the weather examples, so every geolocated search was pulled there.
+        "find me a good restaurant in Lyon",
+        "a good mechanic near Bordeaux",
+        "look for a pizzeria open tonight",
+        "recommend me a hotel in Nantes",
     ],
     # ── Personal documents / RAG ─────────────────────────────────────────────
     # COMPLETE phrases only, never fragments.
@@ -139,6 +145,12 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "I'm hesitating to buy this stock, does it belong in my portfolio?",
         "adding a new stock to my portfolio",
         "should I buy some Engie?",
+        # Forms carrying a temporal marker. Without them "today" or "this morning" pulled
+        # the question towards `calendar`, whose examples are saturated with it.
+        "my positions today",
+        "how is my portfolio doing this morning",
+        "the state of my shares today",
+        "has my brokerage account moved today?",
     ],
     # ── Questions about a project's state ────────────────────────────────────
     # Covers STATUS queries ("where is", "how is it coming along").

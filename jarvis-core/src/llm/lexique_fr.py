@@ -117,6 +117,14 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "le cours de l'action Engie",
         "analyse de l'action Total, sa valorisation et ses perspectives",
         "quelle est la valorisation de cette action ?",
+        # Recherche d'un commerce ou d'un service DANS une ville. Sans ces formes, un
+        # « à <Ville> » n'existait que dans les exemples météo : toute recherche
+        # géolocalisée y était aspirée, d'autant plus fort que le corpus local contient
+        # de vraies requêtes météo sur la ville de l'utilisateur.
+        "trouve-moi un bon restaurant à Lyon",
+        "un bon garagiste près de Bordeaux",
+        "cherche une pizzeria ouverte ce soir",
+        "recommande-moi un hôtel à Nantes",
     ],
     # ── Documents personnels / RAG ───────────────────────────────────────────
     # Phrases COMPLÈTES uniquement, jamais de fragments.
@@ -155,6 +163,13 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "j'hésite à acheter cette action, elle a sa place dans mon portefeuille ?",
         "intégrer une nouvelle action à mon portefeuille",
         "est-ce que je devrais acheter du Engie ?",
+        # Formes portant un marqueur temporel. Sans elles, « aujourd'hui » ou « ce matin »
+        # tirait la question vers `calendar`, dont les exemples en sont saturés
+        # (« mon agenda aujourd'hui », « mes rendez-vous du jour »).
+        "mes positions du jour",
+        "où en est mon portefeuille ce matin",
+        "l'état de mes actions aujourd'hui",
+        "mon PEA a-t-il bougé aujourd'hui ?",
     ],
     # ── Questions sur l'état d'un projet ────────────────────────────────────
     # Couvre les requêtes de STATUS ("où en est", "comment avance").
