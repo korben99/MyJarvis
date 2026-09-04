@@ -216,10 +216,9 @@ def _du_catalogue_courant(logs: list[dict]) -> list[dict]:
     """Ne garde que les entrées écrites avec le catalogue d'actions EN VIGUEUR.
 
     Le catalogue change — actions retirées, actions ajoutées — et le journal, lui, garde
-    30 entrées. Le, 28 des 30 dataient d'avant le découpage : `_extract_
-    behavioral_patterns` annonçait au modèle que « check_health » était choisie dans 47 %
-    de ses cycles, pour une action supprimée le matin même. Il l'a dûment redemandée au
-    cycle de 14 h 07, et l'a payée d'un appel de raisonnement pour rien.
+    30 entrées. Une entrée d'un catalogue révolu montre au modèle, en exemple, une action
+    qui n'existe plus ; il la redemande, et la sortie est rejetée par le validateur — un
+    appel de raisonnement dépensé pour rien.
 
     Pas de numéro de version à incrémenter à la main : chaque entrée porte le catalogue
     qui l'a produite (`engine.log_entry`), et « courant » se lit sur l'entrée la plus
@@ -240,75 +239,3 @@ def get_last_reflection() -> dict | None:
     """
     entries = _du_catalogue_courant(get_reflection_log(_REFLECTION_LOG_MAX))
     return entries[0] if entries else None
-
-
-def _extract_behavioral_patterns(n: int = 20) -> list[str]:
-    """Derive up to 5 recurring behavioral patterns from the last n reflection entries.
-
-    Fully deterministic — no LLM call. Three signals are analysed:
-      1. Action frequency: which actions dominate (≥ 20 % of cycles).
-      2. Time-of-day clustering for "nothing" choices.
-      3. Recurring keywords in focus fields (word seen ≥ 3 times).
-    """
-    logs = _du_catalogue_courant(get_reflection_log(n))
-    if not logs:
-        return []
-
-    patterns: list[str] = []
-
-    # 1. Action frequency
-    #
-    # Comptée sur TOUS les pas du cycle (`steps`), pas sur l'en-tête aplatie. Cette
-    # dernière ne retient qu'une action par cycle, et un cycle qui en enchaîne trois n'en
-    # déclarait qu'une — celle du pas retenu. Le modèle recevait donc une fréquence
-    # d'actions qui sous-comptait tout ce qui se produit en milieu de chaîne.
-    # Repli sur l'en-tête pour les entrées écrites avant que `steps` n'existe.
-    action_counts: Counter = Counter()
-    for e in logs:
-        pas = e.get("steps") or []
-        if pas:
-            action_counts.update(s.get("action", "unknown") for s in pas)
-        else:
-            action_counts[e.get("action", "unknown")] += 1
-    total_actions = sum(action_counts.values()) or 1
-    for action, count in action_counts.most_common(3):
-        pct = round(count / total_actions * 100)
-        if pct >= 20:
-            patterns.append(
-                f"action « {action} » choisie dans {pct}% des pas ({count}/{total_actions})"
-            )
-
-    # 2. "nothing" time-of-day clustering
-    #
-    # En heure LOCALE. Les horodatages du journal sont en UTC : la « nuit » ainsi mesurée
-    # courait de 22 h à 8 h en heure d'été française, et le motif rendu au modèle décrivait
-    # donc une soirée qui n'était pas la sienne.
-    _tz = pytz.timezone(BRIEFING_TIMEZONE)
-    nothing_hours = []
-    for e in logs:
-        if e.get("action") == "nothing" and e.get("timestamp"):
-            try:
-                _t = datetime.fromisoformat(e["timestamp"])
-                if _t.tzinfo is None:
-                    _t = _t.replace(tzinfo=timezone.utc)
-                nothing_hours.append(_t.astimezone(_tz).hour)
-            except Exception:
-                pass
-    if len(nothing_hours) >= 3:
-        avg_h = sum(nothing_hours) / len(nothing_hours)
-        if avg_h >= 20 or avg_h <= 6:
-            patterns.append(
-                f"tend à ne rien faire la nuit/soirée (heure moyenne: {avg_h:.0f}h)"
-            )
-
-    # 3. Recurring keywords in focus fields
-    word_counts: Counter = Counter()
-    for e in logs:
-        for word in e.get("focus", "").lower().split():
-            if len(word) > 5:
-                word_counts[word] += 1
-    top_words = [w for w, c in word_counts.most_common(5) if c >= 3]
-    if top_words:
-        patterns.append(f"focus récurrents : {', '.join(top_words[:3])}")
-
-    return patterns[:5]

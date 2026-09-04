@@ -321,7 +321,7 @@ def _action_alert_admin(params: dict) -> str:
     if err:
         return EchecAction(f"alert_admin: {err}")
     logger.info("Self action: admin alert → %s — %s", admin, message[:80])
-    return f"admin alerted ({admin}): {message[:80]}"
+    return f"admin alerted ({admin}): {message[:300]}"
 
 
 # _action_correct_profile supprimée : `curative_profile_cleanup`

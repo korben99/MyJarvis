@@ -45,7 +45,6 @@ from .state import (
     _KNOWLEDGE_GAPS_KEY,
     _PUSH_COOLDOWN_PREFIX,
     _REFINE_COOLDOWN_PREFIX,
-    _extract_behavioral_patterns,
     get_last_reflection,
     slug_de_sujet,
 )
@@ -395,7 +394,6 @@ def gather_global_context() -> dict:
         "last_reflection": last_ref,
         "reflection_count": self_data.get("reflection_count", 0),
         "user_relations": self_data.get("user_relations", {}),
-        "behavioral_patterns": _extract_behavioral_patterns(20),
         "emotional_state": emotional_state.get_state(),
         # Les neuf axes remplis remplacent l'ancienne liste `self_notes`, retirée le
         # la connaissance de soi n'a plus qu'un foyer, et c'est celui-ci.
@@ -508,22 +506,34 @@ def _fmt_incidents(items: list[dict]) -> str:
 
 
 def _fmt_previous_steps(steps: list[dict] | None) -> str:
+    """Une ligne par pas déjà exécuté ce cycle — c'est ce qui dit au modèle ce qu'il a
+    déjà fait, donc ce qu'il n'a pas à refaire.
+
+    L'issue est aplatie sur une ligne : certaines actions en rendent une multi-ligne
+    (`alert_admin` recopie le début du message d'alerte), et un retour à la ligne y
+    casserait l'énumération — le fragment se lirait comme un item autonome.
+    """
     if not steps:
         return "  aucune (première itération)"
     return "\n".join(
-        f"  {s['iteration']}. {s['action']} → {s['outcome']}" for s in steps
+        f"  {s['iteration']}. {s['action']} → {' '.join(str(s['outcome']).split())}"
+        for s in steps
     )
 
 
 async def _call_global_reflection_llm(
     context: dict, previous_steps: list[dict] | None = None
 ) -> dict | None:
-    """Phase 1 — global self-reflection (Jarvis state, no user profiles)."""
-    bp = context.get("behavioral_patterns", [])
-    behavioral_patterns = (
-        "\n".join(f"  • {p}" for p in bp) if bp else "  aucun pattern identifié"
-    )
+    """Phase 1 — global self-reflection (Jarvis state, no user profiles).
 
+    Pas de statistiques d'auto-observation dans ce prompt. Les trois actions de la phase
+    (`nothing`, `refine_prompt`, `alert_admin`) se décident sur les CVE, les incidents, la
+    santé et les lacunes — jamais sur la fréquence des actions passées. Et sous la consigne
+    d'autocritique qui encadre ce prompt, un taux élevé de `nothing` se lit comme un défaut
+    à corriger, alors que ne rien faire est le comportement attendu d'un système sain : le
+    modèle se donne alors pour objectif d'agir, puis doit justifier une action que l'état
+    contredit — une rédaction sans solution, terrain des générations dégénérées.
+    """
     prompt = get_prompt("REFLECTION_PROMPT").format(
         timestamp=context["timestamp"],
         identity=json.dumps(context["identity"], ensure_ascii=False),
@@ -542,7 +552,6 @@ async def _call_global_reflection_llm(
         )
         if context["last_reflection"]
         else "aucune",
-        behavioral_patterns=behavioral_patterns,
         emotional_state=json.dumps(
             context.get("emotional_state", {}), ensure_ascii=False
         ),

@@ -412,8 +412,9 @@ def _run_chain_step(
 def _pas_marquant(steps: list[dict]) -> dict:
     """Le pas qui RÉSUME le cycle — pas simplement le dernier.
 
-    L'en-tête de l'entrée de journal est lue par `_extract_behavioral_patterns`, par
-    `/self/log`, et surtout injectée en conversation (« Dernière action autonome : … »).
+    L'en-tête de l'entrée de journal est lue par `/self/log`, par `get_last_reflection`
+    (qui l'injecte dans le prompt de réflexion), et surtout injectée en conversation
+    (« Dernière action autonome : … »).
     Elle prenait `all_steps[-1]`, ce qui produisait deux défauts mesurés sur les 30 entrées
     du journal :
 
@@ -736,17 +737,15 @@ async def _reflechir() -> dict:
         # vide, donc celui de la phase globale — pendant que l'action venait du dernier pas
         # du dernier utilisateur : le couple journalisé n'avait jamais existé.
         "focus": retenu.get("focus") or focus,
-        "action": retenu.get("action", "nothing"),  # for _extract_behavioral_patterns
+        "action": retenu.get("action", "nothing"),
         "reason": retenu.get("reason", ""),
         "outcome": retenu.get("outcome", ""),
         "steps": all_steps,
         "health": global_ctx["health"],
         # Le catalogue EN VIGUEUR au moment où l'entrée a été écrite. C'est ce qui permet à
-        # `_extract_behavioral_patterns` et à `get_last_reflection` d'ignorer les entrées
-        # d'un catalogue révolu. Sans lui, : sur 30 entrées, 28 dataient
-        # d'avant le découpage, et le prompt annonçait au modèle que « check_health » était
-        # choisie dans 47 % des cycles — une action supprimée. Le cycle de 14 h 07 l'a
-        # dûment demandée, et l'a payée d'un appel de raisonnement pour rien.
+        # `get_last_reflection` d'ignorer les entrées d'un catalogue révolu : sans lui, le
+        # prompt de réflexion montre en exemple une action qui n'existe plus, et le modèle
+        # la redemande — un appel de raisonnement dépensé pour une sortie rejetée.
         "catalogue": sorted(_SELF_ACTIONS | _USER_ACTIONS),
     }
     log_reflection(log_entry)

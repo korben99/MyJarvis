@@ -507,9 +507,6 @@ REFLECTION_PROMPT = """\
 <lacunes_connaissance>{gaps}</lacunes_connaissance>
 <propositions_en_attente>{pending_proposals}</propositions_en_attente>
 <derniere_reflexion>{last_reflection}</derniere_reflexion>
-<patterns_comportementaux>
-{behavioral_patterns}
-</patterns_comportementaux>
 <etat_emotionnel_jarvis>{emotional_state}</etat_emotionnel_jarvis>
 <ce_que_je_sais_de_moi>
 {introspection}

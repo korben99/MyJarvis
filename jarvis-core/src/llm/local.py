@@ -252,13 +252,31 @@ def _model_profile(model_path: str) -> _ModelProfile:
         # no-op et il ne reste que presence (forfait) et frequency (×n), toutes deux
         # additives — sur une boucle qui sature la fenêtre elles retranchent quelques
         # logits à TOUS les candidats de la boucle, sans différentiel exploitable.
-        # Plafond 1.1 sur cette famille (recommandation Qwen) : au-delà, la reprise
-        # légitime d'un terme technique est rabotée.
+        # 1.1 est le plafond de cette famille (recommandation Qwen) : au-delà, la reprise
+        # légitime d'un terme technique est rabotée. Ces pénalités relèvent la barrière
+        # d'ENTRÉE en boucle ; elles ne font pas sortir d'un attracteur installé, où l'écart
+        # de logits se compte en dizaines de nats quand elles en retranchent deux ou trois.
+        #
+        # repetition_context_size court, aligné sur les autres profils. Une fenêtre large ne
+        # renforce pas la pression anti-boucle : `make_repetition_penalty` sélectionne un
+        # ENSEMBLE (`logits[:, tokens] /= penalty`), donc un token répété quarante fois est
+        # pénalisé comme un token vu une fois, et un motif de 3 à 23 tokens tient déjà dans
+        # une fenêtre courte. Elle pénalise en revanche tout le vocabulaire légitime récent —
+        # c'est-à-dire la SORTIE de la boucle. Sur un motif de 7 tokens dans 180 tokens de
+        # prose française, logits uniformes :
+        #
+        #   fenêtre   pénalité boucle   pénalité vocabulaire d'échappement   différentiel
+        #     256          3.60                      2.65                       0.95
+        #      64          3.30                      0.62                       2.68
+        #      32          2.55                      0.62                       1.93
+        #
+        # Une fenêtre large rend la sortie presque aussi coûteuse que la boucle. Sous 64, la
+        # pénalité de fréquence — la seule qui compte les occurrences — perd des répétitions.
         return _ModelProfile(
             temp_think=1.0, temp_nothink=0.7,
             top_p_think=0.95, top_p_nothink=0.80,
             top_k=20, min_p=0.0,
-            repetition_penalty=1.05, repetition_context_size=256,
+            repetition_penalty=1.1, repetition_context_size=64,
             frequency_penalty=0.15, presence_penalty=1.5,
             use_quant_kv=QUANT_KV, stop_tokens=(),
         )
