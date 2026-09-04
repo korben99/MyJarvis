@@ -21,11 +21,13 @@ Retourne use_reasoning=True pour les ordres explicites de l'utilisateur
 et n'ont pas besoin du routeur LLM pour être classifiées.
 """
 
+import json
 import os
 import re
 import threading
 
 import numpy as np
+from config import EMBED_ROUTER_CORPUS
 from helpers import get_logger
 from .router import RouterResult, _log_routing_sample
 from .lexique import (
@@ -45,8 +47,25 @@ logger = get_logger("jarvis-embed-router")
 
 EMBED_ROUTER_ENABLED: bool = os.getenv("EMBED_ROUTER", "yes").lower() != "no"
 
-# Seuil minimum de similarité cosinus pour accepter un intent
-EMBED_ROUTE_THRESHOLD: float = 0.74
+# Seuil minimum de similarité cosinus pour accepter un intent.
+#
+# DEUX seuils, parce que la qualité des prototypes n'est pas la même. Les phrases-types
+# écrites à la main décrivent une intention en 4-21 jetons ; un message réel y ressemble
+# de loin, donc les scores sont bas et il faut un seuil haut pour ne pas router n'importe
+# quoi. Un corpus d'exemples réels compare du réel à du réel : les scores montent, et le
+# même seuil ne laisserait plus rien passer d'intéressant.
+#
+# Validation croisée 5 plis sur 312 messages atteignant l'étage similarité :
+#
+#              sans corpus              avec corpus
+#   seuil   couverture  précision    couverture  précision
+#    0.65      10.3 %      53.1 %       39.1 %      91.0 %
+#    0.70       6.7 %      57.1 %       30.4 %      94.7 %
+#    0.74       4.2 %      69.2 %       27.6 %      94.2 %
+#
+# D'où l'écart : à 0,65 sans corpus, une décision sur deux serait fausse.
+EMBED_ROUTE_THRESHOLD: float = 0.74          # phrases-types seules
+EMBED_ROUTE_THRESHOLD_CORPUS: float = 0.65   # corpus local actif
 
 # Si les deux meilleurs intents sont à moins de cette marge, c'est ambigu → LLM
 AMBIGUITY_MARGIN: float = 0.06
@@ -58,6 +77,7 @@ EMBED_MAX_CHARS: int = int(os.getenv("EMBED_MAX_CHARS", "130"))
 # ── Cache des embeddings d'exemples (initialisé une seule fois) ───────────────
 _cache_lock = threading.Lock()
 _examples_vectors: dict[str, np.ndarray] | None = None  # intent → (N, D) matrix
+_corpus_actif: bool = False  # vrai si EMBED_ROUTER_CORPUS a fourni des exemples
 
 
 def preload_embed_router() -> None:
@@ -66,24 +86,87 @@ def preload_embed_router() -> None:
         _load_example_vectors()
 
 
+def _messages_du_corpus() -> dict[str, list[str]]:
+    """Lit EMBED_ROUTER_CORPUS et rend {intent: [messages]}. Vide si absent ou illisible.
+
+    Deux filtres, qui reproduisent les conditions dans lesquelles la mesure a été faite :
+    on ne garde que les messages qui atteindraient RÉELLEMENT l'étage similarité. Un
+    message trop long n'y arrive jamais (cf. EMBED_MAX_CHARS), et un message capté par une
+    règle déterministe non plus — l'ajouter comme prototype tirerait le score d'un intent
+    vers des formulations que cet étage n'a jamais à juger.
+
+    Ne lève jamais : un corpus absent ou corrompu doit dégrader vers les phrases-types
+    livrées, jamais casser le routage.
+    """
+    if not EMBED_ROUTER_CORPUS or not os.path.isfile(EMBED_ROUTER_CORPUS):
+        return {}
+    out: dict[str, list[str]] = {}
+    vus: set[str] = set()
+    try:
+        with open(EMBED_ROUTER_CORPUS, encoding="utf-8") as f:
+            for ligne in f:
+                try:
+                    o = json.loads(ligne)
+                except json.JSONDecodeError:
+                    continue
+                msg = (o.get("message") or "").strip()
+                intents = ((o.get("routing") or o.get("attendu") or {}).get("intents")) or []
+                if not msg or not intents or len(msg) >= EMBED_MAX_CHARS:
+                    continue
+                ml = msg.lower()
+                if any(t in ml for t in REASON_EXACT):
+                    continue
+                if re.search(r"https?://", msg) or re.search(r"\brag\b", ml):
+                    continue
+                if len(msg) <= 50 and "?" not in msg and ml.rstrip(" !.,") in SMALL_TALK_EXACT:
+                    continue
+                if ml.rstrip("! ?,") in BRIEFING_EXACT:
+                    continue
+                if ml in vus:  # le collecteur réenregistre les messages répétés
+                    continue
+                vus.add(ml)
+                for it in intents:
+                    if it in INTENT_EXAMPLES:  # intent inconnu = schéma périmé, on ignore
+                        out.setdefault(it, []).append(msg)
+    except OSError as exc:
+        logger.warning("Embed router: corpus %s illisible (%s)", EMBED_ROUTER_CORPUS, exc)
+        return {}
+    return out
+
+
 def _load_example_vectors() -> dict[str, np.ndarray]:
-    """Encode tous les exemples et met en cache les matrices de vecteurs."""
-    global _examples_vectors
+    """Encode tous les exemples et met en cache les matrices de vecteurs.
+
+    Phrases-types livrées + corpus local si EMBED_ROUTER_CORPUS le désigne. Les deux sont
+    CUMULÉS : les phrases-types restent le socle qui fonctionne sur une installation neuve,
+    le corpus ajoute les formulations réelles du foyer. C'est ce cumul qui a été mesuré.
+    """
+    global _examples_vectors, _corpus_actif
     with _cache_lock:
         if _examples_vectors is not None:
             return _examples_vectors
         from memory import get_embed_model
 
         model = get_embed_model()
+        corpus = _messages_du_corpus()
         result: dict[str, np.ndarray] = {}
-        for intent, phrases in INTENT_EXAMPLES.items():
-            vecs = model.encode(phrases, normalize_embeddings=True)  # (N, D)
-            result[intent] = vecs.astype(np.float32)
+        for intent in set(INTENT_EXAMPLES) | set(corpus):
+            phrases = list(INTENT_EXAMPLES.get(intent, ())) + corpus.get(intent, [])
+            if not phrases:
+                continue
+            result[intent] = model.encode(
+                phrases, normalize_embeddings=True
+            ).astype(np.float32)
         _examples_vectors = result
+        _corpus_actif = bool(corpus)
         logger.info(
-            "Embed router: %d intents, %d phrases total chargées",
+            "Embed router: %d intents, %d phrases (%d des phrases-types + %d du corpus "
+            "local) — seuil %.2f",
             len(result),
             sum(v.shape[0] for v in result.values()),
+            sum(len(v) for v in INTENT_EXAMPLES.values()),
+            sum(len(v) for v in corpus.values()),
+            EMBED_ROUTE_THRESHOLD_CORPUS if _corpus_actif else EMBED_ROUTE_THRESHOLD,
         )
         return _examples_vectors
 
@@ -347,8 +430,14 @@ def _embed_route(message: str, google_available: bool = True) -> RouterResult | 
             second_score,
         )
 
-        if best_score < EMBED_ROUTE_THRESHOLD:
-            logger.debug("Embed router: score %.3f < seuil → LLM router", best_score)
+        # Seuil choisi selon la nature des prototypes chargés — voir le commentaire des
+        # deux constantes. `_load_example_vectors()` vient d'être appelé, `_corpus_actif`
+        # est donc à jour.
+        seuil = EMBED_ROUTE_THRESHOLD_CORPUS if _corpus_actif else EMBED_ROUTE_THRESHOLD
+        if best_score < seuil:
+            logger.debug(
+                "Embed router: score %.3f < seuil %.2f → LLM router", best_score, seuil
+            )
             return None
 
         if best_score - second_score < AMBIGUITY_MARGIN:

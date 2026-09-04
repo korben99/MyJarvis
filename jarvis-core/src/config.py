@@ -511,6 +511,14 @@ JARVIS_LANG = os.getenv("JARVIS_LANG", "fr").strip().lower()
 # Mount on host: ./RouterData:/app/router_data  (see docker-compose.yml)
 ROUTER_DATA_DIR = os.getenv("ROUTER_DATA_DIR", "/app/router_data")
 
+# Corpus LOCAL d'exemples de routage, ajouté aux phrases-types du tier 0 (embed_router).
+# Vide par défaut, et c'est délibéré : ce fichier contient les messages réels du foyer, il
+# ne peut pas être livré avec Jarvis. Chaque déploiement construit le sien —
+# `_log_routing_sample` alimente routing_samples.jsonl à chaque décision de routage — puis
+# l'active ici quand il est jugé assez propre. Tant qu'il est vide, le routeur fonctionne
+# sur les seules phrases-types livrées.
+EMBED_ROUTER_CORPUS = os.getenv("EMBED_ROUTER_CORPUS", "").strip()
+
 # ── Conversation storage limits ───────────────────────────────────────────
 CHAT_MAX_MESSAGES = int(
     os.getenv("CHAT_MAX_MESSAGES", "100")
