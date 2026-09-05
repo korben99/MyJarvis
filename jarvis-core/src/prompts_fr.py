@@ -1022,6 +1022,14 @@ Ta journée du {review_date}, tous interlocuteurs confondus.
 {conv_text}
 </conversations>
 
+<journal_des_semaines_passees>
+Ce qui s'est passé les jours précédents, un résumé par personne et par jour. C'est de la
+MATIÈRE, pas un bilan : cherches-y ce qui se répète d'une fois sur l'autre, pas ce qui
+s'est passé hier. Une disposition se reconnaît à sa récurrence — un épisode isolé n'en est
+pas une. N'en tire rien si rien ne se répète.
+{growth_log}
+</journal_des_semaines_passees>
+
 <ton_fonctionnement>
 {etat_operationnel}
 </ton_fonctionnement>
@@ -1200,7 +1208,7 @@ CLASSIFICATION DES PROMPTS :
 
 BUDGETS TOKENS par prompt (approximation : 1 token ≈ 3,6 caractères français) :
   SYSTEM_BASE            →  650 tokens max  (inline, KV-cached — ne pas dépasser)
-  IDENTITY               →  950 tokens max  (inline, KV-cached — identité existentielle)
+  IDENTITY               → 1200 tokens max  (inline, KV-cached — identité existentielle)
   ROUTER_SYSTEM          → 1800 tokens max  (Qwen2.5-1.5B LoRA, KV-cached, 17 exemples + last_jarvis ctx)
   ROUTER_USER            →  600 tokens max  (inclut last_jarvis_block dynamique + message)
   ANALYSIS_PROMPT        → 3200 tokens max  (async Qwen3 — précision avant tout)
@@ -1215,11 +1223,11 @@ BUDGETS TOKENS par prompt (approximation : 1 token ≈ 3,6 caractères français
   NIGHTLY_FACTS_SYSTEM   →  450 tokens max
   NIGHTLY_FACTS_PROMPT   →  550 tokens max  (hors données injectées)
   NIGHTLY_SELF_SYSTEM    → 2500 tokens max
-  NIGHTLY_SELF_PROMPT    →  400 tokens max  (hors données injectées)
+  NIGHTLY_SELF_PROMPT    →  500 tokens max  (hors données injectées)
   NIGHTLY_CLEANING_SYSTEM →  450 tokens max
   NIGHTLY_CLEANING_PROMPT →  250 tokens max  (hors données injectées)
   CONSOLIDATION_PROMPT   →  200 tokens max  (hors données injectées)
-  CURATIVE_CLEANUP_PROMPT →  500 tokens max  (hors données injectées)
+  CURATIVE_CLEANUP_PROMPT →  650 tokens max  (hors données injectées)
 
 Pour les prompts INLINE : si ta modification dépasse le budget, compense en retirant ailleurs.
 Pour les prompts ASYNC : le budget est un plafond de sécurité, pas un objectif."""
@@ -1300,7 +1308,7 @@ Sinon :
 # marge, de quoi laisser respirer un raffinage sans autoriser une dérive.
 PROMPT_TOKEN_BUDGETS = {
     "SYSTEM_BASE": 650,  # inline / KV-cached — estim. 534
-    "IDENTITY": 950,  # inline / KV-cached, avant le bloc utilisateur — estim. 843
+    "IDENTITY": 1200,  # inline / KV-cached, avant le bloc utilisateur — estim. 843
     "ROUTER_SYSTEM": 1800,  # KV-cached, 17 examples + last_jarvis ctx — estim. 1281
     "ROUTER_USER": 600,  # ~18 tok de template — le budget couvre last_jarvis_block + message
     "ANALYSIS_PROMPT": 3200,  # async — quality over speed — estim. 2845
@@ -1315,11 +1323,11 @@ PROMPT_TOKEN_BUDGETS = {
     "NIGHTLY_FACTS_SYSTEM": 450,  # estim. 370
     "NIGHTLY_FACTS_PROMPT": 550,  # estim. 442
     "NIGHTLY_SELF_SYSTEM": 2500,  # estim. 2256
-    "NIGHTLY_SELF_PROMPT": 400,  # estim. 330
+    "NIGHTLY_SELF_PROMPT": 500,  # estim. 330
     "NIGHTLY_CLEANING_SYSTEM": 450,  # estim. 374
     "NIGHTLY_CLEANING_PROMPT": 250,  # estim. 194
     "CONSOLIDATION_PROMPT": 200,  # estim. 71
-    "CURATIVE_CLEANUP_PROMPT": 500,  # estim. 411
+    "CURATIVE_CLEANUP_PROMPT": 650,  # estim. 411
 }
 
 

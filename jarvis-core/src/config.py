@@ -657,8 +657,14 @@ DONE_PROJECT_TTL_DAYS = int(os.getenv("DONE_PROJECT_TTL_DAYS", "180"))
 
 # Nombre maximum d'entrées conservées dans le journal de croissance (growth_log) de jarvis-self.json.
 # Chaque entrée représente un résumé quotidien par utilisateur (1 entrée/utilisateur/jour).
-# Avec 2 utilisateurs actifs, 180 = environ 3 mois de journal avant rotation.
-GROWTH_LOG_MAX_ENTRIES = int(os.getenv("GROWTH_LOG_MAX_ENTRIES", "180"))
+# Avec 2 utilisateurs actifs, 60 = environ un mois de journal avant rotation.
+GROWTH_LOG_MAX_ENTRIES = int(os.getenv("GROWTH_LOG_MAX_ENTRIES", "60"))
+
+# Fenêtre du journal injectée dans le calcul d'introspection nocturne. Celui-ci ne voit
+# sinon que la journée écoulée, alors qu'il forme des dispositions — lesquelles ne se
+# reconnaissent qu'à leur récurrence. Deux semaines suffisent à faire apparaître une
+# répétition ; tout le journal coûterait ~4900 tokens sur un appel raisonnant.
+GROWTH_LOG_INTROSPECTION_JOURS = int(os.getenv("GROWTH_LOG_INTROSPECTION_JOURS", "14"))
 
 # ── Plafonds des autres listes de jarvis-self.json ────────────────────────
 # Ces trois listes étaient tronquées par des tranches EN DUR, réparties dans quatre

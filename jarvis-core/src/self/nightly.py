@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 from config import (
     DEFAULT_TEMP,
+    GROWTH_LOG_INTROSPECTION_JOURS,
     GROWTH_LOG_MAX_ENTRIES,
     INTROSPECTION_AXES,
     INTROSPECTION_LOG_MAX_ENTRIES,
@@ -217,6 +218,20 @@ def _etat_operationnel() -> str:
     return "\n".join(lignes) or "aucun signal opérationnel"
 
 
+def _fmt_growth_log(data: dict, jours: int = GROWTH_LOG_INTROSPECTION_JOURS) -> str:
+    """Les `jours` derniers jours du journal de croissance, un résumé par ligne.
+
+    Fenêtre courte et non tout le journal : l'introspection y cherche une récurrence, pas
+    un historique. Au-delà, le bloc coûte plusieurs milliers de tokens sur un appel
+    raisonnant sans rien ajouter à ce qu'une répétition rend déjà visible.
+    """
+    entrees = (data.get("growth_log") or [])[-jours:]
+    return "\n".join(
+        f"  [{e.get('date','?')}] {e.get('user_name','?')} : {e.get('summary','')}"
+        for e in entrees
+    ) or "  (journal encore vide)"
+
+
 async def _nightly_introspection(
     conversations: list[dict], review_date: str
 ) -> dict | None:
@@ -253,6 +268,7 @@ async def _nightly_introspection(
         conv_text=_build_conv_text(conversations),
         etat_operationnel=_etat_operationnel(),
         self_introspection=_render_introspection(data),
+        growth_log=_fmt_growth_log(data),
         recent_opinions=json.dumps(recent_opinions, ensure_ascii=False)
         if recent_opinions
         else "aucune",

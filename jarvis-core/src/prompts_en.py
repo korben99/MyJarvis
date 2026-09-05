@@ -1026,6 +1026,14 @@ Your day of {review_date}, across all interlocutors.
 {conv_text}
 </conversations>
 
+<journal_des_semaines_passees>
+What happened on the preceding days, one summary per person per day. This is MATERIAL, not
+an assessment: look in it for what repeats from one time to the next, not for what happened
+yesterday. A disposition is recognised by its recurrence — an isolated episode is not one.
+Draw nothing from it if nothing repeats.
+{growth_log}
+</journal_des_semaines_passees>
+
 <ton_fonctionnement>
 {etat_operationnel}
 </ton_fonctionnement>
@@ -1204,7 +1212,7 @@ PROMPT CLASSIFICATION:
 
 TOKEN BUDGETS per prompt (approximation: 1 token ≈ 3.6 characters):
   SYSTEM_BASE            →  650 tokens max  (inline, KV-cached — do not exceed)
-  IDENTITY               →  950 tokens max  (inline, KV-cached — existential identity)
+  IDENTITY               → 1200 tokens max  (inline, KV-cached — existential identity)
   ROUTER_SYSTEM          → 1800 tokens max  (Qwen2.5-1.5B LoRA, KV-cached, 17 examples + last_jarvis ctx)
   ROUTER_USER            →  600 tokens max  (includes the dynamic last_jarvis_block + message)
   ANALYSIS_PROMPT        → 3200 tokens max  (async Qwen3 — precision above all)
@@ -1219,11 +1227,11 @@ TOKEN BUDGETS per prompt (approximation: 1 token ≈ 3.6 characters):
   NIGHTLY_FACTS_SYSTEM   →  450 tokens max
   NIGHTLY_FACTS_PROMPT   →  550 tokens max  (excluding injected data)
   NIGHTLY_SELF_SYSTEM    → 2500 tokens max
-  NIGHTLY_SELF_PROMPT    →  400 tokens max  (excluding injected data)
+  NIGHTLY_SELF_PROMPT    →  500 tokens max  (excluding injected data)
   NIGHTLY_CLEANING_SYSTEM →  450 tokens max
   NIGHTLY_CLEANING_PROMPT →  250 tokens max  (excluding injected data)
   CONSOLIDATION_PROMPT   →  200 tokens max  (excluding injected data)
-  CURATIVE_CLEANUP_PROMPT →  500 tokens max  (excluding injected data)
+  CURATIVE_CLEANUP_PROMPT →  650 tokens max  (excluding injected data)
 
 For INLINE prompts: if your change exceeds the budget, compensate by removing elsewhere.
 For ASYNC prompts: the budget is a safety ceiling, not a target."""
@@ -1304,7 +1312,7 @@ Otherwise:
 # tokenizer count. Budgets and divisor must move together.
 PROMPT_TOKEN_BUDGETS = {
     "SYSTEM_BASE": 650,
-    "IDENTITY": 950,
+    "IDENTITY": 1200,
     "ROUTER_SYSTEM": 1800,
     "ROUTER_USER": 600,
     "ANALYSIS_PROMPT": 3200,
@@ -1319,11 +1327,11 @@ PROMPT_TOKEN_BUDGETS = {
     "NIGHTLY_FACTS_SYSTEM": 450,
     "NIGHTLY_FACTS_PROMPT": 550,
     "NIGHTLY_SELF_SYSTEM": 2500,
-    "NIGHTLY_SELF_PROMPT": 400,
+    "NIGHTLY_SELF_PROMPT": 500,
     "NIGHTLY_CLEANING_SYSTEM": 450,
     "NIGHTLY_CLEANING_PROMPT": 250,
     "CONSOLIDATION_PROMPT": 200,
-    "CURATIVE_CLEANUP_PROMPT": 500,
+    "CURATIVE_CLEANUP_PROMPT": 650,
 }
 
 
