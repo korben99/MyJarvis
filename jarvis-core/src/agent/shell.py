@@ -29,13 +29,11 @@ import asyncio
 import os
 import pathlib
 import re
-import shlex
 
 from config import (
     AGENT_SHELL_MAX_CALLS,
     AGENT_SHELL_NETWORK,
     AGENT_SHELL_TIMEOUT,
-    AGENT_WORKSPACE,
 )
 from helpers import get_logger
 

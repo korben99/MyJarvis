@@ -7,12 +7,10 @@ Couche la plus basse — tous les autres sous-modules en dépendent, elle n'impo
 import json
 import re
 import time
-from collections import Counter
 from datetime import datetime, timezone
 
 import numpy as np
-import pytz
-from config import BRIEFING_TIMEZONE, OPINIONS_MAX_ENTRIES
+from config import OPINIONS_MAX_ENTRIES
 from helpers import get_logger, get_redis
 from memory import (
     get_embed_model,

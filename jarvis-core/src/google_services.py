@@ -41,9 +41,6 @@ from config import (
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
-    ROUTER_API_KEY,
-    ROUTER_API_URL,
-    ROUTER_MODEL,
 )
 from google.auth.exceptions import GoogleAuthError, RefreshError, TransportError
 from google.auth.transport.requests import Request
