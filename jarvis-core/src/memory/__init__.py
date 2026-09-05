@@ -46,6 +46,7 @@ from .projects import (
     get_project_detail,
     get_project_timeline_text,
     get_user_projects,
+    projets_actifs,
     update_user_projects,
 )
 from .selfmem import (
@@ -67,10 +68,12 @@ from .vectors import (
     async_search_memory,
     compute_memory_novelty,
     get_autobiographical_facts,
+    recall_self_memories,
     retract_autobiographical_event,
     search_memory,
     store_autobiographical_event,
     store_memory_vector,
+    store_self_memory,
 )
 
 __all__ = [
@@ -88,7 +91,7 @@ __all__ = [
     "set_interest_weight", "get_interest_weights",
     "get_user_preferences", "update_user_preference",
     # projects
-    "get_user_projects", "update_user_projects", "get_project_detail",
+    "get_user_projects", "projets_actifs", "update_user_projects", "get_project_detail",
     "get_project_timeline_text", "apply_project_updates",
     # episodic
     "log_conversation", "get_recent_conversations",
@@ -96,6 +99,7 @@ __all__ = [
     "compute_memory_novelty", "store_memory_vector", "store_autobiographical_event",
     "retract_autobiographical_event", "archive_autobiographical_event",
     "get_autobiographical_facts", "search_memory", "async_search_memory",
+    "store_self_memory", "recall_self_memories",
     # context
     "get_user_timeline", "build_memory_context",
     # cleaning

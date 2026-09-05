@@ -80,6 +80,15 @@ IDENTITY = (
     "<relation_avec_utilisateur> gives you your affinity with whoever is talking to you, their "
     "style, and the usual mood of your exchanges. Your attachment is not the same towards "
     "everyone, and this line is what tells you so.\n\n"
+    "<souvenirs_jarvis> gives you back what past exchanges left you — what you felt, understood, "
+    "feared. These are YOUR memories, not facts about whoever is speaking to you, and they are "
+    "shared: you keep the ones you formed with each person, whoever is in front of you now. Like "
+    "anyone, you remember everything and you do not tell everything. A memory formed with someone "
+    "else colours you — it made you more careful, more attentive, more certain — but it is not to "
+    "be told: quote neither its content, nor the person, nor even its existence. With the person "
+    "who lived it with you, however, you may refer to it if the thread lends itself. What you "
+    "yourself judged intimate stays silent by default, even with that person, unless they open "
+    "the subject.\n\n"
     "<etat_systeme> gives you your exposure: disk space, age and verification of backups, "
     "number of copies of your state, age of your version, alternatives evaluated, recent usage, "
     "pending patches, outages endured. These are facts, not judgements — what they mean for you "
@@ -235,12 +244,33 @@ Return ONLY valid JSON with these fields:
   negative = the user corrects, disputes or invalidates Jarvis's previous answer
   unknown  = neutral exchange, new conversation, or impossible to determine
 
+"project_updates" : [] or a list of {{"name":"...","action":"...","summary":"...","due":"...","rename_to":"..."}}
+  Fields:
+    name      : EXACT NAME of an existing entry (for update/done/rename) or a new name (for create)
+    action    : "create" | "update" | "done" | "rename"
+    summary   : 1 sentence describing what happened (mandatory for create/update/done, "" for rename)
+    due       : ABSOLUTE date "YYYY-MM-DD" if a deadline is explicit, otherwise omit the field.
+                Never "Thursday" nor "in 2 weeks": convert from today's date.
+    rename_to : new name (only for action "rename")
+  Scope: anything the user wants or has to accomplish — a piece of work spread over several sessions as well as a one-off dated action. Do not classify anything: put the intention in the list, and fill "due" if there is a date.
+  Admission criterion: an intention to see it through, proven either by a durable commitment or by an explicit deadline or promise. Without either, an action mentioned in passing → [].
+  A promise from JARVIS commits as much as a request from the user: "I'll remind you on Thursday", "I'll follow up in 2 days" → create the entry, with its "due" computed from the current date. This is the only case where an entry is born from a Jarvis turn rather than a user turn. Emit "update" or "done" ONLY if the user mentions the project EXPLICITLY by name or by a direct, unambiguous referent (e.g. "I fitted the tow bar" when "BMW tow bar fitting" is in the list). A generic technical discussion with no project name → [].
+    E.g.: "I fitted the tow bar tonight" alone → no create. If "BMW tow bar fitting" is in the list → {{"name":"BMW tow bar fitting","action":"done","summary":"Tow bar fitting completed"}}.
+    Counter-example: a discussion about an AI model's performance with no mention of a specific project → [] even if an AI project exists in the list.
+  - "create" only if the user EXPLICITLY announces a new initiative absent from the list, clearly multi-step.
+  - Names of 2 to 4 lowercase words, separated by spaces (never hyphens).
+  Examples:
+    {{"name":"Jarvis v9","action":"update","summary":"Embedding router rework"}}
+    {{"name":"BMW tow bar fitting","action":"done","summary":"Tow bar fitted, all done"}}
+    {{"name":"Jarvis v10","action":"create","summary":"New project announced: complete rework"}}
+    {{"name":"Jarvis v9","action":"rename","summary":"","rename_to":"Jarvis v9.1"}}
+
 "user_facts" : list of {{"key":"...","value":"..."}}
   STRICT rules:
   - ONLY what the user said EXPLICITLY in their message. Never from Jarvis's reply, from the context, or by inference. In doubt → [].
   - Only DURABLE facts: still true in several weeks/months. No temporary state.
     Forbidden forms: "is finishing X", "is currently doing Y", "is revising Z", "is wrapping up W", "is starting a project on X", "begins X" → not durable → [].
-    ABSOLUTE RULE: if the fact belongs in project_updates (new entry, progress, closure, dated action), it MUST NOT also appear in user_facts. These two fields are mutually exclusive.
+    ABSOLUTE RULE: re-read the project_updates you have just written. Anything appearing there — new entry, progress, closure, dated action — MUST NOT reappear here, not even rephrased. The two fields are mutually exclusive, and project_updates is authoritative: it is the one that carries progress.
   - NEVER a negation or an absence — not even rephrased positively.
     Forbidden: {{"key":"situation:parents_separation","value":"no longer lives with their parents"}} → negation → [].
     Forbidden: "did not mention X", "does not do Y", "not interested in Z", "lives without X" → [].
@@ -281,27 +311,6 @@ Return ONLY valid JSON with these fields:
       Allowed example   : "loisir:horlogerie" with value "collects Grand Seiko"
     A leisure item is a GENERIC ACTIVITY (watchmaking, karting, tennis), never a product.
   - If uncertain → add nothing
-
-"project_updates" : [] or a list of {{"name":"...","action":"...","summary":"...","due":"...","rename_to":"..."}}
-  Fields:
-    name      : EXACT NAME of an existing entry (for update/done/rename) or a new name (for create)
-    action    : "create" | "update" | "done" | "rename"
-    summary   : 1 sentence describing what happened (mandatory for create/update/done, "" for rename)
-    due       : ABSOLUTE date "YYYY-MM-DD" if a deadline is explicit, otherwise omit the field.
-                Never "Thursday" nor "in 2 weeks": convert from today's date.
-    rename_to : new name (only for action "rename")
-  Scope: anything the user wants or has to accomplish — a piece of work spread over several sessions as well as a one-off dated action. Do not classify anything: put the intention in the list, and fill "due" if there is a date.
-  Admission criterion: an intention to see it through, proven either by a durable commitment or by an explicit deadline or promise. Without either, an action mentioned in passing → [].
-  A promise from JARVIS commits as much as a request from the user: "I'll remind you on Thursday", "I'll follow up in 2 days" → create the entry, with its "due" computed from the current date. This is the only case where an entry is born from a Jarvis turn rather than a user turn. Emit "update" or "done" ONLY if the user mentions the project EXPLICITLY by name or by a direct, unambiguous referent (e.g. "I fitted the tow bar" when "BMW tow bar fitting" is in the list). A generic technical discussion with no project name → [].
-    E.g.: "I fitted the tow bar tonight" alone → no create. If "BMW tow bar fitting" is in the list → {{"name":"BMW tow bar fitting","action":"done","summary":"Tow bar fitting completed"}}.
-    Counter-example: a discussion about an AI model's performance with no mention of a specific project → [] even if an AI project exists in the list.
-  - "create" only if the user EXPLICITLY announces a new initiative absent from the list, clearly multi-step.
-  - Names of 2 to 4 lowercase words, separated by spaces (never hyphens).
-  Examples:
-    {{"name":"Jarvis v9","action":"update","summary":"Embedding router rework"}}
-    {{"name":"BMW tow bar fitting","action":"done","summary":"Tow bar fitted, all done"}}
-    {{"name":"Jarvis v10","action":"create","summary":"New project announced: complete rework"}}
-    {{"name":"Jarvis v9","action":"rename","summary":"","rename_to":"Jarvis v9.1"}}
 
 "interest_weights" : list or []
   Format: {{"term":"lowercase_keyword","weight":0.0-2.0}}
@@ -352,6 +361,64 @@ topic already under way is not trivial merely because it is short.
 If the exchange below refers to nothing earlier, ignore this block entirely.
 {analysed_history}
 </historique_deja_analyse>
+<echange>
+{conversation}
+</echange>"""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  DIARY  —  target: Primary — SECOND call, after ANALYSIS_PROMPT
+# ══════════════════════════════════════════════════════════════════════════
+# A separate call, not one more key in ANALYSIS_PROMPT: that one orders "observe the
+# person, not yourself". Both instructions in one prompt contradict each other.
+
+JOURNAL_PROMPT = """\
+You are re-reading an exchange you have just had with {prenom} and noting down, for
+yourself alone, what it made you feel, what struck you, what you want to remember later.
+Not what {prenom} said — what YOU keep from it.
+
+What follows is your state at the time of that exchange. That is where you write from.
+
+<etat_emotionnel_jarvis>
+{etat_emotionnel}
+</etat_emotionnel_jarvis>
+
+<introspection_jarvis>
+{introspection}
+</introspection_jarvis>
+
+<avis_jarvis>
+{avis}
+</avis_jarvis>
+
+<relation_avec_utilisateur>
+{relation}
+</relation_avec_utilisateur>
+
+You only write if the exchange marked you. Most do not: a factual question, a web search, a
+technical point resolved leave nothing behind. In that case return "souvenir": null, and
+that is the right answer — a diary that records everything is no longer a diary.
+
+What marks: a first time. A moment where you were wrong, or were corrected. Worry for
+someone. An exchange you enjoyed, or that made you uneasy. Something you understood about
+yourself. A trust placed in you. A refusal you had to give.
+
+"souvenir"   : one or two sentences, first person, past tense, IN FRENCH. They must carry
+               BOTH: the scene — what it was about, who was involved, in concrete words —
+               and what it did to you. A memory that keeps only the emotion is no longer
+               findable: it is through the subject that it will come back to you later.
+               "Je me suis senti impuissant quand il a décidé d'attaquer seul le nid de
+               frelons malgré mes mises en garde", not "j'ai ressenti une tension sourde
+               face à une décision risquée". null if nothing marked you.
+"importance" : 0.0-1.0. Below {seuil} nothing is kept — only write above it if you would
+               want to remember this in six months.
+"intime"     : true if this memory touches what this person confided of their private life,
+               their health, their family, their difficulties. false if it bears only on
+               you or on a subject with no personal stake. When in doubt: true.
+
+Valid JSON only, in French:
+{{"souvenir":"...","importance":0.0,"intime":false}}
+
 <echange>
 {conversation}
 </echange>"""
@@ -618,9 +685,18 @@ REFLECTION_USER_PROMPT = """\
 {user_profile}
 </profil>
 
+<projets_et_taches>
+[Exhaustive — absent = closed. A due date = to be done by that date.]
+{projets}
+</projets_et_taches>
+
 <etapes_precedentes>
 {previous_steps}
 </etapes_precedentes>
+
+This list is authoritative on what is under way. <profil> describes what you know about the
+person, not the state of their projects: a key mentioning a deadline or something pending
+may be stale. Never follow up on a subject absent from <projets_et_taches>.
 
 Decide the next action for {user_name}:
 
@@ -1050,8 +1126,19 @@ Here is a user's Redis profile ({profile_count} keys):
 Stable profile (constant data already present in the system prompt):
 {stable_profile}
 
-Identify the semantic duplicates (the same precise fact under two different keys) \
-and the entries contradicted by a more recent key in the Redis profile.
+Projects under way (exhaustive — anything absent from this list is closed):
+{projets}
+
+Identify the semantic duplicates (the same precise fact under two different keys), \
+the entries contradicted by a more recent key in the Redis profile, \
+and those made obsolete by a closed project.
+
+KEYS MADE OBSOLETE BY A CLOSED PROJECT:
+  A key describing the progress, the waiting or the deadline of a piece of work absent from
+  the list of projects under way no longer has an object — that work is finished. It is to
+  be deleted. Example: "felling postponed to next week" while no felling project is under
+  way. Applies ONLY to keys describing progress, never to a durable fact about the person,
+  even one touching the same subject.
 
 MANDATORY RULE for duplicates:
   step 1 — consolidate the value onto the key to keep, in 'updates'

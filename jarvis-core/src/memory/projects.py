@@ -20,6 +20,17 @@ def get_user_projects(user_code: str) -> list:
     return redis_get_json(f"user:{user_code}:projects", default=[])
 
 
+def projets_actifs(projects: list | None) -> list:
+    """Les projets non clôturés. Filtre unique, partagé par tous les points d'injection.
+
+    `analyzer` en a un autre, délibérément : il conserve aussi les projets clos depuis
+    moins de 90 jours, pour que le modèle évite d'en recréer un déjà terminé.
+    """
+    return [
+        p for p in (projects or []) if isinstance(p, dict) and p.get("status") != "done"
+    ]
+
+
 def update_user_projects(user_code: str, projects: list):
     """Persist the project list.
     Done projects older than DONE_PROJECT_TTL_DAYS are dropped.

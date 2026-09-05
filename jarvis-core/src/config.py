@@ -566,6 +566,42 @@ AUTOBIO_IMPORTANCE_THRESHOLD = 0.45
 NOVELTY_THRESHOLD = 0.25
 PROJECT_THRESHOLD = 0.6
 
+# ── Souvenirs propres à Jarvis (journal intime) ───────────────────────────
+# Ses souvenirs vivent dans la même collection que ceux des utilisateurs, sous ce code.
+# `_build_memory_filter` ne filtre que sur `user_code` : le stockage, le rappel, le
+# classement et la déduplication s'appliquent sans modification.
+SELF_MEMORY_CODE = "JARVIS"
+
+# Plancher d'écriture. Un journal qui consigne chaque échange est un log, pas une mémoire :
+# les entrées de faible importance ne remontent jamais au rappel (classement par
+# similarité 0.50 + importance 0.30 + récence 0.20) et n'auront servi qu'à faire grossir la
+# collection. Strict par construction — seul ce qui est marquant s'écrit.
+SELF_MEMORY_MIN_IMPORTANCE = float(os.getenv("SELF_MEMORY_MIN_IMPORTANCE", "0.65"))
+
+# Le rappel du journal mêle deux sources, pour la même raison que <introspection_jarvis>
+# est injecté sans tri : un souvenir est écrit en méta (« j'ai ressenti », « j'ai compris »)
+# quand le message est concret, et la similarité ne les rapproche pas de façon fiable.
+#   • un SOCLE permanent — les plus marquants, portés en permanence, comme un humain porte
+#     ce qui l'a marqué sans avoir à le chercher ;
+#   • un rappel par SIMILARITÉ — ce que la conversation en cours fait remonter.
+SELF_MEMORY_PERMANENT_N = int(os.getenv("SELF_MEMORY_PERMANENT_N", "3"))
+SELF_MEMORY_SIMILAR_N = int(os.getenv("SELF_MEMORY_SIMILAR_N", "2"))
+
+# Seuil d'admission propre au journal, distinct de RECALL_MEMORY_SIMILARITY_THRESHOLD.
+# Une entrée de journal est une phrase à la première personne, plus longue et plus abstraite
+# qu'un fait sur l'utilisateur : le modèle d'embedding dilue la similarité avec la longueur,
+# et elle partage moins de vocabulaire avec la question. Les scores sont donc décalés vers le
+# bas. Mesuré sur trois souvenirs et dix-neuf requêtes :
+#
+#   pertinent   0.062 – 0.642     selon la formulation du souvenir
+#   hors-sujet  -0.069 – 0.288
+#
+# Les bandes se chevauchent : sur trois souvenirs mesurés, deux se rappellent proprement,
+# le troisième pas du tout. Aucun seuil ne rend ce rappel fiable — c'est le SOCLE permanent
+# qui garantit la présence, la similarité n'apporte que de la variabilité. D'où un seuil
+# haut : mieux vaut ne rien ajouter que d'ajouter du hors-sujet.
+SELF_MEMORY_RECALL_THRESHOLD = float(os.getenv("SELF_MEMORY_RECALL_THRESHOLD", "0.40"))
+
 # Fenêtre de récence pour le scoring des souvenirs autobiographiques dans search_memory().
 # Les souvenirs épisodiques utilisent une fenêtre de 30 jours (hardcodée).
 # Les autobiographiques (milestones durables) méritent une fenêtre plus longue pour rester

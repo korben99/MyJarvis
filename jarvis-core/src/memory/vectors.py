@@ -20,6 +20,8 @@ from config import (
     NOVELTY_THRESHOLD,
     QDRANT_MEMORY_COLLECTION,
     RECALL_MEMORY_SIMILARITY_THRESHOLD,
+    SELF_MEMORY_CODE,
+    SELF_MEMORY_RECALL_THRESHOLD,
 )
 from helpers import get_logger, get_qdrant, get_redis
 from qdrant_client.models import PointIdsList
@@ -186,7 +188,10 @@ def store_memory_vector(user_code: str, entry: dict):
 
 
 def store_autobiographical_event(
-    user_code: str, summary: str, importance: float
+    user_code: str,
+    summary: str,
+    importance: float,
+    extra_payload: dict | None = None,
 ) -> bool:
     """
     Store a major life / project milestone for the user.
@@ -265,6 +270,7 @@ def store_autobiographical_event(
                         "text": summary,
                         "importance": importance,
                         "timestamp": time.time(),
+                        **(extra_payload or {}),
                     },
                 }
             ],
@@ -277,6 +283,89 @@ def store_autobiographical_event(
     except Exception as e:
         logger.error("Autobiographical memory failed: %s", e)
         return False
+
+
+def store_self_memory(
+    summary: str, importance: float, concerne: str, intime: bool
+) -> bool:
+    """Souvenir propre à Jarvis — ce qu'un échange lui a fait, pas ce qu'il a appris.
+
+    Stocké dans la même collection sous `SELF_MEMORY_CODE`, donc soumis aux mêmes
+    déduplication, classement et rappel que les souvenirs d'utilisateur. Écrit directement
+    en `autobiographical` : le second appel de l'analyzer ne retient que le marquant, il
+    n'y a pas de couche épisodique à consolider ensuite.
+
+    `concerne` porte le code de l'utilisateur avec qui l'épisode s'est joué. Il n'agit pas
+    comme un filtre — les souvenirs sont communs, comme chez un humain. C'est le prompt qui
+    dit ce qui se raconte et à qui.
+    """
+    return store_autobiographical_event(
+        SELF_MEMORY_CODE,
+        summary,
+        importance,
+        extra_payload={"concerne": concerne, "intime": bool(intime)},
+    )
+
+
+def _socle_self_memories(n: int) -> list[dict]:
+    """Les n souvenirs les plus marquants, sans requête — importance puis récence.
+
+    La collection du journal est petite par construction (plancher d'importance à
+    l'écriture), donc un scroll complet suffit et évite un embedding par tour.
+    """
+    try:
+        pts = get_qdrant().scroll(
+            collection_name=QDRANT_MEMORY_COLLECTION,
+            scroll_filter={
+                "must": [
+                    {"key": "user_code", "match": {"value": SELF_MEMORY_CODE}},
+                    {"key": "memory_type", "match": {"value": "autobiographical"}},
+                ],
+                "must_not": [{"key": "status", "match": {"value": "past"}}],
+            },
+            limit=200,
+            with_payload=True,
+        )[0]
+    except Exception as exc:
+        logger.debug("socle du journal illisible (%s)", exc)
+        return []
+
+    maintenant = time.time()
+    fenetre = AUTOBIO_RECENCY_WINDOW_DAYS * 86400
+
+    def _rang(p) -> float:
+        recence = max(0.0, min(1.0, 1 - (maintenant - p.payload.get("timestamp", maintenant)) / fenetre))
+        return p.payload.get("importance", 0) * 0.6 + recence * 0.4
+
+    pts.sort(key=_rang, reverse=True)
+    return [{"text": p.payload["text"]} for p in pts[:n]]
+
+
+def recall_self_memories(n_socle: int, n_similaires: int, query: str = "") -> list[dict]:
+    """Souvenirs propres injectés ce tour : un socle permanent, plus ce que le message rappelle.
+
+    Le socle garantit la présence — la similarité seule ne le fait pas, un souvenir étant
+    écrit en méta là où le message est concret. La part par similarité n'ajoute que de la
+    variabilité, et son seuil est volontairement haut : ne rien ajouter vaut mieux
+    qu'ajouter du hors-sujet.
+    """
+    souvenirs = _socle_self_memories(n_socle)
+    if query and n_similaires > 0:
+        # Dédup sur le texte : `search_memory` retire les champs internes avant de rendre,
+        # donc pas d'identifiant à comparer.
+        vus = {s["text"] for s in souvenirs}
+        for s in search_memory(
+            SELF_MEMORY_CODE,
+            query,
+            n_similaires + n_socle,
+            "autobiographical",
+            seuil=SELF_MEMORY_RECALL_THRESHOLD,
+        ):
+            if s["text"] not in vus:
+                souvenirs.append(s)
+                if len(souvenirs) >= n_socle + n_similaires:
+                    break
+    return souvenirs
 
 
 def _autobio_op(user_code: str, query: str, threshold: float, action: str) -> int:
@@ -418,9 +507,18 @@ def _build_memory_filter(user_code: str, scope: str) -> dict:
 
 
 def search_memory(
-    user_code: str, query: str, limit: int = 5, memory_scope: str = "auto"
+    user_code: str,
+    query: str,
+    limit: int = 5,
+    memory_scope: str = "auto",
+    seuil: float | None = None,
 ):
-    """Search vector memory. memory_scope filters to a specific layer or searches all ('auto')."""
+    """Search vector memory. memory_scope filters to a specific layer or searches all ('auto').
+
+    `seuil` surcharge le seuil d'admission. Il existe pour le journal de Jarvis, vectorisé
+    sur un sujet court là où un souvenir d'utilisateur l'est sur son texte entier : les deux
+    distributions de similarité ne se superposent pas et n'admettent pas la même coupure.
+    """
     # Profile scope has no Qdrant data — Redis profile is already injected via build_memory_context()
     if memory_scope == "profile":
         return []
@@ -455,7 +553,9 @@ def search_memory(
             # Clamp to [0, 1]: the collection uses Distance.DOT so scores can exceed 1.0
             # for old vectors that were stored before normalize_embeddings was enforced.
             sim = min(r.score, 1.0)
-            if sim < RECALL_MEMORY_SIMILARITY_THRESHOLD:
+            if sim < (
+                RECALL_MEMORY_SIMILARITY_THRESHOLD if seuil is None else seuil
+            ):
                 continue
             payload = r.payload
 

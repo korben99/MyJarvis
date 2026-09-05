@@ -31,6 +31,8 @@ import asyncio
 from config import (
     AGENT_ENABLED,
     OPINIONS_MAX_INJECTED,
+    SELF_MEMORY_PERMANENT_N,
+    SELF_MEMORY_SIMILAR_N,
     USERS,
     USER_ADMINS,
     USER_TIMEZONES,
@@ -160,6 +162,27 @@ def build_dynamic_prefix(
         if opinions:
             ops_lines = "\n".join(f"- {o['topic']} : {o['opinion']}" for o in opinions)
             parts.append(f"<avis_jarvis>\n{ops_lines}\n</avis_jarvis>")
+
+        # Souvenirs propres à Jarvis. Bloc distinct de <user_memories>, qui porte des faits
+        # SUR l'utilisateur : ceci est du vécu, et se range avec <avis_jarvis> et
+        # <etat_emotionnel_jarvis> — ce qui vient de lui.
+        #
+        # Aucun filtre sur `concerne` : les souvenirs sont communs, comme chez un humain.
+        # Ce qu'il en dit, et à qui, relève d'IDENTITY.
+        try:
+            from memory import recall_self_memories
+
+            souvenirs = recall_self_memories(
+                SELF_MEMORY_PERMANENT_N, SELF_MEMORY_SIMILAR_N, user_message
+            )
+            if souvenirs:
+                parts.append(
+                    "<souvenirs_jarvis>\n"
+                    + "\n".join(f"- {s['text']}" for s in souvenirs)
+                    + "\n</souvenirs_jarvis>"
+                )
+        except Exception as exc:
+            logger.debug("rappel des souvenirs propres ignoré (%s)", exc)
 
     if voice_mode:
         parts.append(get_prompt("VOICE_SUFFIX").strip())

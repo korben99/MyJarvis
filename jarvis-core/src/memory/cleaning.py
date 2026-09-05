@@ -276,10 +276,31 @@ def curative_profile_cleanup(user_code: str, stable_profile: dict | None = None)
             if stable_profile
             else "aucun"
         )
+        # Les projets en cours, sans quoi une clé décrivant l'avancement d'un chantier
+        # terminé reste indétectable : lue seule, « décalé à la semaine prochaine » est
+        # plausible indéfiniment. C'est la liste des projets qui la date.
+        from .projects import get_user_projects, projets_actifs
+
+        try:
+            _projets = [
+                p.get("name", "sans nom")
+                for p in projets_actifs(get_user_projects(user_code))
+            ]
+        except Exception as exc:
+            logger.debug("[%s] projets illisibles (%s)", user_code, exc)
+            _projets = None
+
         prompt = get_prompt("CURATIVE_CLEANUP_PROMPT").format(
             profile_count=len(profile),
             profile_str=profile_str,
             stable_profile=stable_str,
+            # None ≠ liste vide : indisponible n'autorise aucune conclusion, alors qu'une
+            # liste vide signifie « plus rien en cours » et rend tout avancement caduc.
+            projets=(
+                "  (liste indisponible — ne rien conclure d'une absence)"
+                if _projets is None
+                else "\n".join(f"  - {n}" for n in _projets) or "  aucun projet en cours"
+            ),
         )
 
         parsed = extract_llm_json(

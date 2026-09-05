@@ -18,6 +18,7 @@ from helpers import (
 
 import emotional_state as _es
 
+from .projects import projets_actifs
 from .selfmem import get_self_memory
 
 logger = get_logger("jarvis-memory")
@@ -230,9 +231,7 @@ def build_memory_context(
         projects = json.loads(_proj_raw) if _proj_raw else []
     except Exception:
         projects = []
-    active_projects = [
-        p for p in projects if isinstance(p, dict) and p.get("status") != "done"
-    ]
+    active_projects = projets_actifs(projects)
     if active_projects:
         # Tasks and projects share one list: a due date is what distinguishes them, so the
         # model reads an "échéance" or it doesn't — nothing to classify on its own.

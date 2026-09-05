@@ -42,7 +42,9 @@ from config import (
     DEFAULT_TEMP,
     IMPORTANCE_THRESHOLD,
     MAX_TOKENS_MEDIUM,
+    OPINIONS_MAX_INJECTED,
     PRIMARY_MODEL,
+    SELF_MEMORY_MIN_IMPORTANCE,
     USER_CODES,
     USERS,
 )
@@ -141,6 +143,19 @@ class AnalysisResult(BaseModel):
     importance: float | None = None
 
 
+class JournalEntry(BaseModel):
+    """Sortie du second appel — ce que l'échange a laissé à Jarvis.
+
+    Les trois champs sont déclarés : `extra: ignore` supprime en silence tout champ absent
+    du modèle, et un champ ajouté au prompt sans l'être ici ne parviendrait jamais en base.
+    """
+
+    model_config = {"extra": "ignore"}
+    souvenir: str | None = None
+    importance: float = 0.0
+    intime: bool = True  # défaut prudent : le prompt demande true dans le doute
+
+
 def _resume_depuis_extraction(result: dict) -> str:
     """Un résumé bâti avec les seuls mots que le modèle a lui-même extraits.
 
@@ -212,6 +227,74 @@ async def analyze_exchange(
             conversation, existing_projects, existing_profile_keys,
             stable_profile, analysed_history,
         )
+
+
+async def _journal_intime(conversation: str, user_code: str) -> bool:
+    """Second appel — le journal de Jarvis. Rend True si un souvenir a été écrit.
+
+    Séparé de `_analyse` parce que les deux consignes s'excluent : ANALYSIS_PROMPT ordonne
+    « observer la personne, pas toi-même ». Le prompt reçoit son état du moment — humeur,
+    dispositions, avis, relation à cet interlocuteur — sous IDENTITY : sans de quoi écrire
+    à la première personne, la sortie serait un résumé de plus.
+
+    Ne lève jamais : le journal est un ajout au cycle d'analyse, pas une condition de son
+    succès.
+    """
+    try:
+        import emotional_state as _es
+        from memory import get_self_memory, store_self_memory
+
+        self_mem = get_self_memory()
+        axes = [t for t in (self_mem.get("self_introspection") or {}).values() if t]
+        avis = [
+            f"  {o.get('topic', '?')} : {o.get('opinion', '')}"
+            for o in (self_mem.get("opinions") or [])[-OPINIONS_MAX_INJECTED:]
+        ]
+        rel = (self_mem.get("user_relations") or {}).get(user_code) or {}
+
+        prompt = get_prompt("JOURNAL_PROMPT").format(
+            prenom=USERS.get(user_code, {}).get("firstname", "cette personne"),
+            seuil=SELF_MEMORY_MIN_IMPORTANCE,
+            etat_emotionnel="\n".join(f"- {l}" for l in _es.render_prompt_lines())
+            or "- rien de saillant",
+            introspection="\n".join(f"- {t}" for t in axes) or "- aucun axe renseigné",
+            avis="\n".join(avis) or "  aucun avis formé",
+            relation="\n".join(f"- {k} : {v}" for k, v in rel.items() if k != "updated_at")
+            or "- pas encore d'historique",
+            conversation=conversation,
+        )
+        content = await call_llm_local_async_bg(
+            [
+                {"role": "system", "content": get_prompt("IDENTITY")},
+                {"role": "user", "content": prompt},
+            ],
+            model=PRIMARY_MODEL,
+            temperature=DEFAULT_TEMP,
+            max_tokens=MAX_TOKENS_MEDIUM,
+            json_response=True,
+            no_think=True,
+        )
+        entree = JournalEntry.model_validate(extract_llm_json(content))
+    except Exception as exc:
+        logger.warning("[JOURNAL] %s pour %s — souvenir ignoré", type(exc).__name__, user_code)
+        return False
+
+    texte = (entree.souvenir or "").strip()
+    importance = round(min(max(entree.importance, 0.0), 1.0), 3)
+    if not texte or importance < SELF_MEMORY_MIN_IMPORTANCE:
+        logger.debug(
+            "[JOURNAL] rien retenu (%s, importance %.2f < %.2f)",
+            user_code, importance, SELF_MEMORY_MIN_IMPORTANCE,
+        )
+        return False
+
+    ecrit = store_self_memory(texte, importance, user_code, entree.intime)
+    logger.info(
+        "[JOURNAL] %s importance=%.2f intime=%s : %s",
+        "souvenir écrit" if ecrit else "dédupliqué",
+        importance, entree.intime, texte[:110],
+    )
+    return ecrit
 
 
 async def _analyse(
@@ -298,9 +381,11 @@ async def _analyse(
 
         # Appel LLM : priorité basse (bg) pour ne pas bloquer le chat.
         # no_think=True : tâche d'extraction structurée — le modèle n'a pas besoin de
-        # raisonner, il doit classifier et reformater. En mode think, Qwen3.6 génère
-        # systématiquement ~1500 tok de thinking anglais sans fermer </think>, épuisant
-        # tout le budget sans jamais produire le JSON. no_think donne la réponse en <5s.
+        # raisonner, il doit classifier et reformater sous schéma. Le think n'aiderait pas
+        # au rangement d'un fait dans le bon champ, et coûterait un budget de réflexion sur
+        # un appel qui tourne par session et par utilisateur, toutes les heures.
+        # (Une objection historique — le think ne fermait pas </think> et épuisait le
+        # budget — ne tient plus : le ThinkingBudgetProcessor force la fermeture.)
         content = await call_llm_local_async_bg(
             [{"role": "user", "content": prompt}],
             model=PRIMARY_MODEL,
@@ -543,6 +628,10 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                 # Watermark mis à jour immédiatement — si la session suivante échoue,
                 # celle-ci est déjà marquée comme analysée (pas de double-analyse).
                 r.set(session["wm_key"], session["new_wm_ts"], ex=CHAT_LOG_TTL)
+
+                # Journal de Jarvis — appel séparé sur le même échange. Après le watermark :
+                # un échec ici ne doit pas faire réanalyser la session.
+                await _journal_intime(conversation, uc)
                 most_recent_analysis = analysis  # la dernière réussie en ordre chrono
 
                 # ── Fusion incrémentale ───────────────────────────────────

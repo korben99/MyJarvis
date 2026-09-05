@@ -112,7 +112,7 @@ def _check_memory_health() -> dict:
       - null_rate_7d     : null_summary_7d / total_7d (0.0–1.0)
       - norm_anomalies   : number of non-unit vectors in sample of 30 most recent
     """
-    from config import QDRANT_MEMORY_COLLECTION
+    from config import QDRANT_MEMORY_COLLECTION, SELF_MEMORY_CODE
 
     qdrant = get_qdrant()
     r = get_redis()
@@ -204,12 +204,44 @@ def _check_memory_health() -> dict:
 
         result[user_code] = stats
 
+    # Journal de Jarvis. Compté à part : ce ne sont pas des souvenirs SUR un utilisateur,
+    # et le volume est le seul indicateur qui dise si le plancher d'importance est bien
+    # placé — trop haut, la collection reste vide ; trop bas, elle devient un log.
+    try:
+        result[SELF_MEMORY_CODE] = {
+            "journal_count": qdrant.count(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                count_filter={
+                    "must": [{"key": "user_code", "match": {"value": SELF_MEMORY_CODE}}]
+                },
+                exact=True,
+            ).count,
+            "journal_intimes": qdrant.count(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                count_filter={
+                    "must": [
+                        {"key": "user_code", "match": {"value": SELF_MEMORY_CODE}},
+                        {"key": "intime", "match": {"value": True}},
+                    ]
+                },
+                exact=True,
+            ).count,
+        }
+    except Exception as exc:
+        logger.debug("sonde journal indisponible (%s)", exc)
+
     return result
 
 
 def _fmt_memory_health(health: dict) -> str:
     lines = []
     for user_code, s in health.items():
+        if "journal_count" in s:
+            lines.append(
+                f"  {user_code}: journal={s['journal_count']} souvenirs "
+                f"(dont {s.get('journal_intimes', 0)} intimes)"
+            )
+            continue
         days = f"{s['days_since']}j" if s.get("days_since") is not None else "jamais"
         norm_warn = f" ⚠ {s['norm_anomalies']} vecteurs non-normalisés" if s.get("norm_anomalies", 0) > 0 else ""
         null_pct = f"{int(s.get('null_rate_7d', 0) * 100)}%"
@@ -479,6 +511,30 @@ def _fmt_introspection(axes: dict) -> str:
     return "\n".join(lignes) or "  aucun axe encore renseigné"
 
 
+def _fmt_projets_actifs(user_code: str) -> str:
+    """Projets non clos d'un utilisateur, au format du bloc injecté en conversation.
+
+    Ce que le profil décrit et ce que les projets décrivent divergent : le profil retient
+    des états passagers (« abattage décalé à la semaine prochaine ») qu'aucune clôture de
+    projet ne vient effacer. Sans cette liste, la phase utilisateur relance sur des sujets
+    terminés — c'est la seule qui décide d'un push, et la seule qui ne les voyait pas.
+    """
+    from memory import get_user_projects
+    from memory.projects import projets_actifs
+
+    try:
+        projets = projets_actifs(get_user_projects(user_code))
+    except Exception as exc:
+        logger.debug("projets illisibles pour %s (%s)", user_code, exc)
+        return "  (liste indisponible)"
+    lignes = [
+        f"- {p.get('name', 'sans nom')}"
+        + (f" (échéance : {p['due_at'][:10]})" if p.get("due_at") else "")
+        for p in projets
+    ]
+    return "\n".join(lignes) or "  aucun projet en cours"
+
+
 def _fmt_opinions(opinions: list[dict]) -> str:
     if not opinions:
         return "  aucune opinion"
@@ -627,6 +683,7 @@ async def _call_user_reflection_llm(
         user_activity=activity_str,
         user_relation=json.dumps(user_ctx["user_relation"], ensure_ascii=False),
         user_profile=_fmt_single_user_profile(user_ctx["profile"]),
+        projets=_fmt_projets_actifs(user_code),
         previous_steps=_fmt_previous_steps(previous_steps),
     )
 
