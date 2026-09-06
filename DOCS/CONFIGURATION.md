@@ -126,6 +126,23 @@ images, keeping only what is **fixable** — a CVE with no fixed version is drop
 time, being both unactionable and unwise to reference. Results are cached in Redis
 (`jarvis:cve`) and read by `vitals`. See the cheatsheet for the manual commands.
 
+**Fixable *by us*, not in the abstract.** `--only-fixed` answers "does a corrected version
+exist", which is not "can I apply it". On a container image the only remedy is to pull a
+newer one: if the running image is already the latest published, the CVE is unactionable
+whatever the package's fixed version says. So on a **critical** CVE against an image, the
+scan checks whether there is anything to pull — and if not, that source's counts are left
+out of the aggregate that feeds `cve_critiques`, α and the incident.
+
+Nothing disappears: the counts stay visible in `par_source` with a `remede` field, and a log
+line states the exclusion at every scan. The check re-opens by itself — the day upstream
+republishes, the digest differs, the CVEs are counted again, and the alert then carries a
+real action (`docker compose pull`).
+
+Undeterminable means counted: a network failure, an unreachable registry or a locally-built
+image (no registry digest) all yield "unknown", and the CVEs are counted. Only a clear "the
+running image *is* the latest" sets them aside. The check costs one network call, and only
+fires when a source actually has a critical.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CVE_CONTAINERS` | `jarvis-redis,jarvis-qdrant,jarvis-webui` | Containers whose images are scanned alongside the venv |

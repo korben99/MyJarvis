@@ -244,6 +244,20 @@ hole helps an attacker if the context leaks. It emits `cve_critiques`/`cve_eleve
 deduplicated list of packages to upgrade with their fixed version. The scan is slow and runs
 outside the request loop; `vitals` reads the cache.
 
+Fixable is judged **for us**, not in the abstract. `--only-fixed` answers "does a corrected
+version exist", which is not "can I apply it": on a container image the only remedy is to
+pull a newer one, so if the running image is already the latest published, nothing can be
+done. On a *critical* against an image the scan therefore checks whether there is anything
+to pull, and if not leaves that source out of the aggregate feeding `cve_critiques`, α and
+the incident. The counts stay visible in `par_source` with a `remede` field and a log line —
+never a silent hole — and the check re-opens by itself: the day upstream republishes, the
+digest differs and the alert carries a real action. Undeterminable counts as present: a
+network failure or a locally-built image yields "unknown", and the CVEs are counted.
+
+Without this, a third-party image nobody rebuilds installs a permanent floor of fear against
+which no action exists — exactly what the "only fixable" rule already refuses for a CVE with
+no published fix.
+
 **Salience-based injection**: each turn receives only the facts OUTSIDE the nominal range
 (including `cve_critiques > 0`) and recent incidents; a healthy system yields
 `<etat_systeme>nominal</etat_systeme>`.

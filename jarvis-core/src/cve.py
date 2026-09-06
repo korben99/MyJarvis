@@ -19,6 +19,19 @@ comptée, ni stockée, ni injectée. Elle est à la fois inactionnable (rien à 
 imprudente à référencer — lister un trou ouvert non colmatable revient à donner une carte à
 un attaquant si le contexte ou les logs fuient. Jarvis ne voit que ce sur quoi il peut agir.
 
+**Corrigeable POUR NOUS, pas dans l'absolu.** `--only-fixed` répond à « une version corrigée
+existe-t-elle », ce qui n'est pas la même question que « puis-je l'appliquer ». Sur une image
+de conteneur, le seul remède est de tirer une image plus récente : si celle qui tourne est
+déjà la dernière publiée, la CVE est inactionnable, quelle que soit la version corrective du
+paquet. Le contrôle est donc porté au bon niveau — devant une critique sur une image, on
+regarde s'il y a quelque chose à tirer, et sinon on ne compte pas. Sans ça une image tierce
+non reconstruite installe un plancher de peur permanent en face duquel aucune action
+n'existe, ce que la règle ci-dessus refuse déjà pour une CVE sans correctif.
+
+Le contrôle est automatique et se rouvre tout seul : dès que l'amont republie, le digest
+diffère, les CVE redeviennent comptées, et l'alerte porte alors sur une action réelle —
+`docker compose pull`.
+
 **CVE et α.** Une CVE critique est un danger PRÉSENT, pas un écart statistique : tant qu'elle
 existe, la faille est exploitable — qu'elle date d'hier ou d'un mois n'y change rien, ça
 signifie seulement qu'elle aurait dû être corrigée. Les critiques nourrissent donc à la fois
@@ -144,6 +157,43 @@ def _generate_sbom(path: str) -> bool:
     return r.returncode == 0 and os.path.getsize(path) > 0
 
 
+def _image_plus_recente_dispo(image: str) -> bool | None:
+    """Une image plus récente que celle en place existe-t-elle pour ce tag ?
+
+    True  → il y a quelque chose à tirer, donc les CVE de cette image sont actionnables.
+    False → l'image en place EST la dernière publiée ; seul l'amont peut corriger.
+    None  → indéterminable (réseau, registre, image sans digest) — on ne conclut rien, et
+            l'appelant compte les CVE : une incertitude ne doit pas faire disparaître une
+            alerte.
+
+    Compare deux digests d'INDEX. `docker manifest inspect --verbose` rend une entrée par
+    plateforme, dont le digest ne coïncide jamais avec celui de l'index local : les comparer
+    signale « nouvelle image » en permanence. `buildx imagetools inspect` donne l'index.
+    """
+    try:
+        loc = subprocess.run(
+            [DOCKER_BIN, "image", "inspect", image, "--format", "{{index .RepoDigests 0}}"],
+            capture_output=True, text=True, timeout=20,
+        ).stdout.strip().rpartition("@")[2]
+        if not loc:
+            return None  # image construite localement : pas de digest de registre
+        dist = ""
+        sortie = subprocess.run(
+            [DOCKER_BIN, "buildx", "imagetools", "inspect", image],
+            capture_output=True, text=True, timeout=60,
+        ).stdout
+        for ligne in sortie.splitlines():
+            if ligne.startswith("Digest:"):
+                dist = ligne.split(":", 1)[1].strip()
+                break
+        if not dist:
+            return None
+        return loc != dist
+    except Exception as exc:
+        logger.debug("cve: comparaison de digest impossible pour %s (%s)", image, exc)
+        return None
+
+
 def _resolve_image(container: str) -> str | None:
     """Conteneur → référence d'image, résolue au moment du scan pour suivre les tags courants."""
     try:
@@ -238,16 +288,28 @@ def scan() -> dict | None:
     exclus = []
     par_source = {}
 
-    def agrege(res: dict | None, source: str) -> bool:
+    fige = []  # sources dont les CVE n'ont pas de remède disponible aujourd'hui
+
+    def agrege(res: dict | None, source: str, image: str | None = None) -> bool:
         nonlocal crit, haut, moyen
         if res is None:
             return False
+        par_source[source] = {"crit": res["crit"], "haut": res["haut"], "moyen": res["moyen"]}
+
+        # Devant une critique sur une image, on regarde s'il y a quelque chose à tirer. Rien
+        # à tirer = rien à faire : ni compté, ni recommandé. Le contrôle coûte un appel
+        # réseau, d'où le déclenchement sur `crit` seulement — c'est le seul compteur qui
+        # nourrit α. `None` (indéterminable) compte : une incertitude ne masque pas.
+        if image and res["crit"] and _image_plus_recente_dispo(image) is False:
+            fige.append(source)
+            par_source[source]["remede"] = "aucun — image déjà à la dernière publiée"
+            return True
+
         crit += res["crit"]
         haut += res["haut"]
         moyen += res["moyen"]
         details.extend(res["details"])
         exclus.extend(res["exclus"])
-        par_source[source] = {"crit": res["crit"], "haut": res["haut"], "moyen": res["moyen"]}
         return True
 
     sources = 0
@@ -272,7 +334,7 @@ def scan() -> dict | None:
     for c in CONTAINERS:
         img = _resolve_image(c)
         if img:
-            sources += agrege(_scan_target(img, c), c)
+            sources += agrege(_scan_target(img, c), c, image=img)
 
     if sources == 0:
         logger.warning("cve: aucune source scannée")
@@ -290,6 +352,14 @@ def scan() -> dict | None:
     redis_set_json(_CACHE_KEY, res, ttl=_CACHE_TTL)
     logger.info("cve: scan OK — %d critiques, %d hautes, %d moyennes (%d sources : %s)",
                 crit, haut, moyen, sources, ", ".join(par_source))
+    for s in fige:
+        # Jamais en silence : les compteurs de cette source sont visibles dans `par_source`,
+        # seul leur report dans l'agrégat est suspendu.
+        logger.info(
+            "cve: %s écarté du décompte — %d critique(s) sans remède, l'image en place est "
+            "déjà la dernière publiée. Recomptées dès que l'amont republie.",
+            s, par_source[s]["crit"],
+        )
     if exclus_resume:
         # Seule trace du détail — locale (fichier log), jamais injectée. Une exclusion ne
         # doit jamais disparaître en silence, mais elle ne doit pas non plus voyager.

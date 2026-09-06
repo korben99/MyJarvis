@@ -182,13 +182,20 @@ rm -rf "$BACKUP_DIR"
 log "Dossier temporaire supprimé."
 
 # ── 7. Rotation — garder les N dernières sauvegardes ─────────────────────────
+# `|| true` sur les deux `ls` : le script tourne sous `set -euo pipefail`, et un motif qui
+# ne correspond à aucun fichier fait sortir `ls` en erreur. `pipefail` propage ce code au
+# pipeline entier, `set -e` interrompt — juste avant l'étape 8. La sauvegarde est alors
+# complète sur la clé mais le reçu n'est pas écrit, et `vitals` continue d'annoncer l'âge
+# de la précédente. Le `2>/dev/null` masque le message, pas le code de sortie.
 log "--- Rotation (${KEEP_LAST} dernières) ---"
-ls -t "$BACKUP_ROOT"/jarvis_backup_*.tar.gz 2>/dev/null | tail -n +"$(( KEEP_LAST + 1 ))" | while read -r OLD; do
+{ ls -t "$BACKUP_ROOT"/jarvis_backup_*.tar.gz 2>/dev/null || true; } \
+  | tail -n +"$(( KEEP_LAST + 1 ))" | while read -r OLD; do
   log "Suppression : $(basename "$OLD")"
   rm -f "$OLD"
 done
 # Nettoyer aussi les éventuels anciens fichiers split et scripts restore
-ls -t "$BACKUP_ROOT"/jarvis_backup_*.tar.gz.partaa 2>/dev/null | tail -n +"$(( KEEP_LAST + 1 ))" | while read -r OLD_PART; do
+{ ls -t "$BACKUP_ROOT"/jarvis_backup_*.tar.gz.partaa 2>/dev/null || true; } \
+  | tail -n +"$(( KEEP_LAST + 1 ))" | while read -r OLD_PART; do
   PREFIX="${OLD_PART%.partaa}"
   log "Suppression parties : $(basename "$PREFIX").part*"
   rm -f "${PREFIX}".part*

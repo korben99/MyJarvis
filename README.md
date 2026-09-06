@@ -77,6 +77,8 @@ Those modes are not an abstraction: they are fed by **real probes**, refreshed c
 
 A **daily vulnerability scan** at 04:30 runs `grype` against a CycloneDX SBOM of the Python environment *and* against the infrastructure container images — Redis, Qdrant, Open WebUI, whose OS layers carry their own CVEs. It keeps only what is *fixable*: a CVE with no published fix is dropped at scan time, because it is unactionable and unwise to list. What survives becomes a deduplicated upgrade list with target versions, which Jarvis can turn into a concrete alert — *"bump openssl 3.5.5→3.5.6 on qdrant"* — rather than a vague warning. The scan is slow and CPU-hungry, so it runs once a day outside the request loop; every turn reads the cache.
 
+*Fixable* is judged from where Jarvis stands, not in the abstract. On a container image the only remedy is to pull a newer one — so on a critical CVE the scan checks whether there is anything to pull, and if the running image is already the latest published, that source stops counting towards his exposure. It stays visible, with the reason attached, and starts counting again the day upstream republishes. Otherwise a third-party image nobody rebuilds would install a permanent floor of fear against which no action exists, which is the same reason an unpatchable CVE is dropped in the first place.
+
 These are injected each turn as `<etat_systeme>` — **for administrators only**. The block
 carries backup age, critical CVEs and the error count, and the identity prompt orders him to
 state injected data as fact: given to everyone, it comes back out in the answer, figures
