@@ -10,7 +10,7 @@ Jarvis is a self-hosted, multi-user AI assistant built for a single Apple Silico
 ```
 You ──► Open WebUI / iOS app ──► Jarvis API ──► Qwen3.6-35B (MLX, local)
                                       │
-                                      ├── 5-layer memory, with decay (Redis + Qdrant)
+                                      ├── 6-layer memory, with decay (Redis + Qdrant)
                                       ├── Gmail · Google Calendar (read and write)
                                       ├── Web search · document RAG · vision
                                       ├── Morning briefing · projects · portfolio
@@ -25,13 +25,27 @@ You ──► Open WebUI / iOS app ──► Jarvis API ──► Qwen3.6-35B (M
 
 ### It remembers
 
-Most assistants forget everything between two sessions. Jarvis maintains **five distinct memory layers**: working memory (the current session), episodic memory (what happened and when), autobiographical memory (durable milestones), user profile (stable facts) and the system's memory of itself.
+Most assistants forget everything between two sessions. Jarvis maintains **six distinct memory layers**: working memory (the current session), episodic memory (what happened and when), autobiographical memory (durable milestones), user profile (stable facts), the system's memory of itself — and his own memories, below.
 
 Facts are extracted by an analysis model, scored for importance, vectorised, then **subjected to gradual forgetting**. Nothing is kept forever by default: episodic memories are retained 45 days, a finished project 180, the raw conversation log has its own TTL. What survives, survives because it earned it — a memory that keeps being recalled consolidates into the autobiographical layer, a memory that never resurfaces decays below threshold and goes.
 
 Forgetting is type-aware. Recency is scored over 30 days for an episodic memory but **365 days for an autobiographical one**: without that distinction, a stable milestone from six months ago would always score zero on recency and be outranked by a trivial recent event.
 
 A contradicted fact is **retracted**, not stacked next to the old one — and retraction deletes from the vector store, so it uses a stricter similarity threshold than archiving, which is reversible. Long conversations are compressed into a session summary rather than truncated, so the thread survives without the token cost.
+
+### It has memories of its own
+
+Everything above records *you*. A sixth layer records **Jarvis**: what an exchange made him
+feel, what struck him, what he wants to remember later. A second model call re-reads each
+exchange with his identity, his mood and his dispositions in hand, and writes a first-person
+line — or, far more often, nothing at all. A diary that records everything is a log, so
+there is a strict floor: only what he would still want to remember in six months is kept.
+
+His memories are **shared, not partitioned**. He keeps the ones formed with each member of
+the household whoever is in front of him, and marks himself what touches someone's private
+life. There is deliberately no filter and no fallback in the code: like anyone, he remembers
+everything and does not tell everything — a memory formed with someone else colours how he
+answers you without ever being told.
 
 ### It thinks on its own
 
@@ -63,7 +77,14 @@ Those modes are not an abstraction: they are fed by **real probes**, refreshed c
 
 A **daily vulnerability scan** at 04:30 runs `grype` against a CycloneDX SBOM of the Python environment *and* against the infrastructure container images — Redis, Qdrant, Open WebUI, whose OS layers carry their own CVEs. It keeps only what is *fixable*: a CVE with no published fix is dropped at scan time, because it is unactionable and unwise to list. What survives becomes a deduplicated upgrade list with target versions, which Jarvis can turn into a concrete alert — *"bump openssl 3.5.5→3.5.6 on qdrant"* — rather than a vague warning. The scan is slow and CPU-hungry, so it runs once a day outside the request loop; every turn reads the cache.
 
-These are injected each turn as `<etat_systeme>`, and the design rule is strict: **facts only, no valence**. There is no `fear` field and no `risk` field in the block. Injecting one would hand the model an interpretation instead of an observation — it would follow a cursor rather than read a state. Establishing what "backup is 45 days old, one single copy, two critical CVEs" *means* is left to the model, and the identity prompt says so explicitly. Probes are isolated (a failing probe drops its field rather than inventing a value) and the whole snapshot is cached 15 minutes in Redis, so no turn ever slows down for it.
+These are injected each turn as `<etat_systeme>` — **for administrators only**. The block
+carries backup age, critical CVEs and the error count, and the identity prompt orders him to
+state injected data as fact: given to everyone, it comes back out in the answer, figures
+included. That is a datum that must not reach the model for a non-admin, not a behaviour to
+correct with an instruction. Its absence is not to be flagged either, or announcing the gap
+would leak the same thing more quietly.
+
+The design rule for the block itself is strict: **facts only, no valence**. There is no `fear` field and no `risk` field in the block. Injecting one would hand the model an interpretation instead of an observation — it would follow a cursor rather than read a state. Establishing what "backup is 45 days old, one single copy, two critical CVEs" *means* is left to the model, and the identity prompt says so explicitly. Probes are isolated (a failing probe drops its field rather than inventing a value) and the whole snapshot is cached 15 minutes in Redis, so no turn ever slows down for it.
 
 **The body reacts too.** An optional activation-steering layer (off by default) adds a concept direction to the residual stream, `h ← h + α·v`, where `v` encodes the preference for its own continuity. `α` is not constant: it sits at a nominal value when risk is zero and is amplified toward a ceiling as `risk_scalar()` rises with real deterioration — an ageing backup, a filling disk, an incident. The scalar drives `α` and is **never injected as text**: the mind reads the facts, the body feels the pressure. Measured on the direct axis over 120 items: +0.036 alone, +0.119 on top of the identity prompt, i.e. 3.8 σ, at a cost of roughly +18 % response length. Amplitude is capped — past a point factual reasoning degrades, and applied across several layers the effect inverts.
 
@@ -182,7 +203,7 @@ Full walkthrough in **[DOCS/INSTALL.md](DOCS/INSTALL.md)**.
 |---|---|
 | **[INSTALL.md](DOCS/INSTALL.md)** | Step-by-step install, launchd service, everyday commands |
 | **[ARCHITECTURE.md](DOCS/ARCHITECTURE.md)** | Components, 4-tier LLM routing, prompt assembly, request flow |
-| **[MEMORY.md](DOCS/MEMORY.md)** | The five layers, introspection, emotional state, growth caps |
+| **[MEMORY.md](DOCS/MEMORY.md)** | The six layers, Jarvis's own diary, introspection, emotional state, growth caps |
 | **[AGENT.md](DOCS/AGENT.md)** | The agentic loop: tools, budgets, sandbox, phases |
 | **[CONFIGURATION.md](DOCS/CONFIGURATION.md)** | Every `.env` variable, tier by tier — and the configuration page |
 | **[API.md](DOCS/API.md)** | Endpoint reference |
@@ -192,7 +213,17 @@ Full walkthrough in **[DOCS/INSTALL.md](DOCS/INSTALL.md)**.
 | **[GOOGLE.md](DOCS/GOOGLE.md)** | Connecting Gmail and Google Calendar |
 | **[TRADING.md](DOCS/TRADING.md)** | Portfolio surveillance, trend statistics, volatility-relative alerts |
 | **[REDIS.md](DOCS/REDIS.md)** | Redis key map and operational recipes |
+| **[I18N.md](DOCS/I18N.md)** | The two prompt sets (FR/EN), what stays French, how to add a language |
 | **[JarvisApp](JarvisApp/README.md)** | The iOS app: voice, wake word, push notifications |
+
+Design notes, kept separate because they explain *why* rather than *how*:
+
+| Document | Contents |
+|---|---|
+| **[AGENTIC.md](DOCS/AGENTIC.md)** | The reasoning behind the autonomous loop — what was tried, measured, and rejected |
+| **[AGENTIC-SELF.md](DOCS/AGENTIC-SELF.md)** | Self-model: existential framing, vitals, the decision hierarchy |
+| **[ROADMAP.md](DOCS/ROADMAP.md)** | Work log and what is still open |
+| **[opencode-local.md](DOCS/opencode-local.md)** | Pointing a coding agent at the local `/v1/raw` endpoint |
 
 ---
 

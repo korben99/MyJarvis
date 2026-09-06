@@ -14,6 +14,39 @@
 | **Qwen2.5-1.5B LoRA router** | −0.5 to −1.2 s vs Hermes-3B | Fine-tuned on 492 samples (val loss 0.047). Warmup with `ROUTER_SYSTEM` → LRU hit from the first call. Turn 2+: 95 % cache hit (1044/1093 tok). |
 | **Stable profile in system prompt** | ~0.1 s / turn | `<profil_utilisateur>` (~80 tokens) injected per-user into the system prompt — never reprocessed after warmup. |
 
+### Removed: speculative memory prefetch
+
+Memory recall used to be launched in parallel with routing and discarded if routing said no,
+justified by an embedding call "~2–3 s on CPU". Measured, the **whole** `search_memory()` —
+encoding, Qdrant query, interest weights, ranking — takes **13 ms median**. Anticipating
+13 ms did not justify a cancellable task, three cancellation branches, a guard skipping
+messages under 15 characters and a fallback path to recover the recall those messages lost.
+Recall now happens in `_gather2`, when routing has decided, in parallel with RAG and web.
+
+### Sampling profile — loop prevention
+
+`repetition_penalty` must be `> 1`: it is the only **multiplicative** penalty, hence the only
+one that opens a gap between an already-seen token and the rest. At `1.0` it is a no-op,
+leaving only presence (flat) and frequency (×n), both additive — on a loop that saturates the
+window they subtract a few logits from *every* candidate in the loop, with no exploitable
+differential. `1.1` is the ceiling for this family; beyond it, legitimate reuse of a technical
+term gets shaved.
+
+`repetition_context_size` is deliberately **short** (64, aligned with the other profiles). A
+wide window does not strengthen the pressure — `make_repetition_penalty` selects a *set*, so a
+token repeated forty times is penalised like one seen once, and observed loops are 3 to 23
+tokens. What a wide window does penalise is the recent legitimate vocabulary, which is the way
+*out* of the loop:
+
+| window | penalty on the loop | penalty on the escape vocabulary | differential |
+|---|---|---|---|
+| 256 | 3.60 | 2.65 | 0.95 |
+| **64** | 3.30 | **0.62** | **2.68** |
+| 32 | 2.55 | 0.62 | 1.93 |
+
+These penalties raise the barrier to *entering* a loop. They do not get you out of an
+established one, where the logit gap runs to tens of nats while they subtract two or three.
+
 ## KV cache design
 
 ```
@@ -140,7 +173,8 @@ whether `ThinkingBudgetProcessor` engages.
 
 | Function | Model | Think | Budget | Processor | Rationale |
 |---|---|---|---|---|---|
-| `analyze_exchange` | PRIMARY | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Structured extraction (topics, mood, facts, projects). Pure classification — thinking generates ~1500 tok of verbose English without ever closing `</think>`, proven by test. no_think gets the same result in under 5 s. |
+| `analyze_exchange` | PRIMARY | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Structured extraction (topics, mood, facts, projects). Pure classification under a schema — thinking would not help place a fact in the right field, and would cost a reasoning budget on a call that runs per session per user, every hour. |
+| `_journal_intime` | PRIMARY | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Jarvis's diary — second call on the same exchange, with `IDENTITY` as system message. Separate because `ANALYSIS_PROMPT` orders "observe the person, not yourself": both instructions in one prompt contradict each other. Writes nothing below `SELF_MEMORY_MIN_IMPORTANCE`. |
 
 ### Background — Memory (`memory.py`)
 

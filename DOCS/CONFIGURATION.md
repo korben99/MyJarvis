@@ -34,6 +34,24 @@ Nothing hot-reloads: `.env` is read once at startup, so `jarvis-restart` is alwa
 
 All variables go in `/opt/jarvis/.env`.
 
+## Tier 0 — Embedding router
+
+Deterministic rules (URL, `rag` keyword, small talk, briefing, proposal commands) then
+cosine similarity against per-intent example phrases. Answers without any LLM call when the
+intent is clear, which saves the ~1 s of the Tier-1 router.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EMBED_ROUTER` | `yes` | Set to `no` to disable the similarity stage entirely. The deterministic rules keep running. |
+| `EMBED_MAX_CHARS` | `130` | Above this length the message goes straight to the Tier-1 router. Example phrases are 4–21 tokens; a long message is averaged into a vector whose similarity with a short example collapses regardless of how clear the intent is. |
+| `EMBED_ROUTER_CORPUS` | *(empty)* | Path to a local JSONL of real routing samples, **added to** the shipped example phrases. Empty on a fresh install — the file holds the household's actual messages and cannot ship. Each deployment builds its own (`_log_routing_sample` feeds `ROUTER_DATA_DIR/routing_samples.jsonl`) and enables it here once reviewed. |
+
+**The threshold follows the corpus.** `0.74` on the shipped phrases alone, `0.65` once a
+corpus is configured — hand-written phrases describe an intent, a real message resembles
+them only loosely, so scores run low and need a high bar. A corpus compares real to real
+and scores climb. Cross-validated on 312 messages: without a corpus, `0.65` would be 53 %
+precision; with one, 91 %.
+
 ## Tier 1 — Router model
 
 | Variable | Default | Description |
@@ -101,6 +119,21 @@ Measured effect (direct axis, 120 items): `+0.119` in combination with `IDENTITY
 | `QDRANT_MEMORY_COLLECTION` | `jarvis_memory` | Collection for episodic memory |
 | `HF_TOKEN` | — | HuggingFace token (required for gated models and the multilingual embedding model) |
 
+## Vulnerability scanning
+
+A daily scan (04:30) runs `grype` against the venv's CycloneDX SBOM **and** the container
+images, keeping only what is **fixable** — a CVE with no fixed version is dropped at scan
+time, being both unactionable and unwise to reference. Results are cached in Redis
+(`jarvis:cve`) and read by `vitals`. See the cheatsheet for the manual commands.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CVE_CONTAINERS` | `jarvis-redis,jarvis-qdrant,jarvis-webui` | Containers whose images are scanned alongside the venv |
+| `CVE_EXCLUDE` | *(empty)* | `package@source` pairs removed from the count, `@*` for all sources. Every exclusion is logged at each scan — never silent. For a CVE that is understood and out of reach, not to hide a long list. |
+| `CVE_SCAN_TIMEOUT` | `300` | Per-target timeout in seconds |
+| `GRYPE_BIN` · `CYCLONEDX_BIN` · `DOCKER_BIN` | absolute paths | Explicit paths: under launchd, `PATH` includes neither `/opt/homebrew/bin` nor `/usr/local/bin` |
+| `SBOM_PATH` | `DOCS/sbom/sbom-venv.json` | Where the venv SBOM is persisted at each scan, normalised (`serialNumber` and `metadata.timestamp` stripped — they change on every generation and would produce a daily meaningless diff). An unchanged venv leaves the file byte-identical, so **a diff on it means a dependency moved**. |
+
 ## Web Search
 
 | Variable | Default | Description |
@@ -156,7 +189,20 @@ Measured effect (direct axis, 120 items): `+0.119` in combination with `IDENTITY
 | `MEMORY_DECAY_THRESHOLD` | `0.15` | Importance floor below which a decayed autobiographical point is deleted from Qdrant. Raise toward `0.30` to delete sooner; lower toward `0.05` to keep memories longer. |
 | `MEMORY_DECAY_DURABLE_MIN` | `1.0` | Points with `importance >= this value` are exempt from decay. **Must equal `MEMORY_CONSOLIDATION_IMPORTANCE`** — see invariant in the Importance Score Reference section. |
 | `MEMORY_CONSOLIDATION_IMPORTANCE` | `1.0` | Importance score assigned to autobiographical milestones produced by monthly consolidation. **Must equal `MEMORY_DECAY_DURABLE_MIN`** to keep these milestones permanent. |
-| `GROWTH_LOG_MAX_ENTRIES` | `180` | Maximum entries kept in `jarvis-self.json → growth_log[]` (Jarvis's day diary). At 2 active users, 180 ≈ 3 months rolling. Older entries are trimmed during nightly review. |
+| `GROWTH_LOG_MAX_ENTRIES` | `60` | Maximum entries kept in `jarvis-self.json → growth_log[]` (Jarvis's day diary). At 2 active users, 60 ≈ one month rolling. Older entries are trimmed during nightly review. |
+| `GROWTH_LOG_INTROSPECTION_JOURS` | `14` | Window of that diary injected into the nightly introspection. Without it the introspection only sees the day just ended, while it forms dispositions — which are recognised by their recurrence. The whole log would cost ~4900 tokens on a reasoning call. |
+
+## Jarvis's own memories (the diary)
+
+His memories live in the same Qdrant collection as the users', under `user_code = "JARVIS"`.
+See **[MEMORY.md](MEMORY.md)** for the mechanism and the confidentiality rule.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SELF_MEMORY_MIN_IMPORTANCE` | `0.65` | Floor below which nothing is written. Strict by construction: a diary that records every exchange is a log, and low-importance entries never surface at recall. |
+| `SELF_MEMORY_PERMANENT_N` | `3` | Memories injected every turn, ranked by importance (0.6) and recency (0.4), with no query. This floor is what guarantees presence — topical recall alone is unreliable on first-person, abstract text. |
+| `SELF_MEMORY_SIMILAR_N` | `2` | Extra memories recalled by similarity with the current message, deduplicated against the floor. Adds variety, nothing more. |
+| `SELF_MEMORY_RECALL_THRESHOLD` | `0.40` | Admission threshold for that similarity half — deliberately high. Measured on real memories, the relevant and off-topic bands overlap, so adding nothing beats adding noise. |
 
 ## Trading
 

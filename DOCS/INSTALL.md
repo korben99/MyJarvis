@@ -24,6 +24,23 @@ cd /opt/jarvis
 - creates every gitignored runtime directory (`RAGData/*` — including `RAGData/Trade/` —, `logs/`, `keys/`, `models/`, `jarvis-core/JarvisData/`)
 - copies `.env.example` → `.env` and `DOCS/examples/users_list.example.json` → `jarvis-core/JarvisData/users_list.json` (never overwrites existing files)
 - installs the `com.jarvis.api` launchd service from `DOCS/examples/com.jarvis.api.plist.template` and adds the `jarvis-start`/`jarvis-stop`/`jarvis-reload` aliases to your shell rc
+- **asks you for the minimum viable configuration** — see below
+
+### The interactive step
+
+On a first install, and only on a real terminal, the script asks for what has no sensible
+default: the administrator's first name, city, timezone and email, their **access code** —
+which is that user's API secret, so it is the one field with no default and the script
+refuses both an empty value and the template's `changeme1` — plus the interface language,
+the three local model names and an optional `HF_TOKEN`.
+
+Every model default is a public Hugging Face repository, so a plain Enter through the whole
+sequence gives a working installation with no token.
+
+It runs **only when `users_list.json` was just created**. Re-running after a `git pull` asks
+nothing and touches nothing — re-questioning would overwrite a live configuration. Without a
+TTY (CI, piped install) it is skipped with a warning, and `JARVIS_NONINTERACTIVE=1` disarms
+it explicitly.
 
 What's left, by hand:
 

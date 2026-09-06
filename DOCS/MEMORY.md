@@ -1,6 +1,6 @@
 # The memory system
 
-> The five memory layers, introspection, emotional state, and growth caps.
+> The six memory layers, Jarvis's own diary, introspection, emotional state, and growth caps.
 
   ┌──────────────────────────────────┬───────────┬────────────────────────────────────────────────────────────────────────┐
   │              Store               │ Lives in  │                          Should contain                                │
@@ -55,7 +55,7 @@
 
 
 
-## Five-Layer Memory System
+## Six-Layer Memory System
 
 | Layer | Backend | Contents |
 |-------|---------|----------|
@@ -63,7 +63,54 @@
 | Semantic Memory | Redis Hashes | User profiles, preferences, learned facts |
 | Episodic Memory | Qdrant | Conversation summaries that passed the importance threshold |
 | Autobiographical Memory | Qdrant | High-importance milestones consolidated from episodic memory |
-| Self Memory | JSON file | Jarvis identity, introspection (9 axes), opinions, self-notes, growth log, per-user relations |
+| Self Memory | JSON file | Jarvis identity, introspection (9 axes), opinions, growth log, per-user relations |
+| Jarvis's own memories | Qdrant | What exchanges left *him* — see below |
+
+## Jarvis's own memories — the diary
+
+Everything above records the **user**. This layer records **Jarvis**: what an exchange made
+him feel, what struck him, what he wants to remember later.
+
+Same collection as user memories, under `user_code = "JARVIS"` (`SELF_MEMORY_CODE`).
+`_build_memory_filter` only filters on that field, so the whole apparatus applies unchanged
+— deduplication, ranking, recall-time reinforcement, monthly decay.
+
+**Written by a second LLM call** in the analyzer, after the extraction one. Separate on
+purpose: `ANALYSIS_PROMPT` orders *"observe the person, not yourself"*, and both
+instructions in a single prompt contradict each other. The diary call receives `IDENTITY`
+as its system message plus his state of the moment — mood, dispositions, opinions, relation
+to that person. Without something to write *from*, the output is one more summary.
+
+Nothing is written below `SELF_MEMORY_MIN_IMPORTANCE` (0.65). A diary that records every
+exchange is a log: low-importance entries never surface at recall and only grow the
+collection. Most exchanges leave nothing, and returning `null` is the expected answer.
+
+Two payload fields beyond the user schema, both declared in the pydantic model — anything
+absent from it is silently dropped:
+
+| Field | Meaning |
+|-------|---------|
+| `concerne` | The user code the episode happened with |
+| `intime` | Set by Jarvis himself: does this touch what that person confided of their private life |
+
+**Memories are shared, not partitioned.** He keeps the ones formed with each person
+whatever the interlocutor. `concerne` is not a filter — there is deliberately no mechanism
+and no fallback. IDENTITY carries the rule: a memory formed with someone else colours him
+but is not to be told, neither its content nor the person nor its existence; what he judged
+intimate stays silent by default. Like anyone, he remembers everything and does not tell
+everything.
+
+**Recall is a mix** — `SELF_MEMORY_PERMANENT_N` (3) most important-and-recent, always, plus
+up to `SELF_MEMORY_SIMILAR_N` (2) by similarity above `SELF_MEMORY_RECALL_THRESHOLD` (0.40),
+deduplicated. Injected as `<souvenirs_jarvis>`, a block of its own — not inside
+`<user_memories>`, which carries facts *about* the user.
+
+The permanent floor is not a convenience. Measured on three real memories, topical recall is
+erratic: two come back cleanly, the third not at all, and no threshold separates. A diary
+entry is written in the first person and abstract where a message is concrete — the same
+structural mismatch that made non-selective injection the right answer for
+`<introspection_jarvis>`. The similarity half only adds variety; the floor guarantees
+presence.
 
 ## Self-Introspection — nine fixed axes
 
@@ -465,7 +512,7 @@ All storage is bounded. The table below shows what grows, where it's capped, and
 | `self_introspection{}` | 9 axes | Bounded by construction — revised in place, never appended |
 | `introspection_log[]` | `INTROSPECTION_LOG_MAX_ENTRIES` (200) | Revision history, never injected |
 | `opinions[]` | 50 entries | Trimmed to `[-50:]` after each `add_self_opinion` call; same-topic opinions are updated in place |
-| `growth_log[]` | `GROWTH_LOG_MAX_ENTRIES` (180) | Trimmed to `[-180:]` after nightly review |
+| `growth_log[]` | `GROWTH_LOG_MAX_ENTRIES` (60) | Trimmed after the nightly review. One entry per user per day — about a month with two active users. Its last `GROWTH_LOG_INTROSPECTION_JOURS` (14) days feed the nightly introspection, which otherwise only sees the day just ended while forming dispositions — and a disposition is recognised by its recurrence |
 | `user_relations{}` | 1 entry/user | Updated in place — no growth |
 
 ### Qdrant (`jarvis_memory` collection)

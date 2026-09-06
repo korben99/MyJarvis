@@ -73,12 +73,19 @@ circular dependency.
 `setup_logging()` sets level `WARNING` on `httpx`, `httpcore`, `primp`,
 `sentence_transformers`, `apscheduler`, `urllib3` and `asyncio`.
 
+`yfinance` is pinned to `CRITICAL`, not `WARNING`: it logs conditions the caller already
+handles — a 404 on an unknown symbol, "possibly delisted" — at `ERROR` level, and `ERROR` is
+precisely what is noisy. `trading/market.py` turns them into `None` and logs the failure
+itself with the ticker, so nothing diagnostic is lost. This matters beyond noise: those lines
+count towards `erreurs_log_24h`, which feeds vitals — one invalid symbol in a portfolio would
+raise a `degradation_interne` incident and push α up.
+
 ---
 
 ## Test suite
 
 ```bash
-# Fast loop — 92 unit tests, well under a second, no network at all
+# Fast loop — 103 unit tests, well under a second, no network at all
 ./venv/bin/python -m pytest jarvis-core/tests/ -m "not integration"
 
 # Same thing: the default run skips everything that needs a server or the web

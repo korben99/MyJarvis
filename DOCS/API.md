@@ -200,15 +200,21 @@ Conversations from the day are sorted by importance score descending before bein
 | `knowledge_gaps` | Redis counter hash | Top 5 flagged topics by frequency |
 | `pending_proposals` | `prompt_proposals.json` | Prevents duplicate refine_prompt proposals |
 | `last_reflection` | Redis sorted set (1 entry) | Previous action + outcome |
-| `behavioral_patterns` | Computed from last 20 reflection log entries | Action frequency, nothing-clustering by hour, recurring focus keywords |
 | `emotional_state` | `emotional_state.describe()` | Current internal state: humeur, confiance, energie (returns `"neutre"` when all dims < 0.25) |
 | `introspection` | `jarvis-self.json` | The filled introspection axes — replaced `self_notes` on 2026-08-21 |
 | `opinions[-5:]` | `jarvis-self.json` | Last 5 topic opinions written by `add_self_opinion` |
 | `user_relations` | `jarvis-self.json` | Affinity + style per user |
 | `user_profiles` | Redis hash per user | Capped at 20 keys/user for token budget |
 | `push_availability` | Redis `jarvis:device:token:{code}` | Real-time per-user iOS push status — prevents wasting cycles on users with no registered device |
+| `projets_et_taches` (phase 2) | Redis `user:{code}:projects` | Open projects only. Authoritative on what is under way — without it the user phase follows up on closed work, since the profile keeps stale progress keys |
 
-**`behavioral_patterns`** is computed deterministically (no LLM) from the reflection log: action frequency (≥ 20 % of cycles), time-of-day clustering for "nothing" choices (night/evening pattern), and recurring keywords in past focus fields (seen ≥ 3 times). Up to 5 bullet points.
+**No self-observation statistics.** A `behavioral_patterns` block once reported action
+frequencies over the last 20 cycles. None of the phase-1 actions (`nothing`,
+`refine_prompt`, `alert_admin`) is decided on those — they are decided on CVEs, incidents,
+health and gaps. And under the self-critical instruction that frames this prompt, a high
+`nothing` rate reads as a defect to correct, when doing nothing is the expected behaviour of
+a healthy system: the model then set itself the goal of acting, and had to justify an action
+the state contradicted.
 
 **Reflection action catalog** — actions the LLM can choose during each reflection cycle.
 Only outward-facing work lives here since 2026-08-21; memory upkeep moved to the night:
