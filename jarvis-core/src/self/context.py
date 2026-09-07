@@ -520,19 +520,14 @@ def _fmt_projets_actifs(user_code: str) -> str:
     terminés — c'est la seule qui décide d'un push, et la seule qui ne les voyait pas.
     """
     from memory import get_user_projects
-    from memory.projects import projets_actifs
+    from memory.projects import fmt_projets, projets_actifs
 
     try:
         projets = projets_actifs(get_user_projects(user_code))
     except Exception as exc:
         logger.debug("projets illisibles pour %s (%s)", user_code, exc)
         return "  (liste indisponible)"
-    lignes = [
-        f"- {p.get('name', 'sans nom')}"
-        + (f" (échéance : {p['due_at'][:10]})" if p.get("due_at") else "")
-        for p in projets
-    ]
-    return "\n".join(lignes) or "  aucun projet en cours"
+    return fmt_projets(projets) or "  aucun projet en cours"
 
 
 def _fmt_opinions(opinions: list[dict]) -> str:

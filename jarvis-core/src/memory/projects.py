@@ -10,7 +10,7 @@ import re
 from datetime import datetime, timezone
 
 from config import DONE_PROJECT_TTL_DAYS
-from helpers import get_logger, redis_get_json, redis_set_json
+from helpers import get_logger, redis_get_json, redis_set_json, rel_time_fr
 
 logger = get_logger("jarvis-memory")
 
@@ -29,6 +29,42 @@ def projets_actifs(projects: list | None) -> list:
     return [
         p for p in (projects or []) if isinstance(p, dict) and p.get("status") != "done"
     ]
+
+
+def projets_clos(projects: list | None) -> list:
+    """Les projets clôturés, du plus récemment terminé au plus ancien.
+
+    `update_user_projects` purge au-delà de DONE_PROJECT_TTL_DAYS : figurer ici signifie
+    donc « clos récemment ». L'ordre compte parce que la liste sert à dater des clés de
+    profil, et qu'une clôture ancienne n'en explique plus aucune.
+    """
+    clos = [
+        p for p in (projects or []) if isinstance(p, dict) and p.get("status") == "done"
+    ]
+    return sorted(clos, key=lambda p: p.get("last_update") or "", reverse=True)
+
+
+def fmt_projets(projects: list | None) -> str:
+    """Rendu d'une liste de projets pour les blocs injectés — conversation et réflexion.
+
+    Tâches et projets partagent une liste : c'est l'échéance qui les distingue, donc le
+    modèle lit une « échéance » ou n'en lit pas, rien à classer de lui-même.
+    Le dernier mouvement est rendu parce qu'aucune purge ne vise les projets ouverts —
+    seule leur ancienneté distingue un sujet vivant d'un sujet abandonné, et la clôture
+    appartient à l'utilisateur.
+    """
+    lignes = []
+    for p in projects or []:
+        ligne = f"- {p.get('name', 'sans nom')}"
+        if p.get("due_at"):
+            ligne += f" (échéance : {p['due_at'][:10]})"
+        try:
+            horodatage = datetime.fromisoformat(p["last_update"]).timestamp()
+            ligne += f" [{rel_time_fr(horodatage)}]"
+        except (KeyError, TypeError, ValueError):
+            pass
+        lignes.append(ligne)
+    return "\n".join(lignes)
 
 
 def update_user_projects(user_code: str, projects: list):
@@ -114,7 +150,12 @@ def _fuzzy_project_name(
 
     Scoring uses word overlap with two metrics (max is taken):
     - General: overlap / max(|A|, |B|)  — Jaccard-like
-    - Subset : overlap / min(|A|, |B|)  — catches subset names ("Jarvis" → "Jarvis v9")
+    - Subset : 1 when the shorter name is fully contained in the longer one, else 0
+               ("Jarvis" → "Jarvis v9", "attelage bmw" → "installation attelage bmw")
+
+    L'inclusion doit être COMPLÈTE : notée en proportion, deux noms de deux mots partageant
+    un seul mot marquent 0,5, et « vente X » absorbe « vente Y » alors que rien ne les
+    rapproche. Les noms de projets faisant deux à quatre mots, ce cas est le plus courant.
 
     Tokens are split on spaces, hyphens, and em-dashes so that slugified names
     and natural-language names score identically.
@@ -132,7 +173,7 @@ def _fuzzy_project_name(
         if overlap == 0:
             continue
         general = overlap / max(len(words_new), len(words_ex))
-        subset = overlap / min(len(words_new), len(words_ex))
+        subset = 1.0 if overlap == min(len(words_new), len(words_ex)) else 0.0
         score = max(general, subset)
         if score < threshold:
             continue
@@ -182,24 +223,17 @@ def apply_project_updates(user_code: str, project_events: list[dict]):
         )
 
         if action == "create":
+            # Pas de seuil plus permissif ici que pour la résolution ci-dessus : un
+            # rattachement abusif perd la tâche en silence, alors qu'un doublon se voit
+            # et se corrige. Les reformulations sont déjà couvertes par l'inclusion.
             if resolved not in project_map:
-                soft_match = _fuzzy_project_name(name, project_map, threshold=0.4)
-                if soft_match:
-                    resolved = soft_match
-                    project_map[resolved]["last_update"] = now
-                    logger.debug(
-                        "Project create: '%s' soft-matched to '%s' — skipping create",
-                        name,
-                        soft_match,
-                    )
-                else:
-                    project_map[resolved] = {
-                        "name": resolved,
-                        "status": "in_progress",
-                        "first_mentioned": now,
-                        "last_update": now,
-                        "updates": [],
-                    }
+                project_map[resolved] = {
+                    "name": resolved,
+                    "status": "in_progress",
+                    "first_mentioned": now,
+                    "last_update": now,
+                    "updates": [],
+                }
             else:
                 project_map[resolved]["last_update"] = now
 

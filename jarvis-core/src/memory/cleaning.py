@@ -10,7 +10,6 @@ import time
 from config import (
     DEFAULT_TEMP,
     EPISODIC_RETENTION_DAYS,
-    MAX_TOKENS_COMPACT,
     MEMORY_CONSOLIDATION_IMPORTANCE,
     MEMORY_DECAY_DURABLE_MIN,
     MEMORY_DECAY_FACTOR,
@@ -276,31 +275,36 @@ def curative_profile_cleanup(user_code: str, stable_profile: dict | None = None)
             if stable_profile
             else "aucun"
         )
-        # Les projets en cours, sans quoi une clé décrivant l'avancement d'un chantier
-        # terminé reste indétectable : lue seule, « décalé à la semaine prochaine » est
-        # plausible indéfiniment. C'est la liste des projets qui la date.
-        from .projects import get_user_projects, projets_actifs
+        # Les deux listes, sans quoi une clé décrivant l'avancement d'un chantier terminé
+        # reste indétectable : lue seule, « décalé à la semaine prochaine » est plausible
+        # indéfiniment. Ce sont les projets clos qui la datent — les actifs servent à
+        # reconnaître l'inverse, un chantier qui court toujours.
+        from .projects import (
+            apply_project_updates,
+            get_user_projects,
+            projets_actifs,
+            projets_clos,
+        )
 
         try:
-            _projets = [
-                p.get("name", "sans nom")
-                for p in projets_actifs(get_user_projects(user_code))
-            ]
+            _tous = get_user_projects(user_code)
+            _actifs = [p.get("name", "sans nom") for p in projets_actifs(_tous)]
+            _clos = [p.get("name", "sans nom") for p in projets_clos(_tous)]
         except Exception as exc:
             logger.debug("[%s] projets illisibles (%s)", user_code, exc)
-            _projets = None
+            _actifs = _clos = None
+
+        def _liste(noms: list | None) -> str:
+            if noms is None:
+                return "  (liste indisponible)"
+            return "\n".join(f"  - {n}" for n in noms) or "  aucun"
 
         prompt = get_prompt("CURATIVE_CLEANUP_PROMPT").format(
             profile_count=len(profile),
             profile_str=profile_str,
             stable_profile=stable_str,
-            # None ≠ liste vide : indisponible n'autorise aucune conclusion, alors qu'une
-            # liste vide signifie « plus rien en cours » et rend tout avancement caduc.
-            projets=(
-                "  (liste indisponible — ne rien conclure d'une absence)"
-                if _projets is None
-                else "\n".join(f"  - {n}" for n in _projets) or "  aucun projet en cours"
-            ),
+            projets=_liste(_actifs),
+            projets_clos=_liste(_clos),
         )
 
         parsed = extract_llm_json(
@@ -310,10 +314,17 @@ def curative_profile_cleanup(user_code: str, stable_profile: dict | None = None)
                 api_url=PRIMARY_API_URL,
                 api_key=PRIMARY_API_KEY,
                 temperature=DEFAULT_TEMP,
-                max_tokens=MAX_TOKENS_COMPACT,
+                # Réflexion active, comme la consolidation ci-dessus : le croisement des
+                # trois critères de suppression demande un raisonnement, et sans bloc
+                # <think> celui-ci se déroule dans la réponse, où il partage le plafond
+                # avec le JSON — l'objet arrive tronqué, ou pas du tout. Dans un bloc, il
+                # est refermé de force par ThinkingBudgetProcessor et le JSON dispose de
+                # son propre budget.
+                max_tokens=MAX_TOKENS_THINK_MEDIUM,
+                thinking_budget=THINKING_BUDGET_MEDIUM,
                 json_response=True,
-                no_think=True,
-                timeout=llm_timeout(MAX_TOKENS_COMPACT),
+                no_think=False,
+                timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
             )
         )
 
@@ -355,7 +366,33 @@ def curative_profile_cleanup(user_code: str, stable_profile: dict | None = None)
             logger.info(
                 "[%s] curative_profile_cleanup: deleted %s", user_code, keys_to_delete
             )
-        elif not updates:
+
+        # Ouverture des actions en cours restées hors des projets. Cette passe est le seul
+        # point qui voit à la fois le profil et les deux listes, donc leur différence :
+        # l'analyzer ne voit que la conversation, et un chantier qui s'installe comme
+        # contexte sans jamais être annoncé ne lui parvient pas. `apply_project_updates`
+        # rattache à l'existant sous le seuil flou plutôt que de créer un doublon.
+        a_creer = parsed.get("projets_a_creer", []) if isinstance(parsed, dict) else []
+        evenements = [
+            {
+                "name": p["name"].strip(),
+                "action": "create",
+                "summary": (p.get("summary") or "").strip(),
+            }
+            for p in (a_creer if isinstance(a_creer, list) else [])[:2]
+            if isinstance(p, dict)
+            and isinstance(p.get("name"), str)
+            and p["name"].strip()
+        ]
+        if evenements:
+            apply_project_updates(user_code, evenements)
+            logger.info(
+                "[%s] curative_profile_cleanup: projets ouverts %s",
+                user_code,
+                [e["name"] for e in evenements],
+            )
+
+        if not keys_to_delete and not updates and not evenements:
             logger.info("[%s] curative_profile_cleanup: profile is clean", user_code)
 
     except Exception as exc:

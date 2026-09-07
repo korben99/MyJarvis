@@ -18,7 +18,7 @@ from helpers import (
 
 import emotional_state as _es
 
-from .projects import projets_actifs
+from .projects import fmt_projets, projets_actifs
 from .selfmem import get_self_memory
 
 logger = get_logger("jarvis-memory")
@@ -233,17 +233,11 @@ def build_memory_context(
         projects = []
     active_projects = projets_actifs(projects)
     if active_projects:
-        # Tasks and projects share one list: a due date is what distinguishes them, so the
-        # model reads an "échéance" or it doesn't — nothing to classify on its own.
-        plines = [
-            f"- {p.get('name', 'sans nom')}"
-            + (f" (échéance : {p['due_at'][:10]})" if p.get("due_at") else "")
-            for p in active_projects
-        ]
         parts.append(
             "<projets_et_taches>\n"
-            "[Exhaustif — absent = clôturé. Une échéance = à faire pour cette date.]\n"
-            + "\n".join(plines)
+            "[Une échéance = à faire pour cette date, un crochet = dernier mouvement. "
+            "Absent ≠ clôturé : tout n'est pas enregistré ici.]\n"
+            + fmt_projets(active_projects)
             + "\n</projets_et_taches>"
         )
 

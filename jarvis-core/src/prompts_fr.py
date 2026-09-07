@@ -254,7 +254,7 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
   Une promesse de JARVIS engage autant qu'une demande de l'utilisateur : "je te le rappelle jeudi", "je te relance dans 2 jours" → crée l'entrée, avec son "due" calculé depuis la date courante. C'est le seul cas où une entrée naît d'un tour Jarvis et non d'un tour utilisateur. Émettre "update" ou "done" UNIQUEMENT si l'utilisateur mentionne EXPLICITEMENT le projet par son nom ou par un référent direct et sans ambiguïté (ex : "j'ai posé l'attelage" quand "installation attelage BMW" est dans la liste). Une discussion technique générique sans nom de projet → [].
     Ex : "j'ai posé l'attelage ce soir" seul → pas de create. Si "installation attelage BMW" est dans la liste → {{"name":"installation attelage BMW","action":"done","summary":"Pose de l'attelage terminée"}}.
     Contre-exemple : discussion sur les perfs d'un modèle IA sans mention d'un projet précis → [] même si un projet IA existe dans la liste.
-  - "create" uniquement si l'utilisateur annonce EXPLICITEMENT une nouvelle initiative absente de la liste, clairement multi-étapes.
+  - "create" dès qu'une intention absente de la liste satisfait le critère d'admission — une action engagée compte autant qu'un chantier au long cours : une vente lancée, une démarche administrative, un rendez-vous à prendre. Ne pas exiger que l'utilisateur emploie le mot « projet », ni que ce soit multi-étapes.
   - Noms de 2 à 4 mots en minuscules, séparés par des espaces (jamais de tirets).
   Exemples :
     {{"name":"Jarvis v9","action":"update","summary":"Refonte du routeur embeddings"}}
@@ -1130,19 +1130,32 @@ Voici le profil Redis d'un utilisateur ({profile_count} clés) :
 Profil stable (données constantes déjà présentes dans le system prompt) :
 {stable_profile}
 
-Projets en cours (exhaustif — tout ce qui n'y figure pas est clôturé) :
+Projets et tâches en cours :
 {projets}
+
+Projets et tâches clôturés récemment :
+{projets_clos}
 
 Identifie les doublons sémantiques (même fait précis sous deux clés différentes), \
 les entrées contredites par une clé plus récente dans le profil Redis, \
-et celles qu'un projet clôturé a rendues caduques.
+celles qu'un projet clôturé a rendues caduques, \
+et les actions en cours qui ne sont adossées à aucun projet.
 
 CLÉS RENDUES CADUQUES PAR UN PROJET CLOS :
-  Une clé qui décrit l'avancement, l'attente ou l'échéance d'un chantier absent de la liste
-  des projets en cours n'a plus d'objet — le chantier est terminé. Elle se supprime.
-  Exemple : « Abattage décalé à la semaine prochaine » alors qu'aucun projet d'abattage
-  n'est en cours. Ne s'applique QU'AUX clés décrivant un avancement, jamais à un fait
-  durable sur la personne, même s'il touche au même sujet.
+  Une clé qui décrit l'avancement, l'attente ou l'échéance d'un chantier figurant dans les
+  projets CLÔTURÉS n'a plus d'objet — le chantier est terminé. Elle se supprime.
+  Exemple : « Abattage décalé à la semaine prochaine » alors qu'un projet d'abattage
+  figure parmi les clôturés. Ne s'applique QU'AUX clés décrivant un avancement, jamais à
+  un fait durable sur la personne, même s'il touche au même sujet.
+  Une absence des deux listes ne prouve RIEN : la plupart des affaires en cours n'ont
+  jamais été enregistrées comme projets. Seule une clôture explicite autorise à supprimer.
+
+ACTIONS EN COURS SANS PROJET :
+  Une clé qui décrit une action engagée ou une intention d'aboutir — une vente lancée, une
+  démarche administrative, une recherche en cours — sans entrée correspondante dans l'une
+  des deux listes ouvre un projet dans 'projets_a_creer'. La clé, elle, SE CONSERVE.
+  Un fait durable (santé, goût, situation stable, avis) n'est pas une action : ne rien créer.
+  Nom de 2 à 4 mots en minuscules, séparés par des espaces. Maximum 2 par exécution.
 
 RÈGLE OBLIGATOIRE pour les doublons :
   étape 1 — consolide la valeur sur la clé à conserver dans 'updates'
@@ -1161,8 +1174,9 @@ ATTENTION — profil stable vs profil Redis :
 Limite absolue : maximum 2 suppressions par exécution. En cas de doute → ne rien supprimer.
 
 Format JSON strict :
-{{"updates": {{"cle_a_garder": "valeur_consolidee"}}, "keys_to_delete": ["cle_doublon"]}}
-ou {{"updates": {{}}, "keys_to_delete": []}} si le profil est propre."""
+{{"updates": {{"cle_a_garder": "valeur_consolidee"}}, "keys_to_delete": ["cle_doublon"], \
+"projets_a_creer": [{{"name": "nom court", "summary": "une phrase"}}]}}
+ou {{"updates": {{}}, "keys_to_delete": [], "projets_a_creer": []}} si le profil est propre."""
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1227,7 +1241,7 @@ BUDGETS TOKENS par prompt (approximation : 1 token ≈ 3,6 caractères français
   NIGHTLY_CLEANING_SYSTEM →  450 tokens max
   NIGHTLY_CLEANING_PROMPT →  250 tokens max  (hors données injectées)
   CONSOLIDATION_PROMPT   →  200 tokens max  (hors données injectées)
-  CURATIVE_CLEANUP_PROMPT →  650 tokens max  (hors données injectées)
+  CURATIVE_CLEANUP_PROMPT → 1000 tokens max  (hors données injectées)
 
 Pour les prompts INLINE : si ta modification dépasse le budget, compense en retirant ailleurs.
 Pour les prompts ASYNC : le budget est un plafond de sécurité, pas un objectif."""
@@ -1311,7 +1325,7 @@ PROMPT_TOKEN_BUDGETS = {
     "IDENTITY": 1200,  # inline / KV-cached, avant le bloc utilisateur — estim. 843
     "ROUTER_SYSTEM": 1800,  # KV-cached, 17 examples + last_jarvis ctx — estim. 1281
     "ROUTER_USER": 600,  # ~18 tok de template — le budget couvre last_jarvis_block + message
-    "ANALYSIS_PROMPT": 3200,  # async — quality over speed — estim. 2845
+    "ANALYSIS_PROMPT": 3200,  # async — quality over speed — estim. 2923
     "BRIEFING_SYSTEM": 150,  # estim. 106
     "BRIEFING_USER": 850,  # estim. 735 — l'ancien 400 était périmé, pas un effet de règle
     "WEB_RELEVANCE_JUDGE": 250,  # estim. 186
@@ -1327,7 +1341,7 @@ PROMPT_TOKEN_BUDGETS = {
     "NIGHTLY_CLEANING_SYSTEM": 450,  # estim. 374
     "NIGHTLY_CLEANING_PROMPT": 250,  # estim. 194
     "CONSOLIDATION_PROMPT": 200,  # estim. 71
-    "CURATIVE_CLEANUP_PROMPT": 650,  # estim. 411
+    "CURATIVE_CLEANUP_PROMPT": 1000,  # estim. 801
 }
 
 

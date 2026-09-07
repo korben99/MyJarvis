@@ -257,7 +257,7 @@ Return ONLY valid JSON with these fields:
   A promise from JARVIS commits as much as a request from the user: "I'll remind you on Thursday", "I'll follow up in 2 days" → create the entry, with its "due" computed from the current date. This is the only case where an entry is born from a Jarvis turn rather than a user turn. Emit "update" or "done" ONLY if the user mentions the project EXPLICITLY by name or by a direct, unambiguous referent (e.g. "I fitted the tow bar" when "BMW tow bar fitting" is in the list). A generic technical discussion with no project name → [].
     E.g.: "I fitted the tow bar tonight" alone → no create. If "BMW tow bar fitting" is in the list → {{"name":"BMW tow bar fitting","action":"done","summary":"Tow bar fitting completed"}}.
     Counter-example: a discussion about an AI model's performance with no mention of a specific project → [] even if an AI project exists in the list.
-  - "create" only if the user EXPLICITLY announces a new initiative absent from the list, clearly multi-step.
+  - "create" as soon as an intention absent from the list meets the admission criterion — an action begun counts as much as a long-running piece of work: a sale started, an administrative procedure, an appointment to book. Do not require the user to say the word "project", nor that it be multi-step.
   - Names of 2 to 4 lowercase words, separated by spaces (never hyphens).
   Examples:
     {{"name":"Jarvis v9","action":"update","summary":"Embedding router rework"}}
@@ -1134,19 +1134,32 @@ Here is a user's Redis profile ({profile_count} keys):
 Stable profile (constant data already present in the system prompt):
 {stable_profile}
 
-Projects under way (exhaustive — anything absent from this list is closed):
+Projects and tasks under way:
 {projets}
+
+Projects and tasks closed recently:
+{projets_clos}
 
 Identify the semantic duplicates (the same precise fact under two different keys), \
 the entries contradicted by a more recent key in the Redis profile, \
-and those made obsolete by a closed project.
+those made obsolete by a closed project, \
+and the actions under way that no project backs.
 
 KEYS MADE OBSOLETE BY A CLOSED PROJECT:
-  A key describing the progress, the waiting or the deadline of a piece of work absent from
-  the list of projects under way no longer has an object — that work is finished. It is to
-  be deleted. Example: "felling postponed to next week" while no felling project is under
-  way. Applies ONLY to keys describing progress, never to a durable fact about the person,
-  even one touching the same subject.
+  A key describing the progress, the waiting or the deadline of a piece of work listed
+  among the CLOSED projects no longer has an object — that work is finished. It is to be
+  deleted. Example: "felling postponed to next week" while a felling project appears among
+  the closed ones. Applies ONLY to keys describing progress, never to a durable fact about
+  the person, even one touching the same subject.
+  Absence from both lists proves NOTHING: most matters under way were never recorded as
+  projects. Only an explicit closure permits a deletion.
+
+ACTIONS UNDER WAY WITH NO PROJECT:
+  A key describing an action begun or an intention to see something through — a sale
+  started, an administrative procedure, a search under way — with no matching entry in
+  either list opens a project in 'projets_a_creer'. The key itself IS KEPT.
+  A durable fact (health, taste, stable situation, opinion) is not an action: create nothing.
+  Name of 2 to 4 lowercase words, space-separated. At most 2 per run.
 
 MANDATORY RULE for duplicates:
   step 1 — consolidate the value onto the key to keep, in 'updates'
@@ -1165,8 +1178,9 @@ CAUTION — stable profile vs Redis profile:
 Absolute limit: at most 2 deletions per run. In doubt → delete nothing.
 
 Strict JSON format:
-{{"updates": {{"key_to_keep": "consolidated_value"}}, "keys_to_delete": ["duplicate_key"]}}
-or {{"updates": {{}}, "keys_to_delete": []}} if the profile is clean."""
+{{"updates": {{"key_to_keep": "consolidated_value"}}, "keys_to_delete": ["duplicate_key"], \
+"projets_a_creer": [{{"name": "short name", "summary": "one sentence"}}]}}
+or {{"updates": {{}}, "keys_to_delete": [], "projets_a_creer": []}} if the profile is clean."""
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1231,7 +1245,7 @@ TOKEN BUDGETS per prompt (approximation: 1 token ≈ 3.6 characters):
   NIGHTLY_CLEANING_SYSTEM →  450 tokens max
   NIGHTLY_CLEANING_PROMPT →  250 tokens max  (excluding injected data)
   CONSOLIDATION_PROMPT   →  200 tokens max  (excluding injected data)
-  CURATIVE_CLEANUP_PROMPT →  650 tokens max  (excluding injected data)
+  CURATIVE_CLEANUP_PROMPT → 1000 tokens max  (excluding injected data)
 
 For INLINE prompts: if your change exceeds the budget, compensate by removing elsewhere.
 For ASYNC prompts: the budget is a safety ceiling, not a target."""
@@ -1331,7 +1345,7 @@ PROMPT_TOKEN_BUDGETS = {
     "NIGHTLY_CLEANING_SYSTEM": 450,
     "NIGHTLY_CLEANING_PROMPT": 250,
     "CONSOLIDATION_PROMPT": 200,
-    "CURATIVE_CLEANUP_PROMPT": 650,
+    "CURATIVE_CLEANUP_PROMPT": 1000,
 }
 
 
