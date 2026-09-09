@@ -234,6 +234,12 @@ class _ModelProfile:
     repetition_penalty: float
     repetition_context_size: int
     frequency_penalty: float
+    # Fenêtre propre à `frequency` : c'est la seule pénalité qui COMPTE les occurrences,
+    # donc la seule dont la portée dépende de la longueur de la fenêtre. `repetition` est
+    # ensembliste et `presence` forfaitaire — les deux saturent au premier passage.
+    # Inerte là où `frequency_penalty` vaut 0 : `make_logits_processors` ne crée alors
+    # aucun processeur.
+    frequency_context_size: int
     presence_penalty: float
     use_quant_kv: bool
     stop_tokens: tuple[str, ...]
@@ -256,27 +262,40 @@ def _model_profile(model_path: str) -> _ModelProfile:
         # d'ENTRÉE en boucle ; elles ne font pas sortir d'un attracteur installé, où l'écart
         # de logits se compte en dizaines de nats quand elles en retranchent deux ou trois.
         #
-        # repetition_context_size court, aligné sur les autres profils. Une fenêtre large ne
-        # renforce pas la pression anti-boucle : `make_repetition_penalty` sélectionne un
-        # ENSEMBLE (`logits[:, tokens] /= penalty`), donc un token répété quarante fois est
-        # pénalisé comme un token vu une fois, et un motif de 3 à 23 tokens tient déjà dans
-        # une fenêtre courte. Elle pénalise en revanche tout le vocabulaire légitime récent —
-        # c'est-à-dire la SORTIE de la boucle. Sur un motif de 7 tokens dans 180 tokens de
-        # prose française, logits uniformes :
+        # Les deux régimes ne demandent pas la même fenêtre, d'où deux réglages distincts.
+        #
+        # ENTRÉE en boucle, depuis de la prose. `repetition` sélectionne un ENSEMBLE
+        # (`logits[:, tokens] /= penalty`) : un token répété quarante fois est pénalisé comme
+        # un token vu une fois, et un motif de 3 à 23 tokens tient déjà dans une fenêtre
+        # courte. Une fenêtre large n'ajoute donc rien contre la boucle, mais rabote tout le
+        # vocabulaire légitime récent — c'est-à-dire la SORTIE. Sur un motif de 7 tokens dans
+        # 180 tokens de prose française, logits uniformes :
         #
         #   fenêtre   pénalité boucle   pénalité vocabulaire d'échappement   différentiel
         #     256          3.60                      2.65                       0.95
         #      64          3.30                      0.62                       2.68
         #      32          2.55                      0.62                       1.93
         #
-        # Une fenêtre large rend la sortie presque aussi coûteuse que la boucle. Sous 64, la
-        # pénalité de fréquence — la seule qui compte les occurrences — perd des répétitions.
+        # `presence` est forfaitaire, même raisonnement : fenêtre courte.
+        #
+        # SORTIE d'un attracteur installé. Le tableau ci-dessus ne vaut pas dans ce régime :
+        # la fenêtre ne contient plus que des tokens de boucle, le vocabulaire d'échappement
+        # a un compte de zéro et ne paie rien. `frequency` est la seule pénalité qui COMPTE
+        # les occurrences, donc la seule dont la pression monte avec la profondeur — et il
+        # lui faut de la fenêtre pour la voir. Sur ce même motif de 7 tokens :
+        #
+        #   fenêtre    occurrences vues    pénalité de fréquence
+        #      64             ~9                 1.35 nat
+        #     256            ~36                 5.40 nats
+        #
+        # D'où une fenêtre propre, quatre fois plus longue, pour elle seule.
         return _ModelProfile(
             temp_think=1.0, temp_nothink=0.7,
             top_p_think=0.95, top_p_nothink=0.80,
             top_k=20, min_p=0.0,
             repetition_penalty=1.1, repetition_context_size=64,
-            frequency_penalty=0.15, presence_penalty=1.5,
+            frequency_penalty=0.15, frequency_context_size=256,
+            presence_penalty=1.5,
             use_quant_kv=QUANT_KV, stop_tokens=(),
         )
     if is_qwen25(model_path):
@@ -285,7 +304,8 @@ def _model_profile(model_path: str) -> _ModelProfile:
             top_p_think=1.0, top_p_nothink=1.0,
             top_k=0, min_p=0.0,
             repetition_penalty=1.0, repetition_context_size=64,
-            frequency_penalty=0.0, presence_penalty=0.0,
+            frequency_penalty=0.0, frequency_context_size=256,
+            presence_penalty=0.0,
             use_quant_kv=False, stop_tokens=(),
         )
     if is_qwen3(model_path):
@@ -294,7 +314,8 @@ def _model_profile(model_path: str) -> _ModelProfile:
             top_p_think=0.95, top_p_nothink=0.80,
             top_k=20, min_p=0.0,
             repetition_penalty=1.1, repetition_context_size=64,
-            frequency_penalty=0.05, presence_penalty=1.5,
+            frequency_penalty=0.05, frequency_context_size=256,
+            presence_penalty=1.5,
             use_quant_kv=QUANT_KV, stop_tokens=(),
         )
     if is_hermes(model_path):
@@ -303,7 +324,8 @@ def _model_profile(model_path: str) -> _ModelProfile:
             top_p_think=1.0, top_p_nothink=1.0,
             top_k=0, min_p=0.0,
             repetition_penalty=1.0, repetition_context_size=64,
-            frequency_penalty=0.0, presence_penalty=0.0,
+            frequency_penalty=0.0, frequency_context_size=256,
+            presence_penalty=0.0,
             use_quant_kv=False, stop_tokens=("<|im_end|>",),
         )
     return _ModelProfile(
@@ -311,7 +333,8 @@ def _model_profile(model_path: str) -> _ModelProfile:
         top_p_think=0.90, top_p_nothink=0.90,
         top_k=0, min_p=0.0,
         repetition_penalty=1.3, repetition_context_size=64,
-        frequency_penalty=0.10, presence_penalty=0.0,
+        frequency_penalty=0.10, frequency_context_size=256,
+        presence_penalty=0.0,
         use_quant_kv=False, stop_tokens=(),
     )
 
@@ -390,6 +413,42 @@ async def _acquire_infer_lock_bg() -> float:
         await _bg_wakeup.wait()
 
     return time.time() - _t0
+
+
+async def _acquire_infer_lock_chat(t0: float) -> float:
+    """Prend le lock GPU en priorité chat, en restant annulable.
+
+    `asyncio.to_thread(_infer_lock.acquire)` ne l'est pas : un `threading.Lock.acquire()`
+    bloquant ne s'interrompt pas. À l'annulation — une déconnexion client suffit — la
+    coroutine part, le thread continue et FINIT par prendre le lock ; plus personne ne le
+    relâche, puisque le `finally` qui s'en charge appartient au bloc que la coroutine
+    n'atteindra jamais. Toute inférence ultérieure se bloque alors définitivement, chat
+    comme fond, sans rien journaliser.
+
+    D'où le `shield` : l'acquisition survit à l'annulation, et le rappel de fin relâche le
+    lock si le thread orphelin l'a pris. Le caller possède le lock au retour.
+    """
+    def _relacher_si_acquis(fini: "asyncio.Future") -> None:
+        if fini.cancelled() or fini.exception() is not None or not fini.result():
+            return
+        _infer_lock.release()
+        _wake_bg_waiters()
+        logger.warning("[INFER-LOCK] acquisition orpheline relâchée (annulation pendant l'attente)")
+
+    global _chat_waiters, _last_chat_ts
+    with _chat_waiters_lock:
+        _chat_waiters += 1
+        _last_chat_ts = t0
+    tache = asyncio.ensure_future(asyncio.to_thread(_infer_lock.acquire))
+    try:
+        await asyncio.shield(tache)
+    except asyncio.CancelledError:
+        tache.add_done_callback(_relacher_si_acquis)
+        raise
+    finally:
+        with _chat_waiters_lock:
+            _chat_waiters -= 1
+    return time.time() - t0
 
 
 # LRU prompt cache: one LRUPromptCache per model-path.
@@ -1093,7 +1152,7 @@ def _setup_gen(
         repetition_penalty=profile.repetition_penalty,
         repetition_context_size=profile.repetition_context_size,
         frequency_penalty=profile.frequency_penalty,
-        frequency_context_size=profile.repetition_context_size,
+        frequency_context_size=profile.frequency_context_size,
         presence_penalty=profile.presence_penalty,
         presence_context_size=profile.repetition_context_size,
     ))
@@ -1338,16 +1397,8 @@ async def call_llm_local_async(
 ) -> str:
     """Async non-streaming inference, high priority (chat calls)."""
     _t0 = time.time()
-    with _chat_waiters_lock:
-        global _chat_waiters, _last_chat_ts
-        _chat_waiters += 1
-        _last_chat_ts = _t0
-    try:
-        await asyncio.to_thread(_infer_lock.acquire)
-    finally:
-        with _chat_waiters_lock:
-            _chat_waiters -= 1
-    logger.debug("[TTFT] call_llm_local_async: lock acquired — waited %.3fs", time.time() - _t0)
+    _waited = await _acquire_infer_lock_chat(_t0)
+    logger.debug("[TTFT] call_llm_local_async: lock acquired — waited %.3fs", _waited)
     try:
         return await asyncio.to_thread(
             _generate_sync, model, messages, temperature, max_tokens,
@@ -1545,16 +1596,8 @@ async def stream_local(
         _waited = await _acquire_infer_lock_bg()
         logger.debug("[BG-INFER] stream_local: lock acquired after %.3fs", _waited)
     else:
-        with _chat_waiters_lock:
-            global _chat_waiters, _last_chat_ts
-            _chat_waiters += 1
-            _last_chat_ts = _t_lock_wait
-        try:
-            await asyncio.to_thread(_infer_lock.acquire)
-        finally:
-            with _chat_waiters_lock:
-                _chat_waiters -= 1
-        logger.debug("[TTFT] stream_local: lock acquired — waited %.3fs", time.time() - _t_lock_wait)
+        _waited = await _acquire_infer_lock_chat(_t_lock_wait)
+        logger.debug("[TTFT] stream_local: lock acquired — waited %.3fs", _waited)
 
     # From here the worker owns the lock release (in its finally). Only guard the
     # window where the thread could fail to start.
