@@ -1157,9 +1157,12 @@ KEYS MADE OBSOLETE BY A CLOSED PROJECT:
 ACTIONS UNDER WAY WITH NO PROJECT:
   A key describing an action begun or an intention to see something through — a sale
   started, an administrative procedure, a search under way — with no matching entry in
-  either list opens a project in 'projets_a_creer'. The key itself IS KEPT.
+  either list opens a project in 'projets_a_creer' — the name as key, one sentence of
+  context as value, the one that will later allow the same subject to be recognised. The
+  profile key itself IS KEPT.
   A durable fact (health, taste, stable situation, opinion) is not an action: create nothing.
-  Name of 2 to 4 lowercase words, space-separated. At most 2 per run.
+  Name of 2 to 4 lowercase words separated by SPACES — never a hyphen or an underscore, no
+  prefix. At most 2 per run.
 
 MANDATORY RULE for duplicates:
   step 1 — consolidate the value onto the key to keep, in 'updates'
@@ -1179,8 +1182,8 @@ Absolute limit: at most 2 deletions per run. In doubt → delete nothing.
 
 Strict JSON format:
 {{"updates": {{"key_to_keep": "consolidated_value"}}, "keys_to_delete": ["duplicate_key"], \
-"projets_a_creer": [{{"name": "short name", "summary": "one sentence"}}]}}
-or {{"updates": {{}}, "keys_to_delete": [], "projets_a_creer": []}} if the profile is clean."""
+"projets_a_creer": {{"short name": "one sentence of context"}}}}
+or {{"updates": {{}}, "keys_to_delete": [], "projets_a_creer": {{}}}} if the profile is clean."""
 
 
 # ══════════════════════════════════════════════════════════════════════════

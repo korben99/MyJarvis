@@ -372,17 +372,13 @@ def curative_profile_cleanup(user_code: str, stable_profile: dict | None = None)
         # l'analyzer ne voit que la conversation, et un chantier qui s'installe comme
         # contexte sans jamais être annoncé ne lui parvient pas. `apply_project_updates`
         # rattache à l'existant sous le seuil flou plutôt que de créer un doublon.
-        a_creer = parsed.get("projets_a_creer", []) if isinstance(parsed, dict) else []
+        a_creer = parsed.get("projets_a_creer") if isinstance(parsed, dict) else None
+        if not isinstance(a_creer, dict):
+            a_creer = {}
         evenements = [
-            {
-                "name": p["name"].strip(),
-                "action": "create",
-                "summary": (p.get("summary") or "").strip(),
-            }
-            for p in (a_creer if isinstance(a_creer, list) else [])[:2]
-            if isinstance(p, dict)
-            and isinstance(p.get("name"), str)
-            and p["name"].strip()
+            {"name": nom.strip(), "action": "create", "summary": (resume or "").strip()}
+            for nom, resume in list((a_creer or {}).items())[:2]
+            if isinstance(nom, str) and nom.strip()
         ]
         if evenements:
             apply_project_updates(user_code, evenements)

@@ -1064,6 +1064,7 @@ def _setup_gen(
     thinking_budget: int,
     temperature: float | None,
     max_tokens: int,
+    json_response: bool = False,
 ) -> tuple:
     """Build (sampler, logits_procs, quant_kwargs, effective_max)."""
     effective_max = min(max_tokens, MAX_TOKENS_HARD_CAP)
@@ -1081,7 +1082,14 @@ def _setup_gen(
         top_k=profile.top_k,
         min_p=profile.min_p,
     )
-    procs = list(make_logits_processors(
+    # Famille répétition écartée en sortie structurée : elle relève la barrière d'ENTRÉE
+    # dans une boucle de PROSE, or la grammaire JSON impose de répéter ses jetons —
+    # guillemet, deux-points, nom de champ. Un objet fait une vingtaine de tokens, donc dès
+    # le deuxième élément d'un tableau toute la structure du premier tient dans la fenêtre,
+    # et la pénalité vise exactement les jetons obligatoires : le guillemet ouvrant tombe à
+    # un dixième de sa probabilité pendant qu'un jeton jamais vu ne subit rien. Le champ
+    # perd son guillemet et la sortie n'est plus du JSON.
+    procs = [] if json_response else list(make_logits_processors(
         repetition_penalty=profile.repetition_penalty,
         repetition_context_size=profile.repetition_context_size,
         frequency_penalty=profile.frequency_penalty,
@@ -1177,7 +1185,8 @@ def _generate_sync(
     cache_kwarg = {"prompt_cache": lru_cache} if lru_cache is not None else {}
 
     sampler, logits_procs, quant_kwargs, effective_max = _setup_gen(
-        profile, tokenizer, no_think, thinking_budget, temperature, max_tokens
+        profile, tokenizer, no_think, thinking_budget, temperature, max_tokens,
+        json_response,
     )
 
     early_stopped = False

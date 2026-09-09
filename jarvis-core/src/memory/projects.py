@@ -134,12 +134,15 @@ def get_project_timeline_text(project: dict) -> str:
 def _normalize_project_name(name: str) -> str:
     """Normalize a project name to a consistent space-separated form.
 
-    Replaces slug-style hyphens (between word chars) with spaces so that
-    LLM-generated kebab-case names ("installation-attelage-bmw") and natural
-    language names ("installation attelage bmw") are stored identically.
-    Em-dashes (—) used as title separators are preserved.
+    Replaces slug-style hyphens and underscores (between word chars) with spaces so that
+    LLM-generated kebab-case and snake_case names ("installation-attelage-bmw",
+    "installation_attelage_bmw") and natural language names ("installation attelage bmw")
+    are stored identically. Em-dashes (—) used as title separators are preserved.
+
+    Sans le souligné, un nom slugifié entre en base tel quel et ne se rapproche plus
+    d'aucun autre : les jetons du découpage flou se font sur les espaces.
     """
-    normalized = re.sub(r"(?<=\w)-(?=\w)", " ", name)
+    normalized = re.sub(r"(?<=\w)[-_](?=\w)", " ", name)
     return re.sub(r" {2,}", " ", normalized).strip()
 
 

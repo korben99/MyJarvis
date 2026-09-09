@@ -1153,9 +1153,12 @@ CLÉS RENDUES CADUQUES PAR UN PROJET CLOS :
 ACTIONS EN COURS SANS PROJET :
   Une clé qui décrit une action engagée ou une intention d'aboutir — une vente lancée, une
   démarche administrative, une recherche en cours — sans entrée correspondante dans l'une
-  des deux listes ouvre un projet dans 'projets_a_creer'. La clé, elle, SE CONSERVE.
+  des deux listes ouvre un projet dans 'projets_a_creer' — le nom en clé, une phrase de
+  contexte en valeur, celle qui permettra plus tard de reconnaître le même sujet. La clé de
+  profil, elle, SE CONSERVE.
   Un fait durable (santé, goût, situation stable, avis) n'est pas une action : ne rien créer.
-  Nom de 2 à 4 mots en minuscules, séparés par des espaces. Maximum 2 par exécution.
+  Nom de 2 à 4 mots en minuscules, séparés par des ESPACES — jamais de tiret ni de souligné,
+  aucun préfixe. Maximum 2 par exécution.
 
 RÈGLE OBLIGATOIRE pour les doublons :
   étape 1 — consolide la valeur sur la clé à conserver dans 'updates'
@@ -1175,8 +1178,8 @@ Limite absolue : maximum 2 suppressions par exécution. En cas de doute → ne r
 
 Format JSON strict :
 {{"updates": {{"cle_a_garder": "valeur_consolidee"}}, "keys_to_delete": ["cle_doublon"], \
-"projets_a_creer": [{{"name": "nom court", "summary": "une phrase"}}]}}
-ou {{"updates": {{}}, "keys_to_delete": [], "projets_a_creer": []}} si le profil est propre."""
+"projets_a_creer": {{"nom court": "une phrase de contexte"}}}}
+ou {{"updates": {{}}, "keys_to_delete": [], "projets_a_creer": {{}}}} si le profil est propre."""
 
 
 # ══════════════════════════════════════════════════════════════════════════
