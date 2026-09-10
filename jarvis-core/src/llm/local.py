@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import threading
+from collections import Counter
 import time
 from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass
@@ -519,6 +520,42 @@ def _strip_thinking(text: str) -> str:
     if "Thinking Process:" in text:
         return text.split("Thinking Process:")[-1].strip()
     return text
+
+
+_BOUCLE_PAS = 40      # longueur du segment comparé, en caractères
+_BOUCLE_SEUIL = 8     # occurrences du même segment à partir desquelles on alerte
+
+
+def _detecter_boucle(texte: str, model_short: str, profile: "_ModelProfile") -> None:
+    """Signale une génération dégénérée, une fois qu'elle est produite.
+
+    On ne sait pas déclencher le phénomène à la demande : il dépend de la trajectoire
+    d'échantillonnage ET de l'état du cache LRU au moment de l'appel, que rien ne conserve.
+    Le rejeu du prompt exact d'une boucle avérée, dans ses conditions d'origine, n'en a pas
+    reproduit. Faute de pouvoir la fabriquer, on instrumente celle qui arrive : le motif et
+    les réglages en vigueur suffisent à trancher au prochain cas, là où un journal de prompts
+    relu trois jours après ne dit ni l'un ni l'autre.
+
+    Le comptage passe par un Counter, en un seul parcours : un `.count()` par segment
+    distinct coûterait un produit de tailles à chaque génération.
+    """
+    if len(texte) < _BOUCLE_PAS * _BOUCLE_SEUIL:
+        return
+    segments = [
+        texte[i : i + _BOUCLE_PAS]
+        for i in range(0, len(texte) - _BOUCLE_PAS, _BOUCLE_PAS)
+    ]
+    motif, n = Counter(segments).most_common(1)[0]
+    if n < _BOUCLE_SEUIL:
+        return
+    logger.error(
+        "[BOUCLE] génération dégénérée — motif ×%d sur %d car. (modèle=%s) | "
+        "rep=%.2f/%d freq=%.2f/%d pres=%.2f | motif=%r",
+        n, len(texte), model_short,
+        profile.repetition_penalty, profile.repetition_context_size,
+        profile.frequency_penalty, profile.frequency_context_size,
+        profile.presence_penalty, motif,
+    )
 
 
 def _log_stats(
@@ -1273,6 +1310,7 @@ def _generate_sync(
     _log_stats(model_short, "json" if json_response else "text", no_think,
                "early-stop" if early_stopped else "eos/limit",
                prompt_tokens, resp_tokens, effective_max)
+    _detecter_boucle(result, model_short, profile)
 
     # Insert full sequence into LRU for future prefix reuse.
     # result is the raw LLM output (including think block if any) — inserted before stripping.
@@ -1554,6 +1592,7 @@ async def stream_local(
             thinking_active = "</think>" in raw_resp or "</think >" in raw_resp
             _log_stats(model_short, "stream", no_think, "eos/limit",
                        prompt_tokens, resp_tokens, budget)
+            _detecter_boucle(raw_resp, model_short, profile)
             if thinking_active:
                 logger.debug("[LLM-STATS] thinking active in stream response")
 
