@@ -144,6 +144,28 @@ docker exec jarvis-redis redis-cli DEL episodic:TEST:conversations user:TEST:pro
 Reports container state, the launchd job and an actual HTTP response from the API, LLM
 providers, external APIs, RAG vector count, memory, proto-self and the `/v1/raw` endpoint.
 
+### When HTTP answers but nothing generates
+
+A live process at 0 % CPU that serves `/docs` while every LLM call hangs means the GPU lock is
+held with no owner. Nothing is logged — the last line in `jarvis-api.log` is simply the last
+generation before the freeze, which is what dates the incident.
+
+```bash
+sample <pid> 5 -f /tmp/jarvis-stack.txt      # macOS, no install needed
+grep -c "_pthread_cond_wait" /tmp/jarvis-stack.txt
+```
+
+The signature is the main asyncio thread parked in `lock_PyThread_acquire_lock` for the whole
+sample, with every worker thread asleep. Take the sample **before** restarting: a restart clears
+the state and the evidence with it.
+
+The known cause is fixed. `asyncio.to_thread(_infer_lock.acquire)` is not cancellable — a
+blocking `threading.Lock.acquire()` cannot be interrupted — so a client disconnect left the
+coroutine gone while its thread went on to take the lock nobody would release. Acquisition now
+goes through `_acquire_infer_lock_chat()`, which shields it and releases an orphaned acquisition,
+logging `[INFER-LOCK] acquisition orpheline relâchée`. That warning is the one to watch: it means
+the situation occurred and was recovered.
+
 ---
 
 ## Upgrading dependencies

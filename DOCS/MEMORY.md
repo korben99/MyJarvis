@@ -308,11 +308,25 @@ The nightly review (`run_nightly_interaction_review`) does not write to the prof
 
 An empty string value (`value=""`) is treated identically to `null` (deletion) throughout the write path — a guard against LLM JSON responses that send `""` instead of `null`.
 
+#### Curative cleanup and the two project lists
+
+`curative_profile_cleanup()` receives both the projects under way and those **recently closed** (`projets_clos()`, ordered newest-first; `update_user_projects` purges beyond `DONE_PROJECT_TTL_DAYS`). A key describing progress — a postponed deadline, an awaited step — is deleted only when its subject appears among the **closed** projects.
+
+Absence from both lists proves nothing, and the prompt says so. The analyzer only opens a project when the user announces an initiative explicitly, so most ongoing matters never become projects and live as profile keys instead. Reading absence as closure deleted live information: a property sale under way, a move planned within the year.
+
+The pass runs with thinking enabled, like `consolidate_memories()` above it. Crossing three deletion criteria takes reasoning, and without a `<think>` block that reasoning unfolds in the answer, where it shares the ceiling with the JSON — the object then arrives truncated, or not at all. Inside a block it is force-closed by `ThinkingBudgetProcessor` and the JSON gets its own budget.
+
+The same pass is the only place that sees the profile and both lists together, so it also reports the difference: a key describing an action with no backing project opens one through `projets_a_creer` (name → one sentence of context, 2 per run maximum). The profile key itself is kept. `apply_project_updates` attaches to an existing project rather than creating a duplicate.
+
 ### Project Tracking
 
 Projects are stored as JSON objects in Redis with `name`, `status` (`in_progress` / `done`), `first_mentioned`, `last_update`, and a **`updates[]` timeline** — a FIFO list (cap 20) of `{date, summary}` entries appended on each `update` or `done` action.
 
-`apply_project_updates()` accepts a structured list of events `[{name, action, summary, rename_to}]` and resolves project names using word-overlap fuzzy matching (≥ 60 % threshold) before exact-string lookup, preventing name-drift duplicates (`"Jarvis"` → `"Jarvis v7"`).
+`apply_project_updates()` accepts a structured list of events `[{name, action, summary, rename_to}]` and resolves project names by exact lookup first, then word-overlap fuzzy matching (≥ 60 % threshold), preventing name-drift duplicates (`"Jarvis"` → `"Jarvis v7"`).
+
+Two metrics score the overlap and the higher wins: a Jaccard-like ratio, and **full containment** of the shorter name in the longer (`"attelage bmw"` → `"installation attelage bmw"`). Containment must be complete. Scored as a proportion instead, two two-word names sharing a single word reach 0.5 — enough for `"vente voiture"` to be absorbed into `"vente appartement"`, losing the new task in silence and refreshing the wrong project's `last_update`. Since project names are 2–4 words by convention, that is the common case rather than the edge one.
+
+`create` uses the same threshold as every other action. A lower one costs more than it saves: a duplicate is visible and correctable, a wrongly absorbed task is neither.
 
 When the embed router detects a "project" intent (cosine similarity ≥ 0.74 on project-related phrases), it returns `None` to force the LLM router, which extracts `project_name` from the user message. On the first mention of a project in a session, `get_project_detail()` fetches the full Redis record and `get_project_timeline_text()` formats it for injection into the prompt context — subsequent turns carry this detail in conversation history without re-fetching.
 
@@ -467,7 +481,7 @@ EVERY 5H (défaut 6h — configurable via REFLECTION_INTERVAL_HOURS) — self.py
 | `search_memory()` | memory.py | Every chat (memory intent) | read Qdrant | past facts ×0.4; +0.05 reconsolidation |
 | `get_user_timeline()` | memory.py | Every chat (build_memory_context) | read Qdrant autobio | must_not status=past |
 | `get_autobiographical_facts()` | memory.py | Nightly facts + cleaning | read Qdrant autobio | newest-first for facts context; chronological for cleaning |
-| `curative_profile_cleanup()` | memory.py | Nightly (Call 4) | Redis profile hash | LLM dedup: merge-before-delete; skipped if < 5 keys |
+| `curative_profile_cleanup()` | memory.py | Nightly (Call 4) | Redis profile hash + projects | LLM dedup: merge-before-delete; opens missing projects; skipped if < 5 keys |
 | `consolidate_memories()` | memory.py | 1st of month / on-demand | Qdrant | episodic compress + autobio decay only |
 
 ### Autobiographical Memory Decay

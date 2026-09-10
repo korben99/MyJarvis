@@ -242,7 +242,6 @@ THINKING_BUDGET_DEEP = int(
 
 MAX_TOKENS_THINK_COMPACT = THINKING_BUDGET_COMPACT + 1024  # prune, action_review
 MAX_TOKENS_THINK_MEDIUM = THINKING_BUDGET_MEDIUM + 3000  # trading thresholds
-MAX_TOKENS_SYNTHESIS = int(os.getenv("MAX_TOKENS_SYNTHESIS", "8000"))  # chat web/RAG
 MAX_TOKENS_REASONING = int(
     os.getenv("MAX_TOKENS_REASONING", "10000")
 )  # refine_prompt, chat reasoning

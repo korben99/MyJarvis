@@ -22,8 +22,7 @@ from config import (
     IOS_MAX_MESSAGES,
     LLM_LOCAL,
     MAX_TOKENS_NO_THINK,
-    MAX_TOKENS_REASONING,
-    MAX_TOKENS_SYNTHESIS,
+    MAX_TOKENS_THINK_MEDIUM,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
@@ -1366,15 +1365,14 @@ async def chat(req: ChatRequest):
     # Pre-compute safe web sources (used in both streaming and JSON paths).
     _safe_web = [] if web_results == INTERNET_ERROR else web_results
 
-    # max_tokens budget: no-think / web-rag synthesis / deep reasoning (see config.py)
+    # max_tokens borne le TOTAL généré, réflexion comprise ; thinking_budget en borne la
+    # part de réflexion. MAX_TOKENS_THINK_MEDIUM vaut budget de réflexion + 3000 de marge
+    # pour la réponse — là où les anciens paliers en laissaient plus de 5900, quand le 99e
+    # centile de 309 réponses réelles tient en 1588 hors web. Une réponse qui s'étire
+    # au-delà se conditionne sur sa propre production et dérive. Le budget de réflexion,
+    # lui, reste distinct selon la profondeur demandée.
     _use_reasoning = bool(llm_result and llm_result.use_reasoning)
-    _max_tokens = (
-        MAX_TOKENS_NO_THINK
-        if chat_no_think
-        else MAX_TOKENS_REASONING
-        if _use_reasoning
-        else MAX_TOKENS_SYNTHESIS
-    )
+    _max_tokens = MAX_TOKENS_NO_THINK if chat_no_think else MAX_TOKENS_THINK_MEDIUM
     _thinking_budget = (
         0 if chat_no_think
         else THINKING_BUDGET_MEDIUM if _use_reasoning

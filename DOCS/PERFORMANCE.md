@@ -47,6 +47,27 @@ tokens. What a wide window does penalise is the recent legitimate vocabulary, wh
 These penalties raise the barrier to *entering* a loop. They do not get you out of an
 established one, where the logit gap runs to tens of nats while they subtract two or three.
 
+`frequency_context_size` gets its **own, longer window** (256) because the table above only
+describes entry. Once a loop is established the window holds nothing but loop tokens: the escape
+vocabulary has a count of zero and pays nothing, so a wide window costs nothing there. And
+frequency is the only penalty that *counts* occurrences, hence the only one whose pressure grows
+with the depth of the loop. On a 7-token pattern:
+
+| window | occurrences seen | frequency penalty |
+|---|---|---|
+| 64 | ~9 | 1.35 nat |
+| **256** | ~36 | **5.40 nats** |
+
+`repetition` (set-based) and `presence` (flat) both saturate on the first repeat, so they keep
+the short window.
+
+**Structured output takes none of them.** `_setup_gen(json_response=True)` returns no penalty
+processor: JSON grammar *requires* repeating its tokens — quote, colon, field name. An object
+runs about twenty tokens, so by the second element of an array the whole structure of the first
+still sits in the window, and the penalty lands squarely on the mandatory tokens. Measured on a
+real two-element array, the opening quote fell to a tenth of its probability while a token never
+seen paid nothing; the field lost its quote and the output stopped being JSON.
+
 ## KV cache design
 
 ```
@@ -161,8 +182,15 @@ whether `ThinkingBudgetProcessor` engages.
 | Context | Model | Think | Budget | Processor | Rationale |
 |---|---|---|---|---|---|
 | Plain chat (memory/conversation intent) | PRIMARY | `no_think` | 1 500 | — | Fast reply, no reasoning needed |
-| Web / RAG chat (synthesis) | PRIMARY | `think` | 8 000 | ✅ 2048 tok | Synthesising multiple sources — thinking improves coherence |
-| Reasoning chat (`use_reasoning`) | PRIMARY | `think` | 10 000 | ✅ 2048 tok | Complex request explicitly routed to thinking |
+| Web / RAG chat (synthesis) | PRIMARY | `think` | budget + 3 000 | ✅ 2048 tok | Synthesising multiple sources — thinking improves coherence |
+| Reasoning chat (`use_reasoning`) | PRIMARY | `think` | budget + 3 000 | ✅ 3072 tok | Complex request explicitly routed to thinking |
+
+> **Why the answer is capped separately.** `max_tokens` bounds the *total* generated, thinking
+> included; `thinking_budget` bounds only its thinking part. Setting a flat total left the answer
+> over 5 900 tokens once thinking had taken its share — against a 99th percentile of 1 588 tokens
+> measured on 309 real chat answers. Past that length the model conditions on its own output and
+> drifts: every degenerate generation observed ran long, none under 400 output tokens. Deriving the
+> total from the thinking budget keeps the answer bounded without touching how long Jarvis thinks.
 
 > `ThinkingBudgetProcessor` engages as soon as `thinking_budget > 0` and
 > `USE_THINKING_BUDGET_PROCESSOR=yes`. It forces `</think>` by manipulating logits (soft boost
@@ -260,9 +288,8 @@ Never use thinking_budget=0 in production
 | `MAX_TOKENS_NO_THINK` | 1 500 | Plain chat, nightly facts |
 | `MAX_TOKENS_BRIEFING` | 3 000 | Daily briefing |
 | `MAX_TOKENS_THINK_COMPACT` | `COMPACT + 1024` | prune / action review (thinking + answer) |
-| `MAX_TOKENS_THINK_MEDIUM` | `MEDIUM + 3000` | Trading thresholds (thinking + answer) |
-| `MAX_TOKENS_SYNTHESIS` | 8 000 | Web/RAG chat with thinking |
-| `MAX_TOKENS_REASONING` | 10 000 | `use_reasoning` chat + refine_prompt |
+| `MAX_TOKENS_THINK_MEDIUM` | `MEDIUM + 3000` | Chat with thinking, trading thresholds (thinking + answer) |
+| `MAX_TOKENS_REASONING` | 10 000 | `refine_prompt` only |
 | `MAX_TOKENS_HARD_CAP` | 16 000 | Absolute kill switch on all local calls |
 | `HIST_CONV_TOKEN_BUDGET` | 800 | Token budget for raw history injected per turn |
 | `SESSION_SUMMARY_TOKENS` | 600 | Token budget of the session summary (~2 400 chars) |

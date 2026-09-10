@@ -193,8 +193,8 @@ const CHAMPS = [
   {n:"QDRANT_MEMORY_COLLECTION", d:"jarvis_memory"},
   {n:"RAG_TOP_K", d:"8", t:"number"},
   {n:"RAG_SCORE_THRESHOLD", d:"0.55", a:"Score minimal d'un extrait rendu au chat."},
-  {n:"MAX_UPLOAD_SIZE", d:"5242880", t:"number"},
   {n:"OPENWEBUI_API_KEY", s:1, a:"Utilisée par scripts/uploadrag.py pour indexer RAGData/."},
+  {n:"RAG_FILE_MAX_SIZE", t:"number", a:"Taille maximale d'un fichier indexé, en Mo. À déclarer aussi dans docker-compose.yml : le service open-webui liste ses variables une à une et ne lit pas .env. Sans effet tant que l'entrée rag.file.max_size persistée en base n'est pas vidée — PersistentConfig la garde prioritaire."},
 ]],
 ["Briefing matinal", [
   {n:"BRIEFING_ENABLED", d:"true", t:"select", o:["true","false"]},
@@ -216,7 +216,7 @@ const CHAMPS = [
   {n:"OPINIONS_MAX_ENTRIES", d:"120", t:"number"},
   {n:"OPINIONS_EMBED_THRESHOLD", d:"0.40", a:"Proximité minimale pour réinjecter une opinion."},
   {n:"OPINIONS_MAX_INJECTED", d:"3", t:"number"},
-  {n:"GROWTH_LOG_MAX_ENTRIES", d:"180", t:"number"},
+  {n:"GROWTH_LOG_MAX_ENTRIES", d:"60", t:"number"},
   {n:"INTROSPECTION_LOG_MAX_ENTRIES", d:"200", t:"number"},
   {n:"HIST_CONV_TOKEN_BUDGET", d:"1000", t:"number"},
   {n:"SESSION_SUMMARY_TOKENS", d:"600", t:"number"},
@@ -310,8 +310,7 @@ const CHAMPS = [
   {n:"MAX_TOKENS_MEDIUM", d:"1000", t:"number"},
   {n:"MAX_TOKENS_NO_THINK", d:"1500", t:"number"},
   {n:"MAX_TOKENS_BRIEFING", d:"3000", t:"number"},
-  {n:"MAX_TOKENS_SYNTHESIS", d:"8000", t:"number"},
-  {n:"MAX_TOKENS_REASONING", d:"10000", t:"number"},
+  {n:"MAX_TOKENS_REASONING", d:"10000", t:"number", a:"Amélioration de prompt uniquement. Le chat borne désormais sa réponse via MAX_TOKENS_THINK_MEDIUM (budget de réflexion + 3000), dérivé et non réglable ici."},
   {n:"MAX_TOKENS_HARD_CAP", d:"16000", t:"number", a:"Coupe-circuit absolu, tous appels locaux."},
 ]],
 ["Journaux", [

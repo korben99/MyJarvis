@@ -142,8 +142,8 @@ Token budgets use per-task config variables (see `config.py`). Timeouts are deri
 |-----------|------|-------|----------|-----------|----------------|---------|
 | Router | `llm_router.py` | Tier 1 — Qwen2.5-1.5B LoRA | `True` | `MAX_TOKENS_SHORT` (300) | — | Intent + use_reasoning decision |
 | Main chat (simple) | `routes/chat.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_NO_THINK` (1 500) | — | Chat without RAG/web |
-| Main chat (web/RAG) | `routes/chat.py` | Tier 2 — PRIMARY | `False` | `MAX_TOKENS_SYNTHESIS` (8 000) | `THINKING_BUDGET_MEDIUM` (2 048) | Chat with RAG/web synthesis |
-| Main chat (reasoning) | `routes/chat.py` | Tier 2/3 — PRIMARY or REASONING | `False` | `MAX_TOKENS_REASONING` (10 000) | `THINKING_BUDGET_DEEP` (4 000) | Explicitly routed reasoning query |
+| Main chat (web/RAG) | `routes/chat.py` | Tier 2 — PRIMARY | `False` | `MAX_TOKENS_THINK_MEDIUM` (budget + 3 000) | `THINKING_BUDGET_COMPACT` (2 048) | Chat with RAG/web synthesis |
+| Main chat (reasoning) | `routes/chat.py` | Tier 2/3 — PRIMARY or REASONING | `False` | `MAX_TOKENS_THINK_MEDIUM` (budget + 3 000) | `THINKING_BUDGET_MEDIUM` (3 072) | Explicitly routed reasoning query |
 | Conversation analyzer | `analyzer.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_MEDIUM` (1 000) | — | Post-exchange fact/mood/ESS extraction |
 | Daily briefing | `briefing.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_BRIEFING` (3 000) | — | Morning briefing generation |
 | Calendar date extraction | `google_services.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_SHORT` (300) | — | Parse event datetime from text |
