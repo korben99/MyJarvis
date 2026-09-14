@@ -2042,7 +2042,7 @@
       "version": "1.71"
     },
     {
-      "bom-ref": "mlx==0.32.0",
+      "bom-ref": "mlx==0.32.2",
       "description": "A framework for machine learning on Apple silicon.",
       "externalReferences": [
         {
@@ -2074,9 +2074,9 @@
           "value": "cuda13"
         }
       ],
-      "purl": "pkg:pypi/mlx@0.32.0",
+      "purl": "pkg:pypi/mlx@0.32.2",
       "type": "library",
-      "version": "0.32.0"
+      "version": "0.32.2"
     },
     {
       "bom-ref": "mlx-audio==0.4.8",
@@ -2130,7 +2130,7 @@
       "version": "0.31.3"
     },
     {
-      "bom-ref": "mlx-metal==0.32.0",
+      "bom-ref": "mlx-metal==0.32.2",
       "description": "A framework for machine learning on Apple silicon.",
       "externalReferences": [
         {
@@ -2148,9 +2148,9 @@
         }
       ],
       "name": "mlx-metal",
-      "purl": "pkg:pypi/mlx-metal@0.32.0",
+      "purl": "pkg:pypi/mlx-metal@0.32.2",
       "type": "library",
-      "version": "0.32.0"
+      "version": "0.32.2"
     },
     {
       "bom-ref": "mlx-vlm==0.6.8",
@@ -5172,7 +5172,7 @@
         "huggingface_hub==1.27.0",
         "miniaudio==1.71",
         "mlx-lm==0.31.3",
-        "mlx==0.32.0",
+        "mlx==0.32.2",
         "numpy==2.4.4",
         "pytest-asyncio==1.4.0",
         "pytest==9.1.1",
@@ -5191,7 +5191,7 @@
       "dependsOn": [
         "Jinja2==3.1.6",
         "PyYAML==6.0.3",
-        "mlx==0.32.0",
+        "mlx==0.32.2",
         "numpy==2.4.4",
         "protobuf==7.35.1",
         "sentencepiece==0.2.2",
@@ -5201,7 +5201,7 @@
       "ref": "mlx-lm==0.31.3"
     },
     {
-      "ref": "mlx-metal==0.32.0"
+      "ref": "mlx-metal==0.32.2"
     },
     {
       "dependsOn": [
@@ -5210,7 +5210,7 @@
         "miniaudio==1.71",
         "mlx-audio==0.4.8",
         "mlx-lm==0.31.3",
-        "mlx==0.32.0",
+        "mlx==0.32.2",
         "numpy==2.4.4",
         "opencv-python==5.0.0.93",
         "pillow==12.3.0",
@@ -5225,12 +5225,12 @@
     },
     {
       "dependsOn": [
-        "mlx-metal==0.32.0",
+        "mlx-metal==0.32.2",
         "numpy==2.4.4",
         "torch==2.13.0",
         "typing_extensions==4.16.0"
       ],
-      "ref": "mlx==0.32.0"
+      "ref": "mlx==0.32.2"
     },
     {
       "dependsOn": [
@@ -5516,7 +5516,7 @@
       "dependsOn": [
         "fsspec==2026.7.0",
         "huggingface_hub==1.27.0",
-        "mlx==0.32.0",
+        "mlx==0.32.2",
         "numpy==2.4.4",
         "pytest==9.1.1",
         "torch==2.13.0"

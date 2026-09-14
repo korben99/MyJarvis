@@ -98,14 +98,23 @@ cmd_stop() {
 # bootstrap immédiat échoue alors avec le code 5 « déjà chargé » — exactement l'erreur
 # que ce script est censé faire disparaître. On attend la libération effective.
 # (kickstart -k serait atomique mais NE RELIT PAS le plist : inutilisable après install.)
+#
+# La fenêtre couvre une inférence en cours : launchd ne libère le label qu'une fois le
+# process sorti, et une génération avec réflexion tient plus de deux minutes. Une fenêtre
+# trop courte fait sortir en erreur APRÈS le bootout et AVANT le bootstrap — le service
+# reste alors déchargé, donc éteint, alors que la commande demandée était un redémarrage.
+# C'est le seul chemin par lequel ce script peut laisser Jarvis à l'arrêt, d'où la marge.
+WAIT_UNLOAD_DECISECONDS=3000   # 300 s
+
 wait_unloaded() {
     local i=0
-    while is_loaded && (( i < 50 )); do
+    while is_loaded && (( i < WAIT_UNLOAD_DECISECONDS )); do
         sleep 0.1
         i=$((i + 1))
     done
     if is_loaded; then
-        echo "erreur — $LABEL toujours chargé après 5s, abandon" >&2
+        echo "erreur — $LABEL toujours chargé après $((WAIT_UNLOAD_DECISECONDS / 10))s" >&2
+        echo "         le service n'a PAS été relancé — une fois débloqué : jarvis-start" >&2
         exit 1
     fi
 }

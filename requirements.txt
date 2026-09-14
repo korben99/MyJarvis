@@ -47,8 +47,15 @@ pillow==12.3.0
 # imports mlx at module level. These packages only install on macOS with
 # Apple Silicon (arm64) — Jarvis currently cannot run on Linux/Windows/Intel
 # Mac. Making the mlx import lazy is a known follow-up, not done yet.
-mlx==0.32.0
-mlx-metal==0.32.0
+# mlx 0.32.2 est un PLANCHER, pas une commodité : jusqu'à 0.32.0 inclus, une fonction
+# décorée `@mx.compile(inputs=mx.random.state, outputs=mx.random.state)` ne propage pas
+# l'état du générateur aléatoire hors du thread principal — elle rejoue indéfiniment
+# l'état initial du thread. Les samplers de mlx_lm sont tous décorés ainsi, et toute
+# génération tourne ici dans un thread de génération : l'échantillonnage rendait alors le
+# même quantile à chaque token, ce qui revient à du greedy et finit en boucle sur les
+# sorties longues. Ne pas redescendre sous 0.32.2 sans rétablir un sampler à clé portée.
+mlx==0.32.2
+mlx-metal==0.32.2
 mlx-lm==0.31.3
 mlx-vlm==0.6.8
 

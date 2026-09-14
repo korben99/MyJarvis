@@ -253,50 +253,25 @@ def _model_profile(model_path: str) -> _ModelProfile:
     hybrides, qui partagent l'architecture. À revérifier après une bascule.
     """
     if is_qwen3_hybrid(model_path):
-        # repetition_penalty > 1 requis : c'est la seule pénalité MULTIPLICATIVE, donc la
-        # seule qui creuse un écart entre un token déjà vu et le reste. À 1.0 elle est un
-        # no-op et il ne reste que presence (forfait) et frequency (×n), toutes deux
-        # additives — sur une boucle qui sature la fenêtre elles retranchent quelques
-        # logits à TOUS les candidats de la boucle, sans différentiel exploitable.
-        # 1.1 est le plafond de cette famille (recommandation Qwen) : au-delà, la reprise
-        # légitime d'un terme technique est rabotée. Ces pénalités relèvent la barrière
-        # d'ENTRÉE en boucle ; elles ne font pas sortir d'un attracteur installé, où l'écart
-        # de logits se compte en dizaines de nats quand elles en retranchent deux ou trois.
+        # Aucune pénalité : le `generation_config.json` du modèle n'en déclare pas, et les
+        # boucles qui en avaient fait poser trois tenaient à un échantillonneur figé, pas à
+        # une propension du modèle à se répéter — cf. la graine posée dans `_setup_gen`.
         #
-        # Les deux régimes ne demandent pas la même fenêtre, d'où deux réglages distincts.
-        #
-        # ENTRÉE en boucle, depuis de la prose. `repetition` sélectionne un ENSEMBLE
-        # (`logits[:, tokens] /= penalty`) : un token répété quarante fois est pénalisé comme
-        # un token vu une fois, et un motif de 3 à 23 tokens tient déjà dans une fenêtre
-        # courte. Une fenêtre large n'ajoute donc rien contre la boucle, mais rabote tout le
-        # vocabulaire légitime récent — c'est-à-dire la SORTIE. Sur un motif de 7 tokens dans
-        # 180 tokens de prose française, logits uniformes :
-        #
-        #   fenêtre   pénalité boucle   pénalité vocabulaire d'échappement   différentiel
-        #     256          3.60                      2.65                       0.95
-        #      64          3.30                      0.62                       2.68
-        #      32          2.55                      0.62                       1.93
-        #
-        # `presence` est forfaitaire, même raisonnement : fenêtre courte.
-        #
-        # SORTIE d'un attracteur installé. Le tableau ci-dessus ne vaut pas dans ce régime :
-        # la fenêtre ne contient plus que des tokens de boucle, le vocabulaire d'échappement
-        # a un compte de zéro et ne paie rien. `frequency` est la seule pénalité qui COMPTE
-        # les occurrences, donc la seule dont la pression monte avec la profondeur — et il
-        # lui faut de la fenêtre pour la voir. Sur ce même motif de 7 tokens :
-        #
-        #   fenêtre    occurrences vues    pénalité de fréquence
-        #      64             ~9                 1.35 nat
-        #     256            ~36                 5.40 nats
-        #
-        # D'où une fenêtre propre, quatre fois plus longue, pour elle seule.
+        # Si une boucle réapparaît, l'ordre est celui-ci. `presence` d'abord : forfaitaire dès
+        # la première occurrence, c'est la seule qui relève la barrière d'ENTRÉE, et une
+        # fenêtre courte lui suffit puisqu'un motif de boucle y tient déjà. `frequency`
+        # ensuite : seule à COMPTER les occurrences, donc seule dont la pression monte avec la
+        # profondeur d'un attracteur déjà installé, ce qui lui demande une fenêtre longue pour
+        # les voir. Les deux abîment la morphologie à dose élevée — elles frappent les
+        # sous-tokens de désinence, qui reviennent nécessairement dans une fenêtre courte, et
+        # le mot sort amputé d'une lettre dans une phrase par ailleurs correcte.
         return _ModelProfile(
             temp_think=1.0, temp_nothink=0.7,
             top_p_think=0.95, top_p_nothink=0.80,
             top_k=20, min_p=0.0,
-            repetition_penalty=1.1, repetition_context_size=64,
-            frequency_penalty=0.15, frequency_context_size=256,
-            presence_penalty=1.5,
+            repetition_penalty=1.0, repetition_context_size=64,
+            frequency_penalty=0.0, frequency_context_size=256,
+            presence_penalty=0.0,
             use_quant_kv=QUANT_KV, stop_tokens=(),
         )
     if is_qwen25(model_path):
@@ -526,6 +501,21 @@ _BOUCLE_PAS = 40      # longueur du segment comparé, en caractères
 _BOUCLE_SEUIL = 8     # occurrences du même segment à partir desquelles on alerte
 
 
+def _segment_porteur(segment: str) -> bool:
+    """Vrai si le segment porte du texte, faux s'il ne porte que de la mise en forme.
+
+    Un tableau markdown aligné répète par construction des segments entiers de remplissage
+    de colonne et de ligne de séparation ; un filet ou une indentation profonde font de
+    même. Ces motifs franchissent le seuil sur une sortie parfaitement saine, et comme le
+    décompte est trié, ils prennent aussi la tête devant un vrai motif de boucle qui se
+    trouverait dans le même texte.
+
+    Un seul test couvre les deux familles : après `strip`, un segment de mise en forme
+    n'a plus qu'un caractère distinct, ou plus aucun.
+    """
+    return len(set(segment.strip())) > 1
+
+
 def _detecter_boucle(texte: str, model_short: str, profile: "_ModelProfile") -> None:
     """Signale une génération dégénérée, une fois qu'elle est produite.
 
@@ -545,7 +535,12 @@ def _detecter_boucle(texte: str, model_short: str, profile: "_ModelProfile") -> 
         texte[i : i + _BOUCLE_PAS]
         for i in range(0, len(texte) - _BOUCLE_PAS, _BOUCLE_PAS)
     ]
-    motif, n = Counter(segments).most_common(1)[0]
+    porteurs = [
+        (seg, n) for seg, n in Counter(segments).most_common() if _segment_porteur(seg)
+    ]
+    if not porteurs:
+        return
+    motif, n = porteurs[0]
     if n < _BOUCLE_SEUIL:
         return
     logger.error(
@@ -1172,6 +1167,13 @@ def _setup_gen(
         temperature if temperature is not None
         else (profile.temp_nothink if no_think else profile.temp_think)
     )
+    # `mx.random.state` est local au thread et chaque thread naît sur la graine initiale du
+    # processus. Or toute génération s'exécute dans un thread de génération — dédié pour le
+    # streaming, emprunté au pool pour le reste —, jamais dans le thread principal : sans
+    # cette ligne, toutes les requêtes rejouent la même suite de tirages et une question
+    # posée deux fois rend deux fois le même texte. Poser la graine ici couvre les deux
+    # chemins, `_setup_gen` étant appelé depuis le thread qui génère.
+    mx.random.seed(int.from_bytes(os.urandom(8), "little"))
     sampler = make_sampler(
         temp=effective_temp,
         top_p=profile.top_p_nothink if no_think else profile.top_p_think,

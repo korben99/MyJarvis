@@ -298,7 +298,18 @@ async def _translate_jarvis_sse(body_iterator, req_id: str, created: int):
                     if not in_think:
                         yield _delta("<think>")
                         in_think = True
-                    yield _delta(data["think"])
+                    # Les délimiteurs appartiennent à ce wrapper. Une balise portée par la
+                    # charge fermerait le panneau de réflexion du client au milieu du
+                    # raisonnement : la suite déborderait dans la bulle visible, et la
+                    # fermeture réelle sortirait ensuite en balise orpheline à l'écran. Le
+                    # cas se présente parce que Qwen3.6 emploie parfois </think> comme
+                    # notation et que le flux amont transmet cette occurrence telle quelle.
+                    # Les chevrons de substitution gardent la notation lisible au passage.
+                    yield _delta(
+                        data["think"]
+                        .replace("<think>", "‹think›")
+                        .replace("</think>", "‹/think›")
+                    )
 
                 elif "content" in data:
                     if in_think:
