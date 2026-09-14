@@ -12,12 +12,16 @@
 
 /* Begin PBXFileReference section */
 		D614D5342F5F1B1C00E0FD81 /* JarvisApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JarvisApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D614D5502F5F1B1C00E0FD81 /* Shared.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Shared.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
 		D614D5462F5F1D9600E0FD81 /* Exceptions for "JarvisApp" folder in "JarvisApp" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Config/Local.xcconfig,
+				Config/Local.xcconfig.example,
+				Config/Shared.xcconfig,
 				Info.plist,
 			);
 			target = D614D5332F5F1B1C00E0FD81 /* JarvisApp */;
@@ -50,6 +54,7 @@
 		D614D52B2F5F1B1C00E0FD81 = {
 			isa = PBXGroup;
 			children = (
+				D614D5512F5F1B1C00E0FD81 /* Config */,
 				D614D5352F5F1B1C00E0FD81 /* Products */,
 				D614D5362F5F1B1C00E0FD81 /* JarvisApp */,
 			);
@@ -61,6 +66,15 @@
 				D614D5342F5F1B1C00E0FD81 /* JarvisApp.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		D614D5512F5F1B1C00E0FD81 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				D614D5502F5F1B1C00E0FD81 /* Shared.xcconfig */,
+			);
+			name = Config;
+			path = JarvisApp/Config;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -272,13 +286,14 @@
 		};
 		D614D5402F5F1B1E00E0FD81 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = D614D5502F5F1B1C00E0FD81 /* Shared.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = JarvisApp/JarvisApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = "$(JARVIS_DEVELOPMENT_TEAM)";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = JarvisApp/Info.plist;
@@ -297,7 +312,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.1.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.JarvisApp;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(JARVIS_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -311,13 +326,14 @@
 		};
 		D614D5412F5F1B1E00E0FD81 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = D614D5502F5F1B1C00E0FD81 /* Shared.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = JarvisApp/JarvisApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = "$(JARVIS_DEVELOPMENT_TEAM)";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = JarvisApp/Info.plist;
@@ -336,7 +352,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.1.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.JarvisApp;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(JARVIS_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;

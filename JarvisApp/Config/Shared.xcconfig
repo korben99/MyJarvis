@@ -1,0 +1,11 @@
+// Réglages de projet dépendant du compte développeur.
+// Les valeurs ci-dessous ne sont que des repères : Config/Local.xcconfig, non suivi,
+// les surcharge avec l'identifiant d'équipe et le bundle ID réels. Le pbxproj ne
+// référence plus que les variables, il reste donc publiable tel quel.
+
+JARVIS_DEVELOPMENT_TEAM =
+JARVIS_BUNDLE_ID = com.example.JarvisApp
+
+// Inclusion optionnelle : sur un clone sans Local.xcconfig, le build part sur les
+// repères ci-dessus au lieu d'échouer sur un fichier introuvable.
+#include? "Local.xcconfig"

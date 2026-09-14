@@ -28,7 +28,9 @@ DerivedData/
 scripts/client_secret.json
 client_secret*.json
 RESEARCH/
-JarvisApp.xcodeproj/project.pbxproj
+# Identifiant d'équipe et bundle ID : le pbxproj ne porte que les variables,
+# les valeurs réelles vivent ici. Voir JarvisApp/Config/Local.xcconfig.example.
+JarvisApp/Config/Local.xcconfig
 # Clés de signature : APNs (.p8), certificats, clés privées.
 # Le dossier entier est ignoré — une clé oubliée ici ne doit jamais partir dans un commit.
 keys/

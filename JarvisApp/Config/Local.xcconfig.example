@@ -1,0 +1,5 @@
+// Copier en Config/Local.xcconfig et renseigner avec les valeurs du compte développeur.
+// Ce fichier-ci est suivi, Local.xcconfig ne l'est pas.
+
+JARVIS_DEVELOPMENT_TEAM = ABCDE12345
+JARVIS_BUNDLE_ID = com.example.JarvisApp
