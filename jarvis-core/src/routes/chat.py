@@ -111,17 +111,49 @@ def _spawn_bg(coro) -> None:
     t.add_done_callback(_background_tasks.discard)
 
 
+_GARANTIS_MAX = 4   # messages du dernier échange conservés quoi qu'il arrive
+
+
+def _tronque_fin(msg: dict, max_chars: int) -> dict:
+    """Tronque un message en gardant sa FIN — c'est elle que la suite de l'échange
+    prolonge, et c'est à elle qu'un « continue » se rattache."""
+    contenu = msg.get("content", "") or ""
+    if len(contenu) <= max_chars:
+        return msg
+    return {**msg, "content": "[…] " + contenu[-max_chars:]}
+
+
 def _trim_history_to_budget(hist: list[dict], budget_tokens: int) -> list[dict]:
-    """Keep the most recent messages within token budget, always preserving the last exchange."""
+    """Keep the most recent messages within token budget, always preserving the last exchange.
+
+    Le dernier échange se délimite par le dernier tour `user` et ce qui le suit, et non par
+    `hist[-2:]` : plusieurs tours proactifs consécutifs de l'assistant ne laisseraient alors
+    aucun message utilisateur, et le modèle répondrait sans savoir à quoi.
+
+    Ce bloc garanti est PLAFONNÉ comme le reste, et c'est le point important : sans plafond,
+    une réponse longue est réinjectée entière au tour suivant quel que soit le budget. Le
+    modèle relit sa propre production dans son intégralité, ce qui l'incite à la prolonger
+    plutôt qu'à répondre — une réponse qui a dérivé se réamorce alors elle-même au tour
+    suivant.
+    """
     if not hist:
         return []
     budget_chars = budget_tokens * 4
-    # Always keep the last exchange (last 2 messages = preceding user + last assistant).
-    min_keep = min(2, len(hist))
-    guaranteed = hist[-min_keep:]
+
+    dernier_user = next(
+        (i for i in range(len(hist) - 1, -1, -1) if hist[i].get("role") == "user"), None
+    )
+    if dernier_user is None or len(hist) - dernier_user > _GARANTIS_MAX:
+        debut = len(hist) - min(2, len(hist))
+    else:
+        debut = dernier_user
+
+    garantis = hist[debut:]
+    plafond_msg = max(1, budget_chars // max(2, len(garantis)))
+    guaranteed = [_tronque_fin(m, plafond_msg) for m in garantis]
     used = sum(len(m.get("content", "")) for m in guaranteed)
     older: list[dict] = []
-    for msg in reversed(hist[:-min_keep]):
+    for msg in reversed(hist[:debut]):
         cost = len(msg.get("content", ""))
         if used + cost > budget_chars:
             break
