@@ -28,7 +28,7 @@ DerivedData/
 scripts/client_secret.json
 client_secret*.json
 RESEARCH/
-
+JarvisApp.xcodeproj/project.pbxproj
 # Clés de signature : APNs (.p8), certificats, clés privées.
 # Le dossier entier est ignoré — une clé oubliée ici ne doit jamais partir dans un commit.
 keys/
