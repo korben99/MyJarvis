@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
-"""Banc de reproduction des boucles de génération, et évaluation des correctifs.
+"""ARCHIVÉ — banc bâti sur un modèle causal faux, conservé pour mémoire seulement.
+
+Ce banc fait varier les pénalités d'échantillonnage pour reproduire les boucles. Ce n'était
+pas la cause : jusqu'à MLX 0.32.0, une fonction décorée
+`@mx.compile(inputs=mx.random.state, outputs=mx.random.state)` ne propage pas l'état du
+générateur hors du thread principal. Les samplers de mlx_lm sont tous décorés ainsi et
+toute génération tourne dans un thread de génération, donc le tirage rendait le même
+quantile à chaque token — un greedy déguisé, qui boucle sur les sorties longues. Les
+pénalités ne faisaient que relever la barrière d'entrée ; le banc mesurait l'épaisseur du
+pansement. Correctif : plancher `mlx>=0.32.2` plus une graine par génération
+(`llm/local.py::_setup_gen`).
+
+L'en-tête ci-dessous affirme qu'un rejeu du prompt exact d'une boucle avérée n'en a pas
+reproduit. C'est faux, et c'est ce qui a égaré l'enquête : le rejeu donne au contraire la
+MÊME sortie au caractère près, puisque la génération était déterministe. C'est d'ailleurs
+ce rejeu qui a fini par désigner la cause.
+
+Banc de reproduction des boucles de génération, et évaluation des correctifs.
 
 **Jarvis doit être arrêté** (`jarvis-stop`) : le banc charge le modèle dans son propre
 processus et lui parle en direct, sans passer par l'API. C'est ce qui permet de faire varier
