@@ -57,7 +57,11 @@ pillow==12.3.0
 mlx==0.32.2
 mlx-metal==0.32.2
 mlx-lm==0.31.3
-mlx-vlm==0.6.8
+# mlx-vlm 0.6.16 est le PLANCHER pour l'encodeur visuel Qwen3-VL : en deçà, il appelle
+# `mx.repeat(seq_len, grid_thw[i, 0])` avec un nombre de répétitions sous forme de tableau
+# 0-d, que mlx 0.32 n'accepte plus (signature `repeats: int`). L'encodeur lève alors à
+# chaque image, ce qui coupe toute la vision — préchauffage compris.
+mlx-vlm==0.6.17
 
 # ── Sécurité : SBOM + scan CVE (cve.py + grype) ─────────────────────────────
 # cyclonedx-bom génère la SBOM du venv pour le scan de vulnérabilités.
