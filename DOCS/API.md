@@ -126,6 +126,7 @@ skipped entirely, and most nights revise no introspection axis).
 | `morning_briefing` | `BRIEFING_TIME` | `run_morning_briefings()` | 1 per user | Push / email delivery only |
 | `trade_check` | **2 h** | `run_trade_check()` | 1 per user (`evaluate_alerts`), skipped when the market is closed | Redis portfolio state (prices, auto-set thresholds), push on alert |
 | `cve_scan` | **04:30** | `cve.scan()` | none (SBOM + grype) | CVE cache read by `vitals` |
+| `autocode_nightly` | **02:00** (`AUTOCODE_HOUR`), off by default | `run_nightly_autocode()` | 2 (selection, report) + one per agent step | `AUTOCODE_DIR/<date>-<id>/` (five numbered artefacts, one per phase), Redis journal + cooldowns + the one patch in flight. **Never touches the working tree**: the agent writes in a throwaway `git worktree`. |
 | agent worker | queue-driven, not scheduled | `agent/worker.py` | per task step | Agent workspace, Redis task records |
 
 Two consequences worth knowing before changing anything:
@@ -306,6 +307,32 @@ RELATIONSHIP WITH THIS USER (injected into build_memory_context):
 Affinity is expressed as a semantic label (`forte` ≥ 0.8 · `bonne` ≥ 0.6 · `modérée` ≥ 0.4 · `faible` < 0.4) rather than a numeric score — the LLM reads a qualitative value more reliably.
 
 **Design principle:** in-conversation mood is already perceived by the LLM from the message history — no real-time state update is needed. The relation captures only what cannot be inferred from a single exchange.
+
+## Agent / Autocoding
+
+**Administrators only** (`admin: true` in `users_list.json`), and `503` when
+`AGENT_ENABLED=false`. Full reference in **[AGENT.md](AGENT.md)**.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/agent/tasks` | Queue an agentic task — returns `202`, execution is asynchronous |
+| `GET` | `/agent/tasks` | List tasks; without `user_code`, all users (operations view) |
+| `GET` | `/agent/tasks/{id}` | State, result and deliverables of one task |
+| `POST` | `/agent/tasks/{id}/cancel` | Request cancellation — taken between two steps, never mid-step |
+| `GET` | `/agent/tasks/{id}/transcript` | Last *n* events — what the agent actually did |
+| `POST` | `/agent/autocode` | Replay a nightly autocoding cycle by hand. **Blocking** (~20 min); `{"dry_run": true}` stops after the selection and spends no GPU |
+| `GET` | `/agent/autocode/journal` | Past cycles with their verdicts, the patch awaiting a decision, the eligible findings and what was filtered out |
+
+```bash
+# What would Jarvis pick tonight, and why — nothing is produced
+curl -X POST localhost:8000/agent/autocode \
+  -H 'Content-Type: application/json' \
+  -d '{"user_code":"ALICE1","dry_run":true}'
+```
+
+No endpoint applies a patch, by design. Decisions are taken in chat
+(*"accepte le patch AC-007"*) and record an intent — applying stays a `git apply` the
+operator types.
 
 ## Device / Push Notifications
 

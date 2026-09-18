@@ -186,7 +186,14 @@ fires when a source actually has a critical.
 | `REFLECTION_INTERVAL_HOURS` | `6` | Hours between self-reflection cycles |
 | `CONV_ANALYSIS_INTERVAL_MINUTES` | `60` | Minutes between conversation-analysis runs |
 | `MAX_CHAIN_ITERATIONS` | `3` | Max actions per reflection phase |
-| `REFINE_PROMPT_THRESHOLD` | `3` | Times a knowledge gap must be flagged before a prompt refinement is proposed |
+| `AUTOCODE_HOUR` | `2` | Hour of the nightly autocoding cycle (see below) |
+
+`REFINE_PROMPT_THRESHOLD` no longer exists. It expressed "only propose a prompt improvement
+once a gap has come back three times", but no code ever read it — and the counter it would
+have read could not measure recurrence: topic slugs are truncated to 40 characters with no
+semantic matching, so two phrasings of the same problem counted separately. `refine_prompt`
+is now bounded by **rate** (one proposal in flight, 30 days of sleep per settled topic)
+rather than by recurrence, because human approval is already the relevance filter.
 
 ## Conversation Limits
 
@@ -259,6 +266,41 @@ versioned — keep a copy before removing an entry.
 | `RAW_THINKING_BUDGET` | `3000` | Reasoning cap when the client does not impose one. **Never leave at 0** with thinking on: nothing would bound the reasoning, which shares `RAW_MAX_TOKENS` with the answer — the model can burn its whole budget without ever emitting the tool call. |
 | `RAW_MAX_TOKENS` | `16000` | Reasoning **and** answer share this envelope. |
 | `RAW_DEBUG_PROMPTS` | `true` | Journalisation vers `logs/opencode-prompts.log`. |
+
+## Agentic loop (`agent/`)
+
+Off by default, with a second switch for the shell. Every variable is listed in
+**[AGENT.md](AGENT.md)**; the two that decide whether anything happens at all:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AGENT_ENABLED` | `false` | Master switch. `false` ⇒ no worker, routes answer `503`. |
+| `AGENT_SHELL_ENABLED` | `false` | The `shell` tool. A shell running under your account is the loop's most dangerous capability: it is enabled knowingly, never inherited from a configuration. |
+
+## Nightly autocoding (`autocode/`)
+
+Once a night, Jarvis takes a fact about himself — a traceback from his own log, or a line you
+added to `DOCS/AUTOCODE.md` — writes a test that fails to prove the defect is real, fixes it,
+and drops the patch on a shelf. It **never applies anything**: applying stays a `git apply`
+you type after reading the diff.
+
+Requires `AGENT_ENABLED` as well, but is switched separately: two capabilities, two decisions.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTOCODE_ENABLED` | `false` | Master switch, distinct from `AGENT_ENABLED`. |
+| `AUTOCODE_HOUR` | `2` | Hour of the cycle. After the nightly review (23:00), before the CVE scan (04:30). |
+| `AUTOCODE_POOL_FILE` | `DOCS/AUTOCODE.md` | Findings you add by hand. Optional — tracebacks feed the cycle on their own. |
+| `AUTOCODE_DIR` | `/opt/jarvis/autocode` | Shelf for the patches, one sub-directory per cycle. |
+| `AUTOCODE_MAX_STEPS` | `40` | Writing code takes more steps than writing a note. |
+| `AUTOCODE_TIMEOUT_MINUTES` | `90` | Wall-clock budget. At 2 a.m. nothing competes for the GPU. |
+| `AUTOCODE_MAX_DIFF_LINES` | `200` | Above this the patch is rejected. A diff that overflows is not a big fix, it is a fix that drifted. |
+| `AUTOCODE_COOLDOWN_DAYS` | `30` | How long a target you rejected sleeps. |
+| `AUTOCODE_MAX_TARGET_LINES` | `800` | Target files above this are filtered out: beyond it a single `read_file` no longer covers the file, and pagination is what the model handles worst. |
+| `AUTOCODE_PROTECTED` | `config.py`, `prompts*.py`, `.env`, `users_list.json`, `jarvis-self.json` | Files a patch may never touch, even with approval. |
+
+See **[AUTOCODE.md](AUTOCODE.md)** for the format of hand-added findings and **[AGENT.md](AGENT.md)** for the
+cycle itself.
 
 ## Prompt logs
 

@@ -50,7 +50,7 @@ import shutil
 import time
 from datetime import datetime, timedelta, timezone
 
-from helpers import get_logger, redis_get_json, redis_set_json
+from helpers import get_logger, get_redis, redis_get_json, redis_set_json
 
 logger = get_logger("jarvis-vitals")
 
@@ -299,6 +299,10 @@ def mark_incident(kind: str, detail: str, severity: str = "info") -> None:
         lst.append({"kind": kind, "detail": detail, "severity": severity,
                     "at": time.time(), "iso": datetime.now(timezone.utc).isoformat()})
         redis_set_json(_INCIDENTS_KEY, lst[-_INCIDENTS_MAX:])
+        # L'instantané en cache a été calculé avant l'incident : le garder ferait servir
+        # jusqu'à 15 min un état qui ignore ce qui vient d'arriver, à la réflexion nocturne
+        # comme à /status. `risk_scalar` n'est pas concerné — il relit les incidents vifs.
+        get_redis().delete(_CACHE_KEY)
         logger.info("vitals: incident %s (%s) — %s", kind, severity, detail)
     except Exception as exc:
         logger.debug("vitals: incident non enregistré (%s)", exc)

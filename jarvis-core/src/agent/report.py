@@ -53,6 +53,28 @@ def _en_html(texte: str) -> str:
     )
 
 
+# Longueur d'un intitulé en pied de courriel. Large pour une demande humaine, qui tient
+# en une phrase ; sans effet sur un objectif construit, dont seule la première ligne part.
+_INTITULE_MAX_CARS = 300
+
+
+def _intitule(task: dict) -> str:
+    """Première ligne de l'objectif, bornée. Jamais l'objectif entier.
+
+    Une tâche humaine porte une demande d'une phrase, et l'afficher est utile. Une tâche
+    construite par le code porte son PROMPT — pour l'autocoding, deux mille cinq cents
+    caractères de consignes, de critères et de limites. Les recopier en pied de courriel
+    faisait fuiter tout le contrat dans la boîte de l'utilisateur, après le rapport.
+
+    La première ligne convient aux deux : c'est la demande pour l'une, le constat pour
+    l'autre — `CONSTAT : …` ouvre l'objectif d'autocoding.
+    """
+    for ligne in (task.get("objective") or "").splitlines():
+        if ligne.strip():
+            return ligne.strip()[:_INTITULE_MAX_CARS]
+    return "(sans objet)"
+
+
 def envoyer(task: dict) -> bool:
     """Envoie les livrables de `task` au demandeur. True si un courriel est parti.
 
@@ -94,16 +116,17 @@ def envoyer(task: dict) -> bool:
         )
 
     resume = (task.get("result") or "").strip()
+    intitule = _intitule(task)
     texte = (
         f"{resume}\n\n{'=' * 60}\n\n{corps}\n\n{'=' * 60}\n"
-        f"Objectif : {task['objective']}\n"
+        f"Objectif : {intitule}\n"
         f"Fichiers : {task['workspace']}\n"
     )
 
     from google_services import send_gmail_message
 
     prenom = USER_CODES.get(task["user_code"], "")
-    sujet = f"Jarvis — {task['objective'][:70]}"
+    sujet = f"Jarvis — {intitule[:70]}"
     try:
         envoye = send_gmail_message(
             to=destinataire,

@@ -27,6 +27,8 @@ import pytz
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import (
+    AUTOCODE_ENABLED,
+    AUTOCODE_HOUR,
     BRIEFING_ENABLED,
     BRIEFING_TIME,
     BRIEFING_TIMEZONE,
@@ -227,6 +229,21 @@ async def lifespan(app: FastAPI):
         )
         logger.info("CVE scan scheduled daily at 04:30")
 
+        if AUTOCODE_ENABLED:
+            from autocode import run_nightly_autocode
+
+            # Cycle indépendant de la revue nocturne, et pas sa dernière phase : un échec
+            # ne doit pas emporter l'apprentissage mémoire, et un cycle isolé se rejoue à
+            # la main. L'heure le place après la revue (23:00) et avant le scan CVE (04:30),
+            # hors de la fenêtre où la revue fait cinq appels LLM en priorité chat.
+            scheduler.add_job(
+                run_nightly_autocode,
+                trigger="cron",
+                hour=AUTOCODE_HOUR,
+                id="autocode_nightly",
+            )
+            logger.info("autocode: cycle planifié à %02dh00", AUTOCODE_HOUR)
+
         scheduler.start()
         logger.info("Self reflection scheduled every %d h", REFLECTION_INTERVAL_HOURS)
         logger.info("Nightly review scheduled at 23:00 (%s)", BRIEFING_TIMEZONE)
@@ -236,6 +253,17 @@ async def lifespan(app: FastAPI):
     # Worker agentique — hors scheduler : il n'est pas périodique, il consomme une file.
     # No-op si AGENT_ENABLED=false.
     start_worker()
+
+    if AUTOCODE_ENABLED:
+        # Une coupure en plein cycle laisse un worktree enregistré dans .git alors que son
+        # workspace a pu disparaître. Ce qu'une interruption laisse derrière elle se répare
+        # au démarrage, comme requeue_interrupted() le fait pour les tâches.
+        try:
+            from autocode.chantier import purger_orphelins
+
+            await purger_orphelins()
+        except Exception as exc:
+            logger.warning("autocode: purge des worktrees en échec (%s)", type(exc).__name__)
 
     yield
 

@@ -18,7 +18,7 @@ Both are written to `logs/` and readable directly on the host.
 
 ## Prompt logs
 
-Six logs record the prompt and the **raw** LLM response:
+Seven logs record the prompt and the **raw** LLM response:
 
 | File | Gate | Contents |
 |---|---|---|
@@ -27,15 +27,22 @@ Six logs record the prompt and the **raw** LLM response:
 | `nightly-prompts.log` | `LLM_DEBUG_PROMPTS` | nightly review — **everything** it calls |
 | `reflection-prompts.log` | `LLM_DEBUG_PROMPTS` | reflection cycle, self-challenges included |
 | `opencode-prompts.log` | `RAW_DEBUG_PROMPTS` | `/v1/raw` only (coding agents) |
-| `agent-prompts.log` | `AGENT_DEBUG_PROMPTS` | agentic loop (autonomous tasks) |
+| `agent-prompts.log` | `AGENT_DEBUG_PROMPTS` | agentic loop — tasks **you** hand it |
+| `autocode-prompts.log` | `AGENT_DEBUG_PROMPTS` | one nightly autocoding cycle, **end to end** |
+
+The last two split by the task's `origin`, and the reason is practical: a cycle reads from
+the choice of finding to the final report, and scattering its steps among the human tasks
+meant jumping between files to follow a single night. The two framing calls (choose, report)
+used to land in `prompts.log`, in the middle of chat traffic, while the loop they framed
+wrote elsewhere — the two halves of one cycle in two unrelated files.
 
 **Two routing mechanisms, for two different needs.** OpenCode and the agent pass an
 **explicit** path (`debug_log_path`) and have their own switch: their prompts carry an entire
 repository's context or ten tool schemas, and you want to follow them without turning
 conversational logging back on.
 
-The three background jobs go through a **context variable** (`journal_de_cycle`,
-`llm/local.py`). They share `prompts.log`'s gate — it is the same traffic, just filed
+The background jobs go through a **context variable** (`journal_de_cycle`,
+`llm/local.py`) — the autocoding cycle included, for its two framing calls. They share `prompts.log`'s gate — it is the same traffic, just filed
 elsewhere. A context variable was preferred to a parameter because one cycle calls the LLM
 from several modules: the nightly review delegates curation to `memory/cleaning.py` and the
 narrative to `memory/profile.py`. Threading a path through `helpers` and then the four entry
@@ -85,7 +92,7 @@ raise a `degradation_interne` incident and push α up.
 ## Test suite
 
 ```bash
-# Fast loop — 103 unit tests, well under a second, no network at all
+# Fast loop — 157 unit tests, about two seconds, no network at all
 ./venv/bin/python -m pytest jarvis-core/tests/ -m "not integration"
 
 # Same thing: the default run skips everything that needs a server or the web
@@ -99,6 +106,7 @@ raise a `degradation_interne` incident and push α up.
 | `test_memory.py` | Retraction, convlog, project whitelist |
 | `test_self.py` | Action catalogue coherence, introspection axes, nightly prompt |
 | `test_agent.py` | Sandbox, blacklist, tool schemas, budget relationships |
+| `test_autocode.py` | Pool parsing, mechanical guards, verdict computation, tool set per origin |
 | `test_integration.py` | Live pipeline — **opt-in**, writes to real memory |
 | `test_web_search.py` | Real web queries — **opt-in** |
 | `test_lru_cache.py` | GPU benchmark — needs Jarvis stopped |

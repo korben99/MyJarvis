@@ -133,6 +133,36 @@ it is the shortest exfiltration path there is.
 The shell agent is **disabled by default** (`AGENT_SHELL_ENABLED`). Enable it only
 deliberately. See **[AGENT.md](AGENT.md)** for the full picture.
 
+### Executing code the model wrote
+
+Nightly autocoding (`jarvis-core/src/autocode/`) has the agent write a patch and then run the
+test suite against it. That is the sharpest form of the problem: **the code being executed is
+code the model just produced**, and a test file is enough to carry it.
+
+The `verify` tool therefore runs inside the very same seatbelt profile as `shell`. Running it
+directly would have granted arbitrary execution under the user's account through the mere act
+of writing a file — the exact thing the sandbox exists to prevent.
+
+What differs from `shell` is not the confinement, it is that **nobody composes the command**:
+`verify` runs a fixed sequence (`compileall`, `pyflakes`, `pytest -m "not integration"`) and
+takes no arguments. That is why a self-triggered task may call `verify` while it may never
+call `shell`.
+
+Three further properties bound the blast radius:
+
+- The agent works in a detached **`git worktree` inside its own workspace** — already the
+  only zone seatbelt allows it to write. The production checkout is never touched.
+- That worktree's `.git` points *outside* the write zone, so the agent **cannot commit**. The
+  prompt tells it not to use git; the kernel enforces it regardless.
+- **No code path applies a patch**, not even an approved one. "Accept" records a decision; the
+  operator applies it with `git apply` after reading the diff. It is precisely because the
+  cycle's product changes nothing that it is allowed to trigger itself.
+
+The tool set is derived from the task's `origin` and enforced at dispatch, not merely at
+declaration: undeclared schemas are not a barrier, since a generation can name a real tool
+outside its perimeter. Autocoding is switched separately from the agentic loop
+(`AUTOCODE_ENABLED`), and both are off by default.
+
 ---
 
 ## Prompt injection

@@ -53,6 +53,31 @@ class TestPariteDesPrompts:
         orphelines = sorted(_constantes(prompts_en) - _constantes(prompts_fr))
         assert not orphelines, f"présentes seulement en anglais : {orphelines}"
 
+    def test_les_champs_de_substitution_sont_identiques(self):
+        """La parité des NOMS ne suffit pas : ce sont les `{champs}` qui plantent.
+
+        Un prompt traduit en oubliant un champ lève un `KeyError` au moment de servir la
+        requête ; un champ ajouté d'un seul côté est passé pour rien, donc silencieux
+        jusqu'au jour où l'instance change de langue. Les deux se voient ici et nulle part
+        ailleurs — la relecture humaine de deux fichiers de 1600 lignes ne les attrape pas.
+        """
+        import string
+
+        try:
+            prompts_en = importlib.import_module("prompts_en")
+        except ImportError:
+            pytest.skip("prompts_en.py absent")
+
+        def champs(texte: str) -> set[str]:
+            return {f for _, f, _, _ in string.Formatter().parse(texte) if f}
+
+        ecarts = []
+        for nom in sorted(_constantes(prompts_fr) & _constantes(prompts_en)):
+            fr, en = champs(getattr(prompts_fr, nom)), champs(getattr(prompts_en, nom))
+            if fr != en:
+                ecarts.append(f"{nom} (FR seul : {sorted(fr - en)}, EN seul : {sorted(en - fr)})")
+        assert not ecarts, "champs désynchronisés — " + " ; ".join(ecarts)
+
 
 class TestPariteDuLexique:
 

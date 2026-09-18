@@ -96,24 +96,30 @@ def verifier(cmd: str) -> str | None:
     return None
 
 
-async def executer(task: dict, cmd: str, timeout: float = 0) -> str:
+async def executer(task: dict, cmd: str, timeout: float = 0, compter: bool = True) -> str:
     """Exécute `cmd` dans le bac à sable, cwd = workspace de la tâche.
 
     Ne lève jamais : tout échec revient sous forme de texte lisible par le modèle, comme
     pour les autres outils.
+
+    `compter=False` pour une commande que l'agent n'a pas composée — les mesures que
+    l'orchestrateur prend APRÈS la boucle. Le quota borne la dérive du modèle ; le décompter
+    sur des commandes fixes ferait échouer la mesure d'une tâche par ailleurs réussie, au
+    seul motif que l'agent a beaucoup vérifié son travail.
     """
     raison = verifier(cmd)
     if raison:
         logger.warning("agent: %s — commande refusée (%s) : %s", task["id"], raison, cmd[:120])
         return f"Commande refusée — {raison}. Elle n'a pas été exécutée."
 
-    appels = task.get("shell_calls", 0)
-    if appels >= AGENT_SHELL_MAX_CALLS:
-        return (
-            f"Quota de commandes atteint ({AGENT_SHELL_MAX_CALLS} pour la tâche). "
-            "Termine avec ce que tu as."
-        )
-    task["shell_calls"] = appels + 1
+    if compter:
+        appels = task.get("shell_calls", 0)
+        if appels >= AGENT_SHELL_MAX_CALLS:
+            return (
+                f"Quota de commandes atteint ({AGENT_SHELL_MAX_CALLS} pour la tâche). "
+                "Termine avec ce que tu as."
+            )
+        task["shell_calls"] = appels + 1
 
     workspace = os.path.realpath(task["workspace"])
     profil = os.path.join(workspace, ".sandbox.sb")

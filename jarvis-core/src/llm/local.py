@@ -118,6 +118,11 @@ _AGENT_PROMPTS_LOG_PATH = "/opt/jarvis/logs/agent-prompts.log"
 # mêmes prompts, on veut juste pouvoir les lire séparément du trafic conversationnel.
 _NIGHTLY_PROMPTS_LOG_PATH = "/opt/jarvis/logs/nightly-prompts.log"
 _REFLECTION_PROMPTS_LOG_PATH = "/opt/jarvis/logs/reflection-prompts.log"
+# Le cycle d'autocoding fait deux appels de cadrage — choisir un constat, rédiger le
+# rapport. Sans ce journal ils tombaient dans prompts.log, au milieu du trafic de chat,
+# alors que la boucle agentique qu'ils encadrent écrit, elle, dans agent-prompts.log : les
+# deux moitiés d'un même cycle atterrissaient dans deux fichiers sans rapport.
+_AUTOCODE_PROMPTS_LOG_PATH = "/opt/jarvis/logs/autocode-prompts.log"
 # L'analyseur tourne toutes les heures et son prompt embarque la base de connaissances, les
 # clés de profil et 2000 caractères d'historique. Surtout, on ne l'ouvre pas pour la même
 # question : devant prompts.log on demande ce que Jarvis a répondu à quelqu'un, devant
@@ -206,6 +211,9 @@ def _debug_log(
     _gates = {
         _RAW_PROMPTS_LOG_PATH: RAW_DEBUG_PROMPTS,
         _AGENT_PROMPTS_LOG_PATH: AGENT_DEBUG_PROMPTS,
+        # L'autocoding suit la porte de l'agent : c'est le même trafic, seulement rangé
+        # dans son propre fichier pour qu'un cycle se lise d'un bout à l'autre.
+        _AUTOCODE_PROMPTS_LOG_PATH: AGENT_DEBUG_PROMPTS,
     }
     enabled = _gates.get(log_path, RAW_DEBUG_PROMPTS) if log_path else LLM_DEBUG_PROMPTS
     if not enabled or skip:

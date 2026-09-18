@@ -479,6 +479,65 @@ AGENT_READONLY_ROOTS = tuple(
     ).split(",")
     if p.strip()
 )
+
+# ── Autocoding nocturne (autocode/) ───────────────────────────────────────
+# Troisième régime autonome, à ne confondre ni avec le proto-self (qui propose) ni avec la
+# boucle agentique sur commande humaine (qui agit à la demande) : celui-ci se déclenche
+# seul, chaque nuit, et produit un PATCH — jamais appliqué, déposé avec sa preuve.
+# Interrupteur distinct d'AGENT_ENABLED : deux capacités, deux décisions.
+AUTOCODE_ENABLED = os.getenv("AUTOCODE_ENABLED", "false").lower() in ("yes", "true", "1")
+
+# Racine du dépôt, d'où partent le worktree et le patch.
+JARVIS_ROOT = os.getenv("JARVIS_ROOT", str(pathlib.Path(__file__).resolve().parents[2]))
+
+# Étagère des livrables : un sous-dossier par run, stable et consultable. Distinct du
+# workspace de la tâche, qui est un brouillon et dont le worktree est détruit à la fin.
+AUTOCODE_DIR = os.getenv("AUTOCODE_DIR", os.path.join(JARVIS_ROOT, "autocode"))
+
+# Le vivier de cibles, écrit et maintenu à la main. Le modèle choisit DEDANS, il n'invente
+# jamais d'objectif : un champ texte libre piloté par un modèle dérive, et une tâche
+# agentique coûte cent fois plus cher qu'une proposition de prompt.
+AUTOCODE_POOL_FILE = os.getenv(
+    "AUTOCODE_POOL_FILE", os.path.join(JARVIS_ROOT, "DOCS", "AUTOCODE.md")
+)
+
+# Heure du cycle. Après la revue nocturne (23:00) et avant le scan CVE (04:30), hors de la
+# fenêtre 22:30–01:00 où la revue fait cinq appels LLM par utilisateur en priorité chat.
+AUTOCODE_HOUR = int(os.getenv("AUTOCODE_HOUR", "2"))
+
+# Budgets propres à une tâche de code : écrire du code demande plus de pas que rédiger une
+# note, et à 2 h du matin rien ne dispute le GPU. Surchargent AGENT_MAX_STEPS et
+# AGENT_TASK_TIMEOUT_MINUTES pour la seule origine `autocode`.
+AUTOCODE_MAX_STEPS = int(os.getenv("AUTOCODE_MAX_STEPS", "40"))
+AUTOCODE_TIMEOUT_MINUTES = int(os.getenv("AUTOCODE_TIMEOUT_MINUTES", "90"))
+
+# Au-delà, le patch est rejeté mécaniquement. La consigne est « correctif chirurgical » :
+# un diff qui déborde n'est pas un gros correctif, c'est un correctif qui a dérivé.
+AUTOCODE_MAX_DIFF_LINES = int(os.getenv("AUTOCODE_MAX_DIFF_LINES", "200"))
+
+# Sommeil d'une cible tranchée par l'humain. Même doctrine que refine_prompt : le
+# mécanisme est borné en DÉBIT, l'approbation humaine est le filtre de pertinence.
+AUTOCODE_COOLDOWN_DAYS = int(os.getenv("AUTOCODE_COOLDOWN_DAYS", "30"))
+
+# Plafond de lignes d'un fichier cible. AGENT_READ_MAX_CHARS vaut 32 000 caractères, soit
+# ~800 lignes de Python : au-delà il faudrait paginer, et la pagination est ce que le
+# modèle rate le plus — il rejoue la même lecture jusqu'à épuiser le budget.
+AUTOCODE_MAX_TARGET_LINES = int(os.getenv("AUTOCODE_MAX_TARGET_LINES", "800"))
+
+# Fichiers qu'un patch ne peut pas toucher, même avec approbation. Le tronc commun
+# (config, prompts) casse tout le monde à la fois ; les fichiers d'état sont des données,
+# pas du code, et un patch qui les réécrit détruit de la mémoire.
+AUTOCODE_PROTECTED = tuple(
+    p.strip()
+    for p in os.getenv(
+        "AUTOCODE_PROTECTED",
+        "jarvis-core/src/config.py,jarvis-core/src/prompts_fr.py,"
+        "jarvis-core/src/prompts_en.py,jarvis-core/src/prompts.py,"
+        ".env,users_list.json,jarvis-self.json",
+    ).split(",")
+    if p.strip()
+)
+
 # ── Autocoding — prompt self-modification ─────────────────────────────────
 # Number of times a knowledge gap must be flagged before a prompt-refine is triggered
 # REFINE_PROMPT_THRESHOLD supprimé. Il exprimait « ne proposer une

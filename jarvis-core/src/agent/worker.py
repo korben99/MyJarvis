@@ -32,6 +32,13 @@ def _notify(task: dict) -> None:
     if status == store.STATUS_CANCELLED:
         return
 
+    # Une tâche d'autocoding n'est pas finie quand la boucle l'est : son patch doit encore
+    # être mesuré, jugé et mis en forme. Notifier ici enverrait le brouillon de l'agent
+    # quelques minutes avant le rapport réel — deux courriels, dont le premier est faux.
+    # C'est `autocode/` qui restitue, une fois qu'il a quelque chose à dire.
+    if task.get("origin") == "autocode":
+        return
+
     if status == store.STATUS_DONE:
         # Le courriel part AVANT le push : il porte le livrable, le push n'en porte que
         # l'annonce. Cet ordre permet aussi d'écrire « envoyé par mail » dans la

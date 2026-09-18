@@ -85,3 +85,52 @@ async def transcript(task_id: str, n: int = 50):
         except json.JSONDecodeError:
             continue
     return {"id": task_id, "events": events}
+
+
+class _Autocode(BaseModel):
+    user_code: str
+    # S'arrête après la sélection : de quoi contrôler ce que Jarvis choisirait, et
+    # pourquoi, sans dépenser vingt minutes de GPU ni produire de patch.
+    dry_run: bool = False
+
+    # Part sans cible désignée : l'agent parcourt et juge de ce qui mérite d'être signalé.
+    # Manuel uniquement — le planificateur n'a pas ce drapeau.
+    revue: bool = False
+
+
+@router.post("/agent/autocode")
+async def post_autocode(req: _Autocode):
+    """Rejoue le cycle d'autocoding à la main, sans attendre la nuit.
+
+    Bloquant, à dessein : un cycle complet dure une vingtaine de minutes et l'appelant est
+    un administrateur devant son terminal, qui veut le résultat — pas un identifiant à
+    resonder. Le mode nocturne, lui, ne passe pas par ici.
+    """
+    _require_enabled()
+    if req.user_code not in USER_ADMINS:
+        raise HTTPException(403, "réservé aux administrateurs")
+
+    from autocode import run_nightly_autocode
+
+    return await run_nightly_autocode(dry_run=req.dry_run, revue=req.revue)
+
+
+@router.get("/agent/autocode/journal")
+async def get_autocode_journal(user_code: str, n: int = 10):
+    """Les derniers cycles avec leur verdict, et le patch qui attend une décision."""
+    _require_enabled()
+    if user_code not in USER_ADMINS:
+        raise HTTPException(403, "réservé aux administrateurs")
+
+    from autocode import constats, store
+
+    eligibles, exclus = constats.recueillir()
+    return {
+        "en_attente": store.patch_en_attente(),
+        "journal": store.journal(n),
+        "constats": [
+            {"id": c["id"], "constat": c["constat"], "origine": c["origine"]}
+            for c in eligibles
+        ],
+        "ecartes": [{"id": i, "motif": m} for i, m in exclus],
+    }

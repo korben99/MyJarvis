@@ -59,6 +59,20 @@ Jarvis can detect that one of its own prompts is the cause of a failure it obser
 
 A proposal names the prompt, cites the concrete failure and carries the complete rewritten text. You review it in chat — *"show the proposals"*, *"accept proposal 3"* — and only an explicit approval writes the override, which takes effect without a restart. Guard rails are mechanical, not advisory: one proposal in flight across all prompts, a 30-day sleep per subject once settled, a closed list of 17 refinable prompts, and a token budget per prompt that a rewrite cannot exceed.
 
+### It patches its own code, and proves the patch works
+
+Once a night, Jarvis reads the tracebacks in his own log, picks one, proves it is a real defect, fixes it, and hands you a diff. He never applies anything: the patch lands on a shelf with its report, and applying it stays a `git apply` you type after reading it. That is precisely what lets the cycle run unattended — its product changes nothing until a human decides otherwise.
+
+There is **one kind of task**, and its shape is the whole design:
+
+> take a fact about yourself → write a test that fails, proving the defect is real → fix it so the test passes.
+
+Code is the one deliverable whose success is **mechanically falsifiable**, and a confident model cannot fabricate a test that fails before and passes after. It has to characterise the problem before touching it, and you get a verdict in ten seconds instead of reading a persuasive paragraph. The verdict is not a *type* of task but a **distance travelled** — `corrigé`, `reproduit` (proven, not repaired), `gardé` (no defect, but a test that now guards the property), `rien trouvé`, `rejeté` — and it is *computed*: protected files, fix size, compilation, unit suite, vacuity, and the new test replayed against a pristine checkout. The LLM that writes the report receives that verdict as data, with no way to rescue it.
+
+Nothing about *what* to attempt is left to the model either. A finding is something observed that names a file: a traceback, or a line you add to `DOCS/AUTOCODE.md` for something he could not see on his own. The model never chooses a *subject*, only which *fact* to follow — the difference between "improve yourself", which drifts, and "here are three tracebacks from last week, which is worth the GPU", which cannot, because there is nothing to invent. Handing it a free-text objective instead is how a self-improving loop drifts: the prompt-refinement feature above, before its guard rails, produced eleven rejections out of thirteen, four of them on the same subject aiming at four different targets.
+
+The agent works in a throwaway `git worktree` inside its own sandbox — the working tree is never touched, and the worktree's `.git` sits outside the writable zone, so it cannot commit even if it tried. Its verification tool runs a *fixed* command sequence inside the same kernel sandbox as the shell, because the code it is about to execute is code the model just wrote. And only **one patch is in flight at a time**: the real cost is not GPU time at 2 a.m., it is your review.
+
 ### It knows it can end
 
 This is the part most assistants do not have. `vitals.py` measures Jarvis's own **exposure to disappearance**, sorted into five modes because they are failures of different structures, not shades of one thing:
@@ -103,6 +117,9 @@ Nine tools, and the count is deliberate — every extra tool is one more chance 
 | `list_dir` · `read_file` · `write_file` | filesystem, confined to the task workspace |
 | `plan` | the only tool allowed alongside an action in the same turn |
 | `shell` | command execution — **off by default** |
+| `verify` | compile, lint and run the test suite — autocoding tasks only |
+
+The set a task gets is a function of **who asked for it**, not of the configuration: a task Jarvis gives itself does not inherit the rights of a task you hand it. An autocoding task has no web, no document base and no free shell, even with the shell enabled.
 
 Three independent budgets bound the drift: a maximum number of steps (bounds reasoning in circles), a wall-clock timeout (bounds how long chat waits behind it), and a no-progress guard that trips on two identical calls in a row (bounds tight loops on a failing tool). Every tool output is truncated, because the whole context is re-injected at each step.
 
@@ -206,7 +223,8 @@ Full walkthrough in **[DOCS/INSTALL.md](DOCS/INSTALL.md)**.
 | **[INSTALL.md](DOCS/INSTALL.md)** | Step-by-step install, launchd service, everyday commands |
 | **[ARCHITECTURE.md](DOCS/ARCHITECTURE.md)** | Components, 4-tier LLM routing, prompt assembly, request flow |
 | **[MEMORY.md](DOCS/MEMORY.md)** | The six layers, Jarvis's own diary, introspection, emotional state, growth caps |
-| **[AGENT.md](DOCS/AGENT.md)** | The agentic loop: tools, budgets, sandbox, phases |
+| **[AGENT.md](DOCS/AGENT.md)** | The agentic loop: tools, budgets, sandbox, and the nightly autocoding cycle |
+| **[AUTOCODE.example.md](DOCS/examples/AUTOCODE.example.md)** | Format for hand-added findings — copy to `DOCS/AUTOCODE.md` |
 | **[CONFIGURATION.md](DOCS/CONFIGURATION.md)** | Every `.env` variable, tier by tier — and the configuration page |
 | **[API.md](DOCS/API.md)** | Endpoint reference |
 | **[PERFORMANCE.md](DOCS/PERFORMANCE.md)** | TTFT measurements, KV cache, LLM call map |

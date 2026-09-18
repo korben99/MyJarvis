@@ -210,10 +210,15 @@ def build_dynamic_prefix(
         # jusqu'au modèle, pas un comportement à corriger par une consigne. `incr_usage` et
         # `set_risk` restent hors de la garde : l'usage se compte pour tout le monde, et le
         # corps subit le risque quel que soit l'interlocuteur.
+        # Gardé à part : une sonde qui lève ici emporterait `set_risk`, placé après, alors
+        # que le corps doit subir le risque quel que soit l'état du bloc de texte.
         if user_code in USER_ADMINS:
-            bloc_vitals = render_prompt_block()
-            if bloc_vitals:
-                parts.append(bloc_vitals)
+            try:
+                bloc_vitals = render_prompt_block()
+                if bloc_vitals:
+                    parts.append(bloc_vitals)
+            except Exception as exc:
+                logger.debug("bloc vitals non rendu (%s)", exc)
 
         # Le corps réagit au réel : le même état de disparition qui alimente le texte pilote
         # aussi l'intensité du steering. α reste nominal à risque nul, monte quand ça se

@@ -14,8 +14,10 @@ Deux règles de conception, toutes deux dictées par le contexte d'un 35B local 
   contexte qui est déjà réinjecté intégralement à chaque pas.
 """
 
+import ast
 import json
 import os
+import sys
 
 from config import (
     AGENT_DOCS_MIN_SCORE,
@@ -37,6 +39,16 @@ logger = get_logger("jarvis-agent")
 # dépensant un tour à relire sa propre trace. Ils ne lui apprennent rien qu'il n'ait déjà
 # dans son contexte, et messages.json en est une copie intégrale.
 _FICHIERS_INTERNES = frozenset({"transcript.jsonl", "messages.json", "messages.json.tmp"})
+
+# `repo_ref` est la copie vierge que la mesure compare au travail de l'agent : la montrer
+# l'invite à lire un arbre qui n'est pas le sien — et rendre des constats situés dedans.
+# Masquée, la racine du workspace ne porte plus que `repo`, donc plus rien à choisir.
+#
+# `autocode` et `agent` sont le cycle qui produit cette revue et la boucle qui l'exécute.
+# Ils changent d'un run à l'autre pendant qu'on les met au point : un constat qui les vise
+# porte sur un état déjà périmé quand on le lit. TEMPORAIRE — à retirer quand la mécanique
+# sera stabilisée, `agent/` portant par ailleurs du code de production qui mérite relecture.
+_DOSSIERS_MASQUES = frozenset({"repo_ref", "autocode", "agent"})
 
 # Noms réservés, traités à part par la boucle.
 FINISH = "finish"   # jamais dispatché ici — c'est la sortie de la boucle
@@ -210,8 +222,10 @@ TOOL_SCHEMAS: list[dict] = [
                     "limit": {
                         "type": "integer",
                         "description": (
-                            "Nombre de lignes max. Par défaut, autant que le budget le permet "
-                            "— ne le fixe que pour une lecture ciblée."
+                            "Nombre de lignes max. NE LE FIXE PAS pour découvrir un fichier : "
+                            "sans lui, une lecture rend jusqu'à ~800 lignes d'un coup. Une "
+                            "limite basse coûte un tour par tranche. Réserve-le à la relecture "
+                            "d'un passage précis, avec offset."
                         ),
                     },
                 },
@@ -287,6 +301,120 @@ if not AGENT_SHELL_ENABLED:
     TOOL_SCHEMAS = [t for t in TOOL_SCHEMAS if t["function"]["name"] != "shell"]
 
 TOOL_NAMES = frozenset(t["function"]["name"] for t in TOOL_SCHEMAS)
+
+
+# ── Jeu d'outils par origine ──────────────────────────────────────────────
+# Le filtrage à l'import ne suffit plus dès qu'une deuxième origine existe : une tâche que
+# Jarvis se donne n'a pas les droits d'une tâche qu'un humain lui confie. L'écart doit être
+# porté par la TÂCHE, sans quoi activer une capacité pour l'une l'activerait pour l'autre.
+#
+# `verify` n'entre dans aucun jeu par défaut : il n'a de sens que sur un worktree, que seule
+# l'origine `autocode` prépare.
+VERIFY = "verify"
+GREP = "grep"
+APPELANTS = "appelants"
+
+# Recherche littérale, jamais une expression régulière. Une regex fournie par le modèle
+# s'exécute sur deux cents fichiers et peut s'emballer sans qu'on sache l'interrompre ;
+# « où est défini ceci » se répond par une sous-chaîne, et c'est la question qu'il pose.
+_GREP_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": GREP,
+        "description": (
+            "Cherche un TEXTE EXACT dans les fichiers du dépôt et rend les lignes qui le "
+            "contiennent, avec leur fichier et leur numéro. C'est par là qu'on trouve où "
+            "quelque chose est défini ou utilisé — puis read_file avec offset=<ligne>."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Le texte à chercher, littéralement. Ex : 'def est_protege'.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Sous-dossier où chercher. Par défaut : tout le dépôt.",
+                },
+            },
+            "required": ["pattern"],
+        },
+    },
+}
+
+_APPELANTS_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": APPELANTS,
+        "description": (
+            "Rend TOUS les endroits du dépôt qui importent un module ou appellent une "
+            "fonction, avec fichier et numéro de ligne. Répond à « qui se sert de ça ? » — "
+            "ce qu'un fichier ne dit jamais de lui-même : du code qu'aucun appelant "
+            "n'atteint est inerte, le même code appelé sur chaque requête ne l'est pas. "
+            "Suit les imports indirects que grep manque (from m import f, puis f(…))."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "nom": {
+                    "type": "string",
+                    "description": (
+                        "Un module ou une fonction, sans chemin ni extension. "
+                        "Ex : 'vitals', 'est_protege'."
+                    ),
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Sous-dossier où chercher. Par défaut : tout le dépôt.",
+                },
+            },
+            "required": ["nom"],
+        },
+    },
+}
+
+_VERIFY_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": VERIFY,
+        "description": (
+            "Vérifie l'état du dépôt dans repo/ : compilation, pyflakes, et la suite de "
+            "tests unitaires. Sans argument. À appeler avant finish, et autant de fois "
+            "que nécessaire pendant que tu corriges."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+# Pas de web ni de RAG pour une tâche de code : elle n'en a pas besoin, et chaque schéma
+# est rendu en tête de prompt à CHAQUE pas — un outil inutile se paie quarante fois et
+# reste une occasion de se tromper de choix.
+_OUTILS_AUTOCODE = frozenset(
+    {PLAN, GREP, APPELANTS, "list_dir", "read_file", "write_file", VERIFY, FINISH}
+)
+
+# Ajoutés avant finish : l'ordre des schémas est l'ordre de lecture du modèle, et
+# « chercher », « remonter les appelants », « vérifier » se lisent avant « terminer ».
+_SCHEMAS_AUTOCODE = (_GREP_SCHEMA, _APPELANTS_SCHEMA, _VERIFY_SCHEMA)
+
+
+def schemas_for(task: dict) -> list[dict]:
+    """Schémas d'outils visibles par cette tâche, selon son origine."""
+    if task.get("origin") != "autocode":
+        return TOOL_SCHEMAS
+    retenus: list[dict] = []
+    for schema in TOOL_SCHEMAS:
+        nom = schema["function"]["name"]
+        if nom == FINISH:
+            retenus.extend(_SCHEMAS_AUTOCODE)
+        if nom in _OUTILS_AUTOCODE:
+            retenus.append(schema)
+    return retenus
+
+
+def names_for(task: dict) -> frozenset[str]:
+    return frozenset(t["function"]["name"] for t in schemas_for(task))
 
 
 # ── Implémentations ───────────────────────────────────────────────────────
@@ -507,6 +635,269 @@ async def _plan(task: dict, args: dict) -> str:
     return "Plan à jour." + render_plan(task)
 
 
+# Large devant les ~6 s mesurées (compilation + pyflakes + 107 tests) : le délai borne une
+# suite partie en boucle, il n'arbitre pas la durée nominale.
+_VERIFY_TIMEOUT = 180.0
+
+
+def commande_verification() -> str:
+    """Les trois contrôles, dans l'ordre du moins au plus cher.
+
+    `sys.executable` et non un chemin codé en dur : c'est l'interpréteur qui fait tourner
+    Jarvis, donc celui de son venv, sur n'importe quelle installation.
+    """
+    py = sys.executable
+    return (
+        "cd repo || exit 1\n"
+        "echo '── py_compile ──'\n"
+        f"{py} -m compileall -q jarvis-core/src || echo 'ÉCHEC compilation'\n"
+        "echo '── pyflakes ──'\n"
+        f"{py} -m pyflakes jarvis-core/src/*.py jarvis-core/src/*/*.py\n"
+        "echo '── pytest (unitaires) ──'\n"
+        f"{py} -m pytest jarvis-core/tests/ -m 'not integration' -q\n"
+    )
+
+
+# Bornes de la recherche. Rendre trois cents lignes remplirait le contexte, ce que cet
+# outil existe précisément pour éviter : on cherche un point d'entrée, pas un inventaire.
+_GREP_MAX_RESULTATS = 60
+_GREP_LIGNE_MAX = 200
+# Un même fichier peut appeler cent fois la même fonction sans rien apprendre de plus :
+# ce qu'on cherche, c'est QUELS fichiers touchent le symbole, pas combien de fois.
+_APPELANTS_PAR_FICHIER = 8
+
+# Profondeur maximale d'un couloir traversé d'un seul appel. Assez pour `.` → `repo` →
+# `jarvis-core` → `src`, sans risquer de dérouler une arborescence entière.
+_COULOIR_MAX_PALIERS = 5
+
+_GREP_FICHIERS_MAX = 2000
+# `repo_ref` est la copie vierge de HEAD que la mesure compare au travail de l'agent. La
+# parcourir rend chaque occurrence en double et attribue au dépôt des lignes qui viennent
+# de l'arbre de référence.
+_GREP_IGNORES = frozenset(
+    {".git", "__pycache__", "node_modules", ".pytest_cache", "venv"} | _DOSSIERS_MASQUES
+)
+_GREP_EXTENSIONS = (".py", ".md", ".jinja", ".json", ".toml", ".cfg", ".txt", ".sh", ".yml")
+
+
+async def _grep(task: dict, args: dict) -> str:
+    """Cherche un texte littéral et rend `fichier:ligne: contenu`.
+
+    Écrit en Python plutôt que délégué à `grep` : le motif vient du modèle, et le passer
+    à un shell reviendrait à composer une commande avec son entrée. Ici il n'est qu'une
+    sous-chaîne comparée en mémoire — aucune commande, aucune échappatoire.
+
+    C'est l'outil qui manquait à une tâche de code. Sans lui, chercher où quelque chose est
+    défini se fait en déroulant les dossiers un `list_dir` à la fois : mesuré sur le
+    deuxième cycle réel, sept listages, une divagation hors cible, puis une tentative
+    d'écrire un script de recherche — qu'aucun outil n'aurait pu exécuter.
+    """
+    motif = (args.get("pattern") or "").strip()
+    if not motif:
+        return "Erreur : pattern vide."
+
+    cible = resolve(task["id"], args.get("path") or ".", write=False)
+
+    trouves, scannes, tronque = [], 0, False
+    # Un chemin de FICHIER cherche dans ce fichier, pas dans son dossier. Remonter au
+    # parent rendrait des occurrences venues d'ailleurs, que le modèle attribuerait au
+    # fichier qu'il avait nommé.
+    parcours = (
+        [(os.path.dirname(cible), [], [os.path.basename(cible)])]
+        if os.path.isfile(cible)
+        else os.walk(cible)
+    )
+    for dossier, sous_dossiers, fichiers in parcours:
+        sous_dossiers[:] = [d for d in sous_dossiers if d not in _GREP_IGNORES]
+        for nom in sorted(fichiers):
+            if not nom.endswith(_GREP_EXTENSIONS) and not os.path.isfile(cible):
+                continue
+            scannes += 1
+            if scannes > _GREP_FICHIERS_MAX:
+                tronque = True
+                break
+            chemin = os.path.join(dossier, nom)
+            try:
+                with open(chemin, encoding="utf-8", errors="replace") as f:
+                    for numero, ligne in enumerate(f, 1):
+                        if motif in ligne:
+                            trouves.append(
+                                f"{relative(task['id'], chemin)}:{numero}: "
+                                f"{ligne.strip()[:_GREP_LIGNE_MAX]}"
+                            )
+                            if len(trouves) >= _GREP_MAX_RESULTATS:
+                                tronque = True
+                                break
+            except OSError:
+                continue
+            if tronque:
+                break
+        if tronque:
+            break
+
+    if not trouves:
+        # Le modèle échappe ses crochets par réflexe d'expression régulière — mesuré :
+        # `etape\[` cherché tel quel, zéro résultat. Plutôt que d'accepter les regex (et
+        # leur risque d'emballement sur deux cents fichiers), on le lui dit : la recherche
+        # est littérale, et voici le motif dépouillé de ses échappements.
+        nu = motif.replace("\\", "")
+        indice = (
+            f" La recherche est LITTÉRALE, pas une expression régulière — réessaie avec "
+            f"{nu!r}."
+            if nu != motif else ""
+        )
+        return (
+            f"Aucune occurrence de {motif!r} dans {relative(task['id'], cible)} "
+            f"({scannes} fichier(s) parcouru(s)). Vérifie l'orthographe, ou cherche plus "
+            f"court.{indice}"
+        )
+    entete = f"{len(trouves)} occurrence(s) de {motif!r}"
+    if tronque:
+        entete += f" (arrêté à {_GREP_MAX_RESULTATS} — affine ta recherche)"
+    return _truncate(entete + " :\n" + "\n".join(trouves))
+
+
+def _references_du_fichier(
+    chemin: str, nom: str
+) -> tuple[list[tuple[int, str]], int, set[str]]:
+    """Références à `nom` : (ligne, forme), la ligne de définition, et les noms importés.
+
+    Les noms importés DEPUIS `nom` sont rendus à part parce qu'un module n'est presque
+    jamais appelé sous son propre nom : `from m import f` puis `f(…)` est la forme
+    courante, et s'arrêter à la ligne d'import ferait conclure que personne ne s'en sert.
+
+    Passe par l'AST et non par le texte parce qu'un import et son usage ne partagent
+    aucune chaîne : `from m import f` puis `f(...)` est la forme la plus courante, et
+    une recherche littérale sur `m` ne la voit pas.
+    """
+    try:
+        with open(chemin, encoding="utf-8", errors="replace") as f:
+            arbre = ast.parse(f.read())
+    except (OSError, SyntaxError, ValueError):
+        return [], 0, set()
+
+    refs: list[tuple[int, str]] = []
+    definit = 0
+    importes: set[str] = set()
+
+    for noeud in ast.walk(arbre):
+        if isinstance(noeud, ast.Import):
+            for alias in noeud.names:
+                if alias.name.split(".")[0] == nom or alias.name == nom:
+                    refs.append((noeud.lineno, f"import {alias.name}"))
+        elif isinstance(noeud, ast.ImportFrom):
+            module = noeud.module or ""
+            if module.split(".")[-1] == nom or module == nom:
+                noms = [a.name for a in noeud.names]
+                importes.update(noms)
+                refs.append((noeud.lineno, f"from {module} import {', '.join(noms)}"))
+            else:
+                for alias in noeud.names:
+                    if alias.name == nom:
+                        refs.append((noeud.lineno, f"from {module} import {alias.name}"))
+        elif isinstance(noeud, ast.Call):
+            cible = noeud.func
+            if isinstance(cible, ast.Name) and cible.id == nom:
+                refs.append((noeud.lineno, f"{nom}(…)"))
+            elif isinstance(cible, ast.Attribute) and cible.attr == nom:
+                porteur = getattr(cible.value, "id", "…")
+                refs.append((noeud.lineno, f"{porteur}.{nom}(…)"))
+        elif isinstance(noeud, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if noeud.name == nom:
+                definit = noeud.lineno
+
+    return sorted(set(refs)), definit, importes
+
+
+async def _appelants(task: dict, args: dict) -> str:
+    """Qui importe un module ou appelle une fonction, dans tout le dépôt.
+
+    Un fichier ne dit pas ce qu'il fait au système : un module dangereux qu'aucun appelant
+    ne touche est inerte, le même module appelé sur chaque requête ne l'est pas. Cette
+    différence ne se lit jamais dans le fichier lui-même.
+
+    Rend les références au format `fichier:ligne: forme`, comme `grep` : c'est ce format
+    qui permet ensuite de rouvrir l'endroit exact avec `read_file`.
+    """
+    nom = (args.get("nom") or "").strip()
+    if not nom:
+        return "Erreur : nom vide. Donne un module (ex: 'vitals') ou une fonction."
+    # Un chemin pointé désigne un module : seul son dernier segment est un identifiant.
+    nom = os.path.basename(nom).removesuffix(".py").split(".")[-1]
+    if not nom.isidentifier():
+        return f"Erreur : {nom!r} n'est pas un nom de module ni de fonction."
+
+    racine = resolve(task["id"], args.get("path") or ".", write=False)
+
+    fichiers_py: list[str] = []
+    for dossier, sous_dossiers, fichiers in os.walk(racine):
+        sous_dossiers[:] = [d for d in sous_dossiers if d not in _GREP_IGNORES]
+        fichiers_py += [
+            os.path.join(dossier, f) for f in sorted(fichiers) if f.endswith(".py")
+        ]
+    fichiers_py = fichiers_py[:_GREP_FICHIERS_MAX]
+
+    def _passe(cible: str) -> tuple[list[str], list[str], set[str]]:
+        trouves, defs, importes = [], [], set()
+        for chemin in fichiers_py:
+            refs, definit, depuis = _references_du_fichier(chemin, cible)
+            relatif = relative(task["id"], chemin)
+            if definit:
+                defs.append(f"{relatif}:{definit}: définit {cible}")
+            importes |= depuis
+            for ligne, forme in refs[:_APPELANTS_PAR_FICHIER]:
+                trouves.append(f"{relatif}:{ligne}: {forme}")
+        return trouves, defs, importes
+
+    appelants, definitions, importes = _passe(nom)
+
+    # Un module n'est presque jamais appelé sous son propre nom : s'arrêter aux lignes
+    # d'import ferait conclure que personne ne s'en sert alors que les symboles importés
+    # sont, eux, appelés ailleurs. On remonte donc jusqu'à l'usage réel.
+    usages: list[str] = []
+    for symbole in sorted(importes):
+        if symbole == nom or not symbole.isidentifier():
+            continue
+        trouves, _, _ = _passe(symbole)
+        usages += [t for t in trouves if t.endswith(f"{symbole}(…)")]
+
+    if not appelants and not usages:
+        constat = (
+            f"Aucun fichier n'importe ni n'appelle {nom!r} ({len(fichiers_py)} fichier(s) "
+            f"Python parcouru(s))."
+        )
+        if definitions:
+            constat += (
+                "\n" + "\n".join(definitions)
+                + f"\n\n{nom} est donc défini mais jamais atteint depuis le reste du code."
+            )
+        return constat
+
+    entete = f"{len(appelants)} référence(s) à {nom!r} hors définition"
+    corps = definitions + appelants
+    if usages:
+        entete += f", et {len(usages)} appel(s) de ce qu'il exporte"
+        corps += ["", "Appels des symboles importés depuis ce module :"] + usages
+    return _truncate(f"{entete} :\n" + "\n".join(corps))
+
+
+async def _verify(task: dict, args: dict) -> str:
+    """Compile, lint et suite unitaire sur le worktree de la tâche.
+
+    Passe par le MÊME bac à sable que le shell, et c'est la raison d'être de ce détour :
+    l'outil exécute du code que l'agent vient d'écrire. Le lancer en direct reviendrait à
+    lui donner l'exécution arbitraire sous le compte de l'utilisateur, par le simple fait
+    d'écrire un fichier de test — précisément ce que seatbelt existe pour empêcher.
+
+    Ce qui change par rapport à `shell`, ce n'est donc pas le confinement : c'est QUI
+    compose la commande. Ici, personne — elle est fixe.
+    """
+    from . import shell as sh
+
+    sortie = await sh.executer(task, commande_verification(), _VERIFY_TIMEOUT)
+    return _truncate(sortie)
+
+
 async def _shell(task: dict, args: dict) -> str:
     from . import shell as sh
 
@@ -517,22 +908,157 @@ async def _shell(task: dict, args: dict) -> str:
     return _truncate(sortie)
 
 
-async def _list_dir(task: dict, args: dict) -> str:
-    path = resolve(task["id"], args.get("path") or ".", write=False)
-    if not os.path.isdir(path):
-        return f"Pas un dossier : {args.get('path')}"
-    entries = sorted(e for e in os.listdir(path) if e not in _FICHIERS_INTERNES)
+def _rendre_dossier(task: dict, path: str) -> tuple[str, list[str]]:
+    """Le contenu d'un dossier, et la liste de ses sous-dossiers."""
+    entries = sorted(
+        e for e in os.listdir(path)
+        if e not in _FICHIERS_INTERNES and e not in _DOSSIERS_MASQUES
+    )
     if not entries:
-        return "(dossier vide)"
-    lines = []
+        return f"{relative(task['id'], path)} : (dossier vide)", []
+    lines, sous = [], []
     for name in entries[:200]:
         full = os.path.join(path, name)
         if os.path.isdir(full):
             lines.append(f"{name}/")
+            sous.append(full)
         else:
             lines.append(f"{name}  ({os.path.getsize(full)} o)")
     suffix = f"\n[…{len(entries) - 200} entrées de plus]" if len(entries) > 200 else ""
-    return f"{relative(task['id'], path)} :\n" + "\n".join(lines) + suffix
+    return f"{relative(task['id'], path)} :\n" + "\n".join(lines) + suffix, sous
+
+
+async def _list_dir(task: dict, args: dict) -> str:
+    """Contenu d'un dossier, en traversant les couloirs.
+
+    Un dossier qui ne contient qu'un sous-dossier n'apprend rien : il indique seulement où
+    aller. La racine d'un workspace rend `repo/`, qui rend `jarvis-core/`, qui rend `src/`
+    — trois allers-retours pour atteindre le premier dossier qui porte quelque chose, et
+    trois résultats de cinquante octets occupant trois pas sur quarante. On descend donc
+    tant qu'il n'y a rien d'autre à voir, en rendant chaque palier traversé.
+    """
+    path = resolve(task["id"], args.get("path") or ".", write=False)
+    if not os.path.isdir(path):
+        return f"Pas un dossier : {args.get('path')}"
+
+    rendus = []
+    vus: set[str] = set()
+    for _ in range(_COULOIR_MAX_PALIERS):
+        rendu, sous = _rendre_dossier(task, path)
+        rendus.append(rendu)
+        vus.add(path)
+        # Un seul sous-dossier ET aucun fichier : le palier ne porte que le chemin.
+        if len(sous) != 1 or rendu.count("\n") != 1 or sous[0] in vus:
+            break
+        path = sous[0]
+    return "\n\n".join(rendus)
+
+
+# Plafond de la carte. Les modules réels du dépôt en comptent moins de cinquante ; au-delà
+# c'est un fichier généré ou une agglomération, et lister tout n'aiderait plus personne.
+_CARTE_MAX_ENTREES = 120
+
+
+_MARQUE_DOCSTRING = '"""[docstring retiré]"""'
+
+
+def _sans_docstrings(source: str) -> str:
+    """Vide les docstrings en conservant la numérotation des lignes.
+
+    Un docstring est ce qu'un module dit de lui-même, et cela se lit comme un fait alors
+    que rien ne le garantit : deux revues ont conclu sur la foi d'un docstring — l'une en
+    tenant un mécanisme pour justifié parce qu'il s'y déclarait tel, l'autre en prenant
+    pour le comportement courant une phrase qui décrivait le comportement écarté. Le code,
+    lui, ne se décrit pas : il fait.
+
+    Les lignes sont blanchies et non retirées, sinon les numéros glissent — or ce sont eux
+    que la citation porte et que le relecteur humain ouvre. Les commentaires `#` restent :
+    ils portent les invariants qu'on ne doit pas « corriger », et se lisent au contact du
+    code qu'ils commentent.
+
+    Rend la source inchangée si elle ne s'analyse pas — un fichier en cours d'édition se
+    lit tel quel plutôt que pas du tout.
+    """
+    try:
+        arbre = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return source
+
+    portees = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    plages: list[tuple[int, int]] = []
+    for noeud in ast.walk(arbre):
+        if not isinstance(noeud, portees):
+            continue
+        corps = getattr(noeud, "body", None)
+        if not corps:
+            continue
+        tete = corps[0]
+        if (isinstance(tete, ast.Expr) and isinstance(tete.value, ast.Constant)
+                and isinstance(tete.value.value, str)):
+            plages.append((tete.lineno, tete.end_lineno or tete.lineno))
+
+    if not plages:
+        return source
+
+    lignes = source.splitlines(keepends=True)
+    for debut, fin in plages:
+        if debut > len(lignes):
+            continue
+        brute = lignes[debut - 1]
+        indentation = brute[:len(brute) - len(brute.lstrip())]
+        lignes[debut - 1] = f"{indentation}{_MARQUE_DOCSTRING}\n"
+        for i in range(debut, min(fin, len(lignes))):
+            lignes[i] = "\n"
+    return "".join(lignes)
+
+
+def _carte_du_module(source: str, nb_lignes: int) -> str | None:
+    """Plan d'un module trop gros pour une lecture : définitions et leurs lignes.
+
+    Rend None si le fichier tient dans le budget, ou s'il ne s'analyse pas — dans les deux
+    cas la lecture ordinaire fait mieux.
+    """
+    if len(source) <= AGENT_READ_MAX_CHARS:
+        return None
+    try:
+        arbre = ast.parse(source)
+    except SyntaxError:
+        return None
+
+    entrees = []
+    for noeud in arbre.body:
+        if isinstance(noeud, ast.ClassDef):
+            entrees.append(f"{noeud.lineno:5}  class {noeud.name}")
+            entrees.extend(
+                f"{m.lineno:5}      {m.name}()"
+                for m in noeud.body
+                if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+            )
+        elif isinstance(noeud, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            prefixe = "async def" if isinstance(noeud, ast.AsyncFunctionDef) else "def"
+            entrees.append(f"{noeud.lineno:5}  {prefixe} {noeud.name}")
+    if not entrees:
+        return None
+
+    # La carte est bornée elle aussi : un module de milliers de définitions en produirait
+    # une aussi lourde que le fichier, ce qui réintroduirait le problème qu'elle corrige.
+    reste = 0
+    if len(entrees) > _CARTE_MAX_ENTREES:
+        reste = len(entrees) - _CARTE_MAX_ENTREES
+        entrees = entrees[:_CARTE_MAX_ENTREES]
+
+    pied = (
+        f"\n… et {reste} définition(s) de plus. Ce module est trop gros pour être lu "
+        f"d'un bloc : vise ce que tu cherches."
+        if reste else ""
+    )
+    return (
+        f"[CARTE DU MODULE — {nb_lignes} lignes, trop long pour une lecture entière.\n"
+        f"Ci-dessous ses définitions et leur ligne. Relis avec offset=<ligne> pour ouvrir "
+        f"ce qui t'intéresse.\n"
+        f"Lire le fichier en entier remplirait ton contexte et ferait disparaître ce que "
+        f"tu as déjà lu.]\n\n" + "\n".join(entrees) + pied
+    )
 
 
 async def _read_file(task: dict, args: dict) -> str:
@@ -550,8 +1076,29 @@ async def _read_file(task: dict, args: dict) -> str:
             lines = f.readlines()
     except OSError as exc:
         return f"Lecture impossible : {exc}"
+
+    # Une revue de code lit le code. Le docstring est ce qu'un module dit de lui-même, et
+    # il a déjà emporté deux conclusions : la numérotation est conservée, seul le contenu
+    # part. Réservé à l'origine `autocode` — une tâche humaine lit des sources dont la
+    # prose EST le contenu.
+    if task.get("origin") == "autocode" and path.endswith(".py"):
+        lines = _sans_docstrings("".join(lines)).splitlines(keepends=True)
+
     if offset > len(lines):
         return f"Rien à lire à partir de la ligne {offset} (le fichier en compte {len(lines)})."
+
+    # Un fichier qui ne tient pas en une lecture rend sa CARTE, pas ses 32 000 premiers
+    # caractères. Mesuré sur le premier cycle d'autocoding réel : l'agent a ouvert un
+    # module de 76 ko hors de sa cible, ce qui a rempli les trois quarts du contexte et
+    # provoqué l'élision du fichier qu'il devait réellement examiner — qu'il a donc relu,
+    # évinçant autre chose à son tour. Cinq relectures du même fichier en quatorze pas.
+    #
+    # La pagination n'était pas la cause : le fichier utile tenait en une lecture. La cause
+    # est qu'un gros fichier coûte le contexte entier alors qu'on y cherche un appel précis.
+    # La carte coûte ~2 ko et mène directement à l'offset utile.
+    if offset == 1 and not int(args.get("limit") or 0) and path.endswith(".py"):
+        if (carte := _carte_du_module("".join(lines), len(lines))):
+            return carte
 
     # Le budget est en CARACTÈRES, pas en lignes. Un plafond de 200 lignes rendait 9 000
     # caractères là où 15 000 étaient permis, et obligeait à paginer un fichier de 525
@@ -581,11 +1128,25 @@ async def _read_file(task: dict, args: dict) -> str:
     # L'avertissement est répété EN TÊTE : placé au seul pied d'un bloc de 15 000 à 32 000
     # caractères de code, il est noyé — mesuré, ignoré quatre fois de suite.
     remaining = len(lines) - next_offset + 1
-    warning = (
-        f"[LECTURE PARTIELLE — lignes {offset} à {next_offset - 1} sur {len(lines)}. "
-        f"Il en reste {remaining}. Pour la suite : read_file avec offset={next_offset}. "
-        f"Redemander ces mêmes lignes ne rendra rien de neuf.]"
-    )
+
+    # Deux coupures possibles, et elles n'appellent pas la même suite. Quand c'est `limit`
+    # qui a coupé alors que le reste tenait dans le budget, renvoyer l'offset suivant
+    # entérine une pagination inutile : le modèle fixe une limite basse par réflexe, puis
+    # paie un tour par tranche — un module de cinq cents lignes lu soixante par soixante
+    # consomme dix tours sur quarante pour un contenu qui venait d'un seul bloc.
+    reste = sum(len(f"{i}\t{ligne}") for i, ligne in enumerate(lines[offset - 1:], offset))
+    if limit and reste <= budget:
+        warning = (
+            f"[COUPÉ PAR TON limit={limit} — lignes {offset} à {next_offset - 1} sur "
+            f"{len(lines)}. Le fichier tient ENTIER dans une seule lecture : relance "
+            f"read_file sur ce chemin sans `limit`, au lieu de paginer.]"
+        )
+    else:
+        warning = (
+            f"[LECTURE PARTIELLE — lignes {offset} à {next_offset - 1} sur {len(lines)}. "
+            f"Il en reste {remaining}. Pour la suite : read_file avec offset={next_offset}. "
+            f"Redemander ces mêmes lignes ne rendra rien de neuf.]"
+        )
     return f"{warning}\n\n{body}\n{warning}"
 
 
@@ -664,6 +1225,9 @@ _DISPATCH = {
     "list_dir": _list_dir,
     "read_file": _read_file,
     "write_file": _write_file,
+    VERIFY: _verify,
+    GREP: _grep,
+    APPELANTS: _appelants,
 }
 
 
@@ -674,11 +1238,16 @@ async def execute_tool(task: dict, name: str, args: dict) -> str:
     corriger son tir au pas suivant, pas tuer la tâche. Seule l'annulation et les budgets,
     décidés par la boucle, arrêtent une tâche.
     """
-    fn = _DISPATCH.get(name)
+    # Le jeu d'outils est appliqué ICI et pas seulement à la déclaration : des schémas non
+    # rendus au modèle ne sont pas une barrière — rien n'empêche une génération d'inventer
+    # un nom d'outil réel mais hors de son périmètre. Le message nomme les outils de CETTE
+    # tâche, jamais le catalogue complet, qui enverrait l'agent réessayer l'interdit.
+    disponibles = names_for(task)
+    fn = _DISPATCH.get(name) if name in disponibles else None
     if fn is None:
         return (
             f"Outil inconnu : {name}. Outils disponibles : "
-            f"{', '.join(sorted(TOOL_NAMES))}."
+            f"{', '.join(sorted(disponibles))}."
         )
     try:
         return await fn(task, args)

@@ -799,7 +799,7 @@ async def suggest_thresholds_llm(user_code: str) -> dict:
         "(support technique, perte maximale acceptable).\n"
         "- Adapte les seuils à la volatilité typique de chaque titre et au contexte P&L.\n"
         "- Sois conservateur : évite les seuils trop proches du cours actuel.\n\n"
-        f"Positions :\n" + "\n".join(lines) + "\n\n"
+        "Positions :\n" + "\n".join(lines) + "\n\n"
         "Réponds en JSON uniquement, format exact :\n"
         '{"positions": [{"isin": "...", "threshold_high": 0.0, "threshold_low": 0.0, "rationale": "..."}]}'
     )

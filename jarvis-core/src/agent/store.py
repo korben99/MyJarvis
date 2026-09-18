@@ -48,13 +48,38 @@ def now_iso() -> str:
 # ── Enregistrement ────────────────────────────────────────────────────────
 
 
-def create_task(user_code: str, objective: str) -> dict:
-    """Crée une tâche, son workspace, et la pousse en file d'attente."""
+def create_task(
+    user_code: str,
+    objective: str,
+    origin: str = "human",
+    meta: dict | None = None,
+    max_steps: int = 0,
+    timeout_minutes: int = 0,
+) -> dict:
+    """Crée une tâche, son workspace, et la pousse en file d'attente.
+
+    `origin` dit QUI a décidé de la tâche, et c'est elle qui détermine le jeu d'outils
+    (`tools.schemas_for`) et les budgets. Une tâche humaine et une tâche que Jarvis s'est
+    donnée n'ont pas les mêmes droits : les confondre reviendrait à accorder à la seconde
+    tout ce qui n'a été autorisé que pour la première.
+
+    `meta` porte ce dont l'origine a besoin pour se relire — pour `autocode`, la cible du
+    vivier et sa preuve attendue. Stocké DANS l'enregistrement et jamais par référence :
+    une tâche vit 30 jours, la matière qui l'a déclenchée peut disparaître avant.
+
+    `max_steps` et `timeout_minutes` à zéro laissent la boucle retomber sur les constantes
+    globales. Portés par la tâche parce qu'ils dépendent de ce qu'on lui demande : écrire
+    du code ne se budgète pas comme rédiger une note.
+    """
     task_id = uuid.uuid4().hex[:16]
     task = {
         "id": task_id,
         "user_code": user_code,
         "objective": objective.strip(),
+        "origin": origin,
+        "meta": meta or {},
+        "max_steps": max_steps,
+        "timeout_minutes": timeout_minutes,
         "status": STATUS_QUEUED,
         "created_at": now_iso(),
         "started_at": None,
@@ -69,7 +94,10 @@ def create_task(user_code: str, objective: str) -> dict:
     r = get_redis()
     r.zadd(_INDEX_KEY, {task_id: time.time()})
     r.rpush(_QUEUE_KEY, task_id)
-    logger.info("agent: tâche %s créée par %s — %s", task_id, user_code, objective[:80])
+    logger.info(
+        "agent: tâche %s créée par %s (origine %s) — %s",
+        task_id, user_code, origin, objective[:80],
+    )
     return task
 
 
@@ -90,19 +118,25 @@ def get_task(task_id: str) -> dict | None:
         return None
 
 
-def list_tasks(limit: int = 20, user_code: str | None = None) -> list[dict]:
+def list_tasks(
+    limit: int = 20, user_code: str | None = None, origin: str | None = None
+) -> list[dict]:
     """Tâches les plus récentes d'abord. Les entrées expirées sont purgées de l'index.
 
     `user_code` filtre sur le demandeur. À passer systématiquement dès qu'une liste est
     rendue à un utilisateur : Jarvis est multi-utilisateurs et ne montre jamais à l'un ce
     qui appartient à l'autre — deux administrateurs restent deux personnes.
 
+    `origin` filtre sur qui a décidé de la tâche. Une origine absente de l'enregistrement
+    vaut "human" : les tâches créées avant l'existence du champ sont toutes humaines.
+
     L'index entier est parcouru quand on filtre (borné par AGENT_TASK_TTL, volume faible) :
     ne lire que les `limit` premiers rendrait une liste vide dès qu'un autre utilisateur a
     posté les dernières tâches.
     """
     r = get_redis()
-    ids = r.zrevrange(_INDEX_KEY, 0, -1 if user_code else max(limit, 1) - 1)
+    filtre = user_code or origin
+    ids = r.zrevrange(_INDEX_KEY, 0, -1 if filtre else max(limit, 1) - 1)
     tasks, stale = [], []
     for task_id in ids:
         task = get_task(task_id)
@@ -110,6 +144,8 @@ def list_tasks(limit: int = 20, user_code: str | None = None) -> list[dict]:
             stale.append(task_id)
             continue
         if user_code and task.get("user_code") != user_code:
+            continue
+        if origin and task.get("origin", "human") != origin:
             continue
         tasks.append(task)
         if len(tasks) >= limit:

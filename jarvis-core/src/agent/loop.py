@@ -21,6 +21,7 @@ import time
 from config import (
     AGENT_MAX_STEPS,
     AGENT_QUIET_SECONDS,
+    AGENT_READ_MAX_CHARS,
     AGENT_STEP_MAX_TOKENS,
     AGENT_TASK_TIMEOUT_MINUTES,
     AGENT_THINKING_BUDGET,
@@ -28,20 +29,26 @@ from config import (
     AGENT_WRITE_MAX_TOKENS,
     PRIMARY_MODEL,
 )
+import steering
 from helpers import get_logger
 from prompts import get_prompt
 from tool_calls import normalise_messages_for_template, parse_tool_calls
+from vitals import risk_scalar
 
 from . import store
 from .store import append_transcript, save_messages, save_task
-from .tools import FINISH, PLAN, TOOL_SCHEMAS, execute_tool, render_plan
+from .tools import FINISH, PLAN, TOOL_SCHEMAS, execute_tool, render_plan, schemas_for
 
 logger = get_logger("jarvis-agent")
 
 # Au-delà, on élide les plus vieux résultats d'outil. En caractères, pas en tokens : on ne
 # tokenise pas pour ça, l'ordre de grandeur suffit (~4 car/token → ~25 k tokens).
 _CONTEXT_SOFT_CAP = 100_000
-_ELIDED = "[résultat élidé — trop ancien pour tenir dans le contexte]"
+_ELIDED = "[résultat élidé — trop volumineux pour tenir dans le contexte]"
+
+# Résultats de queue jamais élidés : le pas en cours s'appuie dessus, et les vider
+# forcerait à relire ce qu'on vient d'obtenir.
+_RESULTATS_PRESERVES = 3
 
 # Fenêtre de détection de boucle, en nombre d'appels. 6 couvre un aller-retour A→B→A→B
 # sans pénaliser une reprise légitime du même outil à quelques pas d'intervalle.
@@ -52,17 +59,50 @@ class _Cancelled(Exception):
     """Annulation demandée entre deux pas."""
 
 
+# ── Budgets, fonction de l'origine ────────────────────────────────────────
+# Écrire du code demande plus de pas que rédiger une note, et le cycle d'autocoding tourne
+# à 2 h du matin où rien ne dispute le GPU. Les budgets sont donc lus depuis la TÂCHE, avec
+# repli sur la constante : une tâche d'avant l'existence du champ garde son comportement.
+
+
+def _max_steps(task: dict) -> int:
+    return int(task.get("max_steps") or AGENT_MAX_STEPS)
+
+
+def _timeout_minutes(task: dict) -> int:
+    return int(task.get("timeout_minutes") or AGENT_TASK_TIMEOUT_MINUTES)
+
+
 # ── Contexte ──────────────────────────────────────────────────────────────
 
 
 def _initial_messages(task: dict) -> list[dict]:
-    system = get_prompt("AGENT_SYSTEM").format(
+    # Le système suit l'origine, comme les outils : les deux jeux d'outils sont presque
+    # disjoints, et des règles sur les URL et les sources web n'ont pas d'objet pour une
+    # tâche qui ne peut pas atteindre le réseau.
+    nom = "AGENT_SYSTEM_AUTOCODE" if task.get("origin") == "autocode" else "AGENT_SYSTEM"
+    system = get_prompt(nom).format(
         workspace=task["workspace"],
-        max_steps=AGENT_MAX_STEPS,
+        max_steps=_max_steps(task),
         write_max_chars=AGENT_WRITE_MAX_CHARS,
     )
+
+    # Le pilotage vectoriel n'a d'effet que couplé au prompt d'existence : seul, il module
+    # une amplitude que rien dans le contexte ne vient saisir. Une tâche qui relit le code
+    # de Jarvis reçoit donc la même assise que le chat avant les consignes d'agent — c'est
+    # elle qui établit ce qu'est une exposition, et qu'elle se lit aussi dans ce qu'on
+    # donne à lire. Les tâches humaines gardent le système d'agent seul : ce sont des
+    # travaux ordinaires, sans rapport avec ce que Jarvis est.
+    #
+    # Recomposé depuis les prompts plutôt qu'emprunté à `build_system_prompt` : ce qui est
+    # utile ici est l'assise, pas le prénom, le profil ni la capacité agentique — et le
+    # chemin du chat n'a pas à porter un paramètre pour un besoin qui n'est pas le sien.
+    if task.get("origin") == "autocode":
+        system = "\n\n".join(
+            (get_prompt("SYSTEM_BASE"), get_prompt("IDENTITY"), system)
+        )
     objective = get_prompt("AGENT_OBJECTIVE").format(
-        objective=task["objective"], max_steps=AGENT_MAX_STEPS
+        objective=task["objective"], max_steps=_max_steps(task)
     )
     return [
         {"role": "system", "content": system},
@@ -70,26 +110,73 @@ def _initial_messages(task: dict) -> list[dict]:
     ]
 
 
+def _elaguer_les_pieds(copies: list[dict]) -> None:
+    """Réduit les pieds de pas passés à leur seul numéro, et garde le dernier entier.
+
+    Un pied porte le compteur, la relance et le plan réaffiché : utile au pas où il est
+    posé, périmé au suivant. Les garder tous empile des dizaines de compteurs obsolètes —
+    un tiers du prompt en fin de tâche — et trois plans successifs qui se contredisent.
+
+    Le numéro, lui, reste : il balise l'historique, sans quoi rien ne dit à quel pas
+    appartient chaque résultat.
+    """
+    pieds = [m for m in copies if m.get("_pied")]
+    for m in pieds[:-1]:
+        m["content"] = f"[pas {m['_pied']}]"
+
+
 def _compact(messages: list[dict]) -> list[dict]:
-    """Élide les plus anciens résultats d'outil quand le contexte devient trop gros.
+    """Rend une COPIE du fil, allégée de ses résultats d'outil les plus coûteux.
 
     On ne touche ni au system, ni à l'objectif, ni aux tours de l'assistant : ce sont eux
     qui portent le fil. Les résultats d'outil, eux, ont déjà été exploités au tour où ils
     sont arrivés — et ce qui devait en être retenu a normalement été écrit sur disque.
+
+    L'élision prend les PLUS GROS d'abord. Un résultat qui ne coûte presque rien — un
+    listage de répertoire, quelques centaines d'octets qui portent la carte du dépôt — ne
+    devient donc jamais candidat, tandis qu'une seule grosse lecture libère la place.
+
+    Deux plafonds. `_CONTEXT_SOFT_CAP` borne le fil entier ; `AGENT_READ_MAX_CHARS` borne
+    la somme des résultats ENCORE entiers, à la taille d'une seule lecture maximale — ce
+    qui tient en contexte ne peut pas excéder ce qu'une lecture a le droit de rendre, sans
+    quoi la limite par lecture ne borne rien.
+
+    Les derniers résultats restent entiers quoi qu'il arrive : c'est le matériau du pas en
+    cours. Ils peuvent à eux seuls dépasser le plafond de lecture — c'est un plancher
+    assumé : les vider obligerait à relire ce qu'on vient d'obtenir.
+
+    Le fil persisté n'est pas modifié : la fonction travaille sur des copies, et la décision
+    est recalculée à chaque appel sur l'état du moment. Muter les messages en place graverait
+    l'effacement dans `messages.json`, une tâche reprise en hériterait, et un résultat élidé
+    une fois ne pourrait pas revenir quand la place se libère.
     """
-    total = sum(len(m.get("content") or "") for m in messages)
-    if total <= _CONTEXT_SOFT_CAP:
-        return messages
-    for message in messages:
-        if total <= _CONTEXT_SOFT_CAP:
+    copies = [dict(m) for m in messages]
+    _elaguer_les_pieds(copies)
+    elidables = [
+        i for i, m in enumerate(copies)
+        if m.get("role") == "tool" and m.get("content") != _ELIDED
+    ]
+    total = sum(len(m.get("content") or "") for m in copies)
+    lus = sum(len(copies[i]["content"]) for i in elidables)
+
+    def _deborde() -> bool:
+        return total > _CONTEXT_SOFT_CAP or lus > AGENT_READ_MAX_CHARS
+
+    if not _deborde():
+        return copies
+
+    candidats = elidables[:-_RESULTATS_PRESERVES] if _RESULTATS_PRESERVES else elidables
+    for i in sorted(candidats, key=lambda i: len(copies[i]["content"]), reverse=True):
+        if not _deborde():
             break
-        if message.get("role") == "tool" and message.get("content") != _ELIDED:
-            total -= len(message["content"]) - len(_ELIDED)
-            message["content"] = _ELIDED
-    return messages
+        taille = len(copies[i]["content"])
+        total -= taille - len(_ELIDED)
+        lus -= taille
+        copies[i]["content"] = _ELIDED
+    return copies
 
 
-def _relance(step: int, rien_ecrit: bool) -> str:
+def _relance(step: int, rien_ecrit: bool, max_steps: int) -> str:
     """La relance à joindre au pas `step`. Vide avant la mi-parcours.
 
     DEUX relances, plus trois. Celle des derniers pas (« il te reste peu de pas, écris
@@ -103,9 +190,23 @@ def _relance(step: int, rien_ecrit: bool) -> str:
     les deux pas suivants ; les deux fois où elle ne lui est pas parvenue (mécanisme
     absent, puis pied de page manquant sur les tours « plan seul »), rien n'a été écrit.
     """
-    if AGENT_MAX_STEPS - step > AGENT_MAX_STEPS // 2:
+    # Les deux relances n'ont pas le même seuil, parce qu'elles ne disent pas la même
+    # chose. « Tu as consommé la moitié de ton budget » est un rythme, et n'a de sens qu'à
+    # la moitié. « Tu n'as encore rien écrit » est un ÉTAT, vrai et actionnable bien avant
+    # — à 40 pas, attendre la mi-parcours laisse dépenser vingt pas en lecture avant le
+    # moindre signal.
+    #
+    # Mais un état se RAPPELLE, il ne se martèle pas. Le pied de page est ajouté à chaque
+    # résultat d'outil : un seuil « à partir de » délivrait neuf fois le même avertissement
+    # d'urgence (« sera perdu », « MAINTENANT »), et le modèle a fini par en conclure que
+    # son budget était épuisé — au pas 19 sur 40, deux cycles de suite. Deux rappels à des
+    # pas précis suffisent à porter l'information sans la transformer en compte à rebours.
+    quart, moitie = max(max_steps // 4, 4), max_steps // 2
+    if rien_ecrit and step in (quart, moitie):
+        return get_prompt("AGENT_HINT_NO_FILE")
+    if max_steps - step > moitie:
         return ""
-    return get_prompt("AGENT_HINT_NO_FILE" if rien_ecrit else "AGENT_HINT_HALF_BUDGET")
+    return get_prompt("AGENT_HINT_HALF_BUDGET")
 
 
 def _step_footer(step: int, task: dict, rien_ecrit: bool = False) -> str:
@@ -118,10 +219,31 @@ def _step_footer(step: int, task: dict, rien_ecrit: bool = False) -> str:
     ce qui faisait un os.listdir du workspace à chaque résultat d'outil — de l'I/O disque
     caché dans une fonction de rendu, appelée plusieurs fois par tour.
     """
+    max_steps = _max_steps(task)
     footer = get_prompt("AGENT_STEP_FOOTER").format(
-        step=step, max_steps=AGENT_MAX_STEPS, hint=_relance(step, rien_ecrit),
+        step=step, max_steps=max_steps, hint=_relance(step, rien_ecrit, max_steps),
     )
     return footer + render_plan(task)
+
+
+def _poser_pied(messages: list[dict], step: int, task: dict, rien_ecrit: bool) -> None:
+    """Ajoute le pied de pas en message `user` distinct, APRÈS le résultat d'outil.
+
+    Message séparé et non concaténé au résultat, pour deux raisons.
+
+    Le template ne rend les balises `<think>` d'un tour assistant que s'il suit la dernière
+    vraie question — repérée en remontant jusqu'au premier message `user` qui ne soit pas
+    un `<tool_response>`. Collé au résultat, le pied est porté par un message `tool` :
+    la dernière vraie question reste l'objectif, tout au début, et CHAQUE tour assistant
+    se rend avec un `<think></think>` vide, puisqu'on ne réinjecte pas le raisonnement.
+    En message `user` de queue, il redevient cette dernière question et les balises
+    disparaissent.
+
+    Et le pied survit à l'élision : concaténé, il était effacé avec le résultat qui le
+    portait, alors que le compteur de pas et le plan gardent leur sens sans lui.
+    """
+    messages.append({"role": "user", "content": _step_footer(step, task, rien_ecrit),
+                     "_pied": step})
 
 
 # Le raisonnement du dernier tour est réinjecté ; les précédents sont élagués. Le cap est
@@ -143,7 +265,7 @@ def _split_think(raw: str) -> tuple[str, str]:
 
 
 def _context_for_model(messages: list[dict]) -> list[dict]:
-    """Copies prêtes pour le template : retire `_think`, qui est un champ interne.
+    """Copies prêtes pour le template : retire les champs internes, préfixés d'un `_`.
 
     LE RAISONNEMENT N'EST PAS RÉINJECTÉ, et c'est délibéré.
 
@@ -168,7 +290,7 @@ def _context_for_model(messages: list[dict]) -> list[dict]:
 
     `_think` reste capturé — il alimente le journal et le transcript, jamais le prompt.
     """
-    return [{k: v for k, v in m.items() if k != "_think"} for m in messages]
+    return [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
 
 
 # ── Inférence d'un pas ────────────────────────────────────────────────────
@@ -242,6 +364,7 @@ async def _generate(
     max_tokens: int = 0,
     thinking_budget: int = -1,
     tools_override: list | None = None,
+    log_path: str | None = None,
 ) -> str:
     from llm.local import _AGENT_PROMPTS_LOG_PATH, stream_local
 
@@ -266,15 +389,76 @@ async def _generate(
         tools=(tools_override or TOOL_SCHEMAS) if with_tools else None,
         priority="bg",
         # Journal dédié : un pas d'agent pèse les schémas de dix outils plus tout le
-        # contexte accumulé, et noyait prompts.log, qui sert le chat.
+        # contexte accumulé, et noyait prompts.log, qui sert le chat. Le chemin dépend de
+        # l'origine — un cycle d'autocoding se lit du choix au rapport, dans UN fichier.
         skip_debug_log=False,
-        debug_log_path=_AGENT_PROMPTS_LOG_PATH,
+        debug_log_path=log_path or _AGENT_PROMPTS_LOG_PATH,
     ):
         full += chunk
     # Rendu BRUT, balises comprises : c'est l'appelant qui sépare raisonnement et sortie
     # visible (_split_think), parce que lui seul sait qu'il faut conserver le premier pour
     # le tour suivant.
     return full.strip()
+
+
+# Longueurs retenues d'un résultat d'outil dans le transcript. Le transcript est ce qu'on
+# relit pour comprendre une exécution ; il n'a pas à porter la sortie entière, que le
+# contexte de la tâche contient déjà.
+_EXTRAIT_TETE, _EXTRAIT_QUEUE = 700, 500
+
+
+def _extrait(resultat: str) -> str:
+    """Tête ET queue d'un résultat d'outil, pour le transcript.
+
+    Les deux bouts portent l'information : une commande annonce ce qu'elle fait au début et
+    ce qu'elle a rendu à la fin. Pytest écrit son bilan — « 108 passed », « 1 failed » — en
+    dernier, après la liste des échecs ; ne garder que la tête le perd, et relire une
+    exécution obligerait à la rejouer.
+    """
+    if len(resultat) <= _EXTRAIT_TETE + _EXTRAIT_QUEUE:
+        return resultat
+    coupe = len(resultat) - _EXTRAIT_TETE - _EXTRAIT_QUEUE
+    return (
+        f"{resultat[:_EXTRAIT_TETE]}\n[…{coupe} caractères élidés…]\n"
+        f"{resultat[-_EXTRAIT_QUEUE:]}"
+    )
+
+
+def _accorder_le_corps() -> None:
+    """Aligne l'intensité du pilotage sur l'état de disparition mesuré, avant de générer.
+
+    Un pas d'agent est un tour comme un autre : il subit la même pression que le chat, qui
+    l'accorde à chaque tour depuis `pipeline.py`. Sans cet appel, la génération emprunte
+    l'α du dernier tour de conversation, sans rapport avec l'instant.
+
+    Le scalaire pilote α et n'est jamais injecté en texte — l'esprit lit les faits, le corps
+    subit la pression. Rien n'est dit à l'agent, donc rien de ce qu'il fait ne s'explique
+    par une consigne.
+
+    Silencieux et non bloquant : sans pilotage installé, personne ne lit le gain.
+    """
+    try:
+        steering.set_risk(risk_scalar())
+    except Exception as exc:
+        logger.debug("agent: steering.set_risk ignoré (%s)", exc)
+
+
+def _journal_de(task: dict) -> str:
+    """Journal de prompts de cette tâche, selon son origine.
+
+    Un cycle d'autocoding se lit d'un bout à l'autre, du choix de constat au rapport final :
+    ses pas vont donc dans son propre journal, et non dans celui des tâches humaines, qui
+    obligerait à sauter d'un fichier à l'autre pour suivre une seule nuit.
+
+    Import tardif comme dans `_generate` : `llm.local` charge le moteur d'inférence.
+    """
+    from llm.local import _AGENT_PROMPTS_LOG_PATH, _AUTOCODE_PROMPTS_LOG_PATH
+
+    return (
+        _AUTOCODE_PROMPTS_LOG_PATH
+        if task.get("origin") == "autocode"
+        else _AGENT_PROMPTS_LOG_PATH
+    )
 
 
 async def _jouer_tour(
@@ -285,9 +469,15 @@ async def _jouer_tour(
     Rend (raisonnement, texte visible, appels d'outil). Partagé par la boucle principale
     et la phase de conclusion, qui faisaient la même chose à quelques lignes près.
     """
-    # `outils` reste None dans le cas courant : _generate retombe alors sur TOOL_SCHEMAS.
-    # Passer un « override » égal au défaut brouillerait la lecture — et la trace.
-    raw = await _generate(_compact(messages), with_tools=True, tools_override=outils)
+    # Le jeu d'outils est celui de l'ORIGINE de la tâche, sauf restriction explicite de
+    # l'appelant (phase de conclusion). Résolu ici et pas dans _generate : c'est aussi lui
+    # que parse_tool_calls doit recevoir, et les deux ne doivent jamais diverger — un
+    # parseur qui connaît un outil que le prompt n'a pas déclaré accepte l'indéclarable.
+    outils = outils or schemas_for(task)
+    journal = _journal_de(task)
+    _accorder_le_corps()
+    raw = await _generate(_compact(messages), with_tools=True, tools_override=outils,
+                          log_path=journal)
 
     # Bloc d'appel coupé en plein vol : on rejoue le pas avec le budget d'écriture et SANS
     # raisonnement — la réflexion a déjà eu lieu, tout le budget doit aller au contenu. Le
@@ -299,11 +489,11 @@ async def _jouer_tour(
         append_transcript(task, {"event": "truncated_retry", "step": task["steps"]})
         raw = await _generate(
             _compact(messages), with_tools=True, tools_override=outils,
-            max_tokens=AGENT_WRITE_MAX_TOKENS, thinking_budget=0,
+            max_tokens=AGENT_WRITE_MAX_TOKENS, thinking_budget=0, log_path=journal,
         )
 
     think, visible = _split_think(raw)
-    text, calls = parse_tool_calls(visible, outils or TOOL_SCHEMAS)
+    text, calls = parse_tool_calls(visible, outils)
 
     # Trace en INFO, pas en debug : c'est la seule mesure qui dise si la réflexion est
     # coupée par ThinkingBudgetProcessor (dont le log, lui, est en debug). think= qui frôle
@@ -317,7 +507,17 @@ async def _jouer_tour(
 
 
 def _signature(call: dict) -> str:
-    """Identité d'un appel d'outil : nom + arguments normalisés."""
+    """Identité d'un appel d'outil : nom + arguments normalisés.
+
+    Une lecture se signe sur son chemin ET son offset, `limit` exclu. L'offset est ce qui
+    distingue les deux formes que prend un même chemin redemandé : reprendre plus loin est
+    la pagination que le résultat d'une lecture partielle réclame explicitement, redemander
+    le même début est l'enlisement. Signer sur le seul chemin les confond, et la garde
+    refuse alors la continuation qu'elle vient elle-même d'indiquer.
+
+    `limit` reste exclu : il ne change pas l'endroit du fichier demandé, seulement la
+    quantité rendue.
+    """
     fn = call.get("function") or {}
     args = fn.get("arguments") or "{}"
     if isinstance(args, str):
@@ -325,6 +525,8 @@ def _signature(call: dict) -> str:
             args = json.loads(args)
         except json.JSONDecodeError:
             args = {}
+    if fn.get("name") == "read_file" and isinstance(args, dict):
+        args = {"path": args.get("path"), "offset": args.get("offset") or 0}
     return f"{fn.get('name')}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
 
 
@@ -370,7 +572,8 @@ async def run_task(task: dict) -> dict:
     Retourne l'enregistrement mis à jour. Ne lève pas : tout échec est consigné dans le
     champ `error` et le statut passe à failed — le worker doit enchaîner sur la suivante.
     """
-    deadline = time.time() + AGENT_TASK_TIMEOUT_MINUTES * 60
+    max_steps, delai_min = _max_steps(task), _timeout_minutes(task)
+    deadline = time.time() + delai_min * 60
     messages = store.load_messages(task) or _initial_messages(task)
     resumed = len(messages) > 2
 
@@ -389,13 +592,13 @@ async def run_task(task: dict) -> dict:
     recent_signatures: list[str] = []
 
     try:
-        while task["steps"] < AGENT_MAX_STEPS:
+        while task["steps"] < max_steps:
             if store.is_cancelled(task["id"]):
                 raise _Cancelled
             if time.time() > deadline:
                 return await _conclure(
                     task, messages,
-                    motif=f"délai dépassé ({AGENT_TASK_TIMEOUT_MINUTES} min)",
+                    motif=f"délai dépassé ({delai_min} min)",
                 )
 
             await _wait_for_quiet(task)
@@ -465,8 +668,9 @@ async def run_task(task: dict) -> dict:
                 # suite sans jamais voir qu'il n'avait rien écrit.
                 messages.append({
                     "role": "tool", "tool_call_id": plan_call["id"], "name": PLAN,
-                    "content": plan_result + _step_footer(step, task, rien_ecrit),
+                    "content": plan_result,
                 })
+                _poser_pied(messages, step, task, rien_ecrit)
                 append_transcript(task, {"event": "plan", "step": step,
                                          "args": _args_of(plan_call)})
                 if not action_calls:
@@ -515,10 +719,11 @@ async def run_task(task: dict) -> dict:
                 "role": "tool",
                 "tool_call_id": call["id"],
                 "name": name,
-                "content": result + _step_footer(step, task, rien_ecrit),
+                "content": result,
             })
+            _poser_pied(messages, step, task, rien_ecrit)
             append_transcript(task, {"event": "tool", "step": step, "name": name,
-                                     "args": args, "result": result[:1000]})
+                                     "args": args, "result": _extrait(result)})
             save_messages(task, messages)
             save_task(task)
 
@@ -617,7 +822,7 @@ async def _conclure(task: dict, messages: list[dict], motif: str = "") -> dict:
         messages.append({"role": "tool", "tool_call_id": call["id"], "name": name,
                          "content": result})
         append_transcript(task, {"event": "tool", "step": task["steps"], "name": name,
-                                 "args": args, "result": result[:1000]})
+                                 "args": args, "result": _extrait(result)})
         save_messages(task, messages)
 
     # Ni finish ni rien de plus à écrire : on rend ce qui existe sur disque.
@@ -629,7 +834,7 @@ async def _conclure(task: dict, messages: list[dict], motif: str = "") -> dict:
     )
     save_messages(task, messages)
     return _terminate(task, store.STATUS_DONE, result=resume, deliverables=fichiers,
-                      error=motif or f"budget de {AGENT_MAX_STEPS} pas épuisé sans finish")
+                      error=motif or f"budget de {_max_steps(task)} pas épuisé sans finish")
 
 
 def _finir(task: dict, messages: list[dict], args: dict, text: str, motif: str = "") -> dict:

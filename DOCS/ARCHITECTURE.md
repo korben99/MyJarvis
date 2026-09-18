@@ -533,6 +533,7 @@ plus accès à internet en ce moment…"* — instead of silently returning no r
 │   ├── Dockerfile
 │   ├── tests/                  # conftest.py (vrai config + garde réseau)
 │   │                           # test_analyzer · test_memory · test_self · test_agent
+│   │                           # test_autocode · test_i18n · test_infer_lock
 │   │                           # test_integration · test_web_search (opt-in)
 │   │                           # test_lru_cache (banc GPU)
 │   ├── src/
@@ -565,6 +566,13 @@ plus accès à internet en ce moment…"* — instead of silently returning no r
 │   │   ├── agent/              # Agentic loop (autonomous tasks, admins only)
 │   │   │   ├── loop.py · worker.py · store.py · tools.py
 │   │   │   └── shell.py (seatbelt) · sandbox.py · report.py · cti.py
+│   │   ├── autocode/           # SELF-CORRECTION — one journey: prove it, then fix it
+│   │   │   ├── constats.py     # The facts: tracebacks + hand-added (1-constats.json)
+│   │   │   ├── choix.py        # LLM 1 — picks one fact from a closed list (2-choix.json)
+│   │   │   ├── chantier.py     # git worktrees, agentic task, diff (3-patch.diff)
+│   │   │   ├── mesure.py       # red→green, suite, vacuity, verdict (4-mesure.json)
+│   │   │   ├── bilan.py        # LLM 2 — writes the report, never decides it (5-RAPPORT.md)
+│   │   │   └── store.py        # Journal, cooldowns, the one patch in flight
 │   │   ├── routes/             # chat.py · proxy.py (/v1/*) · memory_routes.py · self_routes.py
 │   │   │                       # agent_routes.py · briefing_routes.py · portfolio.py · device.py
 │   │   └── helpers/            # llm_http.py · llm_json.py · store.py · text.py
@@ -594,8 +602,11 @@ plus accès à internet en ce moment…"* — instead of silently returning no r
 │                               # prompts · analyzer-prompts · nightly-prompts
 │                               # reflection-prompts
 │                               # opencode-prompts · agent-prompts
+├── autocode/                   # Patches from the nightly cycle (git-ignored, never applied)
+│   └── {date}-{id}/            # five numbered artefacts, one per phase
 └── DOCS/
-    ├── AGENT.md                # Agentic loop: tools, budgets, sandbox, API
+    ├── AGENT.md                # Agentic loop: tools, budgets, sandbox, API, autocoding
+    ├── AUTOCODE.md             # The hand-written target pool for the nightly cycle
     ├── ARCHITECTURE.md · MEMORY.md · API.md · CONFIGURATION.md · INSTALL.md
     ├── PERFORMANCE.md · OPERATIONS.md · SECURITY.md · GOOGLE.md · REDIS.md
     ├── opencode-local.md · opencode.json.example
@@ -604,17 +615,34 @@ plus accès à internet en ce moment…"* — instead of silently returning no r
 
 ---
 
-## Prompt Self-Modification (Autocoding)
+## Prompt Self-Modification
 
 Jarvis can propose improvements to its own LLM prompts. The feature is fully autonomous on the detection side, and requires human approval before any change takes effect.
+
+> **Not to be confused with the nightly autocoding cycle** (`autocode/`), which proposes
+> changes to the **source code** rather than to prompts. Two separate mechanisms, deliberately:
+>
+> | | `refine_prompt` (here) | `autocode/` |
+> |---|---|---|
+> | Modifies | a prompt constant | source files, as a diff |
+> | Trigger | the reflection cycle | its own nightly job |
+> | Target chosen by | the model, from `REFINABLE_PROMPTS` | a **hand-written pool**, `DOCS/AUTOCODE.md` |
+> | Success criterion | human judgement only | a test that fails on `HEAD` and passes with the patch |
+> | On approval | the override takes effect immediately | **nothing** — the operator runs `git apply` |
+>
+> The autocoding prompts are deliberately **excluded** from `REFINABLE_PROMPTS`: an
+> autocoding prompt that autocoding may rewrite closes a loop nobody holds an end of.
+>
+> See **[AGENT.md](AGENT.md)** § Nightly autocoding.
 
 ### How it works
 
 ```
 Reflection cycle detects repeated knowledge gap
-    → flag_knowledge_gap increments Redis counter (jarvis:self:gap_counts)
-    → counter reaches REFINE_PROMPT_THRESHOLD (default: 3)
-    → next reflection cycle: LLM chooses refine_prompt action
+    → flag_knowledge_gap records the gap (jarvis:self:knowledge_gaps)
+    → a reflection cycle picks the refine_prompt action
+      (bounded by RATE — one proposal in flight, 30 days of sleep per settled
+       topic — and no longer by a recurrence counter: see CONFIGURATION.md)
     → REASONING_MODEL rewrites the targeted prompt
     → proposal saved to prompt_proposals.json
     → email sent with old/new diff + approval instructions

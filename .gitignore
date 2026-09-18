@@ -42,6 +42,11 @@ keys/
 
 #AGENT#
 agent_workspace/
+# Patchs produits par le cycle d'autocoding, avec leur rapport. Jamais appliqués, jamais
+# versionnés : ce sont des propositions en attente de relecture, pas du code du dépôt.
+# Ancré sur la racine — sans le `/` de tête, le motif exclurait aussi le paquet source
+# jarvis-core/src/autocode/, qui disparaîtrait du dépôt sans un mot.
+/autocode/
 
 # Notes de travail internes — pas destinées à la publication.
 AGENTS.md
@@ -49,6 +54,7 @@ DOCS/AGENTS.md
 DOCS/jarvis_cheatsheet.md
 DOCS/AGENTIC.md
 DOCS/AGENTIC-SELF.md
+DOCS/AUTOCODE.md
 DOCS/ROADMAP.md
 DOCS/I18N.md
 .claude/

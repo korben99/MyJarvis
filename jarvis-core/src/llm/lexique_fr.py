@@ -212,6 +212,13 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "rejette la proposition",
         "montre la proposition",
         "approuve la proposition de prompt",
+        # Patchs d'autocoding. Même régime que les propositions de prompt : une décision
+        # sur l'état interne de Jarvis, qui ne doit pas partir en recherche web sous
+        # prétexte que « patch » ressemble à un sujet technique.
+        "montre les patchs en attente",
+        "accepte le patch",
+        "rejette le patch",
+        "patch en attente",
         "parle-moi de toi",
         "ton identité",
         # Sécurité de SA propre pile. Le possessif ("tes", "ton") est ce qui sépare ces

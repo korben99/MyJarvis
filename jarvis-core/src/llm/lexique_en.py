@@ -193,6 +193,13 @@ INTENT_EXAMPLES: dict[str, list[str]] = {
         "reject the proposal",
         "show the proposal",
         "approve the prompt proposal",
+        # Autocoding patches. Same regime as prompt proposals: a decision about Jarvis's
+        # own internal state, which must not be routed to web search just because "patch"
+        # looks like a technical topic.
+        "show the pending patches",
+        "accept the patch",
+        "reject the patch",
+        "pending patch",
         "tell me about yourself",
         "your identity",
         # Security of ITS OWN stack. The possessive ("your") is what separates these from a
