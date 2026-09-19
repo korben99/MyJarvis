@@ -773,6 +773,26 @@ class TestRevue:
              "cible": ["jarvis-core/src/exemple.py"], "origine": "traceback"}
         )
         assert "le cache ne purge pas" in objectif
+
+    def test_un_perimetre_borne_l_objectif_de_revue(self):
+        """Le dépôt est trop grand pour quarante pas : restreindre le champ concentre la
+        revue au lieu de la laisser suivre sa première impulsion."""
+        from autocode import chantier
+
+        objectif = chantier.construire_objectif(
+            {"id": "REVUE-x", "origine": chantier.ORIGINE_REVUE,
+             "perimetre": "jarvis-core/src/memory"}
+        )
+        assert "repo/jarvis-core/src/memory" in objectif
+        assert objectif.startswith("PÉRIMÈTRE")
+
+    def test_une_revue_sans_perimetre_ne_le_mentionne_pas(self):
+        from autocode import chantier
+
+        objectif = chantier.construire_objectif(
+            {"id": "REVUE-x", "origine": chantier.ORIGINE_REVUE, "perimetre": ""}
+        )
+        assert "PÉRIMÈTRE" not in objectif
         assert "jarvis-core/src/exemple.py" in objectif
 
     def test_une_revue_saute_le_recueil_et_le_choix(self, monkeypatch):
@@ -886,7 +906,7 @@ class TestCycleRobuste:
 
         vus = []
 
-        async def _espion(dry_run, revue=False):
+        async def _espion(dry_run, revue=False, perimetre=""):
             vus.append(_cycle_journal.get())
             return {"lance": False, "motif": "espion"}
 

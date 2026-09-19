@@ -97,13 +97,24 @@ def _initial_messages(task: dict) -> list[dict]:
     # Recomposé depuis les prompts plutôt qu'emprunté à `build_system_prompt` : ce qui est
     # utile ici est l'assise, pas le prénom, le profil ni la capacité agentique — et le
     # chemin du chat n'a pas à porter un paramètre pour un besoin qui n'est pas le sien.
+    prefixe_etat = ""
     if task.get("origin") == "autocode":
         system = "\n\n".join(
             (get_prompt("SYSTEM_BASE"), get_prompt("IDENTITY"), system)
         )
+        # L'état de Jarvis, en tête du premier message comme `build_dynamic_prefix` le fait
+        # pour le chat : IDENTITY décrit ces balises comme « ce qu'on t'injecte », il faut
+        # donc les injecter. En préfixe du user et non dans le system, pour ne pas défaire
+        # le cache du system stable. Import tardif — `agent` ne dépend pas d'`autocode`.
+        from autocode.contexte import build_autocode_prefix
+
+        prefixe_etat = build_autocode_prefix()
+
     objective = get_prompt("AGENT_OBJECTIVE").format(
         objective=task["objective"], max_steps=_max_steps(task)
     )
+    if prefixe_etat:
+        objective = f"{prefixe_etat}\n\n{objective}"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": objective},

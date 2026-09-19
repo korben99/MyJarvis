@@ -1025,6 +1025,17 @@ def _carte_du_module(source: str, nb_lignes: int) -> str | None:
     except SyntaxError:
         return None
 
+    # Les imports en tête de carte : ce qu'un module fait dépend d'abord de ce dont il
+    # dépend, et une carte qui ne montre que ses définitions cache par quoi il est relié au
+    # reste. Regroupés sur une ligne, ils situent sans alourdir.
+    imports: list[str] = []
+    for noeud in arbre.body:
+        if isinstance(noeud, ast.Import):
+            imports += [a.name for a in noeud.names]
+        elif isinstance(noeud, ast.ImportFrom):
+            base = noeud.module or ""
+            imports += [f"{base}.{a.name}" for a in noeud.names]
+
     entrees = []
     for noeud in arbre.body:
         if isinstance(noeud, ast.ClassDef):
@@ -1052,12 +1063,15 @@ def _carte_du_module(source: str, nb_lignes: int) -> str | None:
         f"d'un bloc : vise ce que tu cherches."
         if reste else ""
     )
+    entete_imports = (
+        "importe : " + ", ".join(imports) + "\n\n" if imports else ""
+    )
     return (
         f"[CARTE DU MODULE — {nb_lignes} lignes, trop long pour une lecture entière.\n"
-        f"Ci-dessous ses définitions et leur ligne. Relis avec offset=<ligne> pour ouvrir "
-        f"ce qui t'intéresse.\n"
+        f"Ci-dessous ce qu'il importe, puis ses définitions et leur ligne. Relis avec "
+        f"offset=<ligne> pour ouvrir ce qui t'intéresse.\n"
         f"Lire le fichier en entier remplirait ton contexte et ferait disparaître ce que "
-        f"tu as déjà lu.]\n\n" + "\n".join(entrees) + pied
+        f"tu as déjà lu.]\n\n" + entete_imports + "\n".join(entrees) + pied
     )
 
 

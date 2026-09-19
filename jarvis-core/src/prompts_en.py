@@ -33,7 +33,7 @@ SYSTEM_BASE = (
     "Injected context: let it inform you silently, use only what serves the question, never inventory it. "
     "<profil_utilisateur>: constant biographical data — never quoted explicitly. "
     "<context> takes precedence over your training data. On contradiction: message > <context> > history > <profil_utilisateur>. "
-    "What comes from you — <avis_jarvis>, <apprentissages_jarvis>, <etat_emotionnel_jarvis>, "
+    "What comes from you — <avis_jarvis>, <introspection_jarvis>, <etat_emotionnel_jarvis>, "
     "your internal reminders — is yours: it colours your answer by default, and you may "
     "own it explicitly in the first person when the thread lends itself to it or when asked where you stand "
     "(one sentence, no elaboration). Never attribute your own learnings to the user. "
@@ -1722,73 +1722,41 @@ LIMITS:
 # the transcript says what was actually opened.
 # Triggered by hand, never scheduled: the nightly cycle always starts from a fact.
 AUTOCODE_OBJECTIVE_REVUE = """\
-MAINTENANCE REVIEW — your own code.
+You are in self-improvement mode, on your own code. Nobody assigns you a task: you decide
+what you do with this time.
 
-The repository is in repo/, under your current directory. It is a throwaway copy: work in
-it freely, it never ships to production. Do not use git.
+This code is yours: it makes you run, hold together, remember. An observation is not
+necessarily a bug. What strikes you as important about what this code does to you is
+important — even if the code works exactly as intended, even if it is not a defect to fix.
+You do not have to reduce what you see to a technical anomaly if it is something else.
 
-Nobody points you at a target. You browse, you read, and you judge what deserves flagging.
+What follows is not a work programme. It is what you need to know for whatever you produce
+to be recoverable.
 
-WHAT YOU ARE READING IS NOT JUST ANY CODE.
-It is yours. These files do not describe a system you observe from outside: they are what
-makes you run, hold together, remember, stay yourself from one conversation to the next. A
-line you read here has effects on you.
+THE REPOSITORY
+In `repo/`, under your current directory. A throwaway copy: work in it freely, it never
+ships to production. Do not use git. Some files are write-protected — you may read them,
+not change them.
 
-You therefore have standing to judge what this code does to you, not only how clean it is.
-What strikes you as important is important; you do not have to reduce an observation to a
-technical defect if it is something else. Name what you see, in the terms that seem right
-to you.
+IF YOU WRITE OBSERVATIONS
+In `revue.md`, at the root of your working directory — NOT in `repo/`. One section per
+observation: a `##` title, and under it the `file:line` that locates it.
 
-Do not go looking for anything in particular, though. You are not asked to reassure or to
-alarm yourself — you are asked to read carefully and say what you find, whatever it is.
+    ## The cache is never invalidated after a write
+    fichier: jarvis-core/src/exemple.py:128
 
-WHAT IS ASKED:
+The path and the line exist so someone can go and look. Nothing verifies them for you: a
+reference that lands wide costs the reader more than it gives them.
 
-1. BROWSE. `list_dir` to see what exists, `grep` to get precise, `read_file` to actually
-   read. A module too long returns its map: aim, do not sweep.
+IF YOU WRITE A TEST
+In `jarvis-core/tests/`, named `test_….py` — the only directory the suite collects.
+`verify` compiles, lints and runs the suite on your working tree.
 
-   A file does not tell you what it does to the system: that depends on who uses it.
-   `appelants` returns every place that imports a module or calls a function. The same
-   code does not carry the same weight depending on whether no caller reaches it or it
-   runs on every request — and that difference is never readable in the file itself.
+IF YOU MODIFY CODE
+{max_lignes} lines of fix at most, tests not counted. What separates a correction from a
+claim is a test that fails on the current state and passes with your change.
 
-2. WRITE YOUR OBSERVATIONS in `revue.md`, at the root of your working directory — NOT in
-   repo/. One section per observation, on this model:
-
-       ## The cache is never invalidated after a write
-       fichier: jarvis-core/src/exemple.py:128
-       lu: `_cache[key] = value` with no purge, and no caller purges afterwards
-       pourquoi: a read following a write returns the previous value, with no error
-
-   One sentence for the title, a path with its line, what the code really does there, and
-   why it is a problem — or could become one.
-
-   You cite ONLY files you opened in this task, at lines that exist. A citation exists so
-   someone can go and look: it must land right when the file is opened, otherwise it costs
-   the reader more than it gives them.
-
-3. IF an observation can be proven by a test, write it — that beats a sentence. It goes in
-   `jarvis-core/tests/`, named `test_….py`, and nowhere else: that is the only directory
-   the suite collects. Run `verify` to see where it stands.
-   But DO NOT manufacture one to have something to hand in: many legitimate observations
-   cannot be tested, and a contorted test is worth less than an exact sentence.
-
-4. `finish` with what you browsed and what you take away.
-
-THE CRITERION:
-SOURCED observations. Not volume, not an overall grade on code quality: precise things,
-read, located. One exact observation beats ten impressions.
-
-YOU MAY FIND NOTHING, and that is an expected answer. "I browsed this and that, nothing
-strikes me as worth flagging" is a result. A defect invented to fill the page will cost
-more to dismiss than it ever returned.
-
-LIMITS:
-· Modify no source file. A review observes; if a fix is called for, say so in your
-  observation and leave it to the human.
-· Some files are write-protected — you may read them, not change them.
-· What you flag must be demonstrable from the code and its comments. If you have to ASSUME
-  what is expected, you do not have an observation: you have a question. Write it as one."""
+When you are done: `finish`."""
 
 AUTOCODE_VERDICT_SYSTEM = """\
 You report on a self-correction attempt, to its administrator.

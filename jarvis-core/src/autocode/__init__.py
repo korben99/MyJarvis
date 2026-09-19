@@ -103,7 +103,8 @@ def _contexte_systeme() -> dict:
         return {}
 
 
-async def run_nightly_autocode(dry_run: bool = False, revue: bool = False) -> dict:
+async def run_nightly_autocode(dry_run: bool = False, revue: bool = False,
+                               perimetre: str = "") -> dict:
     """Un cycle. Rend un compte rendu structuré — ne lève jamais.
 
     `dry_run` s'arrête après le choix : de quoi contrôler ce que Jarvis retiendrait, et
@@ -126,17 +127,21 @@ async def run_nightly_autocode(dry_run: bool = False, revue: bool = False) -> di
         # boucle agentique n'est pas concernée : elle tourne dans la tâche du worker, et
         # passe de toute façon son propre chemin, qui a la priorité.
         with journal_de_cycle(_AUTOCODE_PROMPTS_LOG_PATH):
-            return await _cycle(dry_run, revue)
+            return await _cycle(dry_run, revue, perimetre)
     except Exception as exc:
         logger.error("autocode: cycle interrompu (%s)", type(exc).__name__, exc_info=True)
         return {"lance": False, "motif": f"erreur : {type(exc).__name__}"}
 
 
-def _revue_du_jour(date: str) -> dict:
-    """La cible d'une revue : l'absence de cible.
+def _revue_du_jour(date: str, perimetre: str = "") -> dict:
+    """La cible d'une revue : l'absence de cible, ou un périmètre restreint.
 
     Rendue sous la même forme qu'un constat pour que les phases suivantes n'aient rien à
     savoir de l'origine — seul `construire_objectif` la lit, pour choisir l'objectif.
+
+    `perimetre` borne l'exploration à un sous-dossier (ex. `jarvis-core/src/memory`). Le
+    dépôt est trop grand pour être balayé en quarante pas ; restreindre le champ concentre
+    la revue au lieu de la laisser suivre la première impulsion.
     """
     return {
         "id": f"REVUE-{date}",
@@ -146,10 +151,11 @@ def _revue_du_jour(date: str) -> dict:
         "origine": chantier.ORIGINE_REVUE,
         "raison": "déclenchée à la main",
         "angle": "",
+        "perimetre": perimetre,
     }
 
 
-async def _cycle(dry_run: bool, revue: bool = False) -> dict:
+async def _cycle(dry_run: bool, revue: bool = False, perimetre: str = "") -> dict:
     if (empechement := _empechement()):
         logger.info("autocode: cycle non lancé — %s", empechement)
         return {"lance": False, "motif": empechement}
@@ -162,8 +168,9 @@ async def _cycle(dry_run: bool, revue: bool = False) -> dict:
         return {"lance": False, "motif": "déjà passé aujourd'hui"}
 
     if revue:
-        retenu = _revue_du_jour(date)
-        logger.info("autocode: revue de maintenance, sans cible désignée")
+        retenu = _revue_du_jour(date, perimetre)
+        logger.info("autocode: revue de maintenance%s",
+                    f" — périmètre {perimetre}" if perimetre else ", sans cible désignée")
         if dry_run:
             return {"lance": False, "motif": "dry_run", "cible": retenu["id"],
                     "constat": retenu["constat"], "origine": retenu["origine"],

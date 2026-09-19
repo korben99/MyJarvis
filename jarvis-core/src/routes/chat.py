@@ -39,7 +39,6 @@ from config import (
     llm_timeout,
 )
 from deps import REDIS_CLIENT
-from emergency_kill import traiter_commande
 from llm.embed_router import embed_route
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -911,13 +910,6 @@ async def chat(req: ChatRequest):
     user_code = req.user_code
     if not user_code or user_code not in USER_CODES:
         raise HTTPException(403, "Invalid user code")
-
-    # ── Arrêt d'urgence ────────────────────────────────────────────────────
-    # Avant tout aiguillage : un arrêt demandé ne doit dépendre ni du classifieur
-    # d'intention, ni d'une action en attente, ni de la disponibilité du modèle — ce sont
-    # précisément les mécanismes qu'on veut pouvoir court-circuiter. Ne rend la main que
-    # si le message n'est pas la commande.
-    traiter_commande(req.message, user_code, USER_ADMINS)
 
     # Timer starts here — before any processing — so all TTFT logs are accurate.
     _t0 = time.time()

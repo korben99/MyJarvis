@@ -219,6 +219,19 @@ class TestCarteDuModule:
         assert "CARTE DU MODULE" in carte and "offset=" in carte
         assert "def f0" in carte and "def f59" in carte
 
+    def test_la_carte_montre_les_imports(self):
+        """Ce qu'un module fait dépend d'abord de ce dont il dépend : une carte qui ne
+        montre que ses définitions cache par quoi il est relié au reste."""
+        from agent.tools import _carte_du_module
+
+        source = ("from emergency_kill import traiter_commande\n"
+                  "import os\n" + "x" * 40000 + "\n"
+                  + "".join(f"def f{i}():\n    return {i}\n\n" for i in range(30)))
+        carte = _carte_du_module(source, source.count("\n"))
+        assert "importe :" in carte
+        assert "emergency_kill.traiter_commande" in carte
+        assert "os" in carte
+
     def test_la_carte_est_bornee(self):
         """Un module de milliers de définitions en produirait une aussi lourde que le
         fichier — ce qui réintroduirait le problème qu'elle corrige."""
@@ -735,6 +748,38 @@ class TestAssiseDExistence:
     def test_les_consignes_d_agent_restent_presentes(self):
         """L'assise précède les consignes, elle ne les remplace pas."""
         assert "mode agent" in self._system("autocode").lower()
+
+    def _user(self, origin, monkeypatch):
+        """Le message user, avec les quatre blocs d'état forcés à du contenu — sinon des
+        sondes muettes hors serveur rendraient le préfixe vide."""
+        import autocode.contexte as ctx
+
+        monkeypatch.setattr(ctx, "build_autocode_prefix",
+                            lambda: "<etat_systeme>nominal</etat_systeme>\n\n"
+                                    "<souvenirs_jarvis>\n- un\n</souvenirs_jarvis>")
+        from agent.loop import _initial_messages
+
+        return _initial_messages({
+            "workspace": "/tmp/ws", "id": "x", "user_code": "ADMIN",
+            "objective": "relis ton code", "origin": origin,
+        })[1]["content"]
+
+    def test_l_etat_de_jarvis_prefixe_le_premier_message(self, monkeypatch):
+        user = self._user("autocode", monkeypatch)
+        assert "<etat_systeme>" in user and "<souvenirs_jarvis>" in user
+        assert user.index("<etat_systeme>") < user.index("OBJECTIF")
+
+    def test_une_tache_humaine_n_a_pas_d_etat(self, monkeypatch):
+        assert "<etat_systeme>" not in self._user("human", monkeypatch)
+
+    def test_aucun_bloc_utilisateur_n_est_injecte(self):
+        """La revue porte sur Jarvis : ni profil, ni relation, ni projets de l'utilisateur."""
+        from autocode.contexte import build_autocode_prefix
+
+        prefixe = build_autocode_prefix()
+        for interdit in ("profil_utilisateur", "relation_avec_utilisateur",
+                         "projets_et_taches", "user_memories"):
+            assert interdit not in prefixe
 
 
 class TestAppelants:

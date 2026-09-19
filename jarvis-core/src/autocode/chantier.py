@@ -202,7 +202,27 @@ def construire_objectif(constat: dict) -> str:
     d'arriver devant le code diffère.
     """
     if constat.get("origine") == ORIGINE_REVUE:
-        return get_prompt("AUTOCODE_OBJECTIVE_REVUE")
+        objectif = get_prompt("AUTOCODE_OBJECTIVE_REVUE").format(
+            max_lignes=AUTOCODE_MAX_DIFF_LINES
+        )
+        # Périmètre restreint : le dépôt est trop grand pour quarante pas. Le borner
+        # concentre la revue sur un point d'entrée plutôt que de la laisser suivre sa
+        # première impulsion. Un fichier admet ses imports — sans quoi on ne verrait jamais
+        # ce qu'il déclenche ; un dossier se suffit. Une seule ligne, en tête.
+        if (perimetre := constat.get("perimetre")):
+            if perimetre.endswith(".py"):
+                borne = (
+                    f"PÉRIMÈTRE : pars de `repo/{perimetre}`, et suis ses imports — les "
+                    f"fichiers qu'il référence font partie de la revue. Ne t'éparpille pas "
+                    f"au-delà de ce fil."
+                )
+            else:
+                borne = (
+                    f"PÉRIMÈTRE : cette fois, limite-toi à `repo/{perimetre}`. N'explore "
+                    f"ni ne signale rien hors de là."
+                )
+            objectif = f"{borne}\n\n{objectif}"
+        return objectif
 
     proteges = [f for f in constat["cible"] if est_protege(f)]
     contrainte = (

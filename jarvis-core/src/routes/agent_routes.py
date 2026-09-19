@@ -97,6 +97,10 @@ class _Autocode(BaseModel):
     # Manuel uniquement — le planificateur n'a pas ce drapeau.
     revue: bool = False
 
+    # Borne la revue à un sous-dossier (ex. « jarvis-core/src/memory »), relatif à `repo/`.
+    # Vide = tout le dépôt. Sans effet hors d'une revue.
+    perimetre: str = ""
+
 
 @router.post("/agent/autocode")
 async def post_autocode(req: _Autocode):
@@ -112,7 +116,9 @@ async def post_autocode(req: _Autocode):
 
     from autocode import run_nightly_autocode
 
-    return await run_nightly_autocode(dry_run=req.dry_run, revue=req.revue)
+    return await run_nightly_autocode(
+        dry_run=req.dry_run, revue=req.revue, perimetre=req.perimetre
+    )
 
 
 @router.get("/agent/autocode/journal")
