@@ -60,6 +60,17 @@ __all__ = [
 # Longueur utile d'une notification iOS. Le rapport vit dans le courriel et sur l'étagère.
 _PUSH_MAX_CARS = 400
 
+# Verdicts qui laissent un diff à appliquer, donc une décision à prendre. Eux seuls
+# retiennent le créneau.
+#
+# `signalé` en est exclu, et c'est le point : une revue ne s'applique pas, elle se lit —
+# `rendre_rapport` le dit déjà au relecteur en lui proposant un `cat` et non un `git apply`.
+# La compter comme un patch en attente faisait qu'une revue lancée à la main arrêtait le
+# cycle automatique jusqu'à ce que quelqu'un réponde, alors que le verrou de date existe
+# précisément pour que le manuel et le nocturne ne se disputent pas le créneau. Elle reste
+# consultable et se tranche toujours, ce qui ne change pas.
+_A_APPLIQUER = (mesure.CORRIGE, mesure.REPRODUIT, mesure.GARDE)
+
 
 def _admin() -> str | None:
     """Le destinataire du cycle : l'administrateur.
@@ -80,7 +91,7 @@ def _empechement() -> str | None:
         return "AGENT_ENABLED=false — le cycle a besoin du worker agentique"
     if not _admin():
         return "aucun administrateur configuré"
-    if (en_vol := store.patch_en_attente()):
+    if (en_vol := store.patch_en_attente()) and en_vol.get("verdict") in _A_APPLIQUER:
         # La garde qui compte. Le coût réel du cycle n'est pas le GPU à 2 h du matin, c'est
         # la relecture humaine : empiler les patchs non tranchés reproduirait, à plus
         # grande échelle, les treize propositions de prompt que personne n'a regardées.
@@ -142,9 +153,15 @@ def _revue_du_jour(date: str, perimetre: str = "") -> dict:
     `perimetre` borne l'exploration à un sous-dossier (ex. `jarvis-core/src/memory`). Le
     dépôt est trop grand pour être balayé en quarante pas ; restreindre le champ concentre
     la revue au lieu de la laisser suivre la première impulsion.
+
+    L'heure entre dans l'identifiant parce que le dossier de livraison en dérive
+    (`dossier_du_jour`) et qu'il s'écrit en écrasant. Deux revues datées du même jour
+    rendaient le même chemin : la seconde effaçait en silence le rapport, le patch et les
+    constats de la première. Le verrou de date suffit tant qu'il est en place ; il ne
+    couvre pas la mise au point, où on le retire pour rejouer.
     """
     return {
-        "id": f"REVUE-{date}",
+        "id": f"REVUE-{date}-{datetime.now():%H%M}",
         "constat": "revue de maintenance — aucune cible désignée",
         "cible": [],
         "notes": "",
@@ -285,7 +302,45 @@ async def _executer(user_code: str, retenu: dict, eligibles: list[dict],
     finally:
         # Toujours, y compris sur erreur : un worktree abandonné reste enregistré dans .git
         # et gêne la tentative suivante sur le même chemin.
-        await chantier.nettoyer(task["workspace"])
+        #
+        # Mais jamais sous une tâche qui tourne encore. Ce `finally` est aussi traversé
+        # quand l'attente expire alors que la boucle travaille toujours : `worktree remove
+        # --force` effacerait alors `repo/` pendant que l'agent y écrit. On demande d'abord
+        # l'arrêt, et le ménage revient au démarrage suivant (`purger_orphelins`), dont
+        # c'est précisément le rôle.
+        await _liberer_larbre(task)
+
+
+async def _liberer_larbre(task: dict) -> None:
+    """Retire les worktrees, ou demande l'annulation si la tâche n'est pas finie.
+
+    Relit le statut plutôt que de croire l'enregistrement en main : quand l'attente a
+    expiré, celui-ci date du lancement et dit « en cours » d'une tâche peut-être terminée
+    depuis — comme l'inverse.
+
+    Rien ne lève ici. C'est un chemin de `finally` : une erreur y masquerait le résultat
+    du cycle, qui est déjà calculé.
+    """
+    from agent import store as agent_store
+
+    vivants = (agent_store.STATUS_QUEUED, agent_store.STATUS_RUNNING,
+               agent_store.STATUS_INTERRUPTED)
+    try:
+        statut = (agent_store.get_task(task["id"]) or task).get("status")
+        if statut in vivants:
+            agent_store.request_cancel(task["id"])
+            logger.warning(
+                "autocode: tâche %s toujours %s — annulation demandée, worktrees laissés "
+                "en place (le démarrage suivant les purge)", task["id"], statut,
+            )
+            return
+    except Exception as exc:
+        # Magasin injoignable : on ne sait pas si la tâche vit. Le doute profite à l'arbre,
+        # qu'un worktree orphelin gêne moins qu'une destruction sous une boucle active.
+        logger.warning("autocode: statut de %s illisible (%s) — worktrees laissés en place",
+                       task["id"], type(exc).__name__)
+        return
+    await chantier.nettoyer(task["workspace"])
 
 
 def _restituer(task: dict, retenu: dict, verdict: str, motifs: list[str],
@@ -366,16 +421,23 @@ def handle_autocode_command(message: str, user_code: str) -> str | None:
     """Traite une commande de patch. None si le message n'en est pas une."""
     msg = message.strip().lower()
 
-    if any(kw in msg for kw in ("patch en attente", "montre les patchs", "montre le patch",
-                                "liste les patchs", "quels patchs")):
-        en_vol = store.patch_en_attente()
-        return _fmt_en_attente(en_vol) if en_vol else "Aucun patch en attente."
-
-    if not (trouve := _RE_DECISION.search(msg)):
+    consultation = any(
+        kw in msg for kw in ("patch en attente", "montre les patchs", "montre le patch",
+                             "liste les patchs", "quels patchs")
+    )
+    trouve = _RE_DECISION.search(msg)
+    if not consultation and not trouve:
         return None
 
+    # Le contrôle couvre la CONSULTATION autant que la décision : un patch en attente nomme
+    # un défaut du code de Jarvis et le chemin du dossier qui le détaille. Le laisser lire
+    # à tout utilisateur publie une faiblesse connue avant qu'elle soit corrigée.
     if user_code not in USER_ADMINS:
-        return "⛔ Seul un administrateur peut trancher un patch d'autocoding."
+        return "⛔ L'autocoding est réservé aux administrateurs."
+
+    if consultation:
+        en_vol = store.patch_en_attente()
+        return _fmt_en_attente(en_vol) if en_vol else "Aucun patch en attente."
 
     en_vol = store.patch_en_attente()
     if not en_vol:

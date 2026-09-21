@@ -3,6 +3,12 @@
 Réservé aux administrateurs (USER_ADMINS). Une tâche agentique écrit sur le disque de la
 machine et consomme le GPU pendant plusieurs minutes : ce n'est pas une surface qu'on
 ouvre à tous les utilisateurs déclarés tant que le périmètre n'est pas stabilisé.
+
+La garde est posée sur le ROUTEUR et non route par route. Une garde portée par le corps de
+la requête ne protège que les routes qui en ont un, et laisse ouvertes les lectures — or
+celles-ci rendent l'enregistrement entier d'une tâche, `user_code` compris, c'est-à-dire
+le secret qui autorise à en créer une. Sur le routeur, une route ajoutée plus tard est
+protégée sans que personne ait à y penser.
 """
 
 import json
@@ -10,10 +16,28 @@ import os
 
 from agent import create_task, get_task, list_tasks, request_cancel
 from config import AGENT_ENABLED, AGENT_MAX_STEPS, USER_ADMINS
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-router = APIRouter(tags=["agent"])
+
+def exige_admin(authorization: str = Header(default=None)) -> str:
+    """Code administrateur porté par l'en-tête, ou lève.
+
+    En-tête `Authorization: Bearer <code>`, comme les routes de portefeuille : le code est
+    un secret, et un secret n'a pas à voyager dans une chaîne de requête, que les journaux
+    et l'historique du navigateur conservent.
+    """
+    code = (
+        authorization[7:].strip()
+        if authorization and authorization.startswith("Bearer ")
+        else ""
+    )
+    if code not in USER_ADMINS:
+        raise HTTPException(403, "réservé aux administrateurs")
+    return code
+
+
+router = APIRouter(tags=["agent"], dependencies=[Depends(exige_admin)])
 
 
 class _NewTask(BaseModel):
@@ -26,12 +50,23 @@ def _require_enabled() -> None:
         raise HTTPException(503, "AGENT_ENABLED=false — boucle agentique désactivée")
 
 
+def _exige_soi_meme(demandeur: str, declare: str) -> None:
+    """Refuse qu'un administrateur agisse au nom d'un autre.
+
+    Le champ `user_code` désigne le propriétaire de la tâche : c'est lui qui reçoit le
+    livrable par courriel et la notification. Sans cette égalité, un jeton valide
+    ferait travailler l'agent au nom de quelqu'un d'autre et expédierait le résultat dans
+    sa boîte. Deux administrateurs restent deux personnes.
+    """
+    if demandeur != declare:
+        raise HTTPException(403, "le code déclaré n'est pas celui du jeton")
+
+
 @router.post("/agent/tasks", status_code=202)
-async def post_task(req: _NewTask):
+async def post_task(req: _NewTask, demandeur: str = Depends(exige_admin)):
     """Met une tâche en file. Retourne immédiatement : l'exécution est asynchrone."""
     _require_enabled()
-    if req.user_code not in USER_ADMINS:
-        raise HTTPException(403, "réservé aux administrateurs")
+    _exige_soi_meme(demandeur, req.user_code)
     objective = req.objective.strip()
     if len(objective) < 10:
         raise HTTPException(422, "objectif trop court pour être exécutable")
@@ -103,7 +138,7 @@ class _Autocode(BaseModel):
 
 
 @router.post("/agent/autocode")
-async def post_autocode(req: _Autocode):
+async def post_autocode(req: _Autocode, demandeur: str = Depends(exige_admin)):
     """Rejoue le cycle d'autocoding à la main, sans attendre la nuit.
 
     Bloquant, à dessein : un cycle complet dure une vingtaine de minutes et l'appelant est
@@ -111,8 +146,7 @@ async def post_autocode(req: _Autocode):
     resonder. Le mode nocturne, lui, ne passe pas par ici.
     """
     _require_enabled()
-    if req.user_code not in USER_ADMINS:
-        raise HTTPException(403, "réservé aux administrateurs")
+    _exige_soi_meme(demandeur, req.user_code)
 
     from autocode import run_nightly_autocode
 
@@ -122,11 +156,9 @@ async def post_autocode(req: _Autocode):
 
 
 @router.get("/agent/autocode/journal")
-async def get_autocode_journal(user_code: str, n: int = 10):
+async def get_autocode_journal(n: int = 10):
     """Les derniers cycles avec leur verdict, et le patch qui attend une décision."""
     _require_enabled()
-    if user_code not in USER_ADMINS:
-        raise HTTPException(403, "réservé aux administrateurs")
 
     from autocode import constats, store
 

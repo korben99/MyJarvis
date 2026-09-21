@@ -313,18 +313,32 @@ def _fichiers_produits(task: dict) -> list[str]:
     Sert le cas où la tâche s'arrête sans passer par finish (budget épuisé, annulation) :
     le livrable existe sur disque mais personne ne l'a déclaré. A l'usage,
     l'article LinkedIn était écrit et complet, et l'utilisateur recevait « livrables: [] ».
+
+    Descend dans les sous-dossiers, parce que le modèle en crée : un rapport rangé dans
+    `rapports/` n'apparaissait ni dans cette retombée ni dans le courriel, et le filet
+    manquait donc précisément là où les fichiers atterrissent. Les chemins sont rendus
+    relatifs au workspace, forme que `resolve` et le courriel attendent.
+
+    `repo` et `repo_ref` sont écartés : ce sont des arbres git, dont le contenu se lit dans
+    le patch et non dans une liste de livrables — les parcourir rendrait le dépôt entier.
     """
     from .tools import _FICHIERS_INTERNES
 
+    racine = task["workspace"]
+    ignores = {"repo", "repo_ref"}
+    noms = []
     try:
-        noms = sorted(
-            n for n in os.listdir(task["workspace"])
-            if n not in _FICHIERS_INTERNES and not n.startswith(".")
-            and os.path.isfile(os.path.join(task["workspace"], n))
-        )
+        for dossier, sous_dossiers, fichiers in os.walk(racine):
+            sous_dossiers[:] = [
+                d for d in sous_dossiers if d not in ignores and not d.startswith(".")
+            ]
+            for nom in fichiers:
+                if nom in _FICHIERS_INTERNES or nom.startswith("."):
+                    continue
+                noms.append(os.path.relpath(os.path.join(dossier, nom), racine))
     except OSError:
         return []
-    return noms
+    return sorted(noms)
 
 
 def _has_sources(task: dict, deliverables: list) -> bool:
@@ -788,6 +802,12 @@ async def _conclure(task: dict, messages: list[dict], motif: str = "") -> dict:
     logger.info("agent: %s — budget épuisé, phase de conclusion", task["id"])
 
     for _ in range(_TOURS_CONCLUSION):
+        # Le DÉLAI n'est volontairement pas revérifié ici — cette phase existe justement
+        # pour survivre à son dépassement. Une annulation, si : elle vient d'un humain qui
+        # a décidé d'arrêter, et trois tours d'écriture peuvent durer une minute.
+        if store.is_cancelled(task["id"]):
+            raise _Cancelled
+
         think, text, calls = await _jouer_tour(task, messages, outils)
 
         if not calls:

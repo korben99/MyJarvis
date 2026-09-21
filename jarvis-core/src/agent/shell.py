@@ -34,6 +34,8 @@ from config import (
     AGENT_SHELL_MAX_CALLS,
     AGENT_SHELL_NETWORK,
     AGENT_SHELL_TIMEOUT,
+    SELF_MEMORY_PATH,
+    USERS_LIST_PATH,
 )
 from helpers import get_logger
 
@@ -44,6 +46,19 @@ logger = get_logger("jarvis-agent")
 # installation — sur toute autre, le bac à sable laissait passer .env et les clés.
 _RACINE = str(pathlib.Path(__file__).resolve().parents[3])
 _HOME = str(pathlib.Path.home())
+
+# Fichiers d'état refusés en lecture, en plus de .env et keys/. Résolus, parce que seatbelt
+# compare des chemins réels et qu'un `literal` relatif ne protégerait rien.
+#
+#   users_list.json   porte les codes d'accès, c'est-à-dire les mots de passe de l'API.
+#                     Les laisser lisibles revient à donner tous les comptes à qui obtient
+#                     une exécution, alors que .env est fermé juste à côté.
+#   jarvis-self.json  la mémoire propre de Jarvis. L'agent en reçoit déjà ce qui le
+#                     concerne par son contexte ; le fichier entier est une donnée, pas
+#                     une source, et rien ne se lit correctement dedans à la main.
+_FICHIERS_SECRETS = tuple(
+    os.path.realpath(p) for p in (USERS_LIST_PATH, SELF_MEMORY_PATH) if p
+)
 
 # Motifs refusés avant même d'atteindre le bac à sable. Volontairement courts et lisibles :
 # une liste noire n'est PAS une barrière de sécurité (elle se contourne), c'est un garde-fou
@@ -60,6 +75,7 @@ _INTERDITS: tuple[tuple[str, str], ...] = (
     (r"\bdd\b[^|]*\bof=/dev/", "écriture disque brute"),
     (r"\b(diskutil|fdisk|newfs)\b", "manipulation de volumes"),
     (rf"{re.escape(_RACINE)}/\.env|{re.escape(_RACINE)}/keys", "accès aux secrets"),
+    (r"\busers_list\.json\b|\bjarvis-self\.json\b", "accès aux fichiers d'état"),
 )
 
 
@@ -79,6 +95,7 @@ def _profil_seatbelt(workspace: str) -> str:
         '    (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr")',
         '    (literal "/dev/dtracehelper") (subpath "/private/var/folders"))',
         f'(deny file-read* (subpath "{_RACINE}/keys") (literal "{_RACINE}/.env")',
+        "".join(f'    (literal "{p}")' for p in _FICHIERS_SECRETS),
         f'    (subpath "{_HOME}/.ssh") (subpath "{_HOME}/Library/Keychains"))',
     ]
     if not AGENT_SHELL_NETWORK:

@@ -55,8 +55,14 @@ def create_task(
     meta: dict | None = None,
     max_steps: int = 0,
     timeout_minutes: int = 0,
+    en_file: bool = True,
 ) -> dict:
     """Crée une tâche, son workspace, et la pousse en file d'attente.
+
+    `en_file=False` crée la tâche SANS la publier : à l'appelant de le faire par
+    `mettre_en_file` une fois le workspace en état. Le worker consomme la file dès qu'elle
+    bouge, et il ne peut pas savoir qu'un appelant prépare encore le terrain — une tâche
+    dont le contenu du workspace arrive après coup démarre sur un dossier vide.
 
     `origin` dit QUI a décidé de la tâche, et c'est elle qui détermine le jeu d'outils
     (`tools.schemas_for`) et les budgets. Une tâche humaine et une tâche que Jarvis s'est
@@ -91,14 +97,19 @@ def create_task(
         "deliverables": [],
     }
     save_task(task)
-    r = get_redis()
-    r.zadd(_INDEX_KEY, {task_id: time.time()})
-    r.rpush(_QUEUE_KEY, task_id)
+    get_redis().zadd(_INDEX_KEY, {task_id: time.time()})
     logger.info(
         "agent: tâche %s créée par %s (origine %s) — %s",
         task_id, user_code, origin, objective[:80],
     )
+    if en_file:
+        mettre_en_file(task_id)
     return task
+
+
+def mettre_en_file(task_id: str) -> None:
+    """Publie une tâche déjà créée. Le worker peut la prendre dès cet instant."""
+    get_redis().rpush(_QUEUE_KEY, task_id)
 
 
 def save_task(task: dict) -> None:

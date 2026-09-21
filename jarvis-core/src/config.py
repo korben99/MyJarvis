@@ -307,6 +307,26 @@ RAG_TOP_K = int(os.getenv("RAG_TOP_K", os.getenv("QDRANT_TOP_K", "8")))
 RAG_SCORE_THRESHOLD = float(os.getenv("RAG_SCORE_THRESHOLD", "0.55"))
 OWUI_MAX_DOC_CHARS = int(os.getenv("OWUI_MAX_DOC_CHARS", "80000"))
 
+# ── Origines autorisées à appeler l'API depuis un NAVIGATEUR ──────────────
+# Vide par défaut, et ce défaut n'enlève rien : CORS ne s'applique qu'aux navigateurs.
+# L'app iOS, OpenCode, curl et les scripts ne consultent jamais ces en-têtes, et Open WebUI
+# joint l'API depuis son serveur, pas depuis la page.
+#
+# Une liste ouverte (« * ») a un effet que son écriture ne laisse pas voir : couplée aux
+# identifiants, elle fait renvoyer à CHAQUE site l'autorisation de lire les réponses, donc
+# de se servir du code utilisateur qu'une réponse contiendrait. N'ouvrir ici qu'une origine
+# réellement servie dans un navigateur, jamais « * ».
+CORS_ORIGINS = tuple(
+    o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()
+)
+
+# Clé propre à /v1/raw, en plus des codes utilisateur. Cette route ne passe par aucun
+# pipeline Jarvis et n'écrit rien en mémoire : elle sert les agents de code, qui ne sont
+# pas quelqu'un. Leur donner un code utilisateur reviendrait à leur confier de quoi lire
+# la mémoire et le courrier de cette personne sur toutes les autres routes.
+# Vide = seuls les codes utilisateur sont acceptés.
+RAW_API_KEY = os.getenv("RAW_API_KEY", "")
+
 # ── Features ──────────────────────────────────────────────────────────────
 SELF_MEMORY_PATH = os.getenv("SELF_MEMORY_PATH", "/app/data/jarvis-self.json")
 EMBED_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
@@ -832,8 +852,13 @@ try:
         if code:
             USERS[code] = _u
     logger.info("Loaded %d users from %s", len(USERS), USERS_LIST_PATH)
-except FileNotFoundError:
-    logger.error("users_list.json not found at %s — no users loaded", USERS_LIST_PATH)
+except OSError as _e:
+    # OSError et non FileNotFoundError : le bac à sable de l'agent refuse ce fichier, et un
+    # refus lève PermissionError. Ne rattraper que l'absence ferait échouer l'import de
+    # config à l'intérieur du bac — donc toute la suite de tests que `verify` y lance,
+    # au motif d'une garde qui fonctionne.
+    logger.error("users_list.json unreadable at %s (%s) — no users loaded",
+                 USERS_LIST_PATH, type(_e).__name__)
 except json.JSONDecodeError as _e:
     logger.error("users_list.json is invalid JSON: %s", _e)
 

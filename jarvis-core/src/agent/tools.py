@@ -44,15 +44,23 @@ _FICHIERS_INTERNES = frozenset({"transcript.jsonl", "messages.json", "messages.j
 # l'invite à lire un arbre qui n'est pas le sien — et rendre des constats situés dedans.
 # Masquée, la racine du workspace ne porte plus que `repo`, donc plus rien à choisir.
 #
-# `autocode` et `agent` sont le cycle qui produit cette revue et la boucle qui l'exécute.
-# Ils changent d'un run à l'autre pendant qu'on les met au point : un constat qui les vise
-# porte sur un état déjà périmé quand on le lit. TEMPORAIRE — à retirer quand la mécanique
-# sera stabilisée, `agent/` portant par ailleurs du code de production qui mérite relecture.
-_DOSSIERS_MASQUES = frozenset({"repo_ref", "autocode", "agent"})
+# `agent` et `autocode` y figuraient le temps de leur mise au point. Le masque portait sur
+# un nom de dossier, donc sur TOUTES les tâches et tous les outils : ces deux paquets
+# étaient invisibles à `list_dir` et absents des parcours de `grep`, y compris quand on
+# demandait explicitement de les relire. Un périmètre qui les désigne doit pouvoir les
+# atteindre.
+_DOSSIERS_MASQUES = frozenset({"repo_ref"})
 
 # Noms réservés, traités à part par la boucle.
 FINISH = "finish"   # jamais dispatché ici — c'est la sortie de la boucle
 PLAN = "plan"       # seul outil autorisé EN PLUS d'une action dans le même tour
+
+
+def _noter_source(task: dict, source: str) -> None:
+    """Enregistre une source réellement ouverte. `_has_sources` s'appuie là-dessus."""
+    task.setdefault("sources_seen", [])
+    if source not in task["sources_seen"]:
+        task["sources_seen"].append(source)
 
 
 def _truncate(text: str, limit: int = 0) -> str:
@@ -447,9 +455,7 @@ async def _fetch_url(task: dict, args: dict) -> str:
     if not url.startswith("http"):
         return "Erreur : URL invalide (http/https attendu)."
     text = await _fetch_page_text(url, AGENT_PAGE_MAX_CHARS)
-    task.setdefault("sources_seen", [])
-    if url not in task["sources_seen"]:
-        task["sources_seen"].append(url)
+    _noter_source(task, url)
     if not text:
         return f"Page vide ou inaccessible : {url}"
     return _truncate(text)
@@ -480,11 +486,9 @@ async def _search_docs(task: dict, args: dict) -> str:
     # Mémorisé au même titre qu'une URL ou un fichier lu : un article sourcé sur la base
     # documentaire cite un nom de document, pas une URL — sans ça, _has_sources refusait
     # le finish d'un livrable pourtant correctement sourcé.
-    task.setdefault("sources_seen", [])
     for c in kept:
-        src = c.get("source")
-        if src and src not in task["sources_seen"]:
-            task["sources_seen"].append(src)
+        if (src := c.get("source")):
+            _noter_source(task, src)
 
     lines = [
         f"### {c.get('source', '?')} (score {c.get('score', 0.0):.2f})\n{c.get('text', '')}"
@@ -891,10 +895,16 @@ async def _verify(task: dict, args: dict) -> str:
 
     Ce qui change par rapport à `shell`, ce n'est donc pas le confinement : c'est QUI
     compose la commande. Ici, personne — elle est fixe.
+
+    Hors quota (`compter=False`), pour la même raison : le quota borne la dérive du modèle
+    dans ce qu'il COMPOSE, et une commande fixe ne dérive pas. Le décompter revenait à
+    refuser sa vérification finale à un agent au seul motif qu'il avait beaucoup vérifié.
+    La répétition reste bornée ailleurs — par le budget de pas, et par la détection de
+    boucle, pour qui trois `verify` identiques d'affilée sont un enlisement.
     """
     from . import shell as sh
 
-    sortie = await sh.executer(task, commande_verification(), _VERIFY_TIMEOUT)
+    sortie = await sh.executer(task, commande_verification(), _VERIFY_TIMEOUT, compter=False)
     return _truncate(sortie)
 
 
@@ -1112,6 +1122,11 @@ async def _read_file(task: dict, args: dict) -> str:
     # La carte coûte ~2 ko et mène directement à l'offset utile.
     if offset == 1 and not int(args.get("limit") or 0) and path.endswith(".py"):
         if (carte := _carte_du_module("".join(lines), len(lines))):
+            # Une carte est une lecture : le fichier a été ouvert, et c'est ce que
+            # `_has_sources` mesure. Sortir d'ici sans l'enregistrer fait manquer la source
+            # à un livrable qui cite pourtant un module réellement consulté, et lui colle
+            # l'avertissement « aucune source » à tort.
+            _noter_source(task, path)
             return carte
 
     # Le budget est en CARACTÈRES, pas en lignes. Un plafond de 200 lignes rendait 9 000
@@ -1130,9 +1145,7 @@ async def _read_file(task: dict, args: dict) -> str:
         kept.append(numbered)
         used += len(numbered)
 
-    task.setdefault("sources_seen", [])
-    if path not in task["sources_seen"]:
-        task["sources_seen"].append(path)
+    _noter_source(task, path)
 
     body = "".join(kept)
     next_offset = offset + len(kept)

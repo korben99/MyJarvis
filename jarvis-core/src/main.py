@@ -33,6 +33,7 @@ from config import (
     BRIEFING_TIME,
     BRIEFING_TIMEZONE,
     CONV_ANALYSIS_INTERVAL_MINUTES,
+    CORS_ORIGINS,
     LLM_LOCAL,
     OPENAI_API_KEY,
     OPENAI_API_URL,
@@ -51,7 +52,7 @@ from config import (
     USER_CODES,
     USER_TRADING,
 )
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from qdrant_client.models import Distance, HnswConfigDiff, VectorParams
 
@@ -289,10 +290,16 @@ async def lifespan(app: FastAPI):
 # ── App + routers ──────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Jarvis API", version="8.0", lifespan=lifespan)
+
+# `allow_credentials` reste à False, et c'est ce qui rend la liste ci-dessus sûre : avec
+# les identifiants activés, Starlette cesse de répondre « * » et renvoie en écho l'origine
+# qui demande — toute page web obtient alors l'autorisation de lire les réponses. Aucun
+# client de Jarvis n'envoie de cookie : l'identification passe par un en-tête, que le
+# navigateur ne joint jamais tout seul.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=list(CORS_ORIGINS),
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -308,6 +315,23 @@ app.include_router(proxy_router)
 
 
 # ── Core utility endpoints ─────────────────────────────────────────────────────
+
+
+def _exige_utilisateur(authorization: str | None) -> str:
+    """Code utilisateur porté par l'en-tête, ou lève.
+
+    `/status` n'en passe volontairement pas : l'app iOS s'en sert comme sonde de
+    connectivité avant de connaître le moindre code, et le fermer rendrait l'app incapable
+    de dire si le serveur répond.
+    """
+    code = (
+        authorization[7:].strip()
+        if authorization and authorization.startswith("Bearer ")
+        else ""
+    )
+    if code not in USER_CODES:
+        raise HTTPException(403, "Invalid user code")
+    return code
 
 
 @app.get("/status")
@@ -385,13 +409,17 @@ async def models():
 
 
 @app.get("/search")
-async def search(q: str, top_k: int = RAG_TOP_K):
+async def search(q: str, top_k: int = RAG_TOP_K, authorization: str = Header(default=None)):
+    # La base documentaire porte les documents PERSONNELS de l'utilisateur : contrats,
+    # factures, courriers. Cette route en rend les extraits en clair.
+    _exige_utilisateur(authorization)
     chunks = await search_documents(q, top_k)
     return {"query": q, "results": chunks}
 
 
 @app.get("/web")
-async def web(q: str, max_results: int = 3):
+async def web(q: str, max_results: int = 3, authorization: str = Header(default=None)):
+    _exige_utilisateur(authorization)
     results = await search_web(q, max_results)
     return {"query": q, "results": results}
 

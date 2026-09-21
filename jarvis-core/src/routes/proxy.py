@@ -21,6 +21,7 @@ from config import (
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
+    RAW_API_KEY,
     ROUTER_API_KEY,
     ROUTER_API_URL,
     ROUTER_MODEL,
@@ -358,8 +359,31 @@ class _RawChatRequest(_OAIChatRequest):
     priority: Optional[str] = None           # "bg" (défaut de la route) | "chat"
 
 
+def _garde_raw(authorization: str | None) -> None:
+    """Autorise l'accès à /v1/raw, ou lève.
+
+    La route rend le GPU et le modèle à qui la demande, sans rien écrire en mémoire. Sans
+    garde, n'importe qui sur le réseau s'en sert — et, l'API écoutant sur toutes les
+    interfaces, « le réseau » inclut ce qu'un navigateur du foyer peut joindre.
+
+    Deux jetons acceptés, parce qu'ils ne désignent pas la même chose : un code utilisateur
+    (un humain, qui a déjà accès à tout le reste) ou RAW_API_KEY (un agent de code, à qui
+    on ne veut justement pas donner un code utilisateur).
+    """
+    jeton = (
+        authorization[7:].strip()
+        if authorization and authorization.startswith("Bearer ")
+        else ""
+    )
+    if jeton and (jeton in USER_CODES or (RAW_API_KEY and jeton == RAW_API_KEY)):
+        return
+    raise HTTPException(
+        401, "Unauthorized — jeton attendu dans l'en-tête Authorization: Bearer"
+    )
+
+
 @router.post("/v1/raw/chat/completions")
-async def raw_chat(req: _RawChatRequest):
+async def raw_chat(req: _RawChatRequest, authorization: str = Header(default=None)):
     """
     Bypass endpoint — appel direct à stream_local() sur PRIMARY_MODEL.
     Aucun routage Jarvis, aucune injection mémoire/RAG/état émotionnel, aucune écriture
@@ -375,6 +399,7 @@ async def raw_chat(req: _RawChatRequest):
       1. no_think + thinking_budget dans le body
       2. Variable d'env RAW_NO_THINK (défaut=true)
     """
+    _garde_raw(authorization)
     if not LLM_LOCAL:
         raise HTTPException(503, "LLM_LOCAL non activé — endpoint raw indisponible")
 

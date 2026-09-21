@@ -54,7 +54,13 @@ _BLOC_MAX_CARS = 4000
 _MESSAGE_MAX_CARS = 90
 
 _SEPARATEUR = "Traceback (most recent call last):"
-_FRAME = re.compile(r'File "/opt/jarvis/jarvis-core/src/([^"]+)", line (\d+)')
+# Racine déduite de JARVIS_ROOT, jamais écrite en dur : le motif ne reconnaît une frame que
+# si le chemin correspond, et un préfixe figé sur une seule installation rend zéro constat
+# partout ailleurs — silencieusement, la source « tracebacks » paraissant simplement vide.
+_FRAME = re.compile(
+    r'File "' + re.escape(os.path.join(JARVIS_ROOT, "jarvis-core", "src"))
+    + r'/([^"]+)", line (\d+)'
+)
 _HORODATAGE = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 # Ligne finale d'un traceback : « ValueError: message ». Le nom peut être qualifié.
 _EXCEPTION = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Warning)):\s*(.*)$", re.M)
@@ -107,14 +113,18 @@ def _horodatage_avant(texte: str) -> datetime | None:
     """Date de la dernière ligne journalisée avant ce point du fichier.
 
     Le traceback n'est pas horodaté lui-même — c'est la ligne qui l'introduit qui l'est.
+
+    Le journal écrit en heure LOCALE. Le lire comme de l'UTC décale chaque traceback du
+    décalage horaire de la machine, et ce décalage se paie sur la fenêtre d'incident de
+    `_dans_un_incident` : un traceback survenu juste avant un incident tombe hors de la
+    fenêtre, un autre survenu après y entre. `astimezone()` sans argument attache le
+    fuseau du système, qui est celui dans lequel la ligne a été écrite.
     """
     trouves = _HORODATAGE.findall(texte[-2000:])
     if not trouves:
         return None
     try:
-        return datetime.strptime(trouves[-1], "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=timezone.utc
-        )
+        return datetime.strptime(trouves[-1], "%Y-%m-%d %H:%M:%S").astimezone()
     except ValueError:
         return None
 

@@ -829,17 +829,18 @@ class TestAppelants:
         assert "appelant.py:5: f(…)" in sortie
         assert "Aucun fichier" not in sortie
 
-    def test_la_mecanique_qui_produit_la_revue_est_hors_champ(self, tmp_path):
-        """TEMPORAIRE : `autocode` et `agent` changent entre deux runs pendant leur mise au
-        point, donc un constat qui les vise décrit un état déjà périmé quand on le lit."""
+    def test_la_mecanique_qui_produit_la_revue_est_dans_le_champ(self, tmp_path):
+        """`agent` et `autocode` ont été masqués le temps de leur mise au point. Le masque
+        portait sur un nom de dossier, donc sur toutes les tâches : demander une revue de
+        ces paquets rendait un parcours vide, sans que rien ne le signale."""
         for nom in ("autocode", "agent", "memory"):
             (tmp_path / nom).mkdir()
             (tmp_path / nom / "m.py").write_text("import cible\n", encoding="utf-8")
 
         sortie = self._chercher(tmp_path, "cible")
         assert "memory/m.py:1" in sortie
-        assert "autocode" not in sortie
-        assert "agent/" not in sortie
+        assert "autocode/m.py:1" in sortie
+        assert "agent/m.py:1" in sortie
 
     def test_l_arbre_de_reference_n_est_pas_parcouru(self, tmp_path):
         """`repo_ref` est la copie vierge que la mesure compare au travail de l'agent : la

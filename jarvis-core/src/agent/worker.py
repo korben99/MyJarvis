@@ -54,6 +54,13 @@ def _notify(task: dict) -> None:
         if files:
             body += f"\n\nFichiers : {', '.join(files)}"
             body += " — envoyé par mail." if envoye else f" (dans {task['workspace']})"
+
+        # Une tâche « terminée » l'est parfois par épuisement du budget ou par une boucle
+        # détectée : le statut reste `done` parce qu'un livrable a pu être produit, et la
+        # raison de l'arrêt vit dans `error`. Sans cette ligne, la notification annonce un
+        # travail fini là où la phase de conclusion a sauvé ce qui pouvait l'être.
+        if (motif := (task.get("error") or "").strip()):
+            body += f"\n\n⚠ Arrêt anticipé : {motif}"
     else:
         body = f"Ta tâche a échoué : {task.get('error') or 'raison inconnue'}\n\n« {task['objective'][:120]} »"
 

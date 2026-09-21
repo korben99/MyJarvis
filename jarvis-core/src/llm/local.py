@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncGenerator, List, Optional, Union
 
 from config import (
+    JARVIS_ROOT,
     LLM_LOCAL,
     MAX_TOKENS_HARD_CAP,
     PRIMARY_MODEL,
@@ -99,35 +100,40 @@ os.environ["TRANSFORMERS_CACHE"] = os.environ["HF_HUB_CACHE"]
 logger = logging.getLogger("jarvis-llm-local")
 
 LLM_DEBUG_PROMPTS = os.getenv("LLM_DEBUG_PROMPTS", "").lower() in ("yes", "true", "1")
-_PROMPTS_LOG_PATH = "/opt/jarvis/logs/prompts.log"
+
+# Les journaux de prompts suivent JARVIS_ROOT. Écrits en dur, ils désignent le dossier
+# d'une seule installation : ailleurs, l'écriture échoue ou pire, atterrit dans un
+# `/opt/jarvis` créé pour l'occasion et étranger au dépôt qui tourne.
+_LOGS = os.path.join(JARVIS_ROOT, "logs")
+_PROMPTS_LOG_PATH = os.path.join(_LOGS, "prompts.log")
 
 # Journal dédié aux agents de code (/v1/raw). Fichier séparé : ces prompts embarquent
 # tout le contexte du dépôt et noieraient prompts.log. Gate indépendante, pour pouvoir
 # suivre OpenCode sans réactiver la journalisation de tout le trafic conversationnel.
 RAW_DEBUG_PROMPTS = os.getenv("RAW_DEBUG_PROMPTS", "true").lower() in ("yes", "true", "1")
-_RAW_PROMPTS_LOG_PATH = "/opt/jarvis/logs/opencode-prompts.log"
+_RAW_PROMPTS_LOG_PATH = os.path.join(_LOGS, "opencode-prompts.log")
 
 # Journal dédié à la boucle agentique. Même raison que pour OpenCode : un pas d'agent
 # embarque les schémas des dix outils plus tout le contexte accumulé, et noierait les
 # prompts conversationnels de prompts.log. Gate indépendante, pour suivre l'agent sans
 # rallumer la journalisation de tout le trafic de chat.
 AGENT_DEBUG_PROMPTS = os.getenv("AGENT_DEBUG_PROMPTS", "true").lower() in ("yes", "true", "1")
-_AGENT_PROMPTS_LOG_PATH = "/opt/jarvis/logs/agent-prompts.log"
+_AGENT_PROMPTS_LOG_PATH = os.path.join(_LOGS, "agent-prompts.log")
 
 # Journaux des deux cycles de fond. Ils partagent la gate de prompts.log — ce sont les
 # mêmes prompts, on veut juste pouvoir les lire séparément du trafic conversationnel.
-_NIGHTLY_PROMPTS_LOG_PATH = "/opt/jarvis/logs/nightly-prompts.log"
-_REFLECTION_PROMPTS_LOG_PATH = "/opt/jarvis/logs/reflection-prompts.log"
+_NIGHTLY_PROMPTS_LOG_PATH = os.path.join(_LOGS, "nightly-prompts.log")
+_REFLECTION_PROMPTS_LOG_PATH = os.path.join(_LOGS, "reflection-prompts.log")
 # Le cycle d'autocoding fait deux appels de cadrage — choisir un constat, rédiger le
 # rapport. Sans ce journal ils tombaient dans prompts.log, au milieu du trafic de chat,
 # alors que la boucle agentique qu'ils encadrent écrit, elle, dans agent-prompts.log : les
 # deux moitiés d'un même cycle atterrissaient dans deux fichiers sans rapport.
-_AUTOCODE_PROMPTS_LOG_PATH = "/opt/jarvis/logs/autocode-prompts.log"
+_AUTOCODE_PROMPTS_LOG_PATH = os.path.join(_LOGS, "autocode-prompts.log")
 # L'analyseur tourne toutes les heures et son prompt embarque la base de connaissances, les
 # clés de profil et 2000 caractères d'historique. Surtout, on ne l'ouvre pas pour la même
 # question : devant prompts.log on demande ce que Jarvis a répondu à quelqu'un, devant
 # celui-ci pourquoi un fait n'a pas été extrait ou un résumé rendu nul.
-_ANALYZER_PROMPTS_LOG_PATH = "/opt/jarvis/logs/analyzer-prompts.log"
+_ANALYZER_PROMPTS_LOG_PATH = os.path.join(_LOGS, "analyzer-prompts.log")
 
 # Routage par CONTEXTE plutôt que par paramètre. Un cycle de fond appelle le LLM depuis
 # plusieurs modules — la revue nocturne délègue à memory/cleaning.py et memory/profile.py —

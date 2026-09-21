@@ -241,9 +241,13 @@ def construire_objectif(constat: dict) -> str:
 
 
 async def lancer(user_code: str, constat: dict) -> dict | None:
-    """Crée la tâche agentique et prépare ses arbres. None si git refuse.
+    """Crée la tâche agentique, prépare ses arbres, PUIS la met en file. None si git refuse.
 
-    Les arbres sont créés APRÈS la tâche : c'est elle qui donne le chemin du workspace.
+    Les arbres sont créés après la tâche : c'est elle qui donne le chemin du workspace.
+    L'ordre des deux dernières étapes n'est pas cosmétique — publier d'abord laisse le
+    worker démarrer sur un workspace dont `repo/` n'existe pas encore, et, si git refuse,
+    fait tourner quarante pas sur un arbre vide alors que plus personne n'attend le
+    résultat : `lancer` a déjà rendu None, et son appelant est reparti.
     """
     from agent import store as agent_store
 
@@ -254,6 +258,7 @@ async def lancer(user_code: str, constat: dict) -> dict | None:
         meta={"constat_id": constat["id"], "cible": constat["cible"]},
         max_steps=AUTOCODE_MAX_STEPS,
         timeout_minutes=AUTOCODE_TIMEOUT_MINUTES,
+        en_file=False,
     )
 
     if not await preparer(task["workspace"]):
@@ -261,6 +266,8 @@ async def lancer(user_code: str, constat: dict) -> dict | None:
         task["error"] = "worktree impossible"
         agent_store.save_task(task)
         return None
+
+    agent_store.mettre_en_file(task["id"])
     return task
 
 
