@@ -331,7 +331,8 @@ async def _liberer_larbre(task: dict) -> None:
             agent_store.request_cancel(task["id"])
             logger.warning(
                 "autocode: tâche %s toujours %s — annulation demandée, worktrees laissés "
-                "en place (le démarrage suivant les purge)", task["id"], statut,
+                "en place (purgés par chantier.purger_orphelins au démarrage suivant)",
+                task["id"], statut,
             )
             return
     except Exception as exc:

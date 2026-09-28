@@ -60,6 +60,7 @@ if LLM_LOCAL:
     from llm.local import preload_models
     from pipeline import build_system_prompt
 from agent import start_worker, stop_worker
+from agent import surveiller as surveiller_agent
 from analyzer import analyse_recent_conversations
 from deps import _STREAM_CLIENTS, HTTP_CLIENT, QDRANT_CLIENT
 from llm.embed_router import preload_embed_router
@@ -213,6 +214,19 @@ async def lifespan(app: FastAPI):
             next_run_time=datetime.now(tz) + timedelta(minutes=8),
         )
         logger.info("Trading surveillance scheduled every 2 h")
+
+        # Ronde du worker agentique. Une Task asyncio morte ne se signale pas : sa file
+        # cesse simplement de se vider, et rien sur aucun cadran ne le dit. Cinq minutes
+        # bornent ce qu'une chute coûte, pour un appel qui ne fait rien quand tout va bien.
+        # No-op si AGENT_ENABLED=false.
+        scheduler.add_job(
+            surveiller_agent,
+            trigger="interval",
+            minutes=5,
+            id="agent_worker_watchdog",
+            next_run_time=datetime.now(tz) + timedelta(minutes=5),
+        )
+        logger.info("Agent worker watchdog scheduled every 5 min")
 
         async def _run_cve_scan():
             # SBOM venv + images conteneurs → grype. Lent (~15-20 s) et gourmand CPU :

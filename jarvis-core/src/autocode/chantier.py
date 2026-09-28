@@ -19,6 +19,7 @@ import shutil
 from datetime import datetime
 
 from config import (
+    AGENT_WORKSPACE,
     AUTOCODE_DIR,
     AUTOCODE_MAX_DIFF_LINES,
     AUTOCODE_MAX_STEPS,
@@ -139,23 +140,71 @@ async def preparer(workspace: str) -> bool:
 
 
 async def nettoyer(workspace: str) -> None:
-    """Retire les worktrees. Jamais bloquant : un arbre orphelin gêne, il ne casse rien."""
+    """Retire les worktrees. Jamais bloquant : un arbre orphelin gêne, il ne casse rien.
+
+    Deux temps, parce que `git worktree remove` ne traite QUE les arbres encore enregistrés
+    dans .git. Un dossier qui a perdu son enregistrement n'est plus un worktree pour git :
+    la commande échoue, et comme rien ici n'est bloquant, les octets restaient en place
+    définitivement — une purge annoncée qui ne purgeait pas.
+
+    Le repli n'efface que `repo/` et `repo_ref/`, jamais le workspace : `messages.json` et
+    `transcript.jsonl` sont la trace de ce que la tâche a fait, et elle se relit après coup.
+    """
     for nom in ("repo", "repo_ref"):
         chemin = os.path.join(workspace, nom)
+        if not os.path.isdir(chemin):
+            continue
+        await _git("worktree", "remove", "--force", chemin)
         if os.path.isdir(chemin):
-            await _git("worktree", "remove", "--force", chemin)
+            shutil.rmtree(chemin, ignore_errors=True)
     await _git("worktree", "prune")
 
 
-async def purger_orphelins() -> int:
-    """Au démarrage : efface les enregistrements d'arbres dont le dossier a disparu.
+# Statuts d'une tâche dont l'arbre doit être ÉPARGNÉ : elle sera reprise, et la boucle y
+# écrit. Recopiés depuis `agent.store` plutôt qu'importés de son `_OPEN_STATUSES` privé.
+_STATUTS_OUVERTS = ("queued", "running", "interrupted")
 
-    Une coupure en plein cycle laisse un worktree enregistré dans .git alors que son
-    workspace a pu être nettoyé. Même motif que `store.requeue_interrupted()` : ce qu'une
-    interruption laisse derrière elle se répare au boot, pas à la tentative suivante.
+
+async def purger_orphelins() -> int:
+    """Au démarrage : retire les arbres des tâches qui ne sont plus en cours.
+
+    `git worktree prune` seul ne suffit pas, et c'est ce qui les laissait s'accumuler : il
+    n'efface que les enregistrements dont le DOSSIER a disparu. Une tâche qui n'a jamais été
+    consommée laisse au contraire ses deux arbres entiers sur le disque — une vingtaine de
+    mégaoctets par nuit, et autant d'enregistrements dans .git, qu'aucun prune ne reprend.
+
+    Une tâche encore ouverte garde le sien : le worker peut la reprendre à cet instant même,
+    et lui retirer son arbre sous les pieds ferait échouer une reprise par ailleurs saine.
+
+    Un workspace sans `repo/` n'est pas un chantier d'autocoding mais une tâche humaine :
+    il n'a pas d'arbre, et rien à purger.
     """
-    code, _ = await _git("worktree", "prune")
-    return code
+    from agent import store as agent_store
+
+    if not os.path.isdir(AGENT_WORKSPACE):
+        return 0
+
+    retires = 0
+    for task_id in sorted(os.listdir(AGENT_WORKSPACE)):
+        workspace = os.path.join(AGENT_WORKSPACE, task_id)
+        if not any(
+            os.path.isdir(os.path.join(workspace, nom)) for nom in ("repo", "repo_ref")
+        ):
+            continue
+        task = agent_store.get_task(task_id)
+        if task and task.get("status") in _STATUTS_OUVERTS:
+            continue
+        await nettoyer(workspace)
+        # Compté sur le résultat CONSTATÉ et non sur la tentative : un compteur qui
+        # s'incrémente sans regarder le disque annonce une purge qui n'a pas eu lieu.
+        if not any(
+            os.path.isdir(os.path.join(workspace, nom)) for nom in ("repo", "repo_ref")
+        ):
+            retires += 1
+
+    if retires:
+        logger.info("autocode: %d chantier(s) orphelin(s) purgé(s)", retires)
+    return retires
 
 
 async def produire_patch(workspace: str) -> str:

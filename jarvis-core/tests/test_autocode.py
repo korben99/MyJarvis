@@ -145,12 +145,19 @@ class TestListeFermee:
 
 # ── Constats tirés du journal ────────────────────────────────────────────────
 
-_TRACEBACK = """\
+# Les chemins de frame sont construits depuis JARVIS_ROOT, jamais écrits en dur : le motif
+# de `constats` en dérive lui aussi, et un préfixe figé ne coïncide avec lui que sur
+# l'installation où il a été écrit. Ailleurs — et un worktree d'autocoding EST un ailleurs,
+# c'est là que la suite se rejoue — aucune frame ne correspondrait, et ces tests
+# échoueraient en accusant le code d'une divergence qui n'appartiendrait qu'à eux.
+_SRC = pathlib.Path(constats.JARVIS_ROOT) / "jarvis-core" / "src"
+
+_TRACEBACK = f"""\
 2026-09-14 10:00:00  jarvis-self               ERROR  Cycle en échec
 Traceback (most recent call last):
-  File "/opt/jarvis/jarvis-core/src/self/engine.py", line 12, in _reflechir
+  File "{_SRC}/self/engine.py", line 12, in _reflechir
     resultat = etape["reason"]
-  File "/opt/jarvis/jarvis-core/src/agent/sandbox.py", line 60, in resolve
+  File "{_SRC}/agent/sandbox.py", line 60, in resolve
     raise SandboxError(chemin)
 KeyError: 'reason'
 2026-09-14 10:00:01  jarvis-api                INFO  suite du journal
@@ -1019,3 +1026,96 @@ class TestCommandeDecision:
         handle, tranches = commande
         assert "SIG-a1b2c3d4" in handle("montre les patchs en attente", "ADMIN1")
         assert tranches == []
+
+
+# ── Purge des chantiers ──────────────────────────────────────────────────────
+
+
+class TestPurgeDesChantiers:
+    """Un cycle interrompu laisse deux arbres git sur le disque, une vingtaine de
+    mégaoctets. Rien ne les reprenait : `git worktree prune` n'efface que les
+    enregistrements dont le dossier a DISPARU, et ceux-là sont bien présents.
+    """
+
+    @pytest.fixture
+    def atelier(self, tmp_path, monkeypatch):
+        from autocode import chantier
+
+        monkeypatch.setattr(chantier, "AGENT_WORKSPACE", str(tmp_path))
+
+        def poser(task_id: str, statut: str | None) -> pathlib.Path:
+            base = tmp_path / task_id
+            (base / "repo").mkdir(parents=True)
+            (base / "transcript.jsonl").write_text('{"event":"start"}\n', encoding="utf-8")
+            return base
+
+        taches: dict[str, str | None] = {}
+        monkeypatch.setattr(
+            chantier, "_git", _async_git := _faux_git(),
+        )
+
+        from agent import store as agent_store
+
+        monkeypatch.setattr(
+            agent_store, "get_task",
+            lambda tid: ({"status": taches[tid]} if taches.get(tid) else None),
+        )
+        return chantier, poser, taches
+
+    def test_un_chantier_de_tache_finie_est_purge(self, atelier):
+        import asyncio
+
+        chantier, poser, taches = atelier
+        base = poser("t1", "done")
+        taches["t1"] = "done"
+
+        assert asyncio.run(chantier.purger_orphelins()) == 1
+        assert not (base / "repo").is_dir(), "l'arbre devait être retiré"
+
+    @pytest.mark.parametrize("statut", ["queued", "running", "interrupted"])
+    def test_un_chantier_de_tache_ouverte_est_epargne(self, atelier, statut):
+        """Le worker peut reprendre la tâche à cet instant : lui retirer son arbre sous les
+        pieds ferait échouer une reprise par ailleurs saine."""
+        import asyncio
+
+        chantier, poser, taches = atelier
+        base = poser("t2", statut)
+        taches["t2"] = statut
+
+        assert asyncio.run(chantier.purger_orphelins()) == 0
+        assert (base / "repo").is_dir(), f"l'arbre d'une tâche {statut} a été détruit"
+
+    def test_la_trace_survit_a_la_purge(self, atelier):
+        """`transcript.jsonl` est ce qu'on relit pour comprendre une exécution. La purge
+        porte sur les arbres, pas sur le workspace."""
+        import asyncio
+
+        chantier, poser, taches = atelier
+        base = poser("t3", "done")
+        taches["t3"] = "done"
+
+        asyncio.run(chantier.purger_orphelins())
+        assert (base / "transcript.jsonl").is_file()
+
+    def test_un_workspace_sans_arbre_n_est_pas_un_chantier(self, atelier, tmp_path):
+        """Une tâche humaine n'a pas de worktree : rien à purger, et surtout rien à compter."""
+        import asyncio
+
+        chantier, _, taches = atelier
+        (tmp_path / "humaine").mkdir()
+        (tmp_path / "humaine" / "rapport.md").write_text("x", encoding="utf-8")
+
+        assert asyncio.run(chantier.purger_orphelins()) == 0
+        assert (tmp_path / "humaine" / "rapport.md").is_file()
+
+
+def _faux_git():
+    """Doublure de `_git` : un vrai worktree demanderait un dépôt git par test.
+
+    Elle ne retire RIEN, ce qui reproduit exactement le cas où git refuse — un dossier qui
+    n'est plus un worktree enregistré. C'est le repli de `nettoyer` qui doit alors effacer
+    les octets, et c'est lui que ces tests éprouvent.
+    """
+    async def _git(*args):
+        return 0, ""
+    return _git

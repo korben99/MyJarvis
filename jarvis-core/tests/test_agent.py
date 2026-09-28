@@ -972,3 +972,138 @@ class TestRelance:
 
         assert _relance(step=10, rien_ecrit=False, max_steps=40) == ""
         assert _relance(step=20, rien_ecrit=False, max_steps=40)
+
+
+# ── Survie du worker ─────────────────────────────────────────────────────────
+
+
+class TestSurvieDuWorker:
+    """Le worker consomme une file, seul, sans personne pour le regarder.
+
+    Une exception qui sort de sa boucle ne s'arrête sur rien : la Task asyncio meurt,
+    l'exception y reste stockée — la référence globale empêche sa collecte, donc asyncio ne
+    la signale jamais —, et la file cesse simplement de se vider. Aucun cadran ne bouge.
+    C'est la panne la plus coûteuse du dispositif parce qu'elle est indolore, et ces tests
+    sont ce qui garantit qu'elle ne peut plus être silencieuse.
+    """
+
+    @pytest.fixture
+    def worker(self, monkeypatch):
+        import agent.worker as w
+
+        monkeypatch.setattr(w, "AGENT_ENABLED", True)
+        monkeypatch.setattr(w, "_PAUSE_APRES_PANNE", 0.01)
+        monkeypatch.setattr(w.store, "requeue_interrupted", lambda: 0)
+        monkeypatch.setattr(w, "_worker_task", None)
+        return w
+
+    def test_une_panne_du_magasin_ne_tue_pas_la_boucle(self, worker, monkeypatch):
+        """Les appels Redis du tour — file, lecture, annulation, sauvegarde — sont hors du
+        try qui entoure run_task. Sans filet sur le tour entier, le premier hoquet de Redis
+        arrête l'exécution autonome jusqu'au prochain redémarrage du service."""
+        import asyncio
+
+        tours = []
+
+        def pop_qui_tombe(timeout=5):
+            tours.append(1)
+            if len(tours) <= 3:
+                raise ConnectionError("magasin injoignable")
+            return None
+
+        # monkeypatch et non affectation directe : `worker.store` est le module partagé
+        # `agent.store`, et le remplacer en dur laisserait la doublure en place pour tous
+        # les tests suivants du fichier.
+        monkeypatch.setattr(worker.store, "pop_next", pop_qui_tombe)
+
+        async def scenario():
+            tache = asyncio.create_task(worker._run())
+            await asyncio.sleep(0.3)
+            vivant = not tache.done()
+            tache.cancel()
+            try:
+                await tache
+            except asyncio.CancelledError:
+                pass
+            return vivant
+
+        vivant = asyncio.run(scenario())
+        assert vivant, "la boucle est morte sur une exception du magasin"
+        assert len(tours) > 3, "la boucle n'a pas repris après les pannes"
+
+    def test_la_ronde_releve_un_worker_mort_et_le_signale(self, worker, monkeypatch):
+        """Un worker mort qui ne se signale pas, c'est cinq nuits d'autocoding perdues sans
+        qu'aucune ligne de journal ne le dise. L'incident emprunte le chemin par lequel une
+        aggravation de CVE remonte déjà jusqu'à l'administrateur."""
+        import asyncio
+
+        import vitals
+
+        incidents = []
+        monkeypatch.setattr(
+            vitals, "mark_incident",
+            lambda kind, detail, severity="info": incidents.append((kind, severity)),
+        )
+        monkeypatch.setattr(worker.store, "pop_next", lambda timeout=5: None)
+
+        async def scenario():
+            async def meurt_aussitot():
+                raise RuntimeError("panne simulée")
+
+            worker._worker_task = asyncio.create_task(meurt_aussitot())
+            await asyncio.sleep(0.05)
+            mort_avant = not worker.worker_vivant()
+
+            worker.surveiller()
+            await asyncio.sleep(0.05)
+            vivant_apres = worker.worker_vivant()
+
+            worker._worker_task.cancel()
+            try:
+                await worker._worker_task
+            except asyncio.CancelledError:
+                pass
+            return mort_avant, vivant_apres
+
+        mort_avant, vivant_apres = asyncio.run(scenario())
+        assert mort_avant, "le worker devait être mort avant la ronde"
+        assert vivant_apres, "la ronde n'a pas relevé le worker"
+        assert incidents and incidents[0][1] == "alerte", f"aucune alerte : {incidents}"
+
+    def test_la_ronde_laisse_un_worker_sain_intact(self, worker):
+        """Deux workers sur la même file se voleraient les tâches, et la concurrence 1 —
+        qui protège le GPU et le cache LRU — ne tiendrait plus."""
+        import asyncio
+
+        async def scenario():
+            async def tourne():
+                await asyncio.sleep(10)
+
+            worker._worker_task = attendue = asyncio.create_task(tourne())
+            await asyncio.sleep(0.02)
+            worker.surveiller()
+            inchange = worker._worker_task is attendue
+            attendue.cancel()
+            try:
+                await attendue
+            except asyncio.CancelledError:
+                pass
+            return inchange
+
+        assert asyncio.run(scenario()), "la ronde a remplacé un worker vivant"
+
+    def test_le_motif_de_mort_lit_l_exception(self, worker):
+        """Lire l'exception est ce qui la rend visible : sans cette lecture elle reste dans
+        l'objet Task, que la référence globale empêche de collecter."""
+        import asyncio
+
+        async def scenario():
+            async def meurt():
+                raise ValueError("cause précise")
+
+            worker._worker_task = asyncio.create_task(meurt())
+            await asyncio.sleep(0.05)
+            return worker._motif_de_mort()
+
+        motif = asyncio.run(scenario())
+        assert "ValueError" in motif and "cause précise" in motif

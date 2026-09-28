@@ -20,7 +20,7 @@ confinée au workspace de la tâche. Aucune exécution — le shell arrive en Ph
 """
 
 from .store import create_task, get_task, list_tasks, request_cancel
-from .worker import start_worker, stop_worker
+from .worker import start_worker, stop_worker, surveiller, worker_vivant
 
 __all__ = [
     "create_task",
@@ -29,4 +29,6 @@ __all__ = [
     "request_cancel",
     "start_worker",
     "stop_worker",
+    "surveiller",
+    "worker_vivant",
 ]
