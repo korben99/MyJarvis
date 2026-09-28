@@ -400,7 +400,7 @@ def gather_global_context() -> dict:
     # la réflexion est la boucle de maintenance, elle peut en tirer une note ou une alerte.
     try:
         from cve import render_advice
-        cve_conseil = render_advice(critical_only=True, limit=20)
+        cve_conseil = render_advice(limit=20)
     except Exception as exc:
         logger.debug("gather_global_context: cve indisponible (%s)", exc)
         cve_conseil = ""

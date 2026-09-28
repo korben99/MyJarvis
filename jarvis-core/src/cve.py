@@ -1,5 +1,5 @@
 """
-Scan de vulnérabilités — CVE critiques/hautes de toute la pile Jarvis.
+Scan de vulnérabilités — les CVE critiques de la pile Jarvis que l'on peut réellement fermer.
 
 Un seul appel périodique (planifié, jamais dans un tour) confronte plusieurs cibles à la base
 locale de `grype` :
@@ -7,40 +7,40 @@ locale de `grype` :
   • les images des conteneurs d'infrastructure (Redis, Qdrant, OpenWebUI), scannées
     directement — leur pile (OS de base + binaires) a ses propres CVE, invisibles du venv.
 
-On agrège les compteurs par sévérité (avec ventilation par source et quelques détails),
-mis en cache Redis ; `vitals` les lit comme n'importe quel champ.
+UNE SEULE RÈGLE, et tout le module en découle :
 
-Pourquoi une SBOM + grype plutôt que des versions brutes : une version seule ne dit rien de
-l'exposition. grype classe en Critical/High/… et donne la version corrective — un fait
-actionnable, pas un numéro que le modèle ne sait pas interpréter.
+    est comptée la CVE **critique** dont le correctif est **applicable par une commande**.
 
-**Uniquement le corrigeable.** Une CVE sans version corrective est écartée dès le scan : ni
-comptée, ni stockée, ni injectée. Elle est à la fois inactionnable (rien à recommander) et
-imprudente à référencer — lister un trou ouvert non colmatable revient à donner une carte à
-un attaquant si le contexte ou les logs fuient. Jarvis ne voit que ce sur quoi il peut agir.
+Rien d'autre n'existe ici. Ni les hautes, ni les moyennes, ni une critique dont le correctif
+n'est pas à portée : elles ne sont pas comptées, pas stockées, pas injectées, et ne touchent
+jamais α. Ce n'est pas du masquage, c'est la définition du périmètre — on ne travaille pas
+les hautes, et une faille qu'aucune commande ne ferme ne produit qu'une peur sans issue.
+Compter ce sur quoi on n'agira pas installe un plancher permanent en face duquel il n'y a
+rien à faire, et noie le seul signal qui mérite un geste.
 
-**Corrigeable POUR NOUS, pas dans l'absolu.** `--only-fixed` répond à « une version corrigée
-existe-t-elle », ce qui n'est pas la même question que « puis-je l'appliquer ». Sur une image
-de conteneur, le seul remède est de tirer une image plus récente : si celle qui tourne est
-déjà la dernière publiée, la CVE est inactionnable, quelle que soit la version corrective du
-paquet. Le contrôle est donc porté au bon niveau — devant une critique sur une image, on
-regarde s'il y a quelque chose à tirer, et sinon on ne compte pas. Sans ça une image tierce
-non reconstruite installe un plancher de peur permanent en face duquel aucune action
-n'existe, ce que la règle ci-dessus refuse déjà pour une CVE sans correctif.
+« Applicable par une commande » ne se teste pas de la même façon selon la cible, parce que le
+remède n'est pas le même :
 
-Le contrôle est automatique et se rouvre tout seul : dès que l'amont republie, le digest
-diffère, les CVE redeviennent comptées, et l'alerte porte alors sur une action réelle —
-`docker compose pull`.
+    venv    une version corrective existe → `pip install paquet==version`.
+            C'est ce que rend grype, et c'est suffisant : les avis référencent des
+            versions publiées sur PyPI.
+    image   le SEUL remède est de tirer une image plus récente. La question n'est donc pas
+            « une version corrigée du paquet existe-t-elle » — sur une image tierce, cela ne
+            se traduit en rien de faisable — mais « l'amont a-t-il republié ». Sinon, aucune
+            critique de cette image ne compte, quelle qu'en soit la version corrective.
 
-**CVE et α.** Une CVE critique est un danger PRÉSENT, pas un écart statistique : tant qu'elle
-existe, la faille est exploitable — qu'elle date d'hier ou d'un mois n'y change rien, ça
-signifie seulement qu'elle aurait dû être corrigée. Les critiques nourrissent donc à la fois
-l'esprit (compteurs en texte/réflexion) ET le corps : `risk_scalar` porte un terme critique
-gradué, avec un plancher (une seule critique compte déjà) qui croît avec le backlog. La
-contrepartie, voulue : patcher les images fait retomber la peur, exactement comme une
-sauvegarde. En plus de ce niveau permanent, une AGGRAVATION (nouvelles critiques depuis le
-dernier scan) lève un incident `alerte` — un pic temporaire et une trace durable dans self,
-distincts du niveau de fond.
+Le contrôle des images se rouvre tout seul : dès que l'amont republie, le digest diffère, les
+critiques redeviennent comptées, et l'alerte porte alors sur un geste réel — `docker compose
+pull`. Une critique nouvelle dans une image figée ne lève rien, et c'est voulu : il n'y aurait
+rien à répondre à l'alerte.
+
+**CVE et α.** Une critique corrigeable est un danger PRÉSENT, pas un écart statistique : tant
+qu'elle existe, la faille est exploitable — qu'elle date d'hier ou d'un mois signifie seulement
+qu'elle aurait dû être fermée. Elles nourrissent donc l'esprit (compteur en texte, réflexion)
+ET le corps : `risk_scalar` porte un terme gradué, avec un plancher (une seule compte déjà)
+qui croît avec le backlog. La contrepartie est voulue : appliquer les correctifs fait retomber
+la peur, exactement comme une sauvegarde. En plus de ce niveau de fond, une AGGRAVATION
+(nouvelles critiques depuis le dernier scan) lève un incident `alerte`.
 
 Contraintes :
   • Scan **lent** (~15–20 s) et gourmand en CPU. Jamais dans la boucle de requête — seulement
@@ -206,8 +206,13 @@ def _resolve_image(container: str) -> str | None:
 
 
 def _scan_target(target: str, source: str) -> dict | None:
-    """Lance grype sur une cible (`sbom:fichier` ou une image) et rend les compteurs +
-    détails Critical/High de cette source. None si grype échoue."""
+    """Lance grype sur une cible (`sbom:fichier` ou une image) et rend les critiques
+    corrigeables de cette source. None si grype échoue.
+
+    Les autres sévérités ne sont pas comptées ici, et ne sont pas non plus collectées :
+    un compteur qui existe finit par être lu, et une liste qui existe finit par être
+    injectée. Ce qui n'entre pas dans le périmètre n'a pas à traverser le module.
+    """
     try:
         r = subprocess.run([GRYPE_BIN, target, "-o", "json"],
                            capture_output=True, text=True, timeout=_SCAN_TIMEOUT)
@@ -225,15 +230,19 @@ def _scan_target(target: str, source: str) -> dict | None:
         logger.warning("cve: sortie grype %s illisible (%s) — source ignorée", source,
                        type(exc).__name__)
         return None
-    crit = haut = moyen = 0
+    crit = 0
     details = []
     exclus = []
     for m in matches:
         v = m.get("vulnerability", {})
+        # Le filtre de sévérité passe AVANT tout le reste : c'est lui qui borne le périmètre,
+        # et le placer en tête évite de faire porter au module des paquets hors sujet.
+        if v.get("severity") != "Critical":
+            continue
         fix = (v.get("fix") or {}).get("versions") or []
-        # On ne garde QUE le corrigeable. Une CVE sans version corrective n'est ni actionnable
-        # (rien à recommander) ni prudente à référencer : la stocker/injecter reviendrait à
-        # dresser une carte des trous ouverts pour un attaquant si le contexte fuit.
+        # Sans version corrective, il n'y a rien à appliquer. Une telle CVE est à la fois
+        # inactionnable et imprudente à référencer : la stocker reviendrait à dresser une
+        # carte des trous ouverts si le contexte ou les journaux fuient.
         if not fix:
             continue
         a = m.get("artifact", {})
@@ -243,18 +252,10 @@ def _scan_target(target: str, source: str) -> dict | None:
             exclus.append({"paquet": paquet, "source": source,
                            "id": v.get("id"), "motif": regle["motif"]})
             continue
-        s = v.get("severity", "Unknown")
-        if s == "Critical":
-            crit += 1
-        elif s == "High":
-            haut += 1
-        elif s == "Medium":
-            moyen += 1
-        if s in ("Critical", "High"):
-            details.append({"sev": s, "source": source, "id": v.get("id"),
-                            "paquet": paquet, "version": a.get("version"),
-                            "corrige_par": fix[0]})
-    return {"crit": crit, "haut": haut, "moyen": moyen, "details": details, "exclus": exclus}
+        crit += 1
+        details.append({"source": source, "id": v.get("id"), "paquet": paquet,
+                        "version": a.get("version"), "corrige_par": fix[0]})
+    return {"crit": crit, "details": details, "exclus": exclus}
 
 
 def _detecter_aggravation(nouveau: dict) -> None:
@@ -283,38 +284,42 @@ def scan() -> dict | None:
         logger.warning("cve: grype absent (%s) — scan ignoré", GRYPE_BIN)
         return None
 
-    crit = haut = moyen = 0
+    crit = 0
     details = []
     exclus = []
     par_source = {}
 
-    fige = []  # sources dont les CVE n'ont pas de remède disponible aujourd'hui
+    fige = []  # images déjà à la dernière publiée : aucun remède à appliquer aujourd'hui
 
     def agrege(res: dict | None, source: str, image: str | None = None) -> bool:
-        nonlocal crit, haut, moyen
+        nonlocal crit
         if res is None:
             return False
-        par_source[source] = {"crit": res["crit"], "haut": res["haut"], "moyen": res["moyen"]}
+        par_source[source] = {"crit": res["crit"]}
+        # La liste blanche est un choix d'exploitant, journalisé à chaque scan : son décompte
+        # ne dépend pas du sort de la source, sinon l'audit disparaîtrait avec elle.
+        exclus.extend(res["exclus"])
 
-        # Devant une critique sur une image, on regarde s'il y a quelque chose à tirer. Rien
-        # à tirer = rien à faire : ni compté, ni recommandé. Le contrôle coûte un appel
-        # réseau, d'où le déclenchement sur `crit` seulement — c'est le seul compteur qui
-        # nourrit α. `None` (indéterminable) compte : une incertitude ne masque pas.
+        # Sur une image, le seul remède est d'en tirer une plus récente. S'il n'y a rien à
+        # tirer, aucune de ses critiques n'est applicable : ni comptée, ni listée. Le contrôle
+        # coûte un appel réseau, d'où le déclenchement sur `crit` seulement — sans critique,
+        # la réponse ne changerait rien. `None` (indéterminable) compte : une incertitude ne
+        # doit pas faire disparaître une alerte.
         if image and res["crit"] and _image_plus_recente_dispo(image) is False:
             fige.append(source)
             par_source[source]["remede"] = "aucun — image déjà à la dernière publiée"
             return True
 
         crit += res["crit"]
-        haut += res["haut"]
-        moyen += res["moyen"]
         details.extend(res["details"])
-        exclus.extend(res["exclus"])
         return True
 
     sources = 0
 
-    # venv Python via SBOM CycloneDX
+    # venv Python via SBOM CycloneDX. Appelé SANS `image` : le remède est ici un
+    # `pip install paquet==version`, et l'existence de la version corrective — que grype rend
+    # et que `_scan_target` exige déjà — suffit à le rendre applicable. Passer le contrôle
+    # d'image sur le venv n'aurait aucun sens : il n'y a pas d'amont qui republie, c'est nous.
     if os.path.isfile(CYCLONEDX_BIN):
         tmp = tempfile.NamedTemporaryFile(suffix=".sbom.json", delete=False)
         tmp.close()
@@ -344,14 +349,14 @@ def scan() -> dict | None:
     # Le détail des exclus (paquet, motif) NE va PAS dans le résultat Redis : celui-ci est lu
     # par render_advice et donc potentiellement injecté — y nommer un trou accepté reviendrait
     # à en dresser la carte. On n'y garde qu'un compteur nu ; le détail reste dans le log local.
-    res = {"cve_critiques": crit, "cve_eleves": haut, "cve_moyennes": moyen,
+    res = {"cve_critiques": crit,
            "par_source": par_source, "vulnerables": _dedup_paquets(details),
            "exclus_n": sum(x["n"] for x in exclus_resume),
            "sources": sources, "scanned_at": time.time()}
     _detecter_aggravation(res)  # incident AVANT d'écraser le cache précédent
     redis_set_json(_CACHE_KEY, res, ttl=_CACHE_TTL)
-    logger.info("cve: scan OK — %d critiques, %d hautes, %d moyennes (%d sources : %s)",
-                crit, haut, moyen, sources, ", ".join(par_source))
+    logger.info("cve: scan OK — %d critique(s) corrigeable(s) (%d sources : %s)",
+                crit, sources, ", ".join(par_source))
     for s in fige:
         # Jamais en silence : les compteurs de cette source sont visibles dans `par_source`,
         # seul leur report dans l'agrégat est suspendu.
@@ -386,24 +391,22 @@ def _resume_exclus(exclus: list) -> list:
 
 def _dedup_paquets(details: list) -> list:
     """Regroupe les CVE par (source, paquet) : c'est l'unité actionnable — « monter X de A
-    vers B », pas « telle CVE ». Garde la pire sévérité, une version corrective, le nombre de
-    CVE. Trié critiques d'abord, puis par nombre décroissant."""
+    vers B », pas « telle CVE ». Les plus chargés d'abord.
+
+    Plus de tri ni de fusion par sévérité : tout ce qui arrive ici est critique, la question
+    ne se pose plus."""
     paquets = {}
     for d in details:
         key = (d["source"], d["paquet"])
-        crit = d["sev"] == "Critical"
         e = paquets.get(key)
         if e is None:
-            paquets[key] = {"sev": d["sev"], "source": d["source"], "paquet": d["paquet"],
+            paquets[key] = {"source": d["source"], "paquet": d["paquet"],
                             "version": d["version"], "corrige_par": d["corrige_par"], "n": 1}
         else:
             e["n"] += 1
-            if crit and e["sev"] != "Critical":
-                e["sev"] = "Critical"
             if not e["corrige_par"] and d["corrige_par"]:
                 e["corrige_par"] = d["corrige_par"]
-    return sorted(paquets.values(),
-                  key=lambda x: (0 if x["sev"] == "Critical" else 1, -x["n"]))[:40]
+    return sorted(paquets.values(), key=lambda x: -x["n"])[:40]
 
 
 def get_cve() -> dict:
@@ -412,18 +415,20 @@ def get_cve() -> dict:
     return c if isinstance(c, dict) else {}
 
 
-def render_advice(critical_only: bool = False, limit: int = 15) -> str:
+def render_advice(limit: int = 15) -> str:
     """Liste actionnable des paquets vulnérables, prête à injecter dans un prompt : le LLM
-    y lit quoi mettre à jour et vers quelle version. Chaîne vide si rien (ou pas de scan)."""
+    y lit quoi mettre à jour et vers quelle version. Chaîne vide si rien (ou pas de scan).
+
+    Plus de filtre de sévérité : `vulnerables` ne contient que des critiques applicables, le
+    tri est fait à la source. Un filtre ici laisserait croire qu'il y a autre chose à voir.
+    """
     vulns = get_cve().get("vulnerables", [])
-    if critical_only:
-        vulns = [x for x in vulns if x["sev"] == "Critical"]
     if not vulns:
         return ""
     lignes = []
     for x in vulns[:limit]:
         n = f", {x['n']} CVE" if x.get("n", 1) > 1 else ""
-        lignes.append(f"  - [{x['sev']}] {x['paquet']} {x['version']} → {x['corrige_par']} "
+        lignes.append(f"  - {x['paquet']} {x['version']} → {x['corrige_par']} "
                       f"({x['source']}{n})")
     reste = len(vulns) - limit
     if reste > 0:

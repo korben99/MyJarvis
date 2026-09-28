@@ -475,7 +475,7 @@ def build_context(
                 _ou = f" sur {len(_srcs)} sources ({', '.join(_srcs)})" if _srcs else ""
                 vuln_ligne = "\nVulnérabilités : " + (
                     f"{_n} CVE critique(s) corrigeable(s) sur ma pile{_quand}{_ou}\n"
-                    + render_advice(critical_only=True)
+                    + render_advice()
                     if _n else f"aucune CVE critique corrigeable sur ma pile{_quand}{_ou}"
                 )
         except Exception as exc:  # jamais bloquant pour un tour de conversation

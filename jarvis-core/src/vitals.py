@@ -203,17 +203,14 @@ def _jours_depuis_maj_dependances():
 
 
 def _cve_counts():
-    """Nombre de CVE CRITIQUES du dernier scan grype en cache. Lecture seule ; le scan
-    lui-même tourne dans un job planifié, jamais ici. None si aucun scan n'a abouti.
+    """Nombre de CVE critiques CORRIGEABLES du dernier scan grype en cache. Lecture seule ;
+    le scan lui-même tourne dans un job planifié, jamais ici. None si aucun scan n'a abouti.
 
-    Les comptes `cve_eleves` et `cve_moyennes` restent dans le cache CVE mais ne sont
-    volontairement PAS exposés ici. Exposés, ils n'atteignaient que la réflexion (ils
-    n'ont pas de seuil de saillance, donc jamais le bloc de tour, et seul le critique
-    pilote α) — et la réflexion s'en est saisie pour pousser une alerte
-    « dette technique cumulative (45 CVEs) » sur un parc à 0 critique / 45 hautes /
-    83 moyennes. Rien de tout cela n'est corrigeable à court terme : l'exposer ne
-    produit que des relances stériles. Le canal actionnable est <vulnerabilites>,
-    alimenté par cve.render_advice(critical_only=True)."""
+    C'est le seul compteur qui existe, et c'est délibéré : les hautes et les moyennes ne sont
+    plus ni comptées ni stockées par `cve.py`. Exposées, elles n'atteignaient que la réflexion,
+    qui s'en est saisie pour pousser une alerte « dette technique cumulative » sur un parc sans
+    aucune critique — une relance que rien ne permettait de satisfaire. Le canal actionnable
+    est <vulnerabilites>, alimenté par cve.render_advice()."""
     from cve import get_cve
     c = get_cve()
     if not c:
