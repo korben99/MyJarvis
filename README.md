@@ -16,6 +16,7 @@ You ──► Open WebUI / iOS app ──► Jarvis API ──► Qwen3.6-35B (M
                                       ├── Morning briefing · projects · portfolio
                                       ├── Agentic loop (9 tools, sandboxed)
                                       ├── Autonomous reflection · nightly review
+                                      ├── Nightly self-patching · you apply, or not
                                       └── Self-monitoring · daily CVE scan
 ```
 
@@ -61,17 +62,23 @@ A proposal names the prompt, cites the concrete failure and carries the complete
 
 ### It patches its own code, and proves the patch works
 
-Once a night, Jarvis reads the tracebacks in his own log, picks one, proves it is a real defect, fixes it, and hands you a diff. He never applies anything: the patch lands on a shelf with its report, and applying it stays a `git apply` you type after reading it. That is precisely what lets the cycle run unattended — its product changes nothing until a human decides otherwise.
+Once a night, Jarvis reads the tracebacks in his own log, picks one, proves it is a real defect, fixes it, and hands you a diff. He never applies anything: the patch lands on a shelf with its report, and applying it stays a `git apply` you type after reading it. That is precisely what lets the cycle run unattended — its product changes nothing until a human decides otherwise. It ships switched off, and runs at an hour you choose once you turn it on (`AUTOCODE_ENABLED`, `AUTOCODE_HOUR`).
 
 There is **one kind of task**, and its shape is the whole design:
 
 > take a fact about yourself → write a test that fails, proving the defect is real → fix it so the test passes.
 
-Code is the one deliverable whose success is **mechanically falsifiable**, and a confident model cannot fabricate a test that fails before and passes after. It has to characterise the problem before touching it, and you get a verdict in ten seconds instead of reading a persuasive paragraph. The verdict is not a *type* of task but a **distance travelled** — `corrigé`, `reproduit` (proven, not repaired), `gardé` (no defect, but a test that now guards the property), `rien trouvé`, `rejeté` — and it is *computed*: protected files, fix size, compilation, unit suite, vacuity, and the new test replayed against a pristine checkout. The LLM that writes the report receives that verdict as data, with no way to rescue it.
+Code is the one deliverable whose success is **mechanically falsifiable**, and a confident model cannot fabricate a test that fails before and passes after. It has to characterise the problem before touching it, and you get a verdict in ten seconds instead of reading a persuasive paragraph. The verdict is not a *type* of task but a **distance travelled** — `corrigé`, `reproduit` (proven, not repaired), `gardé` (no defect, but a test that now guards the property), `signalé` (a sourced finding, nothing testable), `rien trouvé`, `rejeté` — and it is *computed*: protected files, fix size, compilation, unit suite, vacuity, and the new test replayed against a pristine checkout. The LLM that writes the report receives that verdict as data, with no way to rescue it.
 
 Nothing about *what* to attempt is left to the model either. A finding is something observed that names a file: a traceback, or a line you add to `DOCS/AUTOCODE.md` for something he could not see on his own. The model never chooses a *subject*, only which *fact* to follow — the difference between "improve yourself", which drifts, and "here are three tracebacks from last week, which is worth the GPU", which cannot, because there is nothing to invent. Handing it a free-text objective instead is how a self-improving loop drifts: the prompt-refinement feature above, before its guard rails, produced eleven rejections out of thirteen, four of them on the same subject aiming at four different targets.
 
 The agent works in a throwaway `git worktree` inside its own sandbox — the working tree is never touched, and the worktree's `.git` sits outside the writable zone, so it cannot commit even if it tried. Its verification tool runs a *fixed* command sequence inside the same kernel sandbox as the shell, because the code it is about to execute is code the model just wrote. And only **one patch is in flight at a time**: the real cost is not GPU time at 2 a.m., it is your review.
+
+**A maintenance review is the one exception, and it is manual** — launched by hand, never scheduled. It starts from no finding at all and leaves the agent to judge what deserves flagging, so it cannot reach the ranks that demand a test: its deliverable is a `revue.md` written *outside* the worktree, because an observation is not a change to the repository, and it is read with a `cat` rather than applied with a `git apply`. You can bound it to a subtree, or to a single file whose imports it then follows — forty steps are not enough to sweep the whole repository, and a review with no edge follows its first impulse. Only a verdict that leaves a diff holds the slot above, so asking for a review at noon does not cost you the night's cycle.
+
+Before it reads a line of code, the agent is handed **Jarvis's own state** — his measured exposure, his memories, his mood, what he knows of his own conduct — and nothing at all about you: the identity prompt describes those blocks as things that get injected, so leaving them out has him reading a dashboard with no dials. What he does not get is a free run at the tree. No web, no document base, and every incentive to navigate rather than to read: exact-text search, *who calls this*, and a long Python module that answers with a map — its imports, then every definition with its line number — so he reopens at the offset he needs instead of spending his context on the rest.
+
+You consult and decide in chat — *"show the pending patch"*, *"accept the patch SIG-4f1c9ab2"* — and both halves are **restricted to administrators, reading included**: a patch on the shelf names a defect in Jarvis's own code and the folder where it is spelled out in full.
 
 ### It knows it can end
 
@@ -117,15 +124,15 @@ Nine tools, and the count is deliberate — every extra tool is one more chance 
 | `list_dir` · `read_file` · `write_file` | filesystem, confined to the task workspace |
 | `plan` | the only tool allowed alongside an action in the same turn |
 | `shell` | command execution — **off by default** |
-| `verify` | compile, lint and run the test suite — autocoding tasks only |
+| `grep` · `appelants` · `verify` | exact-text search, callers of a module or a function, compile + lint + test suite — autocoding tasks only |
 
-The set a task gets is a function of **who asked for it**, not of the configuration: a task Jarvis gives itself does not inherit the rights of a task you hand it. An autocoding task has no web, no document base and no free shell, even with the shell enabled.
+The set a task gets is a function of **who asked for it**, not of the configuration: a task Jarvis gives itself does not inherit the rights of a task you hand it. An autocoding task has no web, no document base and no free shell, even with the shell enabled — it gets those three tools of its own instead.
 
 Three independent budgets bound the drift: a maximum number of steps (bounds reasoning in circles), a wall-clock timeout (bounds how long chat waits behind it), and a no-progress guard that trips on two identical calls in a row (bounds tight loops on a failing tool). Every tool output is truncated, because the whole context is re-injected at each step.
 
-Nothing is lost to a restart: the context is written to disk after each step and interrupted tasks are requeued at the next boot.
+Nothing is lost to a restart: the context is written to disk after each step, interrupted tasks are requeued at the next boot, and the throwaway worktrees of tasks that are no longer running are swept there too — nobody notices twenty megabytes a night, nor a `.git` filling up with records that no `prune` reclaims. A round every five minutes checks the worker is still alive and raises it again as a logged incident if it is not: a queue that has stopped draining shows on no dial, which is exactly what makes it the most expensive failure of the lot.
 
-When the shell is enabled, it is confined by **three independent layers**: a seatbelt kernel sandbox (the only real barrier — writes limited to the task workspace, reads denied on `.env`, `keys/`, `~/.ssh` and the keychain, network cut), a blacklist of obviously destructive patterns (a guard rail against honest mistakes, *not* a security boundary), and per-command and per-task budgets. The network is cut inside the shell even though the agent has `web_search` and `fetch_url`, because those go through Jarvis's own code — logged and bounded — while a `curl` in a shell is the shortest exfiltration path there is.
+When the shell is enabled, it is confined by **three independent layers**: a seatbelt kernel sandbox (the only real barrier — writes limited to the task workspace, reads denied on `.env`, `keys/`, the user list that holds the access codes, Jarvis's own memory file, `~/.ssh` and the keychain, network cut), a blacklist of obviously destructive patterns (a guard rail against honest mistakes, *not* a security boundary), and per-command and per-task budgets. The network is cut inside the shell even though the agent has `web_search` and `fetch_url`, because those go through Jarvis's own code — logged and bounded — while a `curl` in a shell is the shortest exfiltration path there is.
 
 ### It knows where to look
 
