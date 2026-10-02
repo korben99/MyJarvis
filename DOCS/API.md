@@ -126,8 +126,9 @@ skipped entirely, and most nights revise no introspection axis).
 | `morning_briefing` | `BRIEFING_TIME` | `run_morning_briefings()` | 1 per user | Push / email delivery only |
 | `trade_check` | **2 h** | `run_trade_check()` | 1 per user (`evaluate_alerts`), skipped when the market is closed | Redis portfolio state (prices, auto-set thresholds), push on alert |
 | `cve_scan` | **04:30** | `cve.scan()` | none (SBOM + grype) | CVE cache read by `vitals` |
-| `autocode_nightly` | **02:00** (`AUTOCODE_HOUR`), off by default | `run_nightly_autocode()` | 2 (selection, report) + one per agent step | `AUTOCODE_DIR/<date>-<id>/` (five numbered artefacts, one per phase), Redis journal + cooldowns + the one patch in flight. **Never touches the working tree**: the agent writes in a throwaway `git worktree`. |
+| `autocode_nightly` | **02:00** (`AUTOCODE_HOUR`), off by default | `run_nightly_autocode()` | 2 (selection, report) + one per agent step | `AUTOCODE_DIR/<date>-<id>/` (one numbered artefact per phase — `1-constats.json`, `2-choix.json`, `3-patch.diff`, `4-mesure.json`, `4-sorties.txt`, `5-RAPPORT.md`, plus `revue.md` when a review wrote findings), Redis journal + cooldowns + the one patch in flight. **Never touches the working tree**: the agent writes in a throwaway `git worktree`. |
 | agent worker | queue-driven, not scheduled | `agent/worker.py` | per task step | Agent workspace, Redis task records |
+| `agent_worker_watchdog` | **5 min** | `agent.surveiller()` | none | Nothing while the worker is alive. If its loop has died, restarts it and stacks an incident (`jarvis:incidents`, severity `alerte`, deduplicated 6 h) — a queue that has stopped draining is otherwise silent. No-op when `AGENT_ENABLED=false` |
 
 Two consequences worth knowing before changing anything:
 
@@ -313,6 +314,13 @@ Affinity is expressed as a semantic label (`forte` ≥ 0.8 · `bonne` ≥ 0.6 ·
 **Administrators only** (`admin: true` in `users_list.json`), and `503` when
 `AGENT_ENABLED=false`. Full reference in **[AGENT.md](AGENT.md)**.
 
+**Authorization** — the guard sits on the *router* (`routes/agent_routes.py::exige_admin`),
+so it covers the reads too: a task record carries its owner's `user_code`, which is the
+secret that authorises creating one. The admin code travels as `Authorization: Bearer
+<code>`, never in the query string. On the routes that take a `user_code` in their body,
+it must be the caller's own — a valid token does not let one admin make the agent work in
+another's name, nor mail them the result.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/agent/tasks` | Queue an agentic task — returns `202`, execution is asynchronous |
@@ -321,18 +329,36 @@ Affinity is expressed as a semantic label (`forte` ≥ 0.8 · `bonne` ≥ 0.6 ·
 | `POST` | `/agent/tasks/{id}/cancel` | Request cancellation — taken between two steps, never mid-step |
 | `GET` | `/agent/tasks/{id}/transcript` | Last *n* events — what the agent actually did |
 | `POST` | `/agent/autocode` | Replay a nightly autocoding cycle by hand. **Blocking** (~20 min); `{"dry_run": true}` stops after the selection and spends no GPU |
+| `POST` | `/agent/autocode` + `{"revue": true}` | Maintenance review: no designated finding, the agent judges what deserves flagging. `perimetre` bounds it to a path under `repo/`. Manual only — the scheduler has no such flag |
 | `GET` | `/agent/autocode/journal` | Past cycles with their verdicts, the patch awaiting a decision, the eligible findings and what was filtered out |
+
+Body of `POST /agent/autocode` — `user_code` (required, and the caller's own), `dry_run`,
+`revue`, `perimetre`. The last two go together: `perimetre` is ignored outside a review.
 
 ```bash
 # What would Jarvis pick tonight, and why — nothing is produced
 curl -X POST localhost:8000/agent/autocode \
+  -H "Authorization: Bearer ALICE1" \
   -H 'Content-Type: application/json' \
   -d '{"user_code":"ALICE1","dry_run":true}'
+
+# Review one package rather than follow a finding. A directory bounds the walk; a single
+# file bounds it to that file and the imports it leads to.
+curl -X POST localhost:8000/agent/autocode \
+  -H "Authorization: Bearer ALICE1" \
+  -H 'Content-Type: application/json' \
+  -d '{"user_code":"ALICE1","revue":true,"perimetre":"jarvis-core/src/memory"}'
 ```
 
+A review reaches at best the `signalé` verdict: its deliverable is a `revue.md` next to the
+phase artefacts, outside the patch, and the report offers a `cat` rather than a
+`git apply`. It does not hold the one-patch-in-flight slot either — only a verdict that
+leaves a diff does — so a review run by hand does not block the next nightly cycle.
+
 No endpoint applies a patch, by design. Decisions are taken in chat
-(*"accepte le patch AC-007"*) and record an intent — applying stays a `git apply` the
-operator types.
+(*"accepte le patch SIG-4f1c9ab2"* — ids are content-derived: `SIG-` for a traceback,
+`MAIN-` for a hand-added finding, `REVUE-<date>-<hhmm>` for a review) and record an intent
+— applying stays a `git apply` the operator types.
 
 ## Device / Push Notifications
 
