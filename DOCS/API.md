@@ -121,7 +121,7 @@ skipped entirely, and most nights revise no introspection axis).
 |---|---|---|---|---|
 | `conversation_analysis` | **60 min** (`CONV_ANALYSIS_INTERVAL_MINUTES`) | `analyse_recent_conversations()` | 1 per session with new messages, per user | Redis profile (`update_user_profile_batch`), projects (`apply_project_updates`), interest weights, `convlog` back-fill (satisfaction · importance · mood · summary), Qdrant **episodic** vector if above `IMPORTANCE_THRESHOLD`, emotional state. **Never writes autobiographical.** |
 | `self_reflection` | **6 h** (`REFLECTION_INTERVAL_HOURS`) | `run_self_reflection()` | ≤ 3 (phase 1) + ≤ 3 per *active* user (phase 2) + 1 self-review per outward action + 1 proactive-push check per user | `jarvis-self.json` (reflection log, incidents), Redis knowledge gaps, and whatever the chosen actions write — see the action catalog below |
-| `nightly_interaction_review` | **23:00** | `run_nightly_interaction_review()` | 5 per user *having conversed* (calls 1–3, profile dedup, narrative) | Qdrant **autobiographical** (create/archive/delete), `jarvis-self.json` (`self_introspection`, `introspection_log`, `opinions`, `growth_log`, `user_relations`), Redis profile + `profile_narrative` (7-day TTL) + `tomorrow_suggestions` (24 h TTL) |
+| `nightly_interaction_review` | **23:00** (`NIGHTLY_REVIEW_HOUR`) | `run_nightly_interaction_review()` | 5 per user *having conversed* (calls 1–3, profile dedup, narrative) | Qdrant **autobiographical** (create/archive/delete), `jarvis-self.json` (`self_introspection`, `introspection_log`, `opinions`, `growth_log`, `user_relations`), Redis profile + `profile_narrative` (7-day TTL) + `tomorrow_suggestions` (24 h TTL) |
 | ↳ monthly consolidation | **1st of month**, inside the nightly | `consolidate_memories()` | 1 per batch of 50 episodic points | Episodic → autobiographical milestones (`importance = 1.0`), deletes the consolidated points, then decays autobiographical |
 | `morning_briefing` | `BRIEFING_TIME` | `run_morning_briefings()` | 1 per user | Push / email delivery only |
 | `trade_check` | **2 h** | `run_trade_check()` | 1 per user (`evaluate_alerts`), skipped when the market is closed | Redis portfolio state (prices, auto-set thresholds), push on alert |
@@ -152,7 +152,7 @@ memorable.
 One question now places any piece of code: **does it write what Jarvis knows, or does it
 do something? about himself, or about someone?**
 
-| | learn (night, 23:00) | act (every `REFLECTION_INTERVAL_HOURS`) |
+| | learn (night, `NIGHTLY_REVIEW_HOUR`) | act (every `REFLECTION_INTERVAL_HOURS`) |
 |---|---|---|
 | **about itself** | 9 introspection axes + opinions — **one** call on the whole day, from conversations *and* operational state | `refine_prompt`, `alert_admin`, `flag_knowledge_gap` |
 | **about the user** | facts → autobio, relation, autobio curation, profile dedup, narrative — 4 calls **per active user** | `queue_push`, `send_notification`, `ask_user`, `flag_project_stall`, `update_trade_threshold` |
@@ -182,7 +182,10 @@ Jarvis maintains two autonomous cognitive cycles:
 
 **Reflection loop** (configurable via `REFLECTION_INTERVAL_HOURS`, défaut 6h) — global self-observation. Jarvis reviews system health, user activity, and knowledge gaps, then picks one action from the catalog. At the end of each cycle Jarvis also runs a per-user **proactive push** check. Outcome and new focus are persisted to `jarvis-self.json`.
 
-**Nightly review** (23:00) — per-user conversation review using **5 sequential calls** per user:
+**Nightly review** (`NIGHTLY_REVIEW_HOUR`, 23:00 by default) — per-user conversation review
+using **5 sequential calls** per user. The window read is each user's **own previous local
+day**, from `USER_TIMEZONES`, so a household spread over several timezones has each day cut
+where it was lived:
 
 1. **`NIGHTLY_FACTS`** — extracts durable user insights (→ Qdrant autobiographical, dedup-checked at importance 0.70), updates the per-user relation in `jarvis-self.json`, and writes `tomorrow_suggestions` to Redis (TTL 24 h) for injection in the next day's system prompt.
 2. **`NIGHTLY_SELF`** — Jarvis self-reflection on the day's interactions: revision of the nine introspection axes (→ `self_introspection{}`, history in `introspection_log[]`), formed opinions (→ `opinions[]`), day diary entry (→ `growth_log[]`). Revising nothing is the expected outcome on most nights.

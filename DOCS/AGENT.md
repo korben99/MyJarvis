@@ -161,9 +161,43 @@ opening anything. Controlled by `AGENT_EMAIL_REPORT` and `AGENT_EMAIL_MAX_CHARS`
 
 ---
 
+## Launching a task
+
+Two entry points, and the one that gets used daily is the chat.
+
+### From the chat
+
+A **prefix fast-track** (`routes/chat.py::_handle_agent_task`), with no LLM call: the
+message is recognised on its prefix alone, never by the intent router — a false positive
+there would send a multi-minute autonomous task off on an innocuous sentence.
+
+```
+tâche agent: compare les trois offres de … et écris-moi une note
+tâche agent: statut
+```
+
+Accepted prefixes: `tâche agent:`, `agent:`, `agent task:`, `task:`, with or without a
+space before the colon. The English ones work whatever `JARVIS_LANG` is set to — a command
+is not prose, and recognising both costs nothing.
+
+`statut` (also `status`, `état`, `où en es-tu`) lists your last five tasks with their state
+and result. **That consultation is open to every user**, for their own tasks; *creating* a
+task stays restricted to administrators. This is the only route from the iOS app, where
+`curl` is not an option.
+
+---
+
 ## API
 
 Task creation is **restricted to administrators** (`admin: true` in `users_list.json`).
+The guard sits on the router (`agent_routes.py::exige_admin`), so it covers the reads too,
+and the code travels as `Authorization: Bearer <code>`.
+
+`user_code` in the body is **the caller's own code, not a target**: `_exige_soi_meme`
+rejects any other with `403`. There is deliberately no way to launch a task in someone
+else's name — the owner is who receives the deliverable by email and the push notification,
+so a valid admin token must not be able to make the agent work for a third party and mail
+them the result.
 
 | Endpoint | Role |
 |---|---|
@@ -173,15 +207,19 @@ Task creation is **restricted to administrators** (`admin: true` in `users_list.
 | `POST /agent/tasks/{id}/cancel` | request cancellation — taken between two steps, never mid-step |
 | `GET /agent/tasks/{id}/transcript` | the last *n* events — this is where you see what the agent actually did |
 | `POST /agent/autocode` | replay a nightly autocoding cycle by hand — blocking, ~20 min; `dry_run` stops after the selection |
+| `POST /agent/autocode` + `revue` | maintenance review: no designated finding, the agent judges what deserves flagging; `perimetre` bounds it to a path under `repo/`. Manual only — the scheduler has no such flag |
 | `GET /agent/autocode/journal` | past cycles with their verdicts, the patch awaiting a decision, the eligible findings and what was filtered out |
 
 ```bash
+# The Bearer code and the body's user_code are the same admin — anything else is a 403
 curl -X POST http://localhost:8000/agent/tasks \
+  -H "Authorization: Bearer ALICE1" \
   -H "Content-Type: application/json" \
   -d '{"user_code": "ALICE1", "objective": "…"}'
 
 # What would Jarvis pick tonight, and why — no GPU spent, no patch produced
 curl -X POST http://localhost:8000/agent/autocode \
+  -H "Authorization: Bearer ALICE1" \
   -H "Content-Type: application/json" \
   -d '{"user_code": "ALICE1", "dry_run": true}'
 ```
@@ -223,6 +261,7 @@ The verdict is therefore not a *type* of task but a **distance travelled**:
 | `corrigé` | red before, **green after**, suite green |
 | `reproduit` | red before, **red after** — the defect is proven, not repaired |
 | `gardé` | no defect, but a test that now guards the property — **a patch to review** |
+| `signalé` | nothing testable, but sourced findings written to `revue.md` — **something to read**, no diff |
 | `rien trouvé` | no test, or a test proving nothing — **no deliverable** |
 | `rejeté` | protected file modified, vacuous test, error instead of assertion, suite broken, **or a source changed with no test that flips** |
 
@@ -454,15 +493,23 @@ A `rejeté` or `rien trouvé` outcome does **not** take the slot: it leaves noth
 and blocking tomorrow's cycle because yesterday's failed would be the wrong trade. Its
 finding sleeps for the cooldown instead. `corrigé`, `reproduit` and `gardé` all leave a
 patch, so all three wait for a decision. Their report ends with the `git apply` line; the
-other two say plainly that there is nothing to apply.
+others say plainly that there is nothing to apply.
+
+`signalé` does not take the slot either, and that is the point: a review is read, not
+applied, and its report offers a `cat` rather than a `git apply`. Counting it as a pending
+patch meant a review launched by hand stopped the automatic cycle until someone answered —
+whereas the date lock exists precisely so the manual and the nightly do not fight over the
+slot. It stays consultable and is still decided, which does not change.
 
 ### Deliverables
 
-`AUTOCODE_DIR/<date>-<id>/` holds the five numbered artefacts — `1-constats.json`,
+`AUTOCODE_DIR/<date>-<id>/` holds one numbered artefact per phase — `1-constats.json`,
 `2-choix.json`, `3-patch.diff` (applies as-is with `git apply`), `4-mesure.json` plus
 `4-sorties.txt` (raw pytest and pyflakes output), and `5-RAPPORT.md` (computed verdict,
-measurements, then the LLM's prose). The report and the patch are also emailed, through the
-same path as any other task.
+measurements, then the LLM's prose) — plus `revue.md` when a review wrote findings. That
+one is copied here from the workspace on purpose: it is written outside `repo/`, so no
+patch carries it, and without the copy it would stay in a workspace nobody reopens. The
+report and the patch are also emailed, through the same path as any other task.
 
 ---
 

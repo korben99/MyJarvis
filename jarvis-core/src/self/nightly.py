@@ -1,4 +1,5 @@
-"""Revue nocturne (APScheduler 23:00) — LA NUIT APPREND, elle n'agit jamais vers l'extérieur.
+"""Revue nocturne (APScheduler, NIGHTLY_REVIEW_HOUR) — LA NUIT APPREND, elle n'agit jamais
+vers l'extérieur.
 
 Deux temps, depuis le découpage :
   • par utilisateur ayant conversé : faits durables, curation autobio, dédup et narratif
@@ -14,7 +15,9 @@ import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytz
 from config import (
+    BRIEFING_TIMEZONE,
     DEFAULT_TEMP,
     GROWTH_LOG_INTROSPECTION_JOURS,
     GROWTH_LOG_MAX_ENTRIES,
@@ -30,7 +33,13 @@ from config import (
     USERS,
     llm_timeout,
 )
-from helpers import call_llm_async_bg, extract_llm_json, get_logger, get_redis
+from helpers import (
+    call_llm_async_bg,
+    extract_llm_json,
+    get_logger,
+    get_redis,
+    get_user_tz,
+)
 from llm.local import _NIGHTLY_PROMPTS_LOG_PATH, journal_de_cycle
 from memory import (
     archive_autobiographical_event,
@@ -488,35 +497,66 @@ async def run_nightly_interaction_review() -> None:
         await _revue_nocturne()
 
 
+def _fenetre_veille(tz, maintenant: datetime | None = None) -> tuple[str, float, float]:
+    """La veille dans `tz` : sa date, et les bornes epoch de cette journée locale.
+
+    Un jour se découpe dans le fuseau de celui qui l'a vécu. Des bornes calculées en UTC
+    décalent la coupure de l'écart au méridien — une heure à Paris, cinq à New York : la
+    soirée d'un utilisateur part alors dans la journée suivante, et le prompt qui annonce
+    « ta journée du <date> » ne décrit plus ce qu'il contient. Les scores du convlog sont
+    des epochs, donc seules les bornes changent : rien à convertir côté lecture.
+
+    Les deux bornes sont des minuits NAÏFS passés à `localize`, qui attache à chacun
+    l'offset réellement en vigueur ce jour-là. Un `replace(hour=0)` sur un datetime déjà
+    situé garderait l'offset du moment du tir, et `normalize` ne le corrige pas : il
+    déplace l'instant. Aux deux bascules d'heure, la fenêtre démarrait alors une heure
+    avant ou après minuit local — et un jour local fait justement 23 ou 25 heures là.
+    """
+    veille = ((maintenant or datetime.now(tz)).astimezone(tz) - timedelta(days=1)).date()
+    debut = tz.localize(datetime.combine(veille, datetime.min.time()))
+    lendemain = tz.localize(
+        datetime.combine(veille + timedelta(days=1), datetime.min.time())
+    )
+    fin = lendemain - timedelta(microseconds=1)
+    return veille.strftime("%Y-%m-%d"), debut.timestamp(), fin.timestamp()
+
+
 async def _revue_nocturne() -> None:
     """Corps de la revue. Séparé pour que TOUT ce qu'elle appelle — y compris la curation
     et le narratif de profil, qui vivent dans memory/ — écrive dans nightly-prompts.log."""
     logger.info("=== Nightly interaction review starting ===")
     r = get_redis()
-    now = datetime.now(timezone.utc)
-    yesterday = now - timedelta(days=1)
-    review_date = yesterday.strftime("%Y-%m-%d")
-    start_ts = yesterday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-    end_ts = yesterday.replace(
-        hour=23, minute=59, second=59, microsecond=999999
-    ).timestamp()
+    # La journée de JARVIS, dans le fuseau de l'instance : elle date son introspection et
+    # ses opinions, qui sont globales. Les fenêtres de lecture, elles, sont par
+    # utilisateur — un foyer peut être réparti sur plusieurs fuseaux.
+    #
+    # `now` suit le même fuseau parce que `_entretien_nocturne` déclenche la consolidation
+    # mensuelle sur `now.day == 1` : en UTC, ce 1er apparaît à un instant qui n'est pas
+    # minuit local, et une revue placée juste après minuit ne le voit jamais passer.
+    tz_instance = pytz.timezone(BRIEFING_TIMEZONE)
+    now = datetime.now(tz_instance)
+    review_date, _, _ = _fenetre_veille(tz_instance)
 
     toutes_conversations: list[dict] = []
 
     for user_code, user_name in USER_CODES.items():
-        lock_key = f"jarvis:{user_code}:nightly_review:{review_date}"
+        # Sa veille, dans SON fuseau. Le verrou porte la même date : deux utilisateurs de
+        # part et d'autre du globe ne relisent pas le même jour, et un verrou commun en
+        # priverait un des deux.
+        date_user, debut_ts, fin_ts = _fenetre_veille(get_user_tz(user_code))
+        lock_key = f"jarvis:{user_code}:nightly_review:{date_user}"
         if not r.set(lock_key, "1", nx=True, ex=90000):  # 25h TTL
             logger.info(
                 "Nightly review already done for %s on %s — skipping",
                 user_code,
-                review_date,
+                date_user,
             )
             continue
 
-        entries_raw = r.zrangebyscore(f"convlog:{user_code}", start_ts, end_ts)
+        entries_raw = r.zrangebyscore(f"convlog:{user_code}", debut_ts, fin_ts)
         if not entries_raw:
             logger.info(
-                "No conversations for %s on %s — skipping", user_code, review_date
+                "No conversations for %s on %s — skipping", user_code, date_user
             )
             continue
 
@@ -533,7 +573,7 @@ async def _revue_nocturne() -> None:
 
         # ── Call 1: extract user facts ────────────────────────────────────
         facts = await _nightly_facts_user(
-            user_code, user_name, conversations, review_date
+            user_code, user_name, conversations, date_user
         )
         user_insights: list[str] = []
         ecrits_ce_soir: set[str] = set()
@@ -581,7 +621,7 @@ async def _revue_nocturne() -> None:
                 if summary:
                     data.setdefault("growth_log", []).append(
                         {
-                            "date": review_date,
+                            "date": date_user,
                             "user_code": user_code,
                             "user_name": user_name,
                             "summary": summary,
@@ -625,12 +665,12 @@ async def _revue_nocturne() -> None:
                 data["growth_log"] = data.get("growth_log", [])[
                     -GROWTH_LOG_MAX_ENTRIES:
                 ]
-                data["last_nightly"] = review_date
+                data["last_nightly"] = date_user
                 save_self_memory(data)
 
         # ── Call 3: memory cleaning (Qdrant autobio) ─────────────────────
         cleaning = await _nightly_cleaning_user(
-            user_code, user_name, user_insights, review_date, ecrits_ce_soir
+            user_code, user_name, user_insights, date_user, ecrits_ce_soir
         )
         if cleaning:
             # Hard cap: trust the prompt constraint but enforce it in code too.

@@ -12,7 +12,10 @@ demande. C'est exactement la classe d'écart qui se voit en production sous form
 raisonnement payé pour rien, et jamais dans un journal.
 """
 
+from datetime import date, datetime, time, timedelta
+
 import pytest
+import pytz
 
 import prompts
 from self.actions import _ACTION_CATALOG
@@ -184,3 +187,61 @@ class TestListeBlancheRefinePrompt:
     def test_refine_prompt_ne_peut_pas_se_reecrire_lui_meme(self):
         for n in ("REFINE_PROMPT_SYSTEM", "REFINE_PROMPT_USER"):
             assert n not in prompts.REFINABLE_PROMPTS
+
+
+# ── Fenêtre de la revue nocturne ─────────────────────────────────────────────
+
+class TestFenetreVeille:
+    """La journée relue se découpe dans le fuseau de l'utilisateur, pas en UTC.
+
+    Des bornes UTC décalent la coupure de l'écart au méridien — cinq heures à New York —
+    et rangent la soirée de l'un dans la journée de l'autre. Le défaut ne se voit nulle
+    part : la revue tourne, lit un jour, et rend un rapport cohérent avec ce qu'elle a lu.
+    """
+
+    def _fenetre(self, tz, jour):
+        """La fenêtre rendue pour `jour`, ancrée à midi le lendemain — midi existe dans
+        tous les fuseaux, y compris ceux qui basculent l'heure à minuit."""
+        from self.nightly import _fenetre_veille
+
+        ancre = tz.localize(datetime.combine(jour + timedelta(days=1), time(12, 0)))
+        return _fenetre_veille(tz, ancre)
+
+    @pytest.mark.parametrize(
+        "tz_name", ["Europe/Paris", "America/New_York", "America/Los_Angeles", "Asia/Tokyo"]
+    )
+    def test_les_bornes_tombent_a_minuit_local(self, tz_name):
+        tz = pytz.timezone(tz_name)
+        jour, debut, fin = self._fenetre(tz, date(2026, 10, 1))
+        assert jour == "2026-10-01"
+        assert datetime.fromtimestamp(debut, tz).strftime("%H:%M:%S") == "00:00:00"
+        assert datetime.fromtimestamp(fin, tz).strftime("%H:%M:%S") == "23:59:59"
+
+    @pytest.mark.parametrize(
+        "tz_name,jour,heures",
+        [
+            ("Europe/Paris", date(2026, 3, 29), 23),
+            ("Europe/Paris", date(2026, 10, 25), 25),
+            ("America/New_York", date(2026, 3, 8), 23),
+            ("America/New_York", date(2026, 11, 1), 25),
+        ],
+    )
+    def test_un_jour_de_bascule_dure_23_ou_25_heures(self, tz_name, jour, heures):
+        """`replace(hour=0)` + `normalize` donnait ici une fenêtre démarrée une heure
+        avant ou après minuit : l'offset du moment du tir n'est pas celui de minuit."""
+        _, debut, fin = self._fenetre(pytz.timezone(tz_name), jour)
+        assert round((fin - debut + 0.000001) / 3600) == heures
+
+    @pytest.mark.parametrize("tz_name", ["Europe/Paris", "America/Santiago"])
+    def test_les_fenetres_pavent_lannee_sans_trou_ni_recouvrement(self, tz_name):
+        """Un trou perdrait des échanges, un recouvrement les relirait deux fois — et la
+        dédup autobio absorberait le second sans rien signaler."""
+        tz = pytz.timezone(tz_name)
+        jour = date(2026, 1, 1)
+        _, _, fin_precedente = self._fenetre(tz, jour)
+        for _ in range(364):
+            jour += timedelta(days=1)
+            rendu, debut, fin = self._fenetre(tz, jour)
+            assert rendu == jour.isoformat()
+            assert debut == pytest.approx(fin_precedente + 0.000001, abs=1e-6), jour
+            fin_precedente = fin

@@ -52,7 +52,7 @@ answers you without ever being told.
 
 A reflection loop runs in the background every few hours, independent of your questions. Jarvis rates itself on **nine fixed introspection axes** — control, communion, self-knowledge, task, strategy, affect and how it handles others' autonomy and competence — maintains a three-dimensional emotional state with lazy time decay, and can decide to act on its own initiative through a closed catalogue of typed actions: alert the admin, queue a push, ask you a question, flag a stalling project, revise a trading threshold.
 
-A separate **nightly review** at 23:00 does what the reflection loop deliberately cannot: it reads the day's whole conversations, extracts durable facts, revises the introspection axes, forms opinions, curates the vector store and rewrites your narrative profile. The split is deliberate — the night learns, the reflection acts.
+A separate **nightly review**, at 23:00 unless you move it (`NIGHTLY_REVIEW_HOUR`), does what the reflection loop deliberately cannot: it reads the day's whole conversations, extracts durable facts, revises the introspection axes, forms opinions, curates the vector store and rewrites your narrative profile. The split is deliberate — the night learns, the reflection acts.
 
 ### It improves its own prompts
 
@@ -105,7 +105,10 @@ carries backup age, critical CVEs and the error count, and the identity prompt o
 state injected data as fact: given to everyone, it comes back out in the answer, figures
 included. That is a datum that must not reach the model for a non-admin, not a behaviour to
 correct with an instruction. Its absence is not to be flagged either, or announcing the gap
-would leak the same thing more quietly.
+would leak the same thing more quietly. The block can also be switched off outright
+(`VITALS_INJECTION=false`) — worth knowing if the machine is shut down every night, since
+an expected shutdown is recorded as an outage and a week of them crowds the block. That
+switch stops the text, not the measurement: α below still follows the real state.
 
 The design rule for the block itself is strict: **facts only, no valence**. There is no `fear` field and no `risk` field in the block. Injecting one would hand the model an interpretation instead of an observation — it would follow a cursor rather than read a state. Establishing what "backup is 45 days old, one single copy, two critical CVEs" *means* is left to the model, and the identity prompt says so explicitly. Probes are isolated (a failing probe drops its field rather than inventing a value) and the whole snapshot is cached 15 minutes in Redis, so no turn ever slows down for it.
 
@@ -220,6 +223,53 @@ command. A blank secret field means *leave it alone*, and the file is rewritten 
 line so your comments survive.
 
 Full walkthrough in **[DOCS/INSTALL.md](DOCS/INSTALL.md)**.
+
+---
+
+## Pilotage — what to say
+
+Two surfaces, Open WebUI in the browser and the iOS app by voice or wake word, and the
+same sentences work in both. One rule: **almost everything is asked in plain language**,
+and only a handful of actions need an exact phrase — those that must never fire by
+accident.
+
+### Just ask
+
+A router reads the intent, so there is nothing to memorise. Your mail, your calendar, the
+weather, the web, your documents, your positions, your projects — and Jarvis himself:
+*"comment vas-tu ?"*, *"tes dernières réflexions"*, *"tu as des CVE critiques ?"*. Ask for
+the morning briefing at any hour and you get the one already assembled, or a fresh one
+built on the spot.
+
+Telling him things is how you write to memory. *"J'ai commencé un nouveau projet…"* opens
+the entry, *"j'ai fini…"* closes it, a deadline mentioned in passing becomes a date, and a
+fact that contradicts an older one is retracted during the night. There is no command for
+any of that, and nothing to maintain by hand. Attach a photo and ask about it — a local
+vision model reads it.
+
+### Say it exactly
+
+| To do this | Type |
+|---|---|
+| Launch a background task — **admins** | `tâche agent: <objectif>` · also `agent:`, `agent task:`, `task:` |
+| Follow your tasks | `tâche agent: statut` — open to everyone, for their own tasks |
+| Put something in your calendar | *"ajoute un rendez-vous jeudi 14 h chez le dentiste"*, then **`confirme`** or **`annule`** |
+| Read a pending prompt rewrite | *"montre les propositions"*, then *"accepte la proposition `<id>`"* — **admins** decide |
+| Read a pending patch — **admins** | *"montre le patch"*, then *"accepte le patch `<id>`"* or *"rejette le patch `<id>`"* |
+
+The English forms are accepted whatever `JARVIS_LANG` is set to — `task:`, `status`,
+`confirm`, `cancel`. Nothing is written to your calendar until you confirm, and the
+proposed event is dropped if you leave it for ten minutes.
+
+The two decisions do **not** behave the same way, on purpose. Approving a prompt rewrite
+*applies* it — the override is written and takes effect without a restart. Accepting a
+patch applies nothing: it records *I will do it myself, stop proposing it*, and the diff
+still waits for the `git apply` you type after reading it.
+
+Everything else is operator work rather than conversation — queueing a task for yourself
+over HTTP, launching a maintenance review, importing a broker CSV — and it lives in
+**[API.md](DOCS/API.md)**. To feed the document base, drop files in `RAGData/` and run
+`scripts/uploadrag.py --dry-run` before the real pass.
 
 ---
 

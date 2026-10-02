@@ -250,6 +250,8 @@ const CHAMPS = [
    a:"Lu par les sondes vitals : espace disque et reçu de sauvegarde."},
   {n:"JARVIS_LOG_DIR", d:"/opt/jarvis/logs",
    a:"Journaux applicatifs où vitals compte les erreurs et avertissements des 24 dernières heures."},
+  {n:"VITALS_INJECTION", d:"true", t:"select", o:["true","false"],
+   a:"Injection du bloc <etat_systeme> (chat admin et agent d'autocodage). false la coupe : utile sur une machine éteinte chaque nuit, dont les arrêts attendus saturent le bloc d'incidents. La mesure continue — risk_scalar pilote toujours α."},
 ]],
 ["État émotionnel", [
   {n:"EMOTION_DECAY_MODE", d:"exchange", t:"select", o:["exchange","clock"], a:"exchange = un pas de décroissance par analyse de conversation. clock = décroissance horaire."},
@@ -261,6 +263,8 @@ const CHAMPS = [
 ]],
 ["Réflexion autonome", [
   {n:"REFLECTION_INTERVAL_HOURS", d:"6", t:"number"},
+  {n:"NIGHTLY_REVIEW_HOUR", d:"23", t:"number",
+   a:"Heure de la revue nocturne, dans le fuseau de BRIEFING_TIMEZONE. Elle relit la veille locale de chaque utilisateur : toute heure convient, le créneau se choisit sur la charge GPU. AUTOCODE_HOUR se place après elle."},
   {n:"CONV_ANALYSIS_INTERVAL_MINUTES", d:"60", t:"number"},
   {n:"MAX_CHAIN_ITERATIONS", d:"3", t:"number", a:"Actions enchaînées par cycle."},
 ]],

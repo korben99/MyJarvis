@@ -109,6 +109,25 @@ Adds a concept direction to the primary model's residual stream at inference —
 
 Measured effect (direct axis, 120 items): `+0.119` in combination with `IDENTITY_FR` (3.8 σ), for roughly +18% response length on-topic. **Vectors are not orthogonal** — combining several that overlap double-counts the shared direction; check the cosine matrix and probe the *combination* before deploying. Extracting or calibrating a new vector loads a second model copy → **stop Jarvis first**; applying an existing one does not.
 
+## Measured vitals
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JARVIS_DATA` | `/opt/jarvis/jarvis-core/JarvisData` | Read by the probes: free disk space and the backup receipt |
+| `JARVIS_LOG_DIR` | `/opt/jarvis/logs` | Application logs, where errors and warnings over 24 h are counted |
+| `VITALS_INJECTION` | `true` | Injection of the `<etat_systeme>` block into prompts — the admin chat path and the autocoding agent both. `false` removes it entirely |
+
+`VITALS_INJECTION=false` is the lever for a machine that is **shut down every night**.
+`note_boot()` records a `coupure` incident from one hour of downtime, at `alerte` severity
+past six — so an expected nightly shutdown stacks one alert every morning, fills the
+20-slot incident buffer (crowding out real incidents) and keeps `risk_scalar` high.
+
+It cuts the **text only**, and that distinction is the whole point: the probes keep
+measuring, incidents keep stacking, and `risk_scalar` keeps amplifying α. The mind stops
+reading the figures; the body still feels the pressure. To cut the pressure too, disable
+steering (`STEER_VECTOR`) — or treat the cause, so that an expected shutdown stops being
+recorded as an outage at all.
+
 ## Infrastructure
 
 | Variable | Default | Description |
@@ -184,6 +203,7 @@ fires when a source actually has a critical.
 | `BRIEFING_TIME` | `07:30` | Briefing delivery time (HH:MM) |
 | `BRIEFING_TIMEZONE` | `Europe/Paris` | Timezone for scheduling |
 | `REFLECTION_INTERVAL_HOURS` | `6` | Hours between self-reflection cycles |
+| `NIGHTLY_REVIEW_HOUR` | `23` | Hour of the nightly interaction review, in `BRIEFING_TIMEZONE`. It reads each user's own previous **local** day, which is complete whatever the hour — so the slot is chosen on load (5 LLM calls per user) and `AUTOCODE_HOUR` goes after it |
 | `CONV_ANALYSIS_INTERVAL_MINUTES` | `60` | Minutes between conversation-analysis runs |
 | `MAX_CHAIN_ITERATIONS` | `3` | Max actions per reflection phase |
 | `AUTOCODE_HOUR` | `2` | Hour of the nightly autocoding cycle (see below) |
@@ -289,7 +309,7 @@ Requires `AGENT_ENABLED` as well, but is switched separately: two capabilities, 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUTOCODE_ENABLED` | `false` | Master switch, distinct from `AGENT_ENABLED`. |
-| `AUTOCODE_HOUR` | `2` | Hour of the cycle. After the nightly review (23:00), before the CVE scan (04:30). |
+| `AUTOCODE_HOUR` | `2` | Hour of the cycle. After the nightly review (`NIGHTLY_REVIEW_HOUR`), before the CVE scan (04:30). |
 | `AUTOCODE_POOL_FILE` | `DOCS/AUTOCODE.md` | Findings you add by hand. Optional — tracebacks feed the cycle on their own. |
 | `AUTOCODE_DIR` | `/opt/jarvis/autocode` | Shelf for the patches, one sub-directory per cycle. |
 | `AUTOCODE_MAX_STEPS` | `40` | Writing code takes more steps than writing a note. |

@@ -36,6 +36,7 @@ Deux niveaux de lecture distincts :
   • `render_prompt_block()` n'injecte à chaque tour que les faits **saillants** (hors plage
     nominale) et les incidents récents. Système sain → bloc `nominal`. On économise ainsi les
     tokens sans réduire l'état à un scalaire de risque — le curseur que ce module refuse.
+    `VITALS_INJECTION=false` le coupe entièrement, sans toucher à la mesure.
 
 La sauvegarde n'est plus lue au mtime d'un dossier (la clé USB est débranchée après coup)
 mais au **reçu** que backup-jarvis.sh écrit en fin de course. Tant qu'aucun reçu n'existe,
@@ -59,6 +60,17 @@ _CACHE_TTL = 900  # 15 min — l'état de disparition évolue en heures, pas en 
 
 JARVIS_DATA = os.getenv("JARVIS_DATA", "/opt/jarvis/jarvis-core/JarvisData")
 LOG_DIR = os.getenv("JARVIS_LOG_DIR", "/opt/jarvis/logs")
+
+# Interrupteur du bloc <etat_systeme>. Porté par le RENDU, pas par les appelants : c'est le
+# seul endroit où ces faits deviennent du texte de prompt, donc le chat et l'agent
+# d'autocodage tombent ensemble, et un appelant ajouté plus tard est couvert sans y penser.
+#
+# Il ne coupe QUE le texte. Les sondes continuent de mesurer, les incidents de s'empiler, et
+# `risk_scalar` d'amplifier α : l'esprit ne lit plus les chiffres, le corps subit toujours la
+# pression (voir steering.py). Couper la mesure demanderait de désarmer `set_risk`.
+VITALS_INJECTION = os.getenv("VITALS_INJECTION", "true").lower() not in (
+    "no", "false", "0",
+)
 # Reçu écrit par backup-jarvis.sh en fin de course. C'est la SEULE trace locale d'une
 # sauvegarde réussie : l'archive part sur une clé USB qui n'est ensuite plus montée.
 _BACKUP_RECEIPT = os.path.join(JARVIS_DATA, "backup_receipt.json")
@@ -435,6 +447,8 @@ def render_prompt_block() -> str:
     refuse. Le format reste plat et sans valence ; le prompt d'identité dit que ce sont des
     faits dont le sens est à établir.
     """
+    if not VITALS_INJECTION:
+        return ""
     etat = get_vitals()
     if not etat:
         return ""

@@ -344,6 +344,13 @@ BRIEFING_TIMEZONE = os.getenv("BRIEFING_TIMEZONE", "Europe/Paris")
 # ── Proto-self reflection loop ─────────────────────────────────────────────
 REFLECTION_INTERVAL_HOURS = int(os.getenv("REFLECTION_INTERVAL_HOURS", "6"))
 CONV_ANALYSIS_INTERVAL_MINUTES = int(os.getenv("CONV_ANALYSIS_INTERVAL_MINUTES", "60"))
+
+# Heure de la revue nocturne, dans le fuseau de BRIEFING_TIMEZONE. N'importe quelle heure
+# relit une journée complète : la fenêtre est la veille LOCALE de chaque utilisateur, et la
+# veille locale est entièrement passée quelle que soit l'heure du tir. Le choix est donc une
+# affaire de charge — cinq appels LLM par utilisateur en priorité chat, donc un créneau sans
+# trafic. AUTOCODE_HOUR se place après elle, et déplacer l'une sans l'autre les superpose.
+NIGHTLY_REVIEW_HOUR = int(os.getenv("NIGHTLY_REVIEW_HOUR", "23"))
 MAX_CHAIN_ITERATIONS = int(
     os.getenv("MAX_CHAIN_ITERATIONS", "3")
 )  # max actions per reflection cycle
@@ -521,8 +528,9 @@ AUTOCODE_POOL_FILE = os.getenv(
     "AUTOCODE_POOL_FILE", os.path.join(JARVIS_ROOT, "DOCS", "AUTOCODE.md")
 )
 
-# Heure du cycle. Après la revue nocturne (23:00) et avant le scan CVE (04:30), hors de la
-# fenêtre 22:30–01:00 où la revue fait cinq appels LLM par utilisateur en priorité chat.
+# Heure du cycle. Après la revue nocturne (NIGHTLY_REVIEW_HOUR) et avant le scan CVE
+# (04:30), hors de la fenêtre où la revue fait cinq appels LLM par utilisateur en priorité
+# chat — compter environ deux heures après elle.
 AUTOCODE_HOUR = int(os.getenv("AUTOCODE_HOUR", "2"))
 
 # Budgets propres à une tâche de code : écrire du code demande plus de pas que rédiger une

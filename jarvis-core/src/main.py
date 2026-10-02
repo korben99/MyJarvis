@@ -35,6 +35,7 @@ from config import (
     CONV_ANALYSIS_INTERVAL_MINUTES,
     CORS_ORIGINS,
     LLM_LOCAL,
+    NIGHTLY_REVIEW_HOUR,
     OPENAI_API_KEY,
     OPENAI_API_URL,
     PRIMARY_API_URL,
@@ -173,7 +174,7 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(
             run_nightly_interaction_review,
             trigger="cron",
-            hour=23,
+            hour=NIGHTLY_REVIEW_HOUR,
             minute=0,
             id="nightly_interaction_review",
         )
@@ -249,8 +250,8 @@ async def lifespan(app: FastAPI):
 
             # Cycle indépendant de la revue nocturne, et pas sa dernière phase : un échec
             # ne doit pas emporter l'apprentissage mémoire, et un cycle isolé se rejoue à
-            # la main. L'heure le place après la revue (23:00) et avant le scan CVE (04:30),
-            # hors de la fenêtre où la revue fait cinq appels LLM en priorité chat.
+            # la main. L'heure le place après la revue (NIGHTLY_REVIEW_HOUR) et avant le
+            # scan CVE, hors de la fenêtre où la revue fait cinq appels LLM en priorité chat.
             scheduler.add_job(
                 run_nightly_autocode,
                 trigger="cron",
@@ -261,7 +262,11 @@ async def lifespan(app: FastAPI):
 
         scheduler.start()
         logger.info("Self reflection scheduled every %d h", REFLECTION_INTERVAL_HOURS)
-        logger.info("Nightly review scheduled at 23:00 (%s)", BRIEFING_TIMEZONE)
+        logger.info(
+            "Nightly review scheduled at %02d:00 (%s)",
+            NIGHTLY_REVIEW_HOUR,
+            BRIEFING_TIMEZONE,
+        )
     except Exception as exc:
         logger.error("Scheduler failed to start: %s", type(exc).__name__)
 

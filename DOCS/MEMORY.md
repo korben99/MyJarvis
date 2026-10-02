@@ -433,6 +433,7 @@ EVERY 5H (défaut 6h — configurable via REFLECTION_INTERVAL_HOURS) — self.py
         └── Redis jarvis:push:pending:{code}  (TTL, 2h cooldown per user)
 
 23:00 NIGHTLY — self.py → run_nightly_interaction_review()  [5 sequential calls/user]
+               (hour = NIGHTLY_REVIEW_HOUR, 23 by default)
   ├── Call 1 — NIGHTLY_FACTS  (user insight + relation update)
   │     ├── store_autobiographical_event()   → Qdrant autobio  (importance=0.70, insights_durables only)
   │     │     insights_evenements passed to cleaning context but NOT stored in autobio
