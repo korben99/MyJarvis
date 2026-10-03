@@ -92,7 +92,11 @@ Mise en place côté client : voir `DOCS/opencode-local.md`.
 | `GET` | `/memory/emotional-state` | Jarvis current emotional state |
 | `GET` | `/memory/recent/{user_code}` | Recent conversation summaries |
 | `GET` | `/memory/self` | Jarvis self-knowledge |
-| `DELETE` | `/memory/reset` | Clear all memory (destructive) |
+| `DELETE` | `/memory/reset` | Clear all memory of **every** user — profiles, projects, preferences, conversation log, emotional state. Destructive, unscoped, irreversible. **Admin token required** |
+
+The reads above are open, as the trusted-network posture says. `/memory/reset` is not: the
+line is drawn at spending and destroying, not at reading. Recovery is a backup whose age
+`vitals` reports in days.
 
 ## Briefing
 
@@ -109,7 +113,8 @@ The morning briefing aggregates: calendar events, unread emails, weather, news h
 |--------|------|-------------|
 | `GET` | `/self/state` | Current focus, goals, and per-user relations |
 | `GET` | `/self/log` | Last N reflection entries |
-| `POST` | `/self/reflect` | Trigger an immediate reflection cycle |
+| `POST` | `/self/reflect` | Trigger an immediate reflection cycle — minutes of GPU, chat queues behind it. **Admin token required** |
+| `POST` | `/self/maintenance` | Open a maintenance window (`minutes`, `reason`): incidents raised during it are tagged `maintenance` and stop feeding the risk scalar. **Admin token required** — it silences a signal |
 
 ### Background cycles — who fires what, how often, and what it writes
 

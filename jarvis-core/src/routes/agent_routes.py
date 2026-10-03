@@ -15,26 +15,11 @@ import json
 import os
 
 from agent import create_task, get_task, list_tasks, request_cancel
-from config import AGENT_ENABLED, AGENT_MAX_STEPS, USER_ADMINS
-from fastapi import APIRouter, Depends, Header, HTTPException
+from config import AGENT_ENABLED, AGENT_MAX_STEPS
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-
-def exige_admin(authorization: str = Header(default=None)) -> str:
-    """Code administrateur porté par l'en-tête, ou lève.
-
-    En-tête `Authorization: Bearer <code>`, comme les routes de portefeuille : le code est
-    un secret, et un secret n'a pas à voyager dans une chaîne de requête, que les journaux
-    et l'historique du navigateur conservent.
-    """
-    code = (
-        authorization[7:].strip()
-        if authorization and authorization.startswith("Bearer ")
-        else ""
-    )
-    if code not in USER_ADMINS:
-        raise HTTPException(403, "réservé aux administrateurs")
-    return code
+from .garde import exige_admin
 
 
 router = APIRouter(tags=["agent"], dependencies=[Depends(exige_admin)])

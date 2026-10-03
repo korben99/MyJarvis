@@ -1,9 +1,12 @@
 """routes/memory_routes.py — User memory and profile inspection endpoints."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from config import USER_CODES
 from deps import REDIS_CLIENT
+from helpers import get_logger
+
+from .garde import exige_admin
 import emotional_state
 from memory import (
     get_recent_conversations,
@@ -12,6 +15,8 @@ from memory import (
     get_user_profile,
     get_user_projects,
 )
+
+logger = get_logger("jarvis-api")
 
 router = APIRouter(tags=["memory"])
 
@@ -62,7 +67,15 @@ async def memory_analyze_now(user_code: str):
 
 
 @router.delete("/memory/reset")
-async def memory_reset():
+async def memory_reset(demandeur: str = Depends(exige_admin)):
+    """Purge la mémoire Redis de TOUS les utilisateurs. Sans portée et sans retour.
+
+    Réservée aux administrateurs, à la différence des routes de consultation du même
+    module : celles-ci rendent ce que l'appelant sait déjà demander, celle-ci détruit le
+    profil, les projets et le journal de conversation de tout le foyer d'un seul appel, et
+    la seule reprise est une sauvegarde dont l'âge se compte en jours.
+    """
+    logger.warning("memory_reset demandé par %s — purge Redis complète", demandeur)
     r = REDIS_CLIENT
     for key in r.scan_iter("working:*"):
         r.delete(key)

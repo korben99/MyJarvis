@@ -11,6 +11,7 @@ Le rapport reste lisible si l'appel échoue : les mesures, elles, sont déjà l�
 from config import (
     AUTOCODE_MAX_DIFF_LINES,
     DEFAULT_TEMP,
+    JARVIS_ROOT,
     MAX_TOKENS_THINK_MEDIUM,
     REASONING_API_KEY,
     REASONING_API_URL,
@@ -222,7 +223,7 @@ def rendre_rapport(constat: dict, m: dict, verdict: str, motifs: list[str],
             "## Appliquer",
             "",
             "```bash",
-            f"cd /opt/jarvis && git apply --check {dossier}/3-patch.diff",
+            f"cd {JARVIS_ROOT} && git apply --check {dossier}/3-patch.diff",
             "```",
             "",
             "Rien n'a été appliqué. Réponds « accepte le patch "

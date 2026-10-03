@@ -22,7 +22,7 @@ convlog and Qdrant. `/v1/raw` does none of that.
 ```bash
 brew install opencode          # pulls node + ripgrep
 mkdir -p ~/.config/opencode
-cp /opt/jarvis/DOCS/opencode.json.example ~/.config/opencode/opencode.json
+cp /opt/jarvis/DOCS/examples/opencode.json.example ~/.config/opencode/opencode.json
 ```
 
 On another machine: same thing, the config file is all you need — it points at the Tailscale
@@ -68,9 +68,14 @@ closed, there is no way to tell whether the text in flight is prose or the start
 
 ## Security — acknowledged debt
 
-`/v1/raw` has **no authentication** and uvicorn listens on `0.0.0.0`. Acceptable as long as
-the machine stays on a home network and remote access goes through Tailscale. Revisit if it
-ever lands on a shared network. See [SECURITY.md](SECURITY.md).
+`/v1/raw` requires a token (`_garde_raw`): either a user code or `RAW_API_KEY`, carried as
+`Authorization: Bearer <token>`. `RAW_API_KEY` exists so a coding agent can be given access
+without handing it a user code, which unlocks everything else.
+
+Uvicorn still listens on `0.0.0.0` and there is no TLS, so the token travels in clear on the
+LAN. Acceptable as long as the machine stays on a home network and remote access goes
+through Tailscale. Revisit if it ever lands on a shared network. See
+[SECURITY.md](SECURITY.md).
 
 ## Diagnostics
 

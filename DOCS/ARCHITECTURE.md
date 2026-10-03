@@ -609,8 +609,9 @@ plus accès à internet en ce moment…"* — instead of silently returning no r
     ├── AUTOCODE.md             # The hand-written target pool for the nightly cycle
     ├── ARCHITECTURE.md · MEMORY.md · API.md · CONFIGURATION.md · INSTALL.md
     ├── PERFORMANCE.md · OPERATIONS.md · SECURITY.md · GOOGLE.md · REDIS.md
-    ├── opencode-local.md · opencode.json.example
+    ├── opencode-local.md
     └── examples/               # plist template · shell aliases · users_list.example.json
+                                # opencode.json.example · AUTOCODE.example.md
 ```
 
 ---

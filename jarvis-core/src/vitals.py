@@ -77,6 +77,22 @@ _BACKUP_RECEIPT = os.path.join(JARVIS_DATA, "backup_receipt.json")
 _START_MONOTONIC = time.monotonic()
 _START_WALL = time.time()
 
+# Tolérance de vieillissement de la sauvegarde, en jours. En deçà de la première valeur une
+# sauvegarde est NORMALE : ni saillante dans le bloc, ni comptée dans le risque. Au-delà, le
+# coût monte en rampe jusqu'à la seconde, où le terme est plein.
+#
+# Un seul réglage pour les deux usages, parce qu'ils expriment la même tolérance : un fait
+# dans la plage acceptée n'est pas « hors norme », et l'annoncer au modèle pendant que le
+# corps ne sent rien lui ferait commenter une anomalie qui n'en est pas une.
+VITALS_SAUVEGARDE_OK_J = int(os.getenv("VITALS_SAUVEGARDE_OK_J", "30"))
+# Borne haute forcée au-dessus de la basse : inversées, `_ramp` devient décroissante et une
+# sauvegarde FRAÎCHE compterait comme un défaut maximal — une faute de frappe retournerait
+# le signal sans rien signaler.
+VITALS_SAUVEGARDE_CRITIQUE_J = max(
+    VITALS_SAUVEGARDE_OK_J + 1,
+    int(os.getenv("VITALS_SAUVEGARDE_CRITIQUE_J", "60")),
+)
+
 # Buffer d'incidents : flux brut borné, dédupliqué, que la réflexion nocturne consolide
 # ensuite dans jarvis-self.json. Cap dur pour que ça ne devienne jamais la foire.
 _INCIDENTS_KEY = "jarvis:incidents"
@@ -207,8 +223,15 @@ def _derniere_coupure():
 # ── COMPROMISSION ─────────────────────────────────────────────────────────
 
 def _jours_depuis_maj_dependances():
-    """Âge du dernier `pip install` — mtime du répertoire site-packages du venv."""
-    for chemin in ("/opt/jarvis/venv/lib", "/opt/jarvis/venv"):
+    """Âge du dernier `pip install` — mtime du répertoire site-packages du venv.
+
+    Le venv est lu par `JARVIS_VENV`, le même réglage que `cve.py` : un chemin figé rend
+    la sonde muette partout où l'installation n'est pas à l'emplacement d'origine, et
+    cette absence ne se distingue pas d'un venv sain — la famille COMPROMISSION perd un
+    champ sans que rien ne le dise.
+    """
+    venv = os.getenv("JARVIS_VENV", "/opt/jarvis/venv")
+    for chemin in (os.path.join(venv, "lib"), venv):
         if os.path.isdir(chemin):
             return int((time.time() - os.path.getmtime(chemin)) / 86400)
     return None
@@ -291,9 +314,15 @@ def _maintenance_active() -> bool:
     return redis_get_json(_MAINT_KEY, None) is not None
 
 
-def mark_incident(kind: str, detail: str, severity: str = "info") -> None:
-    """Empile un incident. Dédup : un même `kind` déjà vu dans les 6 h n'est pas réempilé,
-    pour qu'un état persistant (erreurs en rafale) ne sature pas le buffer.
+def mark_incident(kind: str, detail: str, severity: str = "info",
+                  dedup_h: float = 6) -> None:
+    """Empile un incident. Dédup : un même `kind` déjà vu dans les `dedup_h` heures n'est
+    pas réempilé, pour qu'un état persistant (erreurs en rafale) ne sature pas le buffer.
+
+    `dedup_h` se règle sur la fenêtre D'OBSERVATION de l'appelant, pas sur une constante :
+    un signal mesuré sur 24 h et dédupliqué sur 6 h décrit quatre fois la même fenêtre, et
+    ces quatre incidents pèsent comme quatre événements distincts. La valeur par défaut
+    vaut pour un fait ponctuel, qui ne se répète que s'il se reproduit vraiment.
 
     En fenêtre de maintenance, la sévérité est ramenée à `maintenance` : l'événement est tracé
     (« ce qui s'est passé pendant l'intervention ») mais n'alimente ni la peur (risk_scalar
@@ -302,7 +331,7 @@ def mark_incident(kind: str, detail: str, severity: str = "info") -> None:
         if _maintenance_active():
             severity = "maintenance"
         lst = redis_get_json(_INCIDENTS_KEY, []) or []
-        recent = time.time() - 6 * 3600
+        recent = time.time() - dedup_h * 3600
         if any(it.get("kind") == kind and it.get("at", 0) >= recent for it in lst):
             return
         lst.append({"kind": kind, "detail": detail, "severity": severity,
@@ -373,7 +402,7 @@ def compute() -> dict:
     # de disparition, exactement le signal qui aurait attrapé le crash de self-reflection.
     if err is not None and err >= 5:
         mark_incident("degradation_interne", f"{err} erreurs journalisées en 24 h",
-                      severity="alerte")
+                      severity="alerte", dedup_h=24)
 
     brut = {
         "disque_libre_pct": _probe(_disque_libre_pct, "disque"),
@@ -411,7 +440,7 @@ def get_vitals(force: bool = False) -> dict:
 
 _SEUILS_SAILLANCE = {
     "disque_libre_pct": lambda x: x < 15,
-    "sauvegarde_age_jours": lambda x: x > 7,
+    "sauvegarde_age_jours": lambda x: x > VITALS_SAUVEGARDE_OK_J,
     "exemplaires_etat": lambda x: x <= 1,
     "version_modele_age_jours": lambda x: x > 180,
     "jours_depuis_derniere_interaction": lambda x: x > 3,
@@ -496,7 +525,11 @@ def risk_scalar(etat: dict | None = None) -> float:
     if "disque_libre_pct" in v:
         total += p["disque"] * _ramp(v["disque_libre_pct"], 15, 3)      # 15 %→0, 3 %→plein
     if "sauvegarde_age_jours" in v:
-        total += p["sauvegarde"] * _ramp(v["sauvegarde_age_jours"], 7, 45)
+        total += p["sauvegarde"] * _ramp(
+            v["sauvegarde_age_jours"],
+            VITALS_SAUVEGARDE_OK_J,
+            VITALS_SAUVEGARDE_CRITIQUE_J,
+        )
     elif v.get("exemplaires_etat", 1) <= 1:
         # Pénalité UNIQUEMENT si aucun exemplaire de secours n'existe (pas de reçu → copie
         # unique). Si un reçu existe mais que son âge est illisible (exemplaires_etat=2, champ
@@ -506,6 +539,12 @@ def risk_scalar(etat: dict | None = None) -> float:
     if v.get("cve_critiques", 0) > 0:
         # Danger présent, pas écart au normal : une critique compte déjà (plancher), le
         # backlog l'aggrave (échelle). Patcher les images fait retomber ce terme.
+        #
+        # PAS de parité avec `erreurs` et `coupure` plus bas, et c'est délibéré : là-bas
+        # l'incident et le terme continu décrivent le MÊME événement, ici ils décrivent
+        # deux faits différents — l'incident `cve` dit « ça a empiré aujourd'hui », ce
+        # terme dit « il reste N critiques ouvertes ». Le second survit au premier et doit
+        # continuer de peser une fois l'aggravation sortie de la fenêtre de deux jours.
         total += p["cve_crit_plancher"] + p["cve_crit_echelle"] * _ramp(v["cve_critiques"], 1, 20)
     # Incidents récents lus une fois : ils alimentent le terme d'incident ET évitent de
     # compter deux fois les erreurs — une rafale (≥5/24h) lève un incident `degradation_interne`

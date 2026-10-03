@@ -152,7 +152,9 @@ python scripts/download_models.py
 ./scripts/reclassify-incident.py --set 0 maintenance  # reclassify (drops out of the risk scalar)
 
 # Ad-hoc maintenance window: incidents in the next N minutes tagged "maintenance"
-curl -X POST "http://localhost:8000/self/maintenance?minutes=120"
+# Admin token: the window silences the incident signal.
+curl -X POST "http://localhost:8000/self/maintenance?minutes=120" \
+  -H "Authorization: Bearer VOTRE_CODE_ADMIN"
 ```
 
 ---

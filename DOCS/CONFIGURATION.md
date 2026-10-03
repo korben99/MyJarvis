@@ -115,6 +115,8 @@ Measured effect (direct axis, 120 items): `+0.119` in combination with `IDENTITY
 |----------|---------|-------------|
 | `JARVIS_DATA` | `/opt/jarvis/jarvis-core/JarvisData` | Read by the probes: free disk space and the backup receipt |
 | `JARVIS_LOG_DIR` | `/opt/jarvis/logs` | Application logs, where errors and warnings over 24 h are counted |
+| `VITALS_SAUVEGARDE_OK_J` | `30` | Below this age a backup is **normal**: absent from `<etat_systeme>`, worth nothing in `risk_scalar`. Set it to your actual backup rhythm |
+| `VITALS_SAUVEGARDE_CRITIQUE_J` | `60` | Age at which the backup term is full. Forced above the previous one — inverted, the ramp decreases and a *fresh* backup would score maximum |
 | `VITALS_INJECTION` | `true` | Injection of the `<etat_systeme>` block into prompts — the admin chat path and the autocoding agent both. `false` removes it entirely |
 
 `VITALS_INJECTION=false` is the lever for a machine that is **shut down every night**.

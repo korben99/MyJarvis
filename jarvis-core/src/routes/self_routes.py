@@ -1,9 +1,11 @@
 """routes/self_routes.py — Jarvis self-state and reflection endpoints."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from memory import get_self_memory
 from self import get_reflection_log, run_self_reflection
+
+from .garde import exige_admin
 
 router = APIRouter(tags=["self"])
 
@@ -32,16 +34,25 @@ async def self_log(n: int = 10):
 
 
 @router.post("/self/reflect")
-async def self_reflect_now():
-    """Trigger an immediate reflection cycle (for testing / manual trigger)."""
+async def self_reflect_now(demandeur: str = Depends(exige_admin)):
+    """Trigger an immediate reflection cycle (for testing / manual trigger).
+
+    Réservée aux administrateurs : un cycle mobilise le GPU plusieurs minutes et chaque
+    tour de chat attend derrière. Les deux routes de consultation au-dessus restent
+    ouvertes — elles ne dépensent rien."""
     result = await run_self_reflection()
     return result
 
 
 @router.post("/self/maintenance")
-async def self_maintenance(minutes: int = 60, reason: str = "maintenance"):
+async def self_maintenance(minutes: int = 60, reason: str = "maintenance",
+                           demandeur: str = Depends(exige_admin)):
     """Ouvre une fenêtre de maintenance : les incidents des prochaines `minutes` sont tagués
-    `maintenance` (pas de peur, pas de trauma). À poser avant une intervention ad-hoc."""
+    `maintenance` (pas de peur, pas de trauma). À poser avant une intervention ad-hoc.
+
+    Réservée aux administrateurs parce qu'elle éteint un signal : pendant la fenêtre, une
+    panne réelle est enregistrée sans sévérité et ne pèse plus sur l'état. C'est une
+    décision d'exploitant, pas une commande de passage."""
     from vitals import set_maintenance
 
     set_maintenance(minutes, reason)

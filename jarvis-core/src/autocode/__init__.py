@@ -44,6 +44,7 @@ from config import (
     AUTOCODE_COOLDOWN_DAYS,
     AUTOCODE_ENABLED,
     BRIEFING_TIMEZONE,
+    JARVIS_ROOT,
     USER_ADMINS,
 )
 from helpers import fmt_now_fr, get_logger
@@ -472,7 +473,7 @@ def handle_autocode_command(message: str, user_code: str) -> str | None:
             )
         return (
             f"Patch {en_vol['constat_id']} accepté — il ne sera plus reproposé. Rien n'a "
-            f"été appliqué : `cd /opt/jarvis && git apply "
+            f"été appliqué : `cd {JARVIS_ROOT} && git apply "
             f"{en_vol.get('dossier', '<dossier>')}/3-patch.diff`."
         )
     return (

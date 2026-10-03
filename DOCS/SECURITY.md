@@ -14,7 +14,7 @@ no accounts, no passwords and no built-in rate limiting. Everything below assume
 | Surface | Default bind | Authentication | What to know |
 |---|---|---|---|
 | Jarvis API (8000) | `0.0.0.0` | user code | Reverse proxy + TLS if you leave the LAN |
-| `/v1/raw/chat/completions` | `0.0.0.0` | **none** | Never expose this route beyond the LAN |
+| `/v1/raw/chat/completions` | `0.0.0.0` | user code or `RAW_API_KEY` | Token in clear (no TLS) — never expose this route beyond the LAN |
 | Open WebUI (3000) | `0.0.0.0` | Open WebUI account | `WEBUI_SECRET_KEY` is in cleartext in `docker-compose.yml` — change it |
 | Qdrant (6333/6334) | `0.0.0.0` | **none** | The whole vector store is readable from the LAN |
 | Redis (6379) | `0.0.0.0` | **none** | The whole memory is readable *and writable* from the LAN |
@@ -60,6 +60,14 @@ Consequences to accept:
   random — not a first name, not a date.
 - Memory is **partitioned by user code**: Redis keys and Qdrant filters all carry the code.
   One user cannot read another's memory.
+
+**Where the admin line is drawn.** Reading is open — `/self/state`, `/self/log`,
+`/memory/emotional-state`, `/status` answer without a token, and the dashboard script
+relies on that. **Spending and destroying are not**: `/agent/*` (disk and GPU),
+`/v1/raw` (GPU), `/self/reflect` (minutes of GPU), `/self/maintenance` (it silences the
+incident signal) and `DELETE /memory/reset` (every user's memory, irreversible) all
+require an admin code in `Authorization: Bearer`. The guard lives in one place,
+`routes/garde.py`, because a copied guard is a guard that will diverge.
 
 **Partitioning by key prefix is not authorization.** Namespacing data by user code only
 protects it if every endpoint checks that the caller *is* the user it names in the path.

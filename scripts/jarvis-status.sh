@@ -108,8 +108,17 @@ else
 fi
 
 EMOTION=$(curl -s http://localhost:8000/memory/emotional-state 2>/dev/null)
-MOOD=$(echo "$EMOTION" | python3 -c "import sys,json; print(json.load(sys.stdin).get('mood','?'))" 2>/dev/null)
-echo "  ✅ Current mood: ${MOOD:-unknown}"
+# L'endpoint rend humeur/confiance/energie : lire 'mood' affichait « ? » en permanence.
+MOOD=$(echo "$EMOTION" | python3 -c "
+import sys, json
+e = json.load(sys.stdin)
+print(', '.join(f'{k} {e[k]:+.2f}' for k in ('humeur', 'confiance', 'energie') if k in e))
+" 2>/dev/null)
+if [ -n "$MOOD" ]; then
+    echo "  ✅ Current mood: $MOOD"
+else
+    echo "  ⬜ Current mood: illisible (/memory/emotional-state)"
+fi
 
 echo ""
 echo "── Proto-Self ──"
@@ -139,14 +148,23 @@ fi
 echo ""
 echo "── Endpoint agents de code (OpenCode) ──"
 # /v1/raw : pas de routage, pas de mémoire, pas d'injection de contexte perso.
-RAW_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 2 \
-    -X POST http://localhost:8000/v1/raw/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{"messages":[{"role":"user","content":"ping"}],"stream":false}')
-if [ "$RAW_CODE" = "200" ]; then
-    echo "  ✅ /v1/raw/chat/completions — OK"
+# La route exige un jeton depuis qu'elle est gardée (_garde_raw) : sans l'en-tête, la
+# sonde rend 401 en permanence et le tableau affiche un rouge qu'on apprend à ignorer.
+if [ -z "$RAW_API_KEY" ]; then
+    echo "  ⬜ /v1/raw/chat/completions — RAW_API_KEY absente du .env, sonde ignorée"
 else
-    echo "  ❌ /v1/raw/chat/completions — HTTP $RAW_CODE (Jarvis démarré ? LLM_LOCAL activé ?)"
+    RAW_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 2 \
+        -X POST http://localhost:8000/v1/raw/chat/completions \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $RAW_API_KEY" \
+        -d '{"messages":[{"role":"user","content":"ping"}],"stream":false}')
+    if [ "$RAW_CODE" = "200" ]; then
+        echo "  ✅ /v1/raw/chat/completions — OK"
+    elif [ "$RAW_CODE" = "401" ]; then
+        echo "  ❌ /v1/raw/chat/completions — HTTP 401 (RAW_API_KEY du .env refusée)"
+    else
+        echo "  ❌ /v1/raw/chat/completions — HTTP $RAW_CODE (Jarvis démarré ? LLM_LOCAL activé ?)"
+    fi
 fi
 
 echo ""

@@ -79,10 +79,14 @@ def _check_service_health() -> dict:
         from config import LLM_LOCAL
         if LLM_LOCAL:
             import os as _os
-            model_dir = _os.path.join("/opt/jarvis/models/hub", PRIMARY_MODEL.replace("/", "--", 1).replace("/", "--"))
+            # Racine lue dans HF_HOME, comme vitals._version_modele_age_jours : figée, elle
+            # rend `model_missing` sur toute installation dont le cache est ailleurs — un
+            # modèle sain déclaré absent dans le contexte que Jarvis lit sur lui-même.
+            _hub = _os.path.join(_os.getenv("HF_HOME", "/opt/jarvis/models"), "hub")
+            model_dir = _os.path.join(_hub, PRIMARY_MODEL.replace("/", "--", 1).replace("/", "--"))
             # HuggingFace cache layout: models--org--name
             hf_dir = _os.path.join(
-                "/opt/jarvis/models/hub",
+                _hub,
                 "models--" + PRIMARY_MODEL.replace("/", "--"),
             )
             health["llm"] = "ok" if (_os.path.isdir(hf_dir) or _os.path.isdir(model_dir)) else "model_missing"

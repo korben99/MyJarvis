@@ -287,17 +287,22 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    await stop_worker()
-
-    # Trace l'heure d'arrêt : c'est elle qui permet au démarrage suivant de mesurer la
-    # durée de coupure (vitals, famille « discontinuité »). Sans cette trace, le champ
-    # est simplement absent — jamais inventé.
+    # Trace l'heure d'arrêt AVANT tout le reste de la descente. C'est elle qui permet au
+    # démarrage suivant de mesurer la coupure (vitals, famille « discontinuité »), et le
+    # reste de la séquence n'a pas de durée bornée : `stop_worker` attend l'arrêt d'une
+    # tâche qui peut être au milieu d'une inférence, alors que launchd tue le processus
+    # peu après son SIGTERM. Posée après, la trace n'est pas écrite dans ce cas, et le
+    # démarrage suivant mesure `boot − arrêt PRÉCÉDENT` : une coupure qui inclut tout le
+    # temps de fonctionnement intermédiaire, donc une alerte sur une panne qui n'a pas eu
+    # lieu. Posée avant, le pire écart est la durée de la descente elle-même.
     try:
         from vitals import mark_shutdown
 
         mark_shutdown()
     except Exception as exc:
         logger.debug("vitals: trace d'arrêt non posée (%s)", exc)
+
+    await stop_worker()
 
     if scheduler:
         scheduler.shutdown(wait=False)
