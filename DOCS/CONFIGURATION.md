@@ -71,7 +71,11 @@ precision; with one, 91 %.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `REASONING_MODEL` | *(PRIMARY_MODEL)* | Complex queries only — used when router sets `use_reasoning=true`. Defaults to PRIMARY (Qwen3.6 in full thinking mode). |
-| `REASONING_TIMEOUT` | `90` | Timeout in seconds (longer — deep reasoning) |
+
+`REASONING_TIMEOUT` no longer exists. It is gone for the same reason as
+`REFINE_PROMPT_THRESHOLD`: no code ever read it. Timeouts are **computed**, not configured —
+`config.llm_timeout()` derives each one from `max_tokens / TOKEN_SPEED_TPS * TIMEOUT_MARGIN`,
+so a slow model is accommodated by those two knobs rather than by a per-tier constant.
 
 ## Vision model
 

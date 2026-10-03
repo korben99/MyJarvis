@@ -10,19 +10,12 @@ import time
 from datetime import datetime, timezone
 
 from config import (
-    DEFAULT_TEMP,
     MAX_CHAIN_ITERATIONS,
-    MAX_TOKENS_THINK_MEDIUM,
-    REASONING_API_KEY,
-    REASONING_API_URL,
-    REASONING_MODEL,
     REFLECTION_INTERVAL_HOURS,
-    THINKING_BUDGET_MEDIUM,
     USER_ADMINS,
     USER_CODES,
-    llm_timeout,
 )
-from helpers import call_llm_async_bg, extract_llm_json, get_logger, get_redis
+from helpers import appel_raisonnement, extract_llm_json, get_logger, get_redis
 from llm.local import _REFLECTION_PROMPTS_LOG_PATH, journal_de_cycle
 import emotional_state
 from memory import get_self_memory, save_self_memory, self_memory_lock
@@ -338,21 +331,10 @@ async def _llm_review_before_action(
     )
 
     try:
-        content = await call_llm_async_bg(
-            [
-                {"role": "system", "content": get_prompt("ACTION_REVIEW_SYSTEM")},
-                {"role": "user", "content": prompt},
-            ],
-            model=REASONING_MODEL,
-            api_url=REASONING_API_URL,
-            api_key=REASONING_API_KEY,
-            temperature=DEFAULT_TEMP,
-            max_tokens=MAX_TOKENS_THINK_MEDIUM,
-            thinking_budget=THINKING_BUDGET_MEDIUM,
-            json_response=True,
-            no_think=False,
-            timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
-        )
+        content = await appel_raisonnement([
+            {"role": "system", "content": get_prompt("ACTION_REVIEW_SYSTEM")},
+            {"role": "user", "content": prompt},
+        ])
         result = extract_llm_json(content)
         execute = bool(result.get("execute", False))
         reason = result.get("reason", "")

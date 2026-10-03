@@ -24,16 +24,15 @@ from config import (
     INTROSPECTION_AXES,
     INTROSPECTION_LOG_MAX_ENTRIES,
     MAX_TOKENS_COMPACT,
-    MAX_TOKENS_THINK_MEDIUM,
     REASONING_API_KEY,
     REASONING_API_URL,
     REASONING_MODEL,
-    THINKING_BUDGET_MEDIUM,
     USER_CODES,
     USERS,
     llm_timeout,
 )
 from helpers import (
+    appel_raisonnement,
     call_llm_async_bg,
     extract_llm_json,
     get_logger,
@@ -125,21 +124,10 @@ async def _nightly_facts_user(
         existing_autobio=existing_autobio_str,
     )
     try:
-        content = await call_llm_async_bg(
-            [
-                {"role": "system", "content": get_prompt("NIGHTLY_FACTS_SYSTEM")},
-                {"role": "user", "content": prompt},
-            ],
-            model=REASONING_MODEL,
-            api_url=REASONING_API_URL,
-            api_key=REASONING_API_KEY,
-            temperature=DEFAULT_TEMP,
-            max_tokens=MAX_TOKENS_THINK_MEDIUM,
-            thinking_budget=THINKING_BUDGET_MEDIUM,
-            json_response=True,
-            no_think=False,
-            timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
-        )
+        content = await appel_raisonnement([
+            {"role": "system", "content": get_prompt("NIGHTLY_FACTS_SYSTEM")},
+            {"role": "user", "content": prompt},
+        ])
         return extract_llm_json(content)
     except Exception as exc:
         logger.error(
@@ -283,21 +271,10 @@ async def _nightly_introspection(
         else "aucune",
     )
     try:
-        content = await call_llm_async_bg(
-            [
-                {"role": "system", "content": get_prompt("NIGHTLY_SELF_SYSTEM")},
-                {"role": "user", "content": prompt},
-            ],
-            model=REASONING_MODEL,
-            api_url=REASONING_API_URL,
-            api_key=REASONING_API_KEY,
-            temperature=DEFAULT_TEMP,
-            max_tokens=MAX_TOKENS_THINK_MEDIUM,
-            thinking_budget=THINKING_BUDGET_MEDIUM,
-            json_response=True,
-            no_think=False,
-            timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
-        )
+        content = await appel_raisonnement([
+            {"role": "system", "content": get_prompt("NIGHTLY_SELF_SYSTEM")},
+            {"role": "user", "content": prompt},
+        ])
         return extract_llm_json(content)
     except Exception as exc:
         logger.error(

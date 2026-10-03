@@ -14,21 +14,14 @@ import httpx
 import numpy as np
 from config import (
     BRIEFING_TIMEZONE,
-    DEFAULT_TEMP,
-    MAX_TOKENS_THINK_MEDIUM,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
     PRIMARY_MODEL,
-    REASONING_API_KEY,
-    REASONING_API_URL,
-    REASONING_MODEL,
-    THINKING_BUDGET_MEDIUM,
     USER_CODES,
     USER_TIMEZONES,
-    llm_timeout,
 )
 from helpers import (
-    call_llm_async_bg,
+    appel_raisonnement,
     extract_llm_json,
     fmt_now_fr,
     get_logger,
@@ -617,21 +610,10 @@ async def _call_global_reflection_llm(
     )
 
     try:
-        content = await call_llm_async_bg(
-            [
-                {"role": "system", "content": get_prompt("REFLECTION_SYSTEM")},
-                {"role": "user", "content": prompt},
-            ],
-            model=REASONING_MODEL,
-            api_url=REASONING_API_URL,
-            api_key=REASONING_API_KEY,
-            temperature=DEFAULT_TEMP,
-            max_tokens=MAX_TOKENS_THINK_MEDIUM,
-            thinking_budget=THINKING_BUDGET_MEDIUM,
-            json_response=True,
-            no_think=False,
-            timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
-        )
+        content = await appel_raisonnement([
+            {"role": "system", "content": get_prompt("REFLECTION_SYSTEM")},
+            {"role": "user", "content": prompt},
+        ])
         return extract_llm_json(content)
     except ValueError as exc:
         logger.error(
@@ -696,18 +678,7 @@ async def _call_user_reflection_llm(
             # bloc think sans émettre </think>) a été retiré : il annonçait
             # sa propre désactivation depuis la migration vers Qwen3.6 tout en laissant
             # `no_think=True` en place.
-            content = await call_llm_async_bg(
-                messages,
-                model=REASONING_MODEL,
-                api_url=REASONING_API_URL,
-                api_key=REASONING_API_KEY,
-                temperature=DEFAULT_TEMP,
-                max_tokens=MAX_TOKENS_THINK_MEDIUM,
-                thinking_budget=THINKING_BUDGET_MEDIUM,
-                json_response=True,
-                no_think=False,
-                timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
-            )
+            content = await appel_raisonnement(messages)
             return extract_llm_json(content)
         except ValueError as exc:
             if attempt == 0:

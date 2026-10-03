@@ -9,10 +9,16 @@ from threading import Lock
 
 import httpx
 from config import (
+    DEFAULT_TEMP,
     LLM_LOCAL,
+    MAX_TOKENS_THINK_MEDIUM,
     PRIMARY_MODEL,
+    REASONING_API_KEY,
+    REASONING_API_URL,
     REASONING_MODEL,
     ROUTER_MODEL,
+    THINKING_BUDGET_MEDIUM,
+    llm_timeout,
     tokens_param,
 )
 from llm.local import (
@@ -248,3 +254,30 @@ async def call_llm_async_bg(
     )
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]
+
+
+async def appel_raisonnement(messages: list[dict]) -> str:
+    """Le palier de raisonnement, paramètres fixes — réflexion, revue nocturne, autocodage.
+
+    Sept sites appelaient `call_llm_async_bg` avec exactement les mêmes onze arguments, et
+    seuls les prompts changeaient. Le coût de cette recopie n'est pas la longueur : c'est
+    qu'un réglage du palier — budget de réflexion, plafond de jetons, timeout — devait être
+    repris sept fois, et qu'un oubli ne se voit nulle part. Un appel qui dérive d'un seul
+    cran produit une sortie plausible.
+
+    Ne porte PAS la gestion d'erreur. Elle diffère par site, et légitimement : l'un
+    réessaie une fois sur un JSON malformé, les autres rendent None avec leur propre
+    message. C'est la raison pour laquelle seul l'appel est ici.
+    """
+    return await call_llm_async_bg(
+        messages,
+        model=REASONING_MODEL,
+        api_url=REASONING_API_URL,
+        api_key=REASONING_API_KEY,
+        temperature=DEFAULT_TEMP,
+        max_tokens=MAX_TOKENS_THINK_MEDIUM,
+        thinking_budget=THINKING_BUDGET_MEDIUM,
+        json_response=True,
+        no_think=False,
+        timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
+    )

@@ -15,11 +15,9 @@ import pytz
 from config import (
     DEFAULT_TEMP,
     MAX_TOKENS_COMPACT,
-    MAX_TOKENS_THINK_MEDIUM,
     REASONING_API_KEY,
     REASONING_API_URL,
     REASONING_MODEL,
-    THINKING_BUDGET_MEDIUM,
     USER_ADMINS,
     USER_CODES,
     USER_EMAILS,
@@ -29,7 +27,7 @@ from config import (
 from apns import is_real_apns_token, send_apns_push
 from google_services import is_google_available, send_gmail_message
 from helpers import (
-    call_llm_async_bg,
+    appel_raisonnement,
     call_llm_bg,
     extract_llm_json,
     get_logger,
@@ -866,18 +864,7 @@ async def generate_proactive_push(user_code: str) -> str:
     )
 
     try:
-        content = await call_llm_async_bg(
-            [{"role": "user", "content": prompt}],
-            model=REASONING_MODEL,
-            api_url=REASONING_API_URL,
-            api_key=REASONING_API_KEY,
-            temperature=DEFAULT_TEMP,
-            max_tokens=MAX_TOKENS_THINK_MEDIUM,
-            thinking_budget=THINKING_BUDGET_MEDIUM,
-            json_response=True,
-            no_think=False,
-            timeout=llm_timeout(MAX_TOKENS_THINK_MEDIUM),
-        )
+        content = await appel_raisonnement([{"role": "user", "content": prompt}])
         message = extract_llm_json(content).get("message")
     except Exception as exc:
         logger.warning(

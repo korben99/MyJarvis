@@ -32,6 +32,7 @@ Connections
 LLM calls
   call_llm / call_llm_bg / call_llm_async / call_llm_async_bg
   All share a persistent, connection-pooled httpx client. API keys are never logged.
+  appel_raisonnement(messages)      -> str   (palier de raisonnement, paramètres fixes)
 
 LLM parsing
   extract_llm_json(raw)             -> dict  (raises ValueError on failure)
@@ -42,6 +43,7 @@ Weather
 """
 
 from .llm_http import (
+    appel_raisonnement,
     call_llm,
     call_llm_async,
     call_llm_async_bg,
@@ -87,6 +89,7 @@ __all__ = [
     "filter_think_chunk", "extract_llm_json",
     # llm_http
     "call_llm", "call_llm_bg", "call_llm_async", "call_llm_async_bg",
+    "appel_raisonnement",
     # weather
     "WEATHER_CODES",
 ]

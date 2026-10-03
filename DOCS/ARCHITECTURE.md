@@ -157,9 +157,9 @@ Token budgets use per-task config variables (see `config.py`). Timeouts are deri
 | Nightly cleaning | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_COMPACT` (600) | — | Autobio fact archive/delete |
 | refine_prompt (initial) | `self.py` | Tier 3 — REASONING | `False` | `MAX_TOKENS_REASONING` (10 000) | `THINKING_BUDGET_DEEP` (4 000) | Propose prompt improvement |
 | refine_prompt (retry) | `self.py` | Tier 3 — REASONING | `False` | `MAX_TOKENS_REASONING` (10 000) | `THINKING_BUDGET_DEEP` (4 000) | Retry with critique feedback |
-| prune_self_memory | `self.py` | Tier 3 — REASONING | `False` | `MAX_TOKENS_THINK_COMPACT` (2 048) | `THINKING_BUDGET_COMPACT` (1 024) | Prune stale self-notes / opinions |
-| Proactive push | `self.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_COMPACT` (600) | — | Generate iOS push message |
-| Action self-review | `self.py` | Tier 3 — REASONING | `False` | `MAX_TOKENS_THINK_COMPACT` (2 048) | `THINKING_BUDGET_COMPACT` (1 024) | LLM gate before risky reflection action |
+| prune_self_memory | `self/actions.py` | Tier 3 — REASONING | `True` | `MAX_TOKENS_COMPACT` (600) | — | Prune stale opinions — a classification task: with thinking on, it loops and never emits JSON |
+| Proactive push | `self/actions.py` | Tier 3 — REASONING | `False` | `MAX_TOKENS_THINK_MEDIUM` | `THINKING_BUDGET_MEDIUM` | Generate iOS push message |
+| Action self-review | `self/engine.py` | Tier 3 — REASONING | `False` | `MAX_TOKENS_THINK_MEDIUM` | `THINKING_BUDGET_MEDIUM` | LLM gate before risky reflection action |
 | Profile key dedup | `memory.py` | Tier 1 — ROUTER | `True` | `MAX_TOKENS_SHORT` (300) | — | Namespace-scoped key dedup |
 | Memory consolidate | `memory.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_COMPACT` (600) | — | Deduplicate / merge episodic memories |
 | Profile curative cleanup | `memory.py` | Tier 2 — PRIMARY | `True` | `MAX_TOKENS_COMPACT` (600) | — | Curative profile cleanup |

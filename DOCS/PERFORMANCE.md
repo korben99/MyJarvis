@@ -219,9 +219,9 @@ whether `ThinkingBudgetProcessor` engages.
 |---|---|---|---|---|---|
 | `_call_global_reflection_llm` | REASONING | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Phase 1 — picks ONE global action per chain step |
 | `_call_user_reflection_llm` | REASONING | `no_think` | `MAX_TOKENS_MEDIUM` (1 000) | — | Phase 2 — same, per user |
-| `generate_proactive_push` | REASONING | `no_think` | `MAX_TOKENS_COMPACT` (600) | — | Binary decision + one short sentence — thinking is superfluous |
-| `_action_prune_self_memory` | REASONING | `think` | `MAX_TOKENS_THINK_COMPACT` (2 048) | ✅ `THINKING_BUDGET_COMPACT` (1 024) | Selecting entries to delete — short thinking for coherence without aggression |
-| `_llm_review_before_action` | REASONING | `think` | `MAX_TOKENS_THINK_COMPACT` (2 048) | ✅ `THINKING_BUDGET_COMPACT` (1 024) | Self-challenge before an outbound action — thinking improves contextual judgement |
+| `generate_proactive_push` | REASONING | `think` | `MAX_TOKENS_THINK_MEDIUM` | ✅ `THINKING_BUDGET_MEDIUM` | Decide whether there is anything worth saying, then one short sentence |
+| `_action_prune_self_memory` | REASONING | `no_think` | `MAX_TOKENS_COMPACT` (600) | — | Classification: with thinking on it loops and never emits its JSON |
+| `_llm_review_before_action` | REASONING | `think` | `MAX_TOKENS_THINK_MEDIUM` | ✅ `THINKING_BUDGET_MEDIUM` | Self-challenge before an outbound action — thinking improves contextual judgement |
 
 ### Background — Nightly review (`self/nightly.py`)
 
@@ -287,8 +287,7 @@ Never use thinking_budget=0 in production
 | `MAX_TOKENS_MEDIUM` | 1 000 | Analyzer, reflection, alerts |
 | `MAX_TOKENS_NO_THINK` | 1 500 | Plain chat, nightly facts |
 | `MAX_TOKENS_BRIEFING` | 3 000 | Daily briefing |
-| `MAX_TOKENS_THINK_COMPACT` | `COMPACT + 1024` | prune / action review (thinking + answer) |
-| `MAX_TOKENS_THINK_MEDIUM` | `MEDIUM + 3000` | Chat with thinking, trading thresholds (thinking + answer) |
+| `MAX_TOKENS_THINK_MEDIUM` | `MEDIUM + 3000` | Everything on the reasoning tier that thinks: chat with thinking, trading thresholds, and the seven calls behind `helpers.appel_raisonnement` |
 | `MAX_TOKENS_REASONING` | 10 000 | `refine_prompt` only |
 | `MAX_TOKENS_HARD_CAP` | 16 000 | Absolute kill switch on all local calls |
 | `HIST_CONV_TOKEN_BUDGET` | 800 | Token budget for raw history injected per turn |

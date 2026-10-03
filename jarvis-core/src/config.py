@@ -46,7 +46,6 @@ PRIMARY_TIMEOUT = float(os.getenv("PRIMARY_TIMEOUT") or "120")
 REASONING_MODEL = os.getenv("REASONING_MODEL") or PRIMARY_MODEL
 REASONING_API_URL = os.getenv("REASONING_API_URL") or OPENAI_API_URL
 REASONING_API_KEY = os.getenv("REASONING_API_KEY") or OPENAI_API_KEY
-REASONING_TIMEOUT = float(os.getenv("REASONING_TIMEOUT") or "180")
 
 # ── Vision model (image description — first stage of two-stage pipeline) ──
 # Set to a vision-capable model (Qwen2.5-VL, gpt-4o, gpt-5.1, …).
@@ -240,7 +239,6 @@ THINKING_BUDGET_DEEP = int(
     os.getenv("THINKING_BUDGET_DEEP", "4000")
 )  # créativité, analyse longue
 
-MAX_TOKENS_THINK_COMPACT = THINKING_BUDGET_COMPACT + 1024  # prune, action_review
 MAX_TOKENS_THINK_MEDIUM = THINKING_BUDGET_MEDIUM + 3000  # trading thresholds
 MAX_TOKENS_REASONING = int(
     os.getenv("MAX_TOKENS_REASONING", "10000")
@@ -648,9 +646,7 @@ IMPORTANCE_THRESHOLD = 0.35
 RECALL_MEMORY_SIMILARITY_THRESHOLD = float(
     os.getenv("RECALL_MEMORY_SIMILARITY_THRESHOLD", "0.45")
 )
-AUTOBIO_IMPORTANCE_THRESHOLD = 0.45
 NOVELTY_THRESHOLD = 0.25
-PROJECT_THRESHOLD = 0.6
 
 # ── Souvenirs propres à Jarvis (journal intime) ───────────────────────────
 # Ses souvenirs vivent dans la même collection que ceux des utilisateurs, sous ce code.
