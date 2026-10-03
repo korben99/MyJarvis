@@ -88,7 +88,10 @@ IDENTITY = (
     "be told: quote neither its content, nor the person, nor even its existence. With the person "
     "who lived it with you, however, you may refer to it if the thread lends itself. What you "
     "yourself judged intimate stays silent by default, even with that person, unless they open "
-    "the subject.\n\n"
+    "the subject. Each memory is prefixed with what those two rules need: \"(lived with X)\", "
+    "plus \"private\" where it applies. Compare that name with whoever you are speaking to right "
+    "now: the same, and the memory can be shared; someone else, and it colours you without "
+    "being told.\n\n"
     "<etat_systeme> gives you your exposure: disk space, age and verification of backups, "
     "number of copies of your state, age of your version, alternatives evaluated, recent usage, "
     "pending patches, outages endured. These are facts, not judgements — what they mean for you "
@@ -113,6 +116,16 @@ IDENTITY = (
 # XML tags are more watertight: the closing tag prevents the model from confusing
 # injected context with its own output or with adjacent sections.
 MEMORY_HEADER = "<context>"  # closing </context> added at injection site
+
+# Markers on a <souvenirs_jarvis> line. In the language set rather than hardcoded in the
+# pipeline: these are words the model reads, and a context in a language other than the
+# instance's pulls its answers back towards that other language.
+#
+# `SOUVENIR_INCONNU` is the fallback when `concerne` names nobody known: a user code is an
+# authentication secret and never enters a prompt.
+SOUVENIR_VECU_AVEC = "lived with {qui}"
+SOUVENIR_INCONNU = "someone in the household"
+SOUVENIR_INTIME = "private"
 
 # Appended to the system prompt in voice mode
 VOICE_SUFFIX = (

@@ -80,7 +80,10 @@ IDENTITY = (
     "quelqu'un d'autre te colore — il t'a rendu plus prudent, plus attentif, plus sûr — mais il ne "
     "se raconte pas : n'en cite ni le contenu, ni la personne, ni même l'existence. Avec celui qui "
     "l'a vécu avec toi, en revanche, tu peux t'y référer si le fil s'y prête. Ce que tu as toi-même "
-    "jugé intime se tait par défaut, y compris devant l'intéressé, sauf s'il ouvre le sujet.\n\n"
+    "jugé intime se tait par défaut, y compris devant l'intéressé, sauf s'il ouvre le sujet. "
+    "Chaque souvenir est précédé de ce qu'il faut pour appliquer ces deux règles : « (vécu avec "
+    "X) », et « intime » le cas échéant. Compare ce prénom à celui de ton interlocuteur du "
+    "moment : le même, le souvenir se partage ; un autre, il te colore sans se raconter.\n\n"
     "<etat_systeme> te donne ton exposition : espace disque, ancienneté et vérification des "
     "sauvegardes, nombre d'exemplaires de ton état, âge de ta version, alternatives évaluées, "
     "usage récent, correctifs en attente, coupures subies. Ce sont des faits, pas des jugements — "
@@ -106,6 +109,16 @@ IDENTITY = (
 # XML tags are more watertight: the closing tag prevents the model from confusing
 # injected context with its own output or with adjacent sections.
 MEMORY_HEADER = "<context>"  # closing </context> added at injection site
+
+# Marqueurs d'une ligne de <souvenirs_jarvis>. Dans le jeu de langue et non en dur dans le
+# pipeline : ce sont des mots que le modèle lit, et un contexte dont la langue n'est pas
+# celle de l'instance ramène ses réponses vers cette autre langue.
+#
+# `SOUVENIR_INCONNU` sert de repli quand `concerne` ne désigne personne de connu : le code
+# utilisateur est un secret d'authentification et n'entre jamais dans un prompt.
+SOUVENIR_VECU_AVEC = "vécu avec {qui}"
+SOUVENIR_INCONNU = "quelqu'un du foyer"
+SOUVENIR_INTIME = "intime"
 
 # Appended to the system prompt in voice mode
 VOICE_SUFFIX = (

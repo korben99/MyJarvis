@@ -35,6 +35,7 @@ from config import (
     SELF_MEMORY_SIMILAR_N,
     USERS,
     USER_ADMINS,
+    USER_CODES,
     USER_TIMEZONES,
 )
 from deps import (
@@ -104,6 +105,31 @@ def build_system_prompt(user_code: str = "") -> str:
     return "\n\n".join(parts)
 
 
+def _rendre_souvenir(s: dict) -> str:
+    """Une ligne de <souvenirs_jarvis>, marquée de ce qu'IDENTITY demande d'en faire.
+
+    Le marqueur NOMME la personne avec qui le souvenir s'est formé : c'est Jarvis qui lit
+    ce bloc, et il s'y adresse à la deuxième personne. « avec toi » y désignait donc Jarvis
+    lui-même — vrai de tous ses souvenirs, donc sans information, et trompeur puisque la
+    règle porte sur l'écart entre cette personne et l'interlocuteur du tour. Le prompt
+    système dit déjà avec qui il parle ; un prénom en regard suffit à trancher.
+
+    Nommer n'expose rien de neuf : le prénom est déjà dans le texte du souvenir et dans
+    <profil_utilisateur>. Ce qui ne doit JAMAIS passer, c'est le code utilisateur, qui est
+    un secret d'authentification — d'où le repli sur un libellé générique plutôt que sur la
+    valeur brute de `concerne` quand elle ne correspond à personne de connu.
+
+    `intime` est l'autre moitié : rien dans la phrase ne dit que Jarvis l'a jugée privée, et
+    sans ce mot la consigne « ce que tu as jugé intime se tait par défaut » ne porte sur
+    rien de lisible.
+    """
+    qui = USER_CODES.get(s.get("concerne") or "") or get_prompt("SOUVENIR_INCONNU")
+    marques = [get_prompt("SOUVENIR_VECU_AVEC").format(qui=qui)]
+    if s.get("intime"):
+        marques.append(get_prompt("SOUVENIR_INTIME"))
+    return f"- ({', '.join(marques)}) {s['text']}"
+
+
 def build_dynamic_prefix(
     session_id: str,
     user_code: str,
@@ -168,7 +194,8 @@ def build_dynamic_prefix(
         # <etat_emotionnel_jarvis> — ce qui vient de lui.
         #
         # Aucun filtre sur `concerne` : les souvenirs sont communs, comme chez un humain.
-        # Ce qu'il en dit, et à qui, relève d'IDENTITY.
+        # Ce qu'il en dit, et à qui, relève d'IDENTITY — d'où le marqueur relatif posé par
+        # `_rendre_souvenir`, sans lequel la consigne porte sur une donnée absente.
         try:
             from memory import recall_self_memories
 
@@ -178,7 +205,7 @@ def build_dynamic_prefix(
             if souvenirs:
                 parts.append(
                     "<souvenirs_jarvis>\n"
-                    + "\n".join(f"- {s['text']}" for s in souvenirs)
+                    + "\n".join(_rendre_souvenir(s) for s in souvenirs)
                     + "\n</souvenirs_jarvis>"
                 )
         except Exception as exc:

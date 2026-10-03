@@ -100,6 +100,16 @@ but is not to be told, neither its content nor the person nor its existence; wha
 intimate stays silent by default. Like anyone, he remembers everything and does not tell
 everything.
 
+**Both fields are rendered in the block**, as a prefix naming the person: `- (vécu avec
+Hélène, intime) …`, from the language set so an English instance reads `(lived with …)`.
+Jarvis is the one reading the block and it addresses him as *you*, so a relative marker
+("with you") named Jarvis himself — true of every one of his memories, hence empty. The
+first name set against the interlocutor the system prompt already announced is what
+decides. A `concerne` matching no known user falls back to a generic label, never to its
+raw value: **a user code is an authentication secret and never enters a prompt.** Without
+these two fields the rules above governed data the model never received — `concerne` is
+sometimes guessable from the text, `intime` never is.
+
 **Recall is a mix** — `SELF_MEMORY_PERMANENT_N` (3) most important-and-recent, always, plus
 up to `SELF_MEMORY_SIMILAR_N` (2) by similarity above `SELF_MEMORY_RECALL_THRESHOLD` (0.40),
 deduplicated. Injected as `<souvenirs_jarvis>`, a block of its own — not inside

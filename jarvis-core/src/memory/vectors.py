@@ -338,7 +338,14 @@ def _socle_self_memories(n: int) -> list[dict]:
         return p.payload.get("importance", 0) * 0.6 + recence * 0.4
 
     pts.sort(key=_rang, reverse=True)
-    return [{"text": p.payload["text"]} for p in pts[:n]]
+    return [
+        {
+            "text": p.payload["text"],
+            "concerne": p.payload.get("concerne", ""),
+            "intime": bool(p.payload.get("intime")),
+        }
+        for p in pts[:n]
+    ]
 
 
 def recall_self_memories(n_socle: int, n_similaires: int, query: str = "") -> list[dict]:
@@ -348,11 +355,17 @@ def recall_self_memories(n_socle: int, n_similaires: int, query: str = "") -> li
     écrit en méta là où le message est concret. La part par similarité n'ajoute que de la
     variabilité, et son seuil est volontairement haut : ne rien ajouter vaut mieux
     qu'ajouter du hors-sujet.
+
+    Chaque souvenir rendu porte `concerne` et `intime` en plus de son texte. Ces deux
+    champs sont la CONDITION des règles d'IDENTITY — se référer à un souvenir devant celui
+    qui l'a vécu, taire ce qui a été jugé intime. Rendus sans eux, les deux règles portent
+    sur une information que le modèle doit deviner : le prénom se lit parfois dans le
+    texte, le caractère intime jamais. Les deux noms sont normalisés ici parce que les deux
+    sources ne les nomment pas pareil.
     """
     souvenirs = _socle_self_memories(n_socle)
     if query and n_similaires > 0:
-        # Dédup sur le texte : `search_memory` retire les champs internes avant de rendre,
-        # donc pas d'identifiant à comparer.
+        # Dédup sur le texte : les deux sources ne partagent pas d'identifiant comparable.
         vus = {s["text"] for s in souvenirs}
         for s in search_memory(
             SELF_MEMORY_CODE,
@@ -362,7 +375,11 @@ def recall_self_memories(n_socle: int, n_similaires: int, query: str = "") -> li
             seuil=SELF_MEMORY_RECALL_THRESHOLD,
         ):
             if s["text"] not in vus:
-                souvenirs.append(s)
+                souvenirs.append({
+                    "text": s["text"],
+                    "concerne": s.get("_concerne", ""),
+                    "intime": bool(s.get("_intime")),
+                })
                 if len(souvenirs) >= n_socle + n_similaires:
                     break
     return souvenirs
@@ -602,6 +619,10 @@ def search_memory(
                     "_mem_type": mem_type,
                     "_importance": payload.get("importance", 0),
                     "_status": payload.get("status", "current"),
+                    # Portés pour les souvenirs propres de Jarvis, absents des souvenirs
+                    # d'utilisateur : c'est le rendu du bloc qui décide quoi en faire.
+                    "_concerne": payload.get("concerne", ""),
+                    "_intime": bool(payload.get("intime")),
                 }
             )
         # cognitive ranking

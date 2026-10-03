@@ -3798,7 +3798,7 @@
       "version": "1.18.0"
     },
     {
-      "bom-ref": "sentence-transformers==5.4.1",
+      "bom-ref": "sentence-transformers==6.1.0",
       "description": "Embeddings, Retrieval, and Reranking",
       "externalReferences": [
         {
@@ -3816,14 +3816,14 @@
         {
           "license": {
             "acknowledgement": "declared",
-            "name": "License :: OSI Approved :: Apache Software License"
+            "id": "Apache-2.0"
           }
         }
       ],
       "name": "sentence-transformers",
-      "purl": "pkg:pypi/sentence-transformers@5.4.1",
+      "purl": "pkg:pypi/sentence-transformers@6.1.0",
       "type": "library",
-      "version": "5.4.1"
+      "version": "6.1.0"
     },
     {
       "bom-ref": "sentencepiece==0.2.2",
@@ -5557,12 +5557,13 @@
         "pytest==9.1.1",
         "scikit-learn==1.9.0",
         "scipy==1.18.0",
+        "tokenizers==0.22.2",
         "torch==2.13.0",
         "tqdm==4.70.0",
         "transformers==5.15.0",
         "typing_extensions==4.16.0"
       ],
-      "ref": "sentence-transformers==5.4.1"
+      "ref": "sentence-transformers==6.1.0"
     },
     {
       "dependsOn": [

@@ -190,3 +190,86 @@ class TestUpdateUserProjects:
     def test_une_date_illisible_ne_fait_pas_tomber_lecriture(self):
         out = self._ecrit([self._projet(status="done", last_update="pas-une-date")])
         assert len(out) == 1, "une date corrompue ne doit pas supprimer le projet"
+
+
+# ── Marquage des souvenirs propres de Jarvis ──────────────────────────────────
+
+class TestMarquageSouvenirs:
+    """Les deux champs qui conditionnent les règles d'IDENTITY doivent atteindre le prompt.
+
+    `concerne` dit avec qui le souvenir s'est formé, `intime` ce que Jarvis a jugé privé.
+    Calculés et stockés mais retirés au rendu, les deux consignes — se référer au souvenir
+    devant celui qui l'a vécu, taire ce qui est intime — portaient sur une information que
+    le modèle ne recevait pas. Le prénom se devine parfois dans le texte ; le caractère
+    intime, jamais.
+    """
+
+    def test_le_socle_conserve_les_deux_champs(self):
+        point = MagicMock()
+        point.payload = {"text": "un souvenir", "concerne": "ALICE1", "intime": True,
+                         "importance": 0.9, "timestamp": 0}
+        with patch.object(vectors, "get_qdrant") as q:
+            q.return_value.scroll.return_value = ([point], None)
+            rendu = vectors._socle_self_memories(1)
+        assert rendu == [{"text": "un souvenir", "concerne": "ALICE1", "intime": True}]
+
+    def test_la_part_par_similarite_est_normalisee(self):
+        """`search_memory` nomme ces champs `_concerne`/`_intime` — les deux sources
+        doivent rendre le même contrat."""
+        with patch.object(vectors, "_socle_self_memories", return_value=[]), \
+             patch.object(vectors, "search_memory", return_value=[
+                 {"text": "autre souvenir", "_concerne": "BOB2", "_intime": False}
+             ]):
+            rendu = vectors.recall_self_memories(0, 1, "une requête")
+        assert rendu == [{"text": "autre souvenir", "concerne": "BOB2", "intime": False}]
+
+    def test_le_marqueur_nomme_la_personne(self, monkeypatch):
+        """C'est Jarvis qui lit ce bloc, et il s'y tutoie : « avec toi » y désignait Jarvis
+        lui-même, vrai de tous ses souvenirs. Le prénom est la seule marque qui distingue."""
+        import pipeline
+
+        monkeypatch.setattr(pipeline, "USER_CODES", {"ALICE1": "Alice"})
+        ligne = pipeline._rendre_souvenir({"text": "X", "concerne": "ALICE1", "intime": False})
+        assert ligne.startswith("- (vécu avec Alice)")
+
+    def test_intime_ne_sajoute_que_si_marque(self, monkeypatch):
+        import pipeline
+
+        monkeypatch.setattr(pipeline, "USER_CODES", {"ALICE1": "Alice"})
+        base = {"text": "X", "concerne": "ALICE1"}
+        assert "intime" in pipeline._rendre_souvenir({**base, "intime": True})
+        assert "intime" not in pipeline._rendre_souvenir({**base, "intime": False})
+
+    def test_le_code_utilisateur_nentre_jamais_dans_le_prompt(self, monkeypatch):
+        """Le garde qui compte : un code utilisateur est un secret d'authentification. Un
+        `concerne` inconnu se replie sur un libellé générique, jamais sur sa valeur brute."""
+        import pipeline
+
+        monkeypatch.setattr(pipeline, "USER_CODES", {"ALICE1": "Alice"})
+        ligne = pipeline._rendre_souvenir(
+            {"text": "contenu", "concerne": "CODE_ORPHELIN", "intime": True}
+        )
+        assert "CODE_ORPHELIN" not in ligne
+        assert ligne.startswith("- (vécu avec quelqu'un du foyer, intime)")
+
+    def test_un_concerne_absent_ne_fait_pas_tomber_le_rendu(self, monkeypatch):
+        """Les souvenirs écrits avant l'ajout du champ n'en portent pas."""
+        import pipeline
+
+        monkeypatch.setattr(pipeline, "USER_CODES", {"ALICE1": "Alice"})
+        assert pipeline._rendre_souvenir({"text": "X"}).startswith("- (vécu avec")
+
+    def test_les_marqueurs_suivent_la_langue_de_linstance(self, monkeypatch):
+        """Ils viennent du jeu de langue : un contexte dans une autre langue que celle de
+        l'instance ramène les réponses vers cette langue."""
+        import pipeline
+
+        etiquettes = {"SOUVENIR_VECU_AVEC": "lived with {qui}",
+                      "SOUVENIR_INCONNU": "someone in the household",
+                      "SOUVENIR_INTIME": "private"}
+        monkeypatch.setattr(pipeline, "USER_CODES", {"ALICE1": "Alice"})
+        monkeypatch.setattr(pipeline, "get_prompt", lambda nom: etiquettes[nom])
+        ligne = pipeline._rendre_souvenir(
+            {"text": "X", "concerne": "ALICE1", "intime": True}
+        )
+        assert ligne.startswith("- (lived with Alice, private)")
