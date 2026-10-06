@@ -90,6 +90,13 @@ _BILAN = re.compile(r"(\d+)\s+(failed|errors?|passed)\b")
 # sur une erreur de syntaxe, pyflakes ajoute la ligne source et son curseur.
 _SIGNALEMENT = re.compile(r"^\S+:\d+:\d+: ")
 
+# Un nom que pyflakes ne sait pas résoudre. Traité à part du simple décompte, parce que ce
+# n'est pas un avertissement de degré mais de nature : un import inutilisé laisse le code
+# s'exécuter, un nom indéfini garantit une NameError au premier passage. Le compilateur ne
+# l'attrape pas — `compileall` valide la syntaxe, pas la résolution des noms — et la suite
+# unitaire ne le voit que si elle traverse la ligne fautive.
+_NOM_INDEFINI = re.compile(r"undefined name '([^']+)'")
+
 
 def _py(module: str, *args: str) -> str:
     """Commande d'un module Python de l'interpréteur de Jarvis.
@@ -283,6 +290,12 @@ def _nb_pyflakes(sortie: str) -> int:
     return sum(1 for ligne in sortie.splitlines() if _SIGNALEMENT.match(ligne))
 
 
+def _noms_indefinis(sortie: str) -> set[str]:
+    """Les noms que pyflakes dit indéfinis. Comparés d'un arbre à l'autre, et non comptés :
+    un patch n'a pas à répondre d'un nom indéfini qu'il a trouvé en arrivant."""
+    return set(_NOM_INDEFINI.findall(sortie))
+
+
 async def _pyflakes(task: dict, arbre: str) -> str:
     return await _lancer(
         task,
@@ -329,6 +342,7 @@ async def mesurer(task: dict, diff: str) -> dict:
     m["pyflakes_avant"] = _nb_pyflakes(avant)
     m["pyflakes_apres"] = _nb_pyflakes(apres)
     m["pyflakes_sortie"] = apres
+    m["noms_indefinis"] = sorted(_noms_indefinis(apres) - _noms_indefinis(avant))
 
     await _eprouver_le_test(task, workspace, neufs, m)
     _mesurer_les_constats(workspace, m)
@@ -450,6 +464,16 @@ def verdict(m: dict) -> tuple[str, list[str]]:
             "le test ajouté tombe sur une erreur (import, collecte ou fixture) et non sur "
             "une assertion, et rien ne le corrige — il démontre qu'il ne tourne pas, pas "
             "qu'un défaut existe"
+        )
+    if m.get("noms_indefinis"):
+        # Rejet, et non un simple motif ajouté au verdict : le reste du contrat ne peut pas
+        # voir ce défaut. `compileall` ne valide que la syntaxe, la suite unitaire ne lève
+        # la NameError que si elle traverse la ligne, et le test ajouté prouve la propriété
+        # visée — pas la survie du reste du module. Un patch qui supprime une constante en
+        # laissant ses usages passe donc rouge→vert, suite verte, et casse à l'exécution.
+        motifs.append(
+            "nom(s) indéfini(s) introduit(s) par le correctif : "
+            + ", ".join(m["noms_indefinis"])
         )
     if a_corrige and m["lignes_source"] > AUTOCODE_MAX_DIFF_LINES:
         motifs.append(

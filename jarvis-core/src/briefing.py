@@ -426,34 +426,61 @@ async def _assemble_with_llm(
         market=market_text,
     )
 
-    try:
-        content = await call_llm_async(
-            [
-                {
-                    "role": "system",
-                    "content": get_prompt("BRIEFING_SYSTEM").format(
-                        user_name=user_name
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            model=PRIMARY_MODEL,
-            api_url=PRIMARY_API_URL,
-            api_key=PRIMARY_API_KEY,
-            temperature=DEFAULT_TEMP,
-            max_tokens=MAX_TOKENS_BRIEFING,
-            json_response=True,
-            no_think=True,
-            timeout=llm_timeout(MAX_TOKENS_BRIEFING),
-        )
-        result = extract_llm_json(content)
-        return result.get("text", ""), result.get("html", "")
-    except Exception as exc:
-        logger.error("Briefing LLM assembly failed: %s: %s", type(exc).__name__, exc)
-        # Minimal fallback
-        fallback = f"Bonjour {user_name} ! Voici ton briefing du {date_str}.\n\n"
-        fallback += f"Agenda: {calendar_text}\n\nMétéo: {weather_text}"
-        return fallback, f"<p>{fallback}</p>"
+    # Une reprise, et une seule, sur un JSON illisible — même garde que la réflexion par
+    # utilisateur, pour la même raison et une de plus ici.
+    #
+    # Le briefing est le cas le plus exposé à la génération dégénérée : c'est une sortie
+    # STRUCTURÉE dont les champs portent de la PROSE longue. Or la famille répétition est
+    # écartée en mode JSON (voir `_setup_gen`), parce qu'elle pénalise les jetons que la
+    # grammaire impose de répéter. Le garde d'échantillonnage contre la boucle est donc
+    # absent précisément là où le contenu est le plus propice à boucler, et la boucle sature
+    # alors le plafond de jetons : le JSON reste inachevé et la sortie est inexploitable.
+    #
+    # Une seconde tentative suffit parce que la graine est retirée à chaque appel
+    # (`mx.random.seed` dans `_setup_gen`) : la trajectoire d'échantillonnage n'est pas
+    # celle qui vient d'échouer. Seul un `ValueError` est repris — un dépassement de délai
+    # ou une panne de transport se reproduirait, et coûterait une génération entière.
+    for tentative in range(2):
+        try:
+            content = await call_llm_async(
+                [
+                    {
+                        "role": "system",
+                        "content": get_prompt("BRIEFING_SYSTEM").format(
+                            user_name=user_name
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                model=PRIMARY_MODEL,
+                api_url=PRIMARY_API_URL,
+                api_key=PRIMARY_API_KEY,
+                temperature=DEFAULT_TEMP,
+                max_tokens=MAX_TOKENS_BRIEFING,
+                json_response=True,
+                no_think=True,
+                timeout=llm_timeout(MAX_TOKENS_BRIEFING),
+            )
+            result = extract_llm_json(content)
+            return result.get("text", ""), result.get("html", "")
+        except ValueError as exc:
+            if tentative == 0:
+                logger.warning(
+                    "Briefing JSON illisible pour %s, seconde tentative — %s",
+                    user_name, exc,
+                )
+                continue
+            logger.error("Briefing LLM assembly failed after retry: %s", exc)
+            break
+        except Exception as exc:
+            logger.error("Briefing LLM assembly failed: %s: %s", type(exc).__name__, exc)
+            break
+
+    # Repli : les deux sorties d'échec y mènent. Jamais la sortie dégénérée elle-même —
+    # agenda et météo bruts valent mieux qu'une salutation répétée quarante fois.
+    fallback = f"Bonjour {user_name} ! Voici ton briefing du {date_str}.\n\n"
+    fallback += f"Agenda: {calendar_text}\n\nMétéo: {weather_text}"
+    return fallback, f"<p>{fallback}</p>"
 
 
 # ── Main entry point ──────────────────────────────────────────────────────

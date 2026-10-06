@@ -1119,3 +1119,59 @@ def _faux_git():
     async def _git(*args):
         return 0, ""
     return _git
+
+
+class TestNomIndefini:
+    """Un nom indéfini introduit par le correctif est un REJET, pas un motif.
+
+    C'est le seul défaut que le reste du contrat ne peut pas voir : `compileall` ne valide
+    que la syntaxe, la suite unitaire ne lève la NameError que si elle traverse la ligne
+    fautive, et le test ajouté prouve la propriété visée — pas la survie du module. Un
+    patch qui supprime une constante en laissant ses usages passe donc rouge→vert, suite
+    verte, et casse à la première exécution.
+    """
+
+    def _mesure_parfaite(self, **extra):
+        """Une mesure qui vaut `corrigé` : rien à lui reprocher par ailleurs."""
+        m = {
+            "fichiers_proteges": [], "compile_ok": True, "vain": False,
+            "avant": mesure.ASSERTION, "apres": mesure.PASSE,
+            "tests_ajoutes": ["jarvis-core/tests/test_x.py"],
+            "sources_touchees": ["jarvis-core/src/x.py"],
+            "lignes_source": 10, "suite_ok": True,
+            "pyflakes_avant": 0, "pyflakes_apres": 0,
+            "constats_ecrits": [], "citations": [],
+        }
+        m.update(extra)
+        return m
+
+    def test_la_mesure_de_reference_vaut_corrige(self):
+        """Contrôle du banc : sans nom indéfini, cette mesure passe."""
+        assert mesure.verdict(self._mesure_parfaite())[0] == mesure.CORRIGE
+
+    def test_un_nom_indefini_fait_rejeter(self):
+        v, motifs = mesure.verdict(self._mesure_parfaite(noms_indefinis=["_JOURNAL"]))
+        assert v == mesure.REJETE
+        assert any("_JOURNAL" in m for m in motifs)
+
+    def test_une_hausse_de_signalements_sans_nom_indefini_ne_rejette_pas(self):
+        """Un import devenu inutile laisse le code s'exécuter : c'est un motif, pas un
+        refus. Sans cette distinction, le durcissement bloquerait des correctifs sains."""
+        v, motifs = mesure.verdict(
+            self._mesure_parfaite(pyflakes_avant=0, pyflakes_apres=2)
+        )
+        assert v == mesure.CORRIGE
+        assert any("pyflakes" in m for m in motifs)
+
+    def test_les_noms_sont_extraits_de_la_sortie_pyflakes(self):
+        sortie = (
+            "jarvis-core/src/a.py:99:34: undefined name '_JOURNAL'\n"
+            "jarvis-core/src/a.py:100:19: undefined name '_JOURNAL'\n"
+            "jarvis-core/src/b.py:3:1: 'os' imported but unused\n"
+        )
+        assert mesure._noms_indefinis(sortie) == {"_JOURNAL"}
+
+    def test_un_nom_deja_indefini_avant_nest_pas_imputé_au_correctif(self):
+        """Le patch répond de ce qu'il introduit, pas de ce qu'il a trouvé en arrivant."""
+        sortie = "jarvis-core/src/a.py:9:1: undefined name 'DEJA_CASSE'\n"
+        assert mesure._noms_indefinis(sortie) - mesure._noms_indefinis(sortie) == set()
