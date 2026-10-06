@@ -209,6 +209,7 @@ fires when a source actually has a critical.
 | `BRIEFING_TIME` | `07:30` | Briefing delivery time (HH:MM) |
 | `BRIEFING_TIMEZONE` | `Europe/Paris` | Timezone for scheduling |
 | `REFLECTION_INTERVAL_HOURS` | `6` | Hours between self-reflection cycles |
+| `NIGHTLY_CATCHUP_MAX_DAYS` | `3` | Missed nights replayed at startup. Without it a night with the machine off is lost for good: the scheduler does not replay a due time that passed while it was down, and the review only ever looks at yesterday. Bounded because each replayed day costs 5 LLM calls per active user |
 | `NIGHTLY_REVIEW_HOUR` | `23` | Hour of the nightly interaction review, in `BRIEFING_TIMEZONE`. It reads each user's own previous **local** day, which is complete whatever the hour — so the slot is chosen on load (5 LLM calls per user) and `AUTOCODE_HOUR` goes after it |
 | `CONV_ANALYSIS_INTERVAL_MINUTES` | `60` | Minutes between conversation-analysis runs |
 | `MAX_CHAIN_ITERATIONS` | `3` | Max actions per reflection phase |

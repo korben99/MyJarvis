@@ -1002,13 +1002,13 @@ async def chat(req: ChatRequest):
 
     if _embed_result is not None:
         # Fast-path: no LLM router — load prefix, history, memory in parallel.
-        # Opinions and tomorrow_suggestions are only useful for conversational intents.
-        _rich_intent = bool(
-            _embed_result.use_memory
-            or _embed_result.use_rag
-            or _embed_result.use_web
-            or _embed_result.use_self
-        )
+        #
+        # Les opinions et les suggestions sont injectées quel que soit l'intent, comme sur
+        # le chemin du routeur LLM. Les en priver sur les intents utilitaires n'était
+        # tenable que là : sur l'autre chemin, le préfixe se construit EN PARALLÈLE du
+        # routage, donc avant que l'intent existe. Le même message recevait ou non ses
+        # opinions selon le routeur qui l'avait tranché — un accident de performance,
+        # pas une règle.
         if _embed_result.use_small_talk:
             # Small talk (acquiescements purs) — pas de profil, pas de recall mémoire.
             # Seul l'historique de conversation suffit.
@@ -1030,9 +1030,7 @@ async def chat(req: ChatRequest):
                     user_code,
                     user_name or "",
                     req.voice_mode,
-                    _rich_intent,
-                    _rich_intent,  # include_opinions, include_suggestions
-                    _history_user_msg,
+                    user_message=_history_user_msg,
                 ),
                 asyncio.to_thread(
                     get_conversation, user_code, req.session_id, _HIST_FETCH_N
@@ -1129,9 +1127,18 @@ async def chat(req: ChatRequest):
     _use_timeout = PRIMARY_TIMEOUT
 
     # ── no_think for simple intents (memory/conversation) ──────────────────
-    # Complex intents (web, RAG, reasoning) keep chain-of-thought.
-    # Typical saving: ~4 s of TTFT on conversational exchanges.
-    _complex_intents = use_rag or use_web_auto or req.use_web or req.use_rag or _has_injected_doc
+    # Seuls RAG et document injecté gardent la réflexion d'office : un extrait de document
+    # arrive sans mise en forme et demande à être recomposé. Une recherche web, non — la
+    # majorité des tours web sont des restitutions (un prix, une date, une recette), où la
+    # réflexion ne fait que retarder une réponse déjà contenue dans les résultats.
+    #
+    # Ce qui distingue une restitution d'une synthèse n'est pas l'intent mais la DEMANDE
+    # (« compare », « ton avis », « fais-toi une conviction »), et c'est le drapeau de
+    # raisonnement qui la porte — motifs déterministes de l'embed_router, ou jugement du
+    # routeur LLM. Un intent ne peut pas trancher ça : il dit où chercher, pas quoi faire
+    # du résultat.
+    # Gain typique : ~4 s de TTFT sur un échange conversationnel.
+    _complex_intents = use_rag or req.use_rag or _has_injected_doc
     chat_no_think = (
         False if (llm_result and llm_result.use_reasoning) else not _complex_intents
     )

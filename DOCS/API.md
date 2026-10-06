@@ -133,6 +133,7 @@ skipped entirely, and most nights revise no introspection axis).
 | `cve_scan` | **04:30** | `cve.scan()` | none (SBOM + grype) | CVE cache read by `vitals` |
 | `autocode_nightly` | **02:00** (`AUTOCODE_HOUR`), off by default | `run_nightly_autocode()` | 2 (selection, report) + one per agent step | `AUTOCODE_DIR/<date>-<id>/` (one numbered artefact per phase — `1-constats.json`, `2-choix.json`, `3-patch.diff`, `4-mesure.json`, `4-sorties.txt`, `5-RAPPORT.md`, plus `revue.md` when a review wrote findings), Redis journal + cooldowns + the one patch in flight. **Never touches the working tree**: the agent writes in a throwaway `git worktree`. |
 | agent worker | queue-driven, not scheduled | `agent/worker.py` | per task step | Agent workspace, Redis task records |
+| `nightly_catchup` | **once, 3 min after boot** | `rattraper_revues_manquees()` | 5 per active user **per replayed day** | Replays the nightly review for the days between `jarvis:nightly_last` (no TTL) and yesterday, oldest first, capped at `NIGHTLY_CATCHUP_MAX_DAYS`. Writes exactly what the nightly writes. No marker yet → it only sets the starting point and replays nothing |
 | `agent_worker_watchdog` | **5 min** | `agent.surveiller()` | none | Nothing while the worker is alive. If its loop has died, restarts it and stacks an incident (`jarvis:incidents`, severity `alerte`, deduplicated 6 h) — a queue that has stopped draining is otherwise silent. No-op when `AGENT_ENABLED=false` |
 
 Two consequences worth knowing before changing anything:

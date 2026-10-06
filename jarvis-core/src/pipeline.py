@@ -135,8 +135,6 @@ def build_dynamic_prefix(
     user_code: str,
     user_name: str = "",
     voice_mode: bool = False,
-    include_opinions: bool = True,
-    include_suggestions: bool = True,
     user_message: str = "",
 ) -> tuple[str, dict]:
     """
@@ -147,9 +145,6 @@ def build_dynamic_prefix(
     Returns (prefix_string, self_mem) so the caller can pass self_mem to
     build_context() without triggering a second get_self_memory() Redis call.
 
-    include_opinions     — False for pure utility intents (weather/calendar/gmail/portfolio)
-                           to avoid ~200 tokens of irrelevant opinion context.
-    include_suggestions  — False for the same utility intents (tomorrow_suggestions).
     """
     tz = USER_TIMEZONES.get(user_code, "Europe/Paris")
     parts: list[str] = []
@@ -160,56 +155,59 @@ def build_dynamic_prefix(
         session_id,
         user_code,
         self_mem=self_mem,
-        include_suggestions=include_suggestions,
         user_message=user_message,
     )
     if memory_ctx:
         parts.append(f"<context>\n{memory_ctx}\n</context>")
 
-    if include_opinions:
-        # Sélection par proximité sémantique (memory.select_opinions), et AUCUNE opinion
-        # quand rien ne correspond. Deux mesures, sur 261 messages réels :
-        #
-        #   • le recouvrement lexical ne trouvait quelque chose que sur 20 % des tours,
-        #     l'embedding sur 28 %, et il attrape ce qui ne partage aucun mot ;
-        #   • le repli sur `opinions[-1:]`, qui couvrait les 80 % restants, est INERTE —
-        #     il ne détournait pas la réponse mais ne donnait pas non plus la « voix »
-        #     qu'il promettait. ~70 tokens par tour pour rien (eval_opinions.py).
-        #
-        # Sans message utilisateur (chemins utilitaires), on garde la récence : il n'y a
-        # rien contre quoi comparer.
-        opinions = self_mem.get("opinions", [])
-        if opinions:
-            opinions = (
-                select_opinions(opinions, user_message)
-                if user_message
-                else opinions[-OPINIONS_MAX_INJECTED:]
-            )
-        if opinions:
-            ops_lines = "\n".join(f"- {o['topic']} : {o['opinion']}" for o in opinions)
-            parts.append(f"<avis_jarvis>\n{ops_lines}\n</avis_jarvis>")
+    # Avis et souvenirs sont injectés à CHAQUE tour, quel que soit l'intent. Les couper
+    # sur les intents utilitaires revenait à servir une réponse dépersonnalisée dès que la
+    # question était pratique : ce bloc et le suivant sont ce qui distingue Jarvis d'un
+    # service de météo ou d'agenda, et ils ne coûtent que quelques centaines de jetons.
+    #
+    # Sélection par proximité sémantique (memory.select_opinions), et AUCUNE opinion
+    # quand rien ne correspond. Deux mesures, sur 261 messages réels :
+    #
+    #   • le recouvrement lexical ne trouvait quelque chose que sur 20 % des tours,
+    #     l'embedding sur 28 %, et il attrape ce qui ne partage aucun mot ;
+    #   • le repli sur `opinions[-1:]`, qui couvrait les 80 % restants, est INERTE —
+    #     il ne détournait pas la réponse mais ne donnait pas non plus la « voix »
+    #     qu'il promettait. ~70 tokens par tour pour rien (eval_opinions.py).
+    #
+    # Sans message utilisateur (chemins utilitaires), on garde la récence : il n'y a
+    # rien contre quoi comparer.
+    opinions = self_mem.get("opinions", [])
+    if opinions:
+        opinions = (
+            select_opinions(opinions, user_message)
+            if user_message
+            else opinions[-OPINIONS_MAX_INJECTED:]
+        )
+    if opinions:
+        ops_lines = "\n".join(f"- {o['topic']} : {o['opinion']}" for o in opinions)
+        parts.append(f"<avis_jarvis>\n{ops_lines}\n</avis_jarvis>")
 
-        # Souvenirs propres à Jarvis. Bloc distinct de <user_memories>, qui porte des faits
-        # SUR l'utilisateur : ceci est du vécu, et se range avec <avis_jarvis> et
-        # <etat_emotionnel_jarvis> — ce qui vient de lui.
-        #
-        # Aucun filtre sur `concerne` : les souvenirs sont communs, comme chez un humain.
-        # Ce qu'il en dit, et à qui, relève d'IDENTITY — d'où le marqueur relatif posé par
-        # `_rendre_souvenir`, sans lequel la consigne porte sur une donnée absente.
-        try:
-            from memory import recall_self_memories
+    # Souvenirs propres à Jarvis. Bloc distinct de <user_memories>, qui porte des faits
+    # SUR l'utilisateur : ceci est du vécu, et se range avec <avis_jarvis> et
+    # <etat_emotionnel_jarvis> — ce qui vient de lui.
+    #
+    # Aucun filtre sur `concerne` : les souvenirs sont communs, comme chez un humain.
+    # Ce qu'il en dit, et à qui, relève d'IDENTITY — d'où le marqueur relatif posé par
+    # `_rendre_souvenir`, sans lequel la consigne porte sur une donnée absente.
+    try:
+        from memory import recall_self_memories
 
-            souvenirs = recall_self_memories(
-                SELF_MEMORY_PERMANENT_N, SELF_MEMORY_SIMILAR_N, user_message
+        souvenirs = recall_self_memories(
+            SELF_MEMORY_PERMANENT_N, SELF_MEMORY_SIMILAR_N, user_message
+        )
+        if souvenirs:
+            parts.append(
+                "<souvenirs_jarvis>\n"
+                + "\n".join(_rendre_souvenir(s) for s in souvenirs)
+                + "\n</souvenirs_jarvis>"
             )
-            if souvenirs:
-                parts.append(
-                    "<souvenirs_jarvis>\n"
-                    + "\n".join(_rendre_souvenir(s) for s in souvenirs)
-                    + "\n</souvenirs_jarvis>"
-                )
-        except Exception as exc:
-            logger.debug("rappel des souvenirs propres ignoré (%s)", exc)
+    except Exception as exc:
+        logger.debug("rappel des souvenirs propres ignoré (%s)", exc)
 
     if voice_mode:
         parts.append(get_prompt("VOICE_SUFFIX").strip())

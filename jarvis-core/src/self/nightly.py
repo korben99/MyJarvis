@@ -13,7 +13,7 @@ Module indépendant : ni la réflexion ni les actions ne l'appellent (planifié 
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 import pytz
 from config import (
@@ -24,6 +24,7 @@ from config import (
     INTROSPECTION_AXES,
     INTROSPECTION_LOG_MAX_ENTRIES,
     MAX_TOKENS_COMPACT,
+    NIGHTLY_CATCHUP_MAX_DAYS,
     REASONING_API_KEY,
     REASONING_API_URL,
     REASONING_MODEL,
@@ -372,6 +373,11 @@ async def _nightly_cleaning_user(
 # un appel LLM par utilisateur et par nuit pour un profil qui n'a pas bougé.
 _NARRATIF_SEUIL_REGEN = 2 * 86400
 
+# Dernière journée relue. Sans expiration, à la différence du verrou par utilisateur :
+# celui-ci garantit l'idempotence dans la journée, celui-là dit au démarrage suivant ce
+# qui a été manqué — deux rôles, deux durées de vie.
+_MARQUEUR_DERNIERE_REVUE = "jarvis:nightly_last"
+
 
 async def _entretien_nocturne(now: datetime, review_date: str) -> None:
     """Entretien de la mémoire — pour TOUS les utilisateurs, qu'ils aient parlé ou non.
@@ -474,6 +480,81 @@ async def run_nightly_interaction_review() -> None:
         await _revue_nocturne()
 
 
+async def rattraper_revues_manquees() -> int:
+    """Au démarrage : rejoue les revues des jours où rien ne tournait. Rend leur nombre.
+
+    La revue se déclenche sur une horloge murale, et APScheduler ne rejoue pas une
+    échéance passée pendant l'arrêt : il recalcule la suivante. Une nuit où la machine est
+    éteinte est donc perdue — définitivement, puisque la revue ne regarde que la veille et
+    que rien ne vient réclamer les jours antérieurs. Sur une machine qui s'éteint la nuit,
+    la moitié « la nuit apprend » ne tourne jamais.
+
+    Même idiome que `requeue_interrupted` et `purger_orphelins` : ce qu'une interruption
+    laisse derrière elle se répare au boot, pas à l'échéance suivante.
+
+    Le rattrapage est BORNÉ. Au retour d'une longue coupure, rejouer chaque jour manqué
+    lancerait autant de cycles de cinq appels LLM par utilisateur actif, tous en priorité
+    chat, au moment précis où quelqu'un vient de rallumer la machine pour s'en servir. Les
+    jours au-delà de la borne sont abandonnés et journalisés : les perdre est déjà le
+    comportement actuel, les rejouer tous serait un nouveau problème.
+    """
+    tz = pytz.timezone(BRIEFING_TIMEZONE)
+    veille = (datetime.now(tz) - timedelta(days=1)).date()
+    try:
+        marque = get_redis().get(_MARQUEUR_DERNIERE_REVUE)
+    except Exception as exc:
+        logger.warning("Rattrapage: marqueur illisible (%s) — abandon", exc)
+        return 0
+    if not marque:
+        # Premier démarrage après l'ajout du marqueur : on ne sait pas ce qui a été fait,
+        # et supposer le pire rejouerait la borne entière sans raison. On se contente de
+        # poser le point de départ.
+        try:
+            get_redis().set(_MARQUEUR_DERNIERE_REVUE, veille.isoformat())
+        except Exception:
+            pass
+        logger.info("Rattrapage: aucun marqueur — point de départ posé au %s", veille)
+        return 0
+
+    try:
+        dernier = datetime.strptime(
+            marque.decode() if isinstance(marque, bytes) else marque, "%Y-%m-%d"
+        ).date()
+    except ValueError:
+        logger.warning("Rattrapage: marqueur illisible (%r) — abandon", marque)
+        return 0
+
+    manques = [
+        dernier + timedelta(days=i) for i in range(1, (veille - dernier).days + 1)
+    ]
+    if not manques:
+        return 0
+    if len(manques) > NIGHTLY_CATCHUP_MAX_DAYS:
+        logger.warning(
+            "Rattrapage: %d jours manqués, seuls les %d derniers sont rejoués "
+            "(du %s au %s abandonnés)",
+            len(manques), NIGHTLY_CATCHUP_MAX_DAYS,
+            manques[0], manques[-NIGHTLY_CATCHUP_MAX_DAYS - 1],
+        )
+        manques = manques[-NIGHTLY_CATCHUP_MAX_DAYS:]
+
+    for jour in manques:
+        # Midi le LENDEMAIN du jour visé : `_fenetre_veille` en déduit ce jour-là, et midi
+        # existe dans tous les fuseaux, y compris ceux qui basculent l'heure à minuit.
+        ancre = tz.localize(datetime.combine(jour + timedelta(days=1), time(12, 0)))
+        logger.info("Rattrapage: revue du %s", jour)
+        try:
+            with journal_de_cycle(_NIGHTLY_PROMPTS_LOG_PATH):
+                await _revue_nocturne(ancre)
+        except Exception as exc:
+            logger.error(
+                "Rattrapage: revue du %s en échec (%s)", jour, type(exc).__name__,
+                exc_info=True,
+            )
+            return 0
+    return len(manques)
+
+
 def _fenetre_veille(tz, maintenant: datetime | None = None) -> tuple[str, float, float]:
     """La veille dans `tz` : sa date, et les bornes epoch de cette journée locale.
 
@@ -498,9 +579,14 @@ def _fenetre_veille(tz, maintenant: datetime | None = None) -> tuple[str, float,
     return veille.strftime("%Y-%m-%d"), debut.timestamp(), fin.timestamp()
 
 
-async def _revue_nocturne() -> None:
+async def _revue_nocturne(ancre: datetime | None = None) -> None:
     """Corps de la revue. Séparé pour que TOUT ce qu'elle appelle — y compris la curation
-    et le narratif de profil, qui vivent dans memory/ — écrive dans nightly-prompts.log."""
+    et le narratif de profil, qui vivent dans memory/ — écrive dans nightly-prompts.log.
+
+    `ancre` déplace le « maintenant » de référence, donc la journée relue : c'est par là
+    que `rattraper_revues_manquees` rejoue un jour passé, sans dupliquer le découpage de
+    fenêtre ni la boucle. Par défaut, l'heure courante — le cycle planifié ne change pas.
+    """
     logger.info("=== Nightly interaction review starting ===")
     r = get_redis()
     # La journée de JARVIS, dans le fuseau de l'instance : elle date son introspection et
@@ -511,8 +597,8 @@ async def _revue_nocturne() -> None:
     # mensuelle sur `now.day == 1` : en UTC, ce 1er apparaît à un instant qui n'est pas
     # minuit local, et une revue placée juste après minuit ne le voit jamais passer.
     tz_instance = pytz.timezone(BRIEFING_TIMEZONE)
-    now = datetime.now(tz_instance)
-    review_date, _, _ = _fenetre_veille(tz_instance)
+    now = ancre.astimezone(tz_instance) if ancre else datetime.now(tz_instance)
+    review_date, _, _ = _fenetre_veille(tz_instance, ancre)
 
     toutes_conversations: list[dict] = []
 
@@ -520,7 +606,7 @@ async def _revue_nocturne() -> None:
         # Sa veille, dans SON fuseau. Le verrou porte la même date : deux utilisateurs de
         # part et d'autre du globe ne relisent pas le même jour, et un verrou commun en
         # priverait un des deux.
-        date_user, debut_ts, fin_ts = _fenetre_veille(get_user_tz(user_code))
+        date_user, debut_ts, fin_ts = _fenetre_veille(get_user_tz(user_code), ancre)
         lock_key = f"jarvis:{user_code}:nightly_review:{date_user}"
         if not r.set(lock_key, "1", nx=True, ex=90000):  # 25h TTL
             logger.info(
@@ -751,5 +837,14 @@ async def _revue_nocturne() -> None:
         logger.info("Nightly: entretien des opinions — %s", resultat)
     except Exception as exc:
         logger.warning("Nightly: purge des opinions échouée (%s)", type(exc).__name__)
+
+    # Marqueur de la dernière journée relue, sans expiration : c'est lui qui permet au
+    # démarrage suivant de savoir ce qui a été manqué. Le verrou par utilisateur ne peut
+    # pas servir à ça — il expire en 25 h, soit exactement la durée au-delà de laquelle
+    # l'information devient utile.
+    try:
+        get_redis().set(_MARQUEUR_DERNIERE_REVUE, review_date)
+    except Exception as exc:
+        logger.warning("Nightly: marqueur de dernière revue non posé (%s)", exc)
 
     logger.info("=== Nightly interaction review complete ===")

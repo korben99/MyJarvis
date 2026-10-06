@@ -131,7 +131,6 @@ def build_memory_context(
     session_id: str,
     user_code: str,
     self_mem: dict | None = None,
-    include_suggestions: bool = True,
     user_message: str = "",
 ) -> str:
     """Build a memory context string to inject into the system prompt.
@@ -139,8 +138,6 @@ def build_memory_context(
     Pass an already-loaded *self_mem* dict to avoid a redundant JSON read when
     the caller (build_system_prompt) has already called get_self_memory().
 
-    include_suggestions — set False for pure utility intents (weather/calendar/gmail)
-                          to skip the SUJETS À ABORDER section (~50 tokens saved).
     user_message        — when provided, profile keys are filtered to the most
                           relevant ones (keyword overlap scoring). Always-inject
                           keys (location, employer…) are kept regardless of score.
@@ -302,18 +299,18 @@ def build_memory_context(
             "<frise_chronologique>\n" + "\n".join(plines) + "\n</frise_chronologique>"
         )
 
-    # Tomorrow suggestions — written by nightly review, consumed today.
-    # Skipped for pure utility intents (weather/calendar/gmail) — irrelevant noise.
-    if include_suggestions:
-        try:
-            suggestions = json.loads(_sugg_raw) if _sugg_raw else []
-        except Exception:
-            suggestions = []
-        if suggestions:
-            plines = [f"- {s}" for s in suggestions]
-            parts.append(
-                "<sujets_a_aborder>\n" + "\n".join(plines) + "\n</sujets_a_aborder>"
-            )
+    # Tomorrow suggestions — written by nightly review, consumed today. Injectées quel que
+    # soit l'intent : une relance que la nuit a préparée n'a pas de raison de disparaître
+    # parce que la question du moment portait sur la météo.
+    try:
+        suggestions = json.loads(_sugg_raw) if _sugg_raw else []
+    except Exception:
+        suggestions = []
+    if suggestions:
+        plines = [f"- {s}" for s in suggestions]
+        parts.append(
+            "<sujets_a_aborder>\n" + "\n".join(plines) + "\n</sujets_a_aborder>"
+        )
 
     # User relation — always injected so every conversation has a tonal directive.
     # self_mem is already loaded at the top of this function (no extra I/O).

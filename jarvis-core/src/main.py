@@ -80,7 +80,11 @@ from routes.memory_routes import router as memory_router
 from routes.portfolio import router as portfolio_router
 from routes.proxy import router as proxy_router
 from routes.self_routes import router as self_router
-from self import run_nightly_interaction_review, run_self_reflection
+from self import (
+    rattraper_revues_manquees,
+    run_nightly_interaction_review,
+    run_self_reflection,
+)
 from trading import run_trade_check
 from web_search import search_web
 
@@ -178,6 +182,17 @@ async def lifespan(app: FastAPI):
             minute=0,
             id="nightly_interaction_review",
         )
+        # Rattrapage des nuits manquées. Passé par le planificateur plutôt qu'attendu dans
+        # le lifespan : un jour rejoué, c'est cinq appels LLM par utilisateur actif, et
+        # l'API ne doit pas attendre ça pour accepter sa première requête. Le délai laisse
+        # le modèle finir de charger.
+        scheduler.add_job(
+            rattraper_revues_manquees,
+            trigger="date",
+            run_date=datetime.now(tz) + timedelta(minutes=3),
+            id="nightly_catchup",
+        )
+
         scheduler.add_job(
             analyse_recent_conversations,
             trigger="interval",

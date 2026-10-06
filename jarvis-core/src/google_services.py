@@ -48,6 +48,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from helpers import call_llm_async, extract_llm_json, get_logger, get_redis
+from llm.lexique import CALENDAR_WRITE_RE
 
 logger = get_logger("jarvis-google")
 
@@ -575,37 +576,15 @@ def send_gmail_message(
 #  CALENDAR WRITE — INTENT + EXTRACTION
 # ══════════════════════════════════════════════════
 
-_CALENDAR_WRITE_KEYWORDS = (
-    # crée
-    "crée un rendez-vous",
-    "crée un rdv",
-    "crée une réunion",
-    # ajoute
-    "ajoutes un rendez-vous",
-    "ajoutes un rendez vous",
-    "ajoutes un rdv",
-    "ajoutes dans mon agenda",
-    "ajoutes a mon agenda",
-    "ajoutes à mon agenda",
-    "ajoutes une réunion",
-    "ajoute un rendez-vous",
-    "ajoute un rendez vous",
-    "ajoute un rdv",
-    "ajoute dans mon agenda",
-    "ajoute a mon agenda",
-    "ajoute à mon agenda",
-    "ajoute une réunion",
-    # planifie
-    "planifie une réunion",
-    # mets
-    "mets un rdv",
-    "mets un rendez-vous",
-)
-
-
 def is_calendar_write(message: str) -> bool:
-    msg = message.lower()
-    return any(kw in msg for kw in _CALENDAR_WRITE_KEYWORDS)
+    """Vrai si le message DEMANDE d'écrire au calendrier.
+
+    Le motif vit dans le lexique de langue, comme tout ce qui reconnaît la demande de
+    l'utilisateur : une liste tenue ici n'existait qu'en français, alors que cette fonction
+    est appelée quelle que soit `JARVIS_LANG` — l'écriture au calendrier était donc
+    injoignable sur une instance anglaise.
+    """
+    return bool(CALENDAR_WRITE_RE.search(message))
 
 
 # Regex that matches leading command phrases so they can be stripped from the title.

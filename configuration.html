@@ -267,6 +267,8 @@ const CHAMPS = [
 ]],
 ["Réflexion autonome", [
   {n:"REFLECTION_INTERVAL_HOURS", d:"6", t:"number"},
+  {n:"NIGHTLY_CATCHUP_MAX_DAYS", d:"3", t:"number",
+   a:"Nuits manquées rejouées au démarrage. Sans ça, une nuit où la machine est éteinte est perdue : le planificateur ne rejoue pas une échéance passée et la revue ne regarde que la veille. Borné — un jour rejoué coûte cinq appels LLM par utilisateur actif."},
   {n:"NIGHTLY_REVIEW_HOUR", d:"23", t:"number",
    a:"Heure de la revue nocturne, dans le fuseau de BRIEFING_TIMEZONE. Elle relit la veille locale de chaque utilisateur : toute heure convient, le créneau se choisit sur la charge GPU. AUTOCODE_HOUR se place après elle."},
   {n:"CONV_ANALYSIS_INTERVAL_MINUTES", d:"60", t:"number"},

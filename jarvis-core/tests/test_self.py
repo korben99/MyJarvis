@@ -12,6 +12,7 @@ demande. C'est exactement la classe d'écart qui se voit en production sous form
 raisonnement payé pour rien, et jamais dans un journal.
 """
 
+import asyncio
 from datetime import date, datetime, time, timedelta
 
 import pytest
@@ -245,3 +246,87 @@ class TestFenetreVeille:
             assert rendu == jour.isoformat()
             assert debut == pytest.approx(fin_precedente + 0.000001, abs=1e-6), jour
             fin_precedente = fin
+
+
+class TestRattrapageDesRevues:
+    """Les nuits manquées se rejouent au démarrage, et pas toutes.
+
+    APScheduler ne rejoue pas une échéance passée pendant l'arrêt. Comme la revue ne
+    regarde que la veille, une nuit sans machine allumée est perdue définitivement. Le
+    rattrapage répare ça ; la borne empêche qu'un retour de longue coupure ne déclenche
+    dix cycles LLM au moment où quelqu'un rallume la machine pour s'en servir.
+    """
+
+    @pytest.fixture
+    def banc(self, monkeypatch):
+        """Redis en mémoire + revue simulée : on teste la DÉCISION, jamais le cycle."""
+        from self import nightly
+
+        etat = {"marque": None, "jours": []}
+
+        class _R:
+            def get(self, cle):
+                return etat["marque"]
+
+            def set(self, cle, val):
+                etat["marque"] = val
+
+        async def _fausse_revue(ancre=None):
+            etat["jours"].append(nightly._fenetre_veille(
+                pytz.timezone("Europe/Paris"), ancre)[0])
+
+        monkeypatch.setattr(nightly, "get_redis", lambda: _R())
+        monkeypatch.setattr(nightly, "_revue_nocturne", _fausse_revue)
+        return nightly, etat
+
+    def _veille(self):
+        tz = pytz.timezone("Europe/Paris")
+        return (datetime.now(tz) - timedelta(days=1)).date()
+
+    def test_sans_marqueur_on_pose_le_point_de_depart(self, banc):
+        """Premier démarrage : on ne sait pas ce qui a été fait, et supposer le pire
+        rejouerait la borne entière sans raison."""
+        nightly, etat = banc
+        assert asyncio.run(nightly.rattraper_revues_manquees()) == 0
+        assert etat["marque"] == self._veille().isoformat()
+        assert etat["jours"] == []
+
+    def test_a_jour_rien_a_rejouer(self, banc):
+        nightly, etat = banc
+        etat["marque"] = self._veille().isoformat()
+        assert asyncio.run(nightly.rattraper_revues_manquees()) == 0
+        assert etat["jours"] == []
+
+    def test_les_jours_manques_sont_rejoues_du_plus_ancien_au_plus_recent(self, banc):
+        nightly, etat = banc
+        etat["marque"] = (self._veille() - timedelta(days=2)).isoformat()
+        assert asyncio.run(nightly.rattraper_revues_manquees()) == 2
+        attendu = [(self._veille() - timedelta(days=1)).isoformat(),
+                   self._veille().isoformat()]
+        assert etat["jours"] == attendu
+
+    def test_le_rattrapage_est_borne(self, banc):
+        """Au retour d'une longue coupure, seuls les derniers jours sont repris."""
+        nightly, etat = banc
+        etat["marque"] = (self._veille() - timedelta(days=30)).isoformat()
+        n = asyncio.run(nightly.rattraper_revues_manquees())
+        assert n == nightly.NIGHTLY_CATCHUP_MAX_DAYS
+        assert etat["jours"][-1] == self._veille().isoformat()
+        assert len(etat["jours"]) == nightly.NIGHTLY_CATCHUP_MAX_DAYS
+
+    def test_un_marqueur_illisible_nempeche_pas_le_demarrage(self, banc):
+        nightly, etat = banc
+        etat["marque"] = "pas-une-date"
+        assert asyncio.run(nightly.rattraper_revues_manquees()) == 0
+        assert etat["jours"] == []
+
+    def test_une_revue_en_echec_arrete_le_rattrapage(self, banc, monkeypatch):
+        """Sans ça, un cycle qui échoue entraînerait les suivants dans la même panne."""
+        nightly, etat = banc
+
+        async def _tombe(ancre=None):
+            raise RuntimeError("cycle en échec")
+
+        monkeypatch.setattr(nightly, "_revue_nocturne", _tombe)
+        etat["marque"] = (self._veille() - timedelta(days=2)).isoformat()
+        assert asyncio.run(nightly.rattraper_revues_manquees()) == 0

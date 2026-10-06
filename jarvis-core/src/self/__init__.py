@@ -23,7 +23,7 @@ from memory import get_self_memory  # re-exporté tel quel (historiquement expos
 from .actions import generate_proactive_push
 from .context import gather_global_context, gather_user_context
 from .engine import run_self_reflection
-from .nightly import run_nightly_interaction_review
+from .nightly import rattraper_revues_manquees, run_nightly_interaction_review
 from .proposals import (
     approve_proposal,
     handle_proposal_command,
@@ -56,6 +56,7 @@ __all__ = [
     "generate_proactive_push",
     # nightly
     "run_nightly_interaction_review",
+    "rattraper_revues_manquees",
     # engine
     "run_self_reflection",
 ]

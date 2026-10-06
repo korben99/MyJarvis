@@ -247,8 +247,35 @@ _REASON_EXACT = {
     "debug complet",
 }
 
+# Écriture au calendrier : un VERBE d'ordre, puis l'objet, à quelques mots de distance.
+#
+# La distance est le point. Un test de sous-chaîne contiguë manque tout ce qui s'intercale
+# — un pronom (« mets-MOI un rendez-vous »), un titre entre guillemets (« ajoute "X" à mon
+# agenda ») — et la demande repart alors en conversation ordinaire : Jarvis répond au lieu
+# de proposer l'événement.
+#
+# Le verbe est obligatoire, et c'est l'autre moitié du garde-fou : ce motif est évalué sur
+# CHAQUE message avant tout routage, donc reconnaître le seul nom détournerait une simple
+# affirmation (« j'ai un rendez-vous demain ») vers une création d'événement.
+_CALENDAR_WRITE_RE = re.compile(
+    r"\b(?:ajoute|ajoutes|rajoute|cr[ée]e|cr[ée]es|mets|planifie|programme|cale|bloque"
+    r"|inscris|r[ée]serve)\b"
+    r"(?:\W+\w+){0,8}?\W+"
+    r"\b(?:rendez-?\s?vous|rdv|r[ée]union|agenda|calendrier|cr[ée]neau|[ée]v[ée]nement)\b",
+    re.IGNORECASE,
+)
+
 _REASON_REGEX = re.compile(
-    r"\braisonne\b|\bréfléchis\b|\bétape par étape\b|\bpas à pas\b|\ben profondeur\b",
+    # Première moitié : l'utilisateur DEMANDE de réfléchir.
+    r"\braisonne\b|\bréfléchis\b|\bétape par étape\b|\bpas à pas\b|\ben profondeur\b"
+    # Seconde moitié : il ne le demande pas, mais la nature de la demande l'exige — une
+    # comparaison ou un avis se construit, là où une question factuelle se restitue. Sans
+    # ces motifs, la réflexion ne s'activait que sur ordre explicite ou par intent, et une
+    # demande d'analyse arrivant en `memory` n'en recevait aucune.
+    r"|\bcompare[rz]?\b|\bcomparaison\b|\bpar rapport à\b|\bdifférences? entre\b"
+    r"|\bqu'en penses?-tu\b|\bce que tu en penses\b|\bton avis\b|\bton opinion\b"
+    r"|\bfais-toi une conviction\b|\bta conviction\b|\bavantages? et inconvénients?\b"
+    r"|\bvaut-il (?:le coup|mieux)\b|\blequel (?:choisir|prendre)\b|\bpour et contre\b",
     re.IGNORECASE,
 )
 

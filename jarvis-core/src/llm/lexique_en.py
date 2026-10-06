@@ -228,8 +228,32 @@ _REASON_EXACT = {
     "full debug",
 }
 
+# Calendar write: an ORDERING VERB, then the object, a few words apart.
+#
+# The distance is the point. A contiguous-substring test misses anything inserted between
+# the two — a pronoun, a quoted title ("add \"X\" to my calendar") — and the request then
+# falls through to ordinary conversation: Jarvis answers instead of proposing the event.
+#
+# The verb is mandatory, and that is the other half of the guard: this pattern runs on
+# EVERY message before any routing, so matching the noun alone would divert a plain
+# statement ("I have a meeting tomorrow") into creating an event.
+_CALENDAR_WRITE_RE = re.compile(
+    r"\b(?:add|create|schedule|book|put|set|pencil|block)\b"
+    r"(?:\W+\w+){0,8}?\W+"
+    r"\b(?:appointment|meeting|event|calendar|diary|slot)\b",
+    re.IGNORECASE,
+)
+
 _REASON_REGEX = re.compile(
-    r"\breason\b|\bthink (?:it )?through\b|\bstep by step\b|\bin depth\b|\bin-depth\b",
+    # First half: the user ASKS for thinking.
+    r"\breason\b|\bthink (?:it )?through\b|\bstep by step\b|\bin depth\b|\bin-depth\b"
+    # Second half: they do not ask, but the nature of the request demands it — a
+    # comparison or an opinion is built, where a factual question is merely retrieved.
+    # Without these, thinking only fired on an explicit order or on the intent, and a
+    # request for analysis landing in `memory` got none.
+    r"|\bcompare[sd]?\b|\bcomparison\b|\bcompared to\b|\bdifferences? between\b"
+    r"|\bwhat do you think\b|\byour (?:take|opinion|view)\b|\bthoughts on\b"
+    r"|\bmake up your mind\b|\bpros and cons\b|\bworth it\b|\bwhich (?:one )?should i\b",
     re.IGNORECASE,
 )
 

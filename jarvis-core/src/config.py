@@ -349,6 +349,12 @@ CONV_ANALYSIS_INTERVAL_MINUTES = int(os.getenv("CONV_ANALYSIS_INTERVAL_MINUTES",
 # affaire de charge — cinq appels LLM par utilisateur en priorité chat, donc un créneau sans
 # trafic. AUTOCODE_HOUR se place après elle, et déplacer l'une sans l'autre les superpose.
 NIGHTLY_REVIEW_HOUR = int(os.getenv("NIGHTLY_REVIEW_HOUR", "23"))
+
+# Jours manqués rejoués au démarrage. APScheduler ne rejoue pas une échéance passée
+# pendant l'arrêt : sans rattrapage, une nuit sans machine allumée est perdue, et la revue
+# ne regarde que la veille. La borne existe parce que chaque jour rejoué coûte cinq appels
+# LLM par utilisateur actif, en priorité chat, juste après un rallumage.
+NIGHTLY_CATCHUP_MAX_DAYS = int(os.getenv("NIGHTLY_CATCHUP_MAX_DAYS", "3"))
 MAX_CHAIN_ITERATIONS = int(
     os.getenv("MAX_CHAIN_ITERATIONS", "3")
 )  # max actions per reflection cycle
