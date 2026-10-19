@@ -444,6 +444,13 @@ async def _web_search(task: dict, args: dict) -> str:
         url = r.get("url") or ""
         body = (r.get("body") or "").strip()
         date = f" ({r['date']})" if r.get("date") else ""
+        # Une URL rendue par la recherche est une source CONSULTÉE : son titre et son
+        # extrait entrent dans le contexte, et c'est souvent d'eux seuls qu'un livrable est
+        # rédigé — sans ouvrir la page. Ne noter que `fetch_url` laissait donc une revue de
+        # presse entièrement sourcée passer pour un texte sans source, et privait d'une
+        # trace de ce qui a déjà été vu.
+        if url:
+            _noter_source(task, url)
         lines.append(f"### {title}{date}\n{url}\n{body}")
     return _truncate("\n\n".join(lines))
 

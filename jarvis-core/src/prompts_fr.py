@@ -1178,6 +1178,20 @@ RÈGLE OBLIGATOIRE pour les doublons :
   étape 2 — liste la clé à supprimer dans 'keys_to_delete'
   En cas de doute sur laquelle garder, préfère la plus récente (date dans le profil).
   Ne jamais mettre les DEUX clés du même concept dans 'keys_to_delete'.
+  La valeur consolidée REPREND les éléments chiffrés et datés des deux clés — un montant,
+  une échéance, une posologie. La suppression qui suit est définitive, et une reformulation
+  qui résume perd exactement ces précisions-là.
+  Elle ne cite jamais un nom de clé : cette valeur est lue dans le contexte de chaque
+  échange, où un nom de clé ne désigne plus rien.
+
+CLÉ QUI CONTREDIT LE PROFIL STABLE :
+  Le profil stable est écrit à la main : il fait foi. Une clé Redis qui le contredit sur le
+  même objet est une erreur d'extraction, pas une mise à jour — corrige-la dans 'updates'
+  pour la rendre compatible, ou supprime-la si rien n'en reste de vrai.
+  Exemple : le profil stable dit « habitation : maison à X » et une clé Redis annonce
+  l'ACHAT d'une maison à X — le lieu de vie est déjà acquis, la clé décrit donc autre chose
+  ou se trompe. Ne jamais laisser les deux coexister : la clé fausse sera reprise dans le
+  portrait narratif, où elle cessera de ressembler à un fait appris.
 
 ATTENTION — profil stable vs profil Redis :
   Le profil stable couvre des faits GÉNÉRAUX (famille, travail, intérêts globaux).
@@ -1544,7 +1558,30 @@ un compte rendu honnête vaut mieux qu'un constat fabriqué pour avoir quelque c
 Français, alphabet latin.
 """
 
+# Rappel du tour précédent, ajouté à l'objectif d'une tâche récurrente. Il est posé dans
+# l'objectif, donc dans le premier message : le compacteur ne l'élide jamais et le cache de
+# préfixe le rend quasi gratuit dès le deuxième pas. Un outil qui irait le chercher
+# coûterait un pas, arriverait après le plan, et serait le premier candidat à l'élision.
+# Le sommaire et les domaines plutôt que le document entier : ce dernier occuperait
+# durablement le contexte, et une fois le plafond atteint le compacteur sacrifie les
+# résultats d'outil — donc la matière fraîche, pour conserver le vieux texte.
+AGENT_RECURRENT_REMINDER = """
+
+TOUR PRÉCÉDENT DE CETTE SÉRIE, le {date}. Ne le refais pas.
+
+Déjà traité :
+{titres}
+
+Sources déjà consultées :
+{domaines}
+
+Revenir sur un de ces points ne vaut que s'il a changé depuis, et c'est le changement \
+qu'il faut rapporter, pas le point. Une même source peut porter un élément neuf : c'est \
+l'élément qui doit être nouveau, pas la source."""
+
 AGENT_OBJECTIVE = """\
+Date du jour : {date}.
+
 OBJECTIF : {objective}
 
 [pas 1/{max_steps}] Premier tour : pose ton plan avec plan(steps=[...]). \

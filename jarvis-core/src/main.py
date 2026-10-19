@@ -27,6 +27,9 @@ import pytz
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import (
+    AGENT_ENABLED,
+    AGENT_RECURRENT_DAY,
+    AGENT_RECURRENT_HOUR,
     AUTOCODE_ENABLED,
     AUTOCODE_HOUR,
     BRIEFING_ENABLED,
@@ -274,6 +277,25 @@ async def lifespan(app: FastAPI):
                 id="autocode_nightly",
             )
             logger.info("autocode: cycle planifié à %02dh00", AUTOCODE_HOUR)
+
+        if AGENT_ENABLED:
+            from agent.recurrent import relancer_les_series
+
+            # Inerte tant qu'aucune série n'existe : la relance ne fait rien si aucune
+            # tâche ne porte de cadence. Pas de drapeau d'activation pour autant — ce
+            # serait une case à cocher pour un mécanisme que l'utilisateur active déjà en
+            # créant la tâche.
+            scheduler.add_job(
+                relancer_les_series,
+                trigger="cron",
+                day_of_week=AGENT_RECURRENT_DAY,
+                hour=AGENT_RECURRENT_HOUR,
+                id="agent_recurrent",
+            )
+            logger.info(
+                "agent: séries récurrentes relancées %s à %02dh00 (%s)",
+                AGENT_RECURRENT_DAY, AGENT_RECURRENT_HOUR, BRIEFING_TIMEZONE,
+            )
 
         scheduler.start()
         logger.info("Self reflection scheduled every %d h", REFLECTION_INTERVAL_HOURS)

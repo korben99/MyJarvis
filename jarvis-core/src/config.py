@@ -466,8 +466,22 @@ AGENT_PAGE_MAX_CHARS = int(os.getenv("AGENT_PAGE_MAX_CHARS", "14000"))
 # Les scores restent affichés à l'agent : c'est à lui de juger de la pertinence.
 AGENT_DOCS_MIN_SCORE = float(os.getenv("AGENT_DOCS_MIN_SCORE", "0.35"))
 
-# Rétention des enregistrements de tâche dans Redis.
+# Rétention des enregistrements de tâche dans Redis. Elle borne aussi la mémoire des
+# séries récurrentes : une série dont la dernière exécution est sortie de l'index ne
+# retrouve plus son antécédent — d'où une cadence qui doit rester largement en deçà.
 AGENT_TASK_TTL = int(os.getenv("AGENT_TASK_TTL_DAYS", "30")) * 86400
+
+# Relance des tâches récurrentes. Créneau nocturne : une série consomme le GPU par rafales
+# de plusieurs minutes. Après le scan CVE (04:30) et assez tôt pour rendre la main avant le
+# briefing du matin, seule tâche de la nuit attendue à une heure dite.
+AGENT_RECURRENT_DAY = os.getenv("AGENT_RECURRENT_DAY", "mon")
+AGENT_RECURRENT_HOUR = int(os.getenv("AGENT_RECURRENT_HOUR", "6"))
+
+# Bornes du rappel passé au successeur. Le digest entre dans l'objectif, donc dans le
+# contexte de chaque pas : plafonné pour qu'il reste une contrainte et ne devienne pas un
+# texte à paraphraser.
+AGENT_RECURRENT_MAX_TITRES = int(os.getenv("AGENT_RECURRENT_MAX_TITRES", "20"))
+AGENT_RECURRENT_MAX_DOMAINES = int(os.getenv("AGENT_RECURRENT_MAX_DOMAINES", "40"))
 
 # Envoi du livrable par courriel au demandeur, à la fin de la tâche. Le push iOS annonce,
 # le courriel transporte : plafonné à 500 caractères et lu sur un écran verrouillé, une

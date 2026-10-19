@@ -1054,7 +1054,7 @@ class TestSurvieDuWorker:
             await asyncio.sleep(0.05)
             mort_avant = not worker.worker_vivant()
 
-            worker.surveiller()
+            await worker.surveiller()
             await asyncio.sleep(0.05)
             vivant_apres = worker.worker_vivant()
 
@@ -1107,3 +1107,203 @@ class TestSurvieDuWorker:
 
         motif = asyncio.run(scenario())
         assert "ValueError" in motif and "cause précise" in motif
+
+
+class TestWatchdogEnlisement:
+    """Le worker peut être VIVANT et ne plus avancer — et c'est la panne qui s'est produite.
+
+    Une coroutine bloquée sur un socket mort n'est pas terminée : `Task.done()` la dit
+    vivante, la ronde ne voit rien, et la file cesse de se vider en silence. Le battement
+    est ce qui sépare « occupé » d'« enlisé » : une tâche longue avance, un worker bloqué
+    non.
+
+    Le second défaut tenait à la signature : une ronde SYNCHRONE s'exécute dans un thread
+    d'AsyncIOScheduler, donc sans boucle d'événements, et `start_worker` y lève « no
+    running event loop ». Le garde ne pouvait pas relancer, même une Task franchement morte.
+    """
+
+    @pytest.fixture
+    def banc(self, monkeypatch):
+        import agent.worker as w
+
+        etat = {"battement": None, "relances": 0, "arrets": 0, "incidents": []}
+
+        async def _faux_stop():
+            etat["arrets"] += 1
+
+        monkeypatch.setattr(w, "AGENT_ENABLED", True)
+        monkeypatch.setattr(w, "_age_du_battement", lambda: etat["battement"])
+        monkeypatch.setattr(w, "battre", lambda: None)
+        monkeypatch.setattr(w, "start_worker", lambda: etat.__setitem__("relances", etat["relances"] + 1))
+        monkeypatch.setattr(w, "stop_worker", _faux_stop)
+        monkeypatch.setattr(w, "_motif_de_mort", lambda: "simulé")
+        import vitals
+        monkeypatch.setattr(vitals, "mark_incident",
+                            lambda k, d, severity="info": etat["incidents"].append((k, severity)))
+        return w, etat
+
+    def _ronde(self, w, vivant, banc_etat):
+        import asyncio
+        from unittest.mock import patch
+
+        with patch.object(w, "worker_vivant", lambda: vivant):
+            asyncio.run(w.surveiller())
+
+    def test_la_ronde_est_une_coroutine(self):
+        """Le garde de régression qui compte : repassée en fonction simple, elle serait
+        exécutée dans un thread sans boucle et ne pourrait plus rien relancer."""
+        import asyncio
+
+        import agent.worker as w
+
+        assert asyncio.iscoroutinefunction(w.surveiller)
+
+    def test_un_worker_qui_avance_est_laisse_tranquille(self, banc):
+        w, etat = banc
+        etat["battement"] = 10.0
+        self._ronde(w, True, etat)
+        assert etat["relances"] == 0 and etat["arrets"] == 0
+
+    def test_un_worker_enlise_est_annule_puis_relance(self, banc):
+        w, etat = banc
+        etat["battement"] = w._BATTEMENT_SEUIL_S + 60
+        self._ronde(w, True, etat)
+        assert etat["arrets"] == 1, "la coroutine figée doit être annulée avant la relance"
+        assert etat["relances"] == 1
+        assert etat["incidents"] == [("agent_worker_arrete", "alerte")]
+
+    def test_un_worker_mort_est_relance_sans_annulation(self, banc):
+        w, etat = banc
+        etat["battement"] = 1.0
+        self._ronde(w, False, etat)
+        assert etat["relances"] == 1 and etat["arrets"] == 0
+
+    def test_un_battement_illisible_naccuse_personne(self, banc):
+        """Ne pas savoir n'est pas une preuve : un worker vivant dont le battement est
+        illisible garde le bénéfice du doute."""
+        w, etat = banc
+        etat["battement"] = None
+        self._ronde(w, True, etat)
+        assert etat["relances"] == 0
+
+    def test_une_tache_longue_mais_qui_progresse_nest_pas_tuee(self, banc):
+        """Un pas d'agent peut durer plusieurs minutes — une vérification lance la suite de
+        tests. Le seuil doit laisser passer ça."""
+        w, etat = banc
+        etat["battement"] = 5 * 60
+        self._ronde(w, True, etat)
+        assert etat["relances"] == 0
+
+    def test_le_battement_ne_leve_jamais(self, monkeypatch):
+        import agent.worker as w
+
+        class _RedisMort:
+            def set(self, *a, **k):
+                raise ConnectionError("redis down")
+
+        monkeypatch.setattr(w.store, "get_redis", lambda: _RedisMort())
+        w.battre()  # ne doit pas lever
+
+
+class TestDelaiSocketEtAppelsBloquants:
+    """Le `socket_timeout` du client Redis borne UNE lecture, pas une connexion.
+
+    Il ne court pas entre deux commandes : une connexion rendue au pool pendant un appel
+    LLM de plusieurs minutes ne déclenche rien, et un pipeline n'envoie rien avant son
+    `execute()`. La seule chose qu'il puisse casser est une commande BLOQUANTE dont le
+    propre délai dépasserait le sien — le `BLPOP` du worker est le seul du code.
+    """
+
+    def test_le_blpop_du_worker_tient_sous_le_delai_de_socket(self):
+        """L'invariant à ne pas rompre : ajouter un appel bloquant plus long que le délai
+        de socket le ferait échouer systématiquement, et cette fois en silence puisque la
+        boucle rattrape, journalise et repart."""
+        import inspect
+
+        from agent import store as agent_store
+        from helpers.store import _SOCKET_TIMEOUT
+
+        defaut = inspect.signature(agent_store.pop_next).parameters["timeout"].default
+        assert defaut < _SOCKET_TIMEOUT, (
+            f"BLPOP {defaut}s >= socket_timeout {_SOCKET_TIMEOUT}s : "
+            "toute attente de file lèverait au lieu d'attendre"
+        )
+        assert _SOCKET_TIMEOUT - defaut >= 5, "marge trop courte pour un réseau lent"
+
+
+class TestAncrageTemporelEtSources:
+    """Deux défauts constatés sur une revue de presse réelle.
+
+    Sans date dans son premier message, le modèle date son travail de sa distribution
+    d'entraînement : le livrable s'ouvrait sur un mois vieux de plusieurs saisons et
+    traitait l'actualité de cette période. Et `web_search` n'enregistrait aucune source,
+    si bien qu'un rapport rédigé depuis les extraits de recherche — le cas courant —
+    passait pour un texte écrit de mémoire.
+    """
+
+    def test_le_premier_message_porte_la_date_du_jour(self):
+        from datetime import datetime
+
+        from agent.loop import _initial_messages
+
+        tache = {"id": "x", "origin": "human", "user_code": "ALICE1",
+                 "workspace": "/tmp/ws", "objective": "une revue", "max_steps": 20}
+        contenu = _initial_messages(tache)[-1]["content"]
+        assert str(datetime.now().year) in contenu
+        assert "OBJECTIF" in contenu, "l'objectif ne doit pas avoir été évincé"
+
+    def test_la_date_precede_lobjectif(self):
+        """L'ancrage est en tête : le premier message est réinjecté à chaque pas, donc il
+        tient toute la tâche."""
+        from agent.loop import _initial_messages
+
+        tache = {"id": "x", "origin": "human", "user_code": "ALICE1",
+                 "workspace": "/tmp/ws", "objective": "une revue", "max_steps": 20}
+        contenu = _initial_messages(tache)[-1]["content"]
+        assert contenu.index("Date") < contenu.index("OBJECTIF")
+
+    def test_une_recherche_web_enregistre_ses_urls(self, monkeypatch):
+        import asyncio
+
+        import web_search
+        from agent import tools as T
+
+        async def _faux(q, n):
+            return [{"title": "A", "url": "https://exemple.org/a", "body": "x"},
+                    {"title": "B", "url": "https://exemple.org/b", "body": "y"}]
+
+        monkeypatch.setattr(web_search, "search_web", _faux)
+        tache = {"id": "y", "origin": "human"}
+        asyncio.run(T._web_search(tache, {"query": "ia"}))
+        assert tache["sources_seen"] == ["https://exemple.org/a", "https://exemple.org/b"]
+
+    def test_un_resultat_sans_url_nest_pas_enregistre(self, monkeypatch):
+        import asyncio
+
+        import web_search
+        from agent import tools as T
+
+        async def _faux(q, n):
+            return [{"title": "A", "url": "", "body": "x"}]
+
+        monkeypatch.setattr(web_search, "search_web", _faux)
+        tache = {"id": "y", "origin": "human"}
+        asyncio.run(T._web_search(tache, {"query": "ia"}))
+        assert not tache.get("sources_seen")
+
+    def test_une_url_vue_deux_fois_ne_compte_quune_fois(self, monkeypatch):
+        """Deux recherches se recoupent presque toujours : sans dédup, `sources_seen`
+        enflerait à chaque pas."""
+        import asyncio
+
+        import web_search
+        from agent import tools as T
+
+        async def _faux(q, n):
+            return [{"title": "A", "url": "https://exemple.org/a", "body": "x"}]
+
+        monkeypatch.setattr(web_search, "search_web", _faux)
+        tache = {"id": "y", "origin": "human"}
+        asyncio.run(T._web_search(tache, {"query": "ia"}))
+        asyncio.run(T._web_search(tache, {"query": "ia bis"}))
+        assert tache["sources_seen"] == ["https://exemple.org/a"]

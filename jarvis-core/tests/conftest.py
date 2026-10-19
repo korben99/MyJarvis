@@ -93,6 +93,7 @@ if "qdrant_client" not in sys.modules:
     _qdrant_models.Filter = MagicMock()
     _qdrant_models.FieldCondition = MagicMock()
     _qdrant_models.MatchValue = MagicMock()
+    _qdrant_models.MatchAny = MagicMock()
     _qdrant = types.ModuleType("qdrant_client")
     _qdrant.models = _qdrant_models
     _qdrant.QdrantClient = MagicMock()

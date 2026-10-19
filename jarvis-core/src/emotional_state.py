@@ -113,6 +113,13 @@ _SATISFACTION_DELTAS: dict[str, dict[str, float]] = {
     "negative": {"confiance": -0.3, "humeur": -0.1, "energie": -0.1},
 }
 
+# Valeurs sans delta, et c'est le cas NOMINAL : « unknown » quand l'analyse n'a pas
+# tranché, « neutral » quand elle a tranché que l'échange ne penche d'aucun côté. Le prompt
+# ne propose que la première, le modèle produit parfois la seconde — même absence d'effet,
+# donc rien à signaler. Les journaliser salissait l'avertissement qui, lui, compte : celui
+# d'une étiquette vraiment inattendue.
+_SATISFACTION_NEUTRES = ("unknown", "neutral")
+
 # Human-readable labels for prompt injection
 _LABELS: dict[str, tuple[str, str]] = {
     "humeur":    ("joyeux",    "triste"),
@@ -227,7 +234,7 @@ def update_from_analysis(mood: str, satisfaction: str) -> None:
     # .get(..., {}) l'avale en silence.
     if mood not in _MOOD_DELTAS:
         logger.warning("emotional_state: humeur %r hors vocabulaire — ignorée", mood)
-    if satisfaction not in _SATISFACTION_DELTAS and satisfaction != "unknown":
+    if satisfaction not in _SATISFACTION_DELTAS and satisfaction not in _SATISFACTION_NEUTRES:
         logger.warning("emotional_state: satisfaction %r hors vocabulaire — ignorée",
                        satisfaction)
 

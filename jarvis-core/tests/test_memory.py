@@ -273,3 +273,54 @@ class TestMarquageSouvenirs:
             {"text": "X", "concerne": "ALICE1", "intime": True}
         )
         assert ligne.startswith("- (lived with Alice, private)")
+
+
+class TestVocabulaireSatisfaction:
+    """Un avertissement ne vaut que s'il signale quelque chose.
+
+    `unknown` et `neutral` disent la même chose — l'échange ne penche d'aucun côté — et
+    produisent le même effet : aucun. Le prompt ne propose que le premier, le modèle rend
+    parfois le second, d'autant plus volontiers que `neutral` EST une humeur valide. Les
+    journaliser noyait l'avertissement qui compte : une étiquette vraiment inattendue,
+    signe que le vocabulaire du prompt a bougé sans que la table suive.
+    """
+
+    def _avertissements(self, satisfaction, monkeypatch):
+        import logging
+
+        import emotional_state as E
+
+        msgs = []
+
+        class _H(logging.Handler):
+            def emit(self, record):
+                msgs.append(record.getMessage())
+
+        h = _H()
+        E.logger.addHandler(h)
+        monkeypatch.setattr(E, "update", lambda deltas: None)
+        try:
+            E.update_from_analysis("happy", satisfaction)
+        finally:
+            E.logger.removeHandler(h)
+        return [m for m in msgs if "satisfaction" in m]
+
+    @pytest.mark.parametrize("valeur", ["positive", "negative", "unknown", "neutral"])
+    def test_une_valeur_attendue_ne_previent_pas(self, valeur, monkeypatch):
+        assert self._avertissements(valeur, monkeypatch) == []
+
+    def test_une_etiquette_inattendue_previent_toujours(self, monkeypatch):
+        """Le garde qui compte : il reste armé."""
+        assert self._avertissements("enthousiaste", monkeypatch)
+
+    def test_les_valeurs_neutres_ne_produisent_aucun_delta(self, monkeypatch):
+        import emotional_state as E
+
+        vus = []
+        monkeypatch.setattr(E, "update", lambda deltas: vus.append(deltas))
+        E.update_from_analysis("happy", "neutral")
+        E.update_from_analysis("happy", "unknown")
+        humeur_seule = E._MOOD_DELTAS["happy"]
+        assert all(d == humeur_seule for d in vus), (
+            "une satisfaction neutre ne doit rien ajouter à l'effet de l'humeur"
+        )

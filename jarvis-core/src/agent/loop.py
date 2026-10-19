@@ -27,10 +27,12 @@ from config import (
     AGENT_THINKING_BUDGET,
     AGENT_WRITE_MAX_CHARS,
     AGENT_WRITE_MAX_TOKENS,
+    BRIEFING_TIMEZONE,
     PRIMARY_MODEL,
+    USER_TIMEZONES,
 )
 import steering
-from helpers import get_logger
+from helpers import fmt_now_fr, get_logger
 from prompts import get_prompt
 from tool_calls import normalise_messages_for_template, parse_tool_calls
 from vitals import risk_scalar
@@ -110,7 +112,14 @@ def _initial_messages(task: dict) -> list[dict]:
 
         prefixe_etat = build_autocode_prefix()
 
+    # La date, dans le fuseau du demandeur. Sans ancrage temporel, le modèle date son
+    # travail de sa distribution d'entraînement : une revue de presse sort datée de
+    # plusieurs mois en arrière et traite l'actualité de cette période-là. Le chat reçoit
+    # déjà cette ligne par `build_dynamic_prefix` ; l'agent, qui travaille justement sur
+    # des sources datées, ne l'avait pas. Posée dans le premier message, qui est réinjecté
+    # à chaque pas : l'ancrage tient toute la tâche.
     objective = get_prompt("AGENT_OBJECTIVE").format(
+        date=fmt_now_fr(USER_TIMEZONES.get(task.get("user_code", ""), BRIEFING_TIMEZONE)),
         objective=task["objective"], max_steps=_max_steps(task)
     )
     if prefixe_etat:
@@ -349,7 +358,10 @@ def _has_sources(task: dict, deliverables: list) -> bool:
     on aurait fabriqué le mensonge qu'on prétend empêcher.
 
     On compare donc aux sources effectivement ouvertes pendant la tâche (`sources_seen`,
-    alimenté par fetch_url et read_file) : une URL citée, un nom de fichier lu. Lecture
+    alimenté par web_search, fetch_url, search_docs et read_file) : une URL citée, un nom
+    de fichier lu. Les résultats de recherche y figurent parce qu'un livrable se rédige
+    souvent de leurs seuls titres et extraits, sans ouvrir les pages — les omettre faisait
+    passer une revue de presse entièrement sourcée pour un texte écrit de mémoire. Lecture
     volontairement grossière : le but est d'attraper le document écrit de mémoire, pas de
     noter la qualité de la bibliographie. Un livrable illisible passe — le doute profite à
     la tâche.
@@ -528,6 +540,12 @@ async def _jouer_tour(
         task["id"], task["steps"], len(think), len(visible),
         calls[0]["function"]["name"] if calls else "aucun",
     )
+    # Un pas accompli est une avancée : sans ce battement, une tâche longue mais saine
+    # paraîtrait enlisée au watchdog, qui la tuerait en plein travail. Import tardif —
+    # `worker` importe ce module.
+    from .worker import battre
+
+    battre()
     return think, text, calls
 
 

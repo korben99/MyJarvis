@@ -1182,6 +1182,20 @@ MANDATORY RULE for duplicates:
   step 2 — list the key to delete in 'keys_to_delete'
   In doubt about which to keep, prefer the more recent one (date in the profile).
   Never put BOTH keys of the same concept in 'keys_to_delete'.
+  The consolidated value CARRIES OVER the figures and dates of both keys — an amount, a
+  deadline, a dosage. The deletion that follows is final, and a rewrite that summarises
+  loses exactly those specifics.
+  It never cites a key name: this value is read in the context of every exchange, where a
+  key name no longer designates anything.
+
+A KEY THAT CONTRADICTS THE STABLE PROFILE:
+  The stable profile is hand-written: it is authoritative. A Redis key contradicting it on
+  the same object is an extraction error, not an update — fix it in 'updates' so the two
+  agree, or delete it if nothing true remains.
+  Example: the stable profile says "home: house in X" and a Redis key announces the
+  PURCHASE of a house in X — the home is already theirs, so the key describes something
+  else or is wrong. Never let both stand: the false key will be taken up by the narrative
+  portrait, where it stops looking like a learned fact.
 
 CAUTION — stable profile vs Redis profile:
   The stable profile covers GENERAL facts (family, work, overall interests).
@@ -1547,7 +1561,30 @@ honest account is worth more than an observation fabricated to have something to
 French, Latin alphabet.
 """
 
+# Reminder of the previous turn, appended to a recurring task's objective. It sits in the
+# objective, hence in the first message: the compactor never elides it and the prefix cache
+# makes it nearly free from the second step on. A tool fetching it would cost a step,
+# arrive after the plan, and be the first candidate for elision. Headings and domains
+# rather than the whole document: that would occupy the context for the whole task, and
+# once the cap is reached the compactor sacrifices tool results — the fresh material — to
+# keep the old text.
+AGENT_RECURRENT_REMINDER = """
+
+PREVIOUS TURN OF THIS SERIES, on {date}. Do not redo it.
+
+Already covered:
+{titres}
+
+Sources already consulted:
+{domaines}
+
+Returning to one of these points is only worth it if it has changed since, and it is the \
+change you must report, not the point. The same source may carry something new: it is the \
+item that must be new, not the source."""
+
 AGENT_OBJECTIVE = """\
+Today's date: {date}.
+
 OBJECTIVE: {objective}
 
 [step 1/{max_steps}] First turn: lay out your plan with plan(steps=[...]). \

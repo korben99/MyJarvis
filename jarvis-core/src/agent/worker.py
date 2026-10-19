@@ -7,6 +7,7 @@ croissance continue. La file, elle, est illimitée.
 """
 
 import asyncio
+import time
 
 from config import AGENT_ENABLED
 from helpers import get_logger
@@ -27,6 +28,35 @@ _PUSH_MAX_CHARS = 500
 
 # Pause après une panne de tour, pour ne pas boucler à plein régime sur une erreur qui dure.
 _PAUSE_APRES_PANNE = 5.0
+
+# Battement du worker : horodatage rafraîchi chaque fois qu'il AVANCE — à chaque tour de
+# file, et à chaque pas d'une tâche en cours. C'est ce qui distingue « enlisé » de
+# « occupé » : une tâche légitime peut tenir une heure, mais elle progresse.
+#
+# Le seul test de `Task.done()` ne suffit pas, et c'est la leçon de la panne qu'il a laissé
+# passer : une coroutine qui attend un socket mort n'est pas terminée, donc paraît vivante.
+_BATTEMENT_KEY = "jarvis:agent:battement"
+# Au-dessus du plus long pas plausible : une vérification lance la suite de tests, plafonnée
+# à 5 min, et une génération avec réflexion s'y ajoute.
+_BATTEMENT_SEUIL_S = 15 * 60
+
+
+def battre() -> None:
+    """Marque une avancée. Jamais bloquant : un battement manqué n'est pas une panne."""
+    try:
+        store.get_redis().set(_BATTEMENT_KEY, time.time())
+    except Exception as exc:
+        logger.debug("agent: battement non posé (%s)", exc)
+
+
+def _age_du_battement() -> float | None:
+    """Secondes depuis la dernière avancée. None si on ne sait pas — et dans ce cas on
+    n'accuse personne : un battement illisible n'est pas une preuve d'enlisement."""
+    try:
+        brut = store.get_redis().get(_BATTEMENT_KEY)
+        return time.time() - float(brut) if brut else None
+    except Exception:
+        return None
 
 
 def _notify(task: dict) -> None:
@@ -98,6 +128,7 @@ async def _run() -> None:
         try:
             # BLPOP dans un thread : bloquant côté Redis, il figerait la boucle d'événements
             # — et donc tout le chat — s'il était appelé directement.
+            battre()
             task_id = await asyncio.to_thread(store.pop_next, 5)
             if not task_id:
                 continue
@@ -169,19 +200,41 @@ def _motif_de_mort() -> str:
     return f"{type(exc).__name__}: {exc}" if exc else "terminé sans erreur"
 
 
-def surveiller() -> None:
-    """Relève le worker s'il est tombé. Ronde périodique du planificateur.
+async def surveiller() -> None:
+    """Relève le worker s'il est tombé OU s'il n'avance plus. Ronde du planificateur.
 
-    Le filet de `_run` rend cette mort très improbable, il ne la rend pas impossible : une
-    exception hors de la boucle, ou un `BaseException`, sort quand même. Une file qui ne se
-    vide plus ne se voit sur aucun cadran — d'où l'incident, qui emprunte le chemin par
-    lequel une aggravation de CVE remonte déjà jusqu'à l'administrateur.
+    Coroutine et non fonction simple : un job synchrone d'AsyncIOScheduler s'exécute dans
+    un thread, donc SANS boucle d'événements — et `start_worker` y lèverait « no running
+    event loop » au lieu de relancer quoi que ce soit. Le garde ne pouvait pas agir.
+
+    Deux pannes, pas une :
+
+      morte      la Task est terminée — une exception hors boucle, un BaseException.
+      enlisée    la Task attend quelque chose qui ne viendra pas. Elle n'est pas terminée,
+                 donc `done()` la dit vivante, et la file cesse simplement de se vider.
+
+    La seconde est la plus coûteuse parce qu'elle est muette : rien ne la distingue d'un
+    worker au repos, sinon le battement, qui s'arrête avec l'avancée. C'est pourquoi le
+    battement est posé à chaque tour de file ET à chaque pas de tâche — une tâche longue
+    avance, un worker bloqué non.
     """
-    if not AGENT_ENABLED or worker_vivant():
+    if not AGENT_ENABLED:
         return
 
-    motif = _motif_de_mort()
-    logger.error("agent: worker arrêté (%s) — relance", motif)
+    age = _age_du_battement()
+    enlise = worker_vivant() and age is not None and age > _BATTEMENT_SEUIL_S
+    if worker_vivant() and not enlise:
+        return
+
+    if enlise:
+        motif = f"aucune avancée depuis {age / 60:.0f} min"
+        # Annulation avant relance : la coroutine figée tient encore sa connexion et
+        # reprendrait la file en double une fois débloquée.
+        await stop_worker()
+    else:
+        motif = _motif_de_mort()
+
+    logger.error("agent: worker %s (%s) — relance", "enlisé" if enlise else "arrêté", motif)
     try:
         from vitals import mark_incident
 
@@ -193,7 +246,9 @@ def surveiller() -> None:
     except Exception as exc:
         logger.debug("agent: incident non posé (%s)", exc)
 
-    # `start_worker` crée la tâche : la Task morte ne passe plus sa garde `done()`.
+    # Le battement est remis à l'heure par la relance : sans ça, la ronde suivante
+    # retrouverait un battement périmé et relancerait un worker tout juste reparti.
+    battre()
     start_worker()
 
 

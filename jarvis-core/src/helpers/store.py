@@ -21,6 +21,9 @@ _redis_lock = Lock()
 _qdrant_client: QdrantClient | None = None
 _qdrant_lock = Lock()
 
+# Le plus long appel bloquant du code est le BLPOP du worker agentique (5 s).
+_SOCKET_TIMEOUT = 15.0
+
 
 def get_redis() -> redis.Redis:
     """Return the shared Redis connection (singleton, thread-safe)."""
@@ -34,6 +37,17 @@ def get_redis() -> redis.Redis:
                     socket_keepalive=True,
                     health_check_interval=30,
                     retry_on_timeout=True,
+                    # Plafond de lecture, sans lequel une connexion à moitié morte fige le
+                    # lecteur indéfiniment : `health_check_interval` ne protège que le
+                    # moment où une connexion est TIRÉE du pool, jamais une lecture déjà
+                    # engagée. Un `BLPOP` déjà bloqué sur un socket que le serveur a oublié
+                    # n'est réveillé par rien, et son appelant non plus.
+                    #
+                    # Confortablement au-dessus du plus long appel bloquant du code — le
+                    # `BLPOP` du worker agentique, à 5 s — pour que ce délai ne se déclenche
+                    # jamais sur une attente légitime. `retry_on_timeout` fait repartir
+                    # l'appel sur une connexion neuve.
+                    socket_timeout=_SOCKET_TIMEOUT,
                 )
     return _redis_client
 

@@ -15,6 +15,8 @@ from typing import Optional
 from briefing import gather_briefing, get_stored_briefing, store_briefing
 from config import (
     AGENT_ENABLED,
+    AGENT_RECURRENT_DAY,
+    AGENT_RECURRENT_HOUR,
     BRIEFING_TIMEZONE,
     DEFAULT_TEMP,
     HIST_CONV_SUMMARIZE_THRESHOLD,
@@ -678,15 +680,28 @@ def _handle_agent_task(
     # français. Une commande n'est pas de la prose : reconnaître les deux ne coûte rien,
     # évite un lexique par langue pour quatre motifs, et rend le fast-track utilisable par
     # un anglophone sur une instance française comme l'inverse.
+    # Les variantes récurrentes d'abord : « agent: » ne peut pas les capter — le préfixe
+    # porte le deux-points immédiatement après « agent » —, mais l'ordre rend l'intention
+    # lisible et protège d'un préfixe plus court ajouté un jour au-dessus.
+    recurrent = False
     for prefix in (
-        "tache agent:", "tache agent :", "agent:", "agent :",
-        "agent task:", "agent task :", "task:", "task :",
+        "tache agent hebdo:", "tache agent hebdo :", "agent hebdo:", "agent hebdo :",
+        "agent weekly:", "agent weekly :", "weekly:", "weekly :",
     ):
         if lowered.startswith(prefix):
             objective = stripped[len(prefix):].strip()
+            recurrent = True
             break
     else:
-        return None
+        for prefix in (
+            "tache agent:", "tache agent :", "agent:", "agent :",
+            "agent task:", "agent task :", "task:", "task :",
+        ):
+            if lowered.startswith(prefix):
+                objective = stripped[len(prefix):].strip()
+                break
+        else:
+            return None
 
     if not AGENT_ENABLED:
         return _instant_reply(req, user_code, "Le mode agent est désactivé (AGENT_ENABLED=false).")
@@ -702,15 +717,40 @@ def _handle_agent_task(
         tasks = list_tasks(5, user_code=user_code)
         if not tasks:
             return _instant_reply(req, user_code, "Tu n'as aucune tâche agent enregistrée.")
-        lines = [
-            f"· {t['objective'][:60]} — {t['status']} ({t['steps']} pas)"
-            + (f" → {t['result'][:100]}" if t.get("result") else "")
-            for t in tasks
-        ]
+        lines = []
+        for t in tasks:
+            meta = t.get("meta") or {}
+            # La série est nommée : sans son identifiant à l'écran, une tâche récurrente ne
+            # pourrait plus être arrêtée que depuis Redis.
+            recurrence = (
+                f" ⟳ {meta['cadence']} [{meta.get('serie', '?')}]"
+                if meta.get("cadence") else ""
+            )
+            objectif = meta.get("objectif_source") or t["objective"]
+            lines.append(
+                f"· {objectif[:60]} — {t['status']} ({t['steps']} pas){recurrence}"
+                + (f" → {t['result'][:100]}" if t.get("result") else "")
+            )
         return _instant_reply(req, user_code, "Tes dernières tâches :\n" + "\n".join(lines))
 
     if user_code not in USER_ADMINS:
         return _instant_reply(req, user_code, "Le mode agent est réservé aux administrateurs.")
+
+    # Arrêt d'une série, sous la même garde que la création : qui ne peut pas lancer de
+    # tâche n'a pas à pouvoir couper celle d'un autre. Le tour en cours n'est pas annulé —
+    # couper une récurrence dit de ne plus recommencer, pas de jeter le travail engagé.
+    arret = re.match(
+        r"(?:arrete|arrête|stop)\s+([0-9a-f]{6,16})$", objective.strip().lower()
+    )
+    if arret:
+        from agent.recurrent import arreter_serie
+
+        arreter_serie(arret.group(1))
+        return _instant_reply(
+            req, user_code,
+            f"Série {arret.group(1)} arrêtée — je ne la relancerai plus. "
+            "Le tour en cours, s'il y en a un, va jusqu'au bout.",
+        )
 
     if len(objective) < 10:
         return _instant_reply(
@@ -718,10 +758,27 @@ def _handle_agent_task(
             "Il me faut un objectif un peu plus explicite pour partir seul là-dessus.",
         )
 
-    task = create_task(user_code, objective)
+    # Le premier tour part tout de suite ; la cadence ne décide que des suivants. Attendre
+    # le prochain créneau ferait d'une commande une promesse, et personne ne saurait avant
+    # plusieurs jours si l'objectif était seulement tenable.
+    meta = None
+    suite = ""
+    if recurrent:
+        from agent.recurrent import CADENCE_HEBDO, nouvelle_serie
+
+        meta = {
+            "cadence": CADENCE_HEBDO,
+            "serie": nouvelle_serie(),
+            "objectif_source": objective,
+        }
+        suite = (
+            f" Je reprends ensuite chaque semaine ({AGENT_RECURRENT_DAY} à "
+            f"{AGENT_RECURRENT_HOUR}h), en repartant de ce que j'aurai trouvé cette fois-ci."
+        )
+    task = create_task(user_code, objective, meta=meta)
     return _instant_reply(
         req, user_code,
-        f"C'est parti — je m'en occupe en arrière-plan (tâche {task['id'][:8]}). "
+        f"C'est parti — je m'en occupe en arrière-plan (tâche {task['id'][:8]}).{suite} "
         f"Je te préviens quand j'ai terminé. « tâche agent: statut » pour suivre.",
     )
 

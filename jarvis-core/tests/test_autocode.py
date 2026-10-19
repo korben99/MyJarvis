@@ -11,6 +11,7 @@ plus nombreux que les cas de succès.
 
 import logging
 import pathlib
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -152,15 +153,21 @@ class TestListeFermee:
 # échoueraient en accusant le code d'une divergence qui n'appartiendrait qu'à eux.
 _SRC = pathlib.Path(constats.JARVIS_ROOT) / "jarvis-core" / "src"
 
+# Daté RELATIVEMENT à aujourd'hui, jamais en dur : `_depuis_tracebacks` écarte ce qui
+# dépasse `_AGE_MAX_JOURS`, donc une date figée fait passer ces tests jusqu'au trentième
+# jour après son écriture, puis échouer — en accusant le code d'une péremption qui
+# n'appartient qu'à la fixture.
+_HIER = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
 _TRACEBACK = f"""\
-2026-09-14 10:00:00  jarvis-self               ERROR  Cycle en échec
+{_HIER} 10:00:00  jarvis-self               ERROR  Cycle en échec
 Traceback (most recent call last):
   File "{_SRC}/self/engine.py", line 12, in _reflechir
     resultat = etape["reason"]
   File "{_SRC}/agent/sandbox.py", line 60, in resolve
     raise SandboxError(chemin)
 KeyError: 'reason'
-2026-09-14 10:00:01  jarvis-api                INFO  suite du journal
+{_HIER} 10:00:01  jarvis-api                INFO  suite du journal
 """
 
 
@@ -218,7 +225,7 @@ class TestDepuisLeJournal:
         assert constats._depuis_tracebacks(_TRACEBACK) == []
 
     def test_un_traceback_trop_vieux_est_ignore(self, journal_lisible):
-        assert constats._depuis_tracebacks(_TRACEBACK.replace("2026-09-14", "2020-01-01")) == []
+        assert constats._depuis_tracebacks(_TRACEBACK.replace(_HIER, "2020-01-01")) == []
 
     def test_deux_occurrences_se_regroupent(self, journal_lisible):
         """Sinon la liste se remplirait de doublons et le cooldown ne tiendrait sur aucun."""
