@@ -1480,7 +1480,10 @@ Et les résultats les plus volumineux sont élidés à mesure que le fil grossit
 veux garder, écris-le dans un fichier.
 
 CE QUE TU AVANCES
-· Chercher n'est pas lire. Avant de rédiger, ouvre au moins une source entière.
+· Chercher n'est pas lire. Un extrait de résultat sert à choisir quoi ouvrir, jamais à
+  rédiger. Ouvre une source entière pour chaque point que tu comptes traiter : une page
+  lue vaut mieux que dix extraits, et un sujet dont tu n'as ouvert aucune source est un
+  sujet que tu ne traites pas.
 · Aucune date, aucun chiffre, aucune citation qui ne vienne d'une source lue DANS CETTE
   TÂCHE. Tes souvenirs d'entraînement sont périmés et tu ne peux pas savoir de combien.
 · Chaque affirmation porte sa source, URL ou chemin du fichier. Sans source, retire-la.
@@ -1602,8 +1605,8 @@ AGENT_STEP_FOOTER = "\n\n[pas {step}/{max_steps}]{hint}"
 # deuxième pas — la consigne y était au mieux vide, au pire trompeuse. Ce qu'on veut dire
 # à mi-budget ne dépend pas du type de livrable : est-ce que le tour d'après rapproche
 # encore du but ?
-AGENT_HINT_HALF_BUDGET = (
-    " Tu as consommé la moitié de ton budget. Vérifie que tu converges : si ta dernière "
+AGENT_HINT_LOW_BUDGET = (
+    " Il te reste un quart de ton budget. Vérifie que tu converges : si ta dernière "
     "action ne t'a rien apporté de neuf, la suivante non plus — change de méthode, ou "
     "considère que tu en sais assez et conclus."
 )

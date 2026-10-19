@@ -479,7 +479,11 @@ async def _fetch_page(url: str, max_chars: int = 0) -> tuple[str, str | None]:
             logger.debug("_fetch_page: HTTP %d for %s", resp.status_code, url)
             return "", None
         ct = resp.headers.get("content-type", "").lower()
-        if not any(x in ct for x in ("html", "text/plain")):
+        # XML inclus : les interfaces qui rendent des données datées et structurées — flux
+        # Atom/RSS, API de dépôts de publications — répondent en `xml` ou `atom+xml`, et
+        # le filtre les écartait alors que leur contenu est du texte que l'extracteur sait
+        # traiter. Les binaires restent exclus : un PDF rendrait des octets illisibles.
+        if not any(x in ct for x in ("html", "text/plain", "xml")):
             logger.debug("_fetch_page: unsupported content-type %r for %s", ct, url)
             return "", None
         raw = resp.text
@@ -859,6 +863,7 @@ async def search_tavily(
     query: str,
     original_message: str = "",
     max_results: int = 5,
+    recent: bool = False,
 ) -> list[dict]:
     """Search via Tavily API. Returns results in the same {title, body, url, date?} format.
 
@@ -872,14 +877,23 @@ async def search_tavily(
     Returns [] on quota/API errors (caller falls back to DDG).
     Raises the exception on network errors so the caller can return INTERNET_ERROR.
     """
-    is_news = _is_news_query(query)
+    # `recent` l'emporte sur la détection par mots-clés : l'appelant qui sait chercher de
+    # l'actualité le sait mieux qu'un classificateur lexical, lequel ne reconnaît une
+    # requête d'actualité qu'au vocabulaire employé — « AI Act implementation latest
+    # updates » passe, « incidents de sécurité octobre 2026 » non, et la seconde repart
+    # alors sans aucune borne de date.
+    is_news = recent or _is_news_query(query)
     # Tavily understands natural language — send the full user question when available.
     # Truncate at 400 chars: beyond that, conversational preamble hurts precision.
     tavily_query = (original_message or query)[:400].strip()
+    # `basic` sert la latence du chat, où une réponse d'actualité doit arriver vite. Un
+    # appelant qui demande explicitement la fenêtre récente travaille en arrière-plan et a
+    # besoin d'extraits assez fournis pour choisir quoi ouvrir : il garde la profondeur
+    # avancée, que le topic `news` seul lui retirerait.
     payload: dict = {
         "api_key": TAVILY_API_KEY,
         "query": tavily_query,
-        "search_depth": "basic" if is_news else "advanced",
+        "search_depth": "basic" if (is_news and not recent) else "advanced",
         "topic": "news" if is_news else "general",
         "max_results": max_results,
         "include_answer": True,
@@ -947,6 +961,7 @@ async def search_web(
     query: str,
     max_results: int = 3,
     original_message: str = "",
+    recent: bool = False,
 ) -> list[dict]:
     """
     Main search entry point.
@@ -970,7 +985,9 @@ async def search_web(
         # ── 1. Tavily (primary) ───────────────────────────────────────────
         if TAVILY_API_KEY:
             try:
-                results = await search_tavily(query, original_message, max(max_results, 5))
+                results = await search_tavily(
+                    query, original_message, max(max_results, 5), recent=recent
+                )
                 if results:
                     return results
                 logger.info("Tavily returned no results — falling back to DDG")
@@ -981,7 +998,7 @@ async def search_web(
                 logger.warning("Tavily error (%s) — falling back to DDG: %s", type(exc).__name__, exc)
 
         # ── 2. DDG fallback ───────────────────────────────────────────────
-        if _is_news_query(query):
+        if recent or _is_news_query(query):
             try:
                 results = await search_news(query, max_results=max_results)
             except Exception as exc:

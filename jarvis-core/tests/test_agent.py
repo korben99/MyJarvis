@@ -966,12 +966,26 @@ class TestRelance:
         ]
         assert recues == [10, 20], f"reçue {len(recues)} fois : {recues}"
 
-    def test_la_relance_de_mi_parcours_garde_son_seuil(self):
-        """Elle dit autre chose — un rythme, pas un état — et n'a de sens qu'à la moitié."""
+    def test_la_relance_de_budget_attend_les_trois_quarts(self):
+        """Elle invite à conclure : placée à la moitié, elle écourte la recherche d'une
+        tâche qui gagnait à creuser, et le document sort mince alors qu'il restait des pas.
+
+        Mesuré sur une revue de presse : elle a cessé de chercher au pas 16 sur 20 avec
+        quatre pas en réserve, après avoir reçu l'invitation onze fois d'affilée.
+        """
         from agent.loop import _relance
 
-        assert _relance(step=10, rien_ecrit=False, max_steps=40) == ""
-        assert _relance(step=20, rien_ecrit=False, max_steps=40)
+        assert _relance(step=20, rien_ecrit=False, max_steps=40) == ""
+        assert _relance(step=29, rien_ecrit=False, max_steps=40) == ""
+        assert _relance(step=30, rien_ecrit=False, max_steps=40)
+
+    def test_le_seuil_suit_le_budget_de_la_tache(self):
+        """Les budgets varient d'une origine à l'autre — 20 pas pour une tâche humaine, 40
+        pour l'autocodage : un seuil en valeur absolue viserait juste pour l'un seulement."""
+        from agent.loop import _relance
+
+        assert _relance(step=14, rien_ecrit=False, max_steps=20) == ""
+        assert _relance(step=15, rien_ecrit=False, max_steps=20)
 
 
 # ── Survie du worker ─────────────────────────────────────────────────────────
@@ -1268,7 +1282,7 @@ class TestAncrageTemporelEtSources:
         import web_search
         from agent import tools as T
 
-        async def _faux(q, n):
+        async def _faux(q, n, **kw):
             return [{"title": "A", "url": "https://exemple.org/a", "body": "x"},
                     {"title": "B", "url": "https://exemple.org/b", "body": "y"}]
 
@@ -1283,7 +1297,7 @@ class TestAncrageTemporelEtSources:
         import web_search
         from agent import tools as T
 
-        async def _faux(q, n):
+        async def _faux(q, n, **kw):
             return [{"title": "A", "url": "", "body": "x"}]
 
         monkeypatch.setattr(web_search, "search_web", _faux)
@@ -1299,7 +1313,7 @@ class TestAncrageTemporelEtSources:
         import web_search
         from agent import tools as T
 
-        async def _faux(q, n):
+        async def _faux(q, n, **kw):
             return [{"title": "A", "url": "https://exemple.org/a", "body": "x"}]
 
         monkeypatch.setattr(web_search, "search_web", _faux)
@@ -1307,3 +1321,111 @@ class TestAncrageTemporelEtSources:
         asyncio.run(T._web_search(tache, {"query": "ia"}))
         asyncio.run(T._web_search(tache, {"query": "ia bis"}))
         assert tache["sources_seen"] == ["https://exemple.org/a"]
+
+
+class TestProfondeurDeRecherche:
+    """Une revue de presse a rendu six recherches pour UNE page ouverte, et trois de ses
+    cinq requêtes sont parties sans borne de date. Le document tenait donc d'extraits
+    promotionnels, et citait zéro URL. Ces trois réglages visent cette panne-là.
+    """
+
+    def test_la_fraicheur_est_pilotable_par_lagent(self, monkeypatch):
+        """Sans ce paramètre, la fenêtre de sept jours dépend d'un classificateur lexical
+        que l'agent ne voit pas : « AI Act latest updates » la déclenche, « incidents de
+        sécurité octobre 2026 » non."""
+        import asyncio
+
+        import web_search
+        from agent import tools as T
+
+        recus = {}
+
+        async def _faux(q, n, recent=False):
+            recus["recent"] = recent
+            return []
+
+        monkeypatch.setattr(web_search, "search_web", _faux)
+        asyncio.run(T._web_search({"id": "t"}, {"query": "ia", "recent": True}))
+        assert recus["recent"] is True
+
+    def test_la_fraicheur_est_fausse_par_defaut(self, monkeypatch):
+        import asyncio
+
+        import web_search
+        from agent import tools as T
+
+        recus = {}
+
+        async def _faux(q, n, recent=False):
+            recus["recent"] = recent
+            return []
+
+        monkeypatch.setattr(web_search, "search_web", _faux)
+        asyncio.run(T._web_search({"id": "t"}, {"query": "ia"}))
+        assert recus["recent"] is False
+
+    def test_le_parametre_est_declare_dans_le_schema(self):
+        """Un paramètre que le schéma ne déclare pas n'existe pas pour le modèle : il ne
+        l'émettrait jamais, et le parseur le refuserait."""
+        from agent.tools import TOOL_SCHEMAS
+
+        web = next(s for s in TOOL_SCHEMAS if s["function"]["name"] == "web_search")
+        assert "recent" in web["function"]["parameters"]["properties"]
+
+    def test_une_demande_explicite_garde_la_profondeur_avancee(self):
+        """`recent` bascule Tavily sur le topic `news`, qui par défaut passe en profondeur
+        `basic` — des extraits trop courts pour choisir quoi ouvrir. Le réglage rapide
+        sert la latence du chat, pas un agent qui travaille la nuit."""
+        import inspect
+
+        import web_search
+
+        src = inspect.getsource(web_search.search_tavily)
+        assert '"basic" if (is_news and not recent) else "advanced"' in src
+
+    def test_le_filtre_de_type_accepte_le_xml(self):
+        """Les interfaces qui rendent des données datées et structurées — flux Atom, API
+        de dépôts de publications — répondent en xml. Le filtre les écartait, ce qui
+        coupait l'agent des sources primaires de la recherche."""
+        import inspect
+
+        import web_search
+
+        src = inspect.getsource(web_search._fetch_page)
+        assert '("html", "text/plain", "xml")' in src
+
+    @pytest.mark.parametrize("type_mime, attendu", [
+        ("application/atom+xml; charset=utf-8", True),
+        ("text/xml", True),
+        ("text/html; charset=utf-8", True),
+        ("application/pdf", False),
+        ("image/png", False),
+    ])
+    def test_le_filtre_trie_bien_les_types(self, monkeypatch, type_mime, attendu):
+        """Exercé sur la vraie porte plutôt que sur son texte : un binaire rendrait des
+        octets illisibles, là où un flux balisé est du texte que l'extracteur sait lire."""
+        import asyncio
+
+        import web_search
+
+        class _Reponse:
+            status_code = 200
+            headers = {"content-type": type_mime}
+            text = "<entry><title>Un titre assez long pour survivre à l'extraction</title></entry>"
+
+        async def _get(*a, **k):
+            return _Reponse()
+
+        monkeypatch.setattr(web_search._HTTP, "get", _get)
+        monkeypatch.setattr(web_search, "_fetch_via_jina", lambda u: asyncio.sleep(0, ""))
+        texte, _ = asyncio.run(web_search._fetch_page("https://exemple.org/x", 2000))
+        assert bool(texte) is attendu
+
+    def test_la_consigne_de_lecture_nest_plus_un_plancher_de_un(self):
+        """« Ouvre AU MOINS UNE source » : le modèle en a ouvert exactement une. Un
+        plancher se lit comme un seuil suffisant."""
+        from prompts import get_prompt
+
+        systeme = get_prompt("AGENT_SYSTEM")
+        assert "au moins une source" not in systeme.lower()
+        assert "pour chaque point" in systeme.lower()

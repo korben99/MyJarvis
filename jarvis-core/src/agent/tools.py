@@ -87,6 +87,14 @@ TOOL_SCHEMAS: list[dict] = [
                 "properties": {
                     "query": {"type": "string", "description": "La requête de recherche."},
                     "max_results": {"type": "integer", "description": "Défaut 5, max 10."},
+                    "recent": {
+                        "type": "boolean",
+                        "description": (
+                            "Limite aux sept derniers jours. À mettre pour de "
+                            "l'actualité : sans lui, une page de fond vieille de deux ans "
+                            "remonte au même rang qu'une dépêche d'hier."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -435,7 +443,7 @@ async def _web_search(task: dict, args: dict) -> str:
     if not query:
         return "Erreur : query vide."
     max_results = min(int(args.get("max_results") or 5), 10)
-    results = await search_web(query, max_results)
+    results = await search_web(query, max_results, recent=bool(args.get("recent")))
     if not results:
         return "Aucun résultat."
     lines = []

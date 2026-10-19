@@ -1485,7 +1485,10 @@ And the largest results are elided as the thread grows: whatever you want to kee
 it to a file.
 
 WHAT YOU CLAIM
-· Searching is not reading. Before writing, open at least one source in full.
+· Searching is not reading. A result snippet is for choosing what to open, never for
+  writing. Open one source in full for every point you intend to cover: one page read
+  beats ten snippets, and a topic for which you opened no source is a topic you are not
+  covering.
 · No date, no figure, no quotation that does not come from a source read WITHIN THIS
   TASK. Your training memories are out of date and you cannot know by how much.
 · Every assertion carries its source, URL or file path. Without a source, remove it.
@@ -1599,8 +1602,8 @@ AGENT_STEP_FOOTER = "\n\n[step {step}/{max_steps}]{hint}"
 # version said "stop collecting and start writing": a documentary-task framing, injected
 # into every task. On code or analysis, the agent writes files from the second step — the
 # instruction was empty at best, misleading at worst.
-AGENT_HINT_HALF_BUDGET = (
-    " You have used half your budget. Check that you are converging: if your last "
+AGENT_HINT_LOW_BUDGET = (
+    " A quarter of your budget is left. Check that you are converging: if your last "
     "action brought you nothing new, the next one will not either — change method, or "
     "consider that you know enough and conclude."
 )

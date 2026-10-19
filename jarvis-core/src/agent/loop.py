@@ -211,10 +211,12 @@ def _relance(step: int, rien_ecrit: bool, max_steps: int) -> str:
     absent, puis pied de page manquant sur les tours « plan seul »), rien n'a été écrit.
     """
     # Les deux relances n'ont pas le même seuil, parce qu'elles ne disent pas la même
-    # chose. « Tu as consommé la moitié de ton budget » est un rythme, et n'a de sens qu'à
-    # la moitié. « Tu n'as encore rien écrit » est un ÉTAT, vrai et actionnable bien avant
-    # — à 40 pas, attendre la mi-parcours laisse dépenser vingt pas en lecture avant le
-    # moindre signal.
+    # chose. Le rappel de budget invite à conclure : placé à la moitié, il écourte la
+    # recherche d'une tâche qui gagnait à creuser encore, et le modèle rend un document
+    # mince alors qu'il lui restait des pas. Aux trois quarts, l'invitation ne porte plus
+    # que sur la fin de partie. « Tu n'as encore rien écrit » est un ÉTAT, vrai et
+    # actionnable bien avant — à 40 pas, attendre la mi-parcours laisse dépenser vingt pas
+    # en lecture avant le moindre signal.
     #
     # Mais un état se RAPPELLE, il ne se martèle pas. Le pied de page est ajouté à chaque
     # résultat d'outil : un seuil « à partir de » délivrait neuf fois le même avertissement
@@ -224,9 +226,9 @@ def _relance(step: int, rien_ecrit: bool, max_steps: int) -> str:
     quart, moitie = max(max_steps // 4, 4), max_steps // 2
     if rien_ecrit and step in (quart, moitie):
         return get_prompt("AGENT_HINT_NO_FILE")
-    if max_steps - step > moitie:
+    if step < max_steps * 3 // 4:
         return ""
-    return get_prompt("AGENT_HINT_HALF_BUDGET")
+    return get_prompt("AGENT_HINT_LOW_BUDGET")
 
 
 def _step_footer(step: int, task: dict, rien_ecrit: bool = False) -> str:
