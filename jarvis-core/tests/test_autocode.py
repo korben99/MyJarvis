@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from autocode import constats, mesure
+from autocode import _A_APPLIQUER
 from autocode.mesure import CORRIGE, REJETE, REPRODUIT, RIEN_TROUVE
 
 
@@ -505,22 +506,27 @@ class TestVerdict:
         ))[0] == mesure.GARDE
 
     def test_un_test_vain_qui_passe_ne_garde_rien(self):
-        assert mesure.verdict(_m(
+        """Un test qui ne référence rien ne peut pas garder une propriété : il n'en touche
+        aucune. Le verdict descend, il ne rejette plus."""
+        verdict, motifs = mesure.verdict(_m(
             avant=mesure.PASSE, apres=mesure.PASSE, vain=True,
             sources_touchees=[], fichiers=["jarvis-core/tests/test_n.py"], lignes_source=0,
-        ))[0] == REJETE
+        ))
+        assert verdict == mesure.RIEN_TROUVE
+        assert any("ne référence rien" in x for x in motifs)
 
 
-    def test_une_erreur_sans_correctif_fait_rejeter(self):
-        """Un import cassé rend un code de sortie non nul tout autant qu'une assertion.
-        Sans « après » pour lever l'ambiguïté, une faute de frappe passerait pour une
-        preuve."""
+    def test_une_erreur_sans_correctif_est_signalee(self):
+        """Un import cassé rend un code de sortie non nul tout autant qu'une assertion :
+        sans « après » pour lever l'ambiguïté, rien ne dit si le défaut existe ou si le
+        test est cassé. C'est une faiblesse de la PREUVE, que l'humain tranche en lisant —
+        pas un code qui ne tient pas."""
         verdict, motifs = mesure.verdict(_m(
             avant=mesure.ERREUR, apres=mesure.ERREUR, sources_touchees=[],
             lignes_source=0, fichiers=["jarvis-core/tests/test_n.py"],
             suite_ok=False, suite_hors_test_ok=True,
         ))
-        assert verdict == REJETE
+        assert verdict == REPRODUIT
         assert any("assertion" in x for x in motifs)
 
     def test_une_erreur_rattrapee_par_le_correctif_est_acceptee(self):
@@ -529,27 +535,31 @@ class TestVerdict:
         maintenant. Rejeter ce cas exclurait toute une famille de défauts légitimes."""
         assert mesure.verdict(_m(avant=mesure.ERREUR, apres=mesure.PASSE))[0] == CORRIGE
 
-    def test_un_test_vain_fait_rejeter(self):
-        assert mesure.verdict(_m(vain=True))[0] == REJETE
+    def test_un_test_vain_est_signale_sans_rejeter(self):
+        verdict, motifs = mesure.verdict(_m(vain=True))
+        assert verdict == CORRIGE
+        assert any("ne référence rien" in x for x in motifs)
 
-    def test_un_correctif_sans_test_fait_rejeter(self):
-        """Le contrat commence par la preuve. Un correctif sans test n'est pas « rien
-        trouvé » : c'est une modification que rien n'étaye."""
+    def test_un_correctif_sans_test_nest_pas_applicable(self):
+        """Le contrat commence par la preuve. Sans test, le verdict n'ouvre aucun droit à
+        appliquer — ce n'est plus un rejet, mais ça ne devient pas un patch pour autant."""
         verdict, motifs = mesure.verdict(_m(
             tests_ajoutes=[], avant=None, apres=None, vain=None,
         ))
-        assert verdict == REJETE
+        assert verdict not in _A_APPLIQUER
         assert any("bascule" in x for x in motifs)
 
-    def test_un_correctif_avec_un_test_qui_ne_bascule_pas_fait_rejeter(self):
+    def test_un_test_qui_ne_bascule_pas_nouvre_aucun_droit(self):
         """Même trou, autre forme : le test existe mais passait DÉJÀ. Rien ne dit que la
         modification serve à quelque chose."""
         verdict, motifs = mesure.verdict(_m(avant=mesure.PASSE, apres=mesure.PASSE))
-        assert verdict == REJETE
+        assert verdict not in _A_APPLIQUER
         assert any("bascule" in x for x in motifs)
 
-    def test_un_test_non_eprouve_fait_rejeter(self):
-        assert mesure.verdict(_m(avant=None))[0] == REJETE
+    def test_un_test_non_eprouve_est_signale(self):
+        verdict, motifs = mesure.verdict(_m(avant=None))
+        assert verdict == CORRIGE
+        assert any("éprouvé contre HEAD" in x for x in motifs)
 
     def test_un_fichier_protege_modifie_fait_rejeter(self):
         assert mesure.verdict(
@@ -562,10 +572,20 @@ class TestVerdict:
     def test_une_suite_rouge_avec_correctif_fait_rejeter(self):
         assert mesure.verdict(_m(suite_ok=False))[0] == REJETE
 
-    def test_le_plafond_borne_le_correctif_pas_la_preuve(self):
-        """Un test de reproduction un peu long reste une preuve valable ; le rejeter
-        perdrait la trouvaille."""
-        assert mesure.verdict(_m(lignes_source=9000))[0] == REJETE
+    def test_un_correctif_trop_long_est_signale_sans_etre_rejete(self):
+        """Un diagnostic juste rendu dans un correctif trop long reste un diagnostic juste.
+
+        Le jeter obligeait le vivier à le redécouvrir au cycle suivant : le même constat
+        est revenu deux fois à un mois d'intervalle, rejeté les deux fois — une à cause du
+        plafond. La longueur est une réserve que l'humain tranche, pas un défaut du code.
+        """
+        verdict, motifs = mesure.verdict(_m(lignes_source=9000))
+        assert verdict == CORRIGE
+        assert any("plafond" in x for x in motifs)
+
+    def test_le_plafond_ne_vise_que_le_correctif_pas_la_preuve(self):
+        """Un test de reproduction un peu long n'est même pas concerné : le plafond porte
+        sur les lignes de SOURCE."""
         assert mesure.verdict(_m(
             apres=mesure.ASSERTION, lignes_source=0, sources_touchees=[],
             fichiers=["jarvis-core/tests/test_n.py"], lignes_diff=9000,
@@ -1182,3 +1202,151 @@ class TestNomIndefini:
         """Le patch répond de ce qu'il introduit, pas de ce qu'il a trouvé en arrivant."""
         sortie = "jarvis-core/src/a.py:9:1: undefined name 'DEJA_CASSE'\n"
         assert mesure._noms_indefinis(sortie) - mesure._noms_indefinis(sortie) == set()
+
+
+class TestFrontiereBloquantReserve:
+    """Ce qui rejette, et ce qui accompagne.
+
+    Un rejet DÉTRUIT : le constat repart en refroidissement et le vivier devra le
+    redécouvrir. Ne doit donc rejeter que ce qu'aucun relecteur ne pourrait accepter — du
+    code qui ne tient pas —, plus la seule limite de sûreté. Tout jugement sur la qualité
+    de la preuve ou la forme du correctif suit le patch jusqu'à l'humain.
+    """
+
+    @pytest.mark.parametrize("nom, surcharge", [
+        ("compilation", {"compile_ok": False}),
+        ("suite rouge", {"suite_ok": False}),
+        ("fichier protégé", {"fichiers_proteges": ["jarvis-core/src/config.py"]}),
+        ("nom indéfini", {"noms_indefinis": ["CONSTANTE_SUPPRIMEE"]}),
+        ("preuve non isolée", {"avant": mesure.ASSERTION, "apres": mesure.ASSERTION,
+                               "suite_hors_test_ok": False}),
+    ])
+    def test_ce_qui_rejette_encore(self, nom, surcharge):
+        assert mesure.verdict(_m(**surcharge))[0] == REJETE, nom
+
+    @pytest.mark.parametrize("nom, surcharge, trace", [
+        ("correctif trop long", {"lignes_source": 9000}, "plafond"),
+        ("test vain", {"vain": True}, "ne référence rien"),
+        ("test non éprouvé", {"avant": None}, "éprouvé contre HEAD"),
+        ("régression pyflakes", {"pyflakes_apres": 9}, "pyflakes"),
+    ])
+    def test_ce_qui_accompagne_desormais(self, nom, surcharge, trace):
+        verdict, motifs = mesure.verdict(_m(**surcharge))
+        assert verdict != REJETE, nom
+        assert any(trace in x for x in motifs), f"{nom} : réserve perdue en route"
+
+    def test_une_reserve_nest_jamais_perdue(self):
+        """Une réserve qui disparaîtrait du rapport serait pire qu'un rejet : le patch
+        arriverait à l'humain sans ce qui doit guider sa lecture."""
+        verdict, motifs = mesure.verdict(_m(lignes_source=9000, vain=True, avant=None))
+        assert verdict != REJETE
+        for trace in ("plafond", "ne référence rien", "éprouvé contre HEAD"):
+            assert any(trace in x for x in motifs), trace
+
+    def test_un_bloquant_eclipse_les_reserves(self):
+        """Quand le code ne tient pas, le reste n'a plus d'objet : le rapport doit dire la
+        cause dure, pas la noyer dans des remarques de forme."""
+        verdict, motifs = mesure.verdict(_m(compile_ok=False, lignes_source=9000, vain=True))
+        assert verdict == REJETE
+        assert motifs == ["la compilation échoue"]
+
+    def test_une_reserve_nouvre_pas_un_droit_dappliquer(self):
+        """La frontière déplacée ne doit pas rendre applicable ce qui n'étaye rien : un
+        correctif sans preuve reste hors du jeu, réserve ou pas."""
+        verdict, _ = mesure.verdict(_m(avant=mesure.PASSE, apres=mesure.PASSE))
+        assert verdict not in _A_APPLIQUER
+
+
+class TestParcoursDeLecture:
+    """Le vivier ne se remplissait que de tracebacks et d'ajouts à la main : un module qui
+    ne tombe jamais n'était jamais relu, et un vivier vide fait un cycle qui ne tourne pas.
+    Le parcours ajoute le module le moins récemment examiné, au rang le plus bas.
+    """
+
+    @pytest.fixture
+    def vus(self, monkeypatch):
+        """État de parcours isolé, partagé entre la lecture et la pose."""
+        etat = {}
+        monkeypatch.setattr(constats.store, "parcours_vu", lambda: etat)
+        monkeypatch.setattr(constats, "AUTOCODE_PARCOURS", True)
+        return etat
+
+    def _jours_avant(self, n):
+        from datetime import datetime, timedelta, timezone
+
+        return (datetime.now(timezone.utc) - timedelta(days=n)).isoformat()
+
+    def test_un_module_jamais_lu_devient_candidat(self, vus):
+        assert constats._depuis_le_parcours()
+
+    def test_le_parcours_avance_a_chaque_visite(self, vus):
+        """Sans pose de visite, le parcours rendrait le même module toutes les nuits."""
+        premier = constats._depuis_le_parcours()[0]["cible"][0]
+        vus[premier] = self._jours_avant(0)
+        assert constats._depuis_le_parcours()[0]["cible"][0] != premier
+
+    def test_un_module_lu_recemment_nest_plus_candidat(self, vus, monkeypatch):
+        monkeypatch.setattr(constats, "AUTOCODE_PARCOURS_JOURS", 60)
+        for chemin in constats._modules_candidats():
+            vus[chemin] = self._jours_avant(1)
+        assert constats._depuis_le_parcours() == []
+
+    def test_un_module_lu_il_y_a_longtemps_redevient_candidat(self, vus, monkeypatch):
+        monkeypatch.setattr(constats, "AUTOCODE_PARCOURS_JOURS", 60)
+        for chemin in constats._modules_candidats():
+            vus[chemin] = self._jours_avant(90)
+        assert constats._depuis_le_parcours()
+
+    def test_jamais_lu_passe_avant_lu_il_y_a_longtemps(self, vus):
+        """Sinon le parcours tournerait sur les modules déjà vus sans jamais atteindre
+        ceux qu'il n'a pas ouverts."""
+        candidats = constats._modules_candidats()
+        for chemin in candidats[1:]:
+            vus[chemin] = self._jours_avant(9000)
+        assert constats._depuis_le_parcours()[0]["cible"][0] == candidats[0]
+
+    def test_un_horodatage_illisible_ne_bloque_pas_le_parcours(self, vus):
+        for chemin in constats._modules_candidats():
+            vus[chemin] = "pas une date"
+        assert constats._depuis_le_parcours()
+
+    def test_les_fichiers_proteges_sont_hors_parcours(self):
+        """Ils restent lisibles sur symptôme — `motif_exclusion` les laisse passer à
+        dessein. Mais une lecture préventive ne peut déboucher sur rien d'applicable."""
+        assert not any(constats.est_protege(c) for c in constats._modules_candidats())
+
+    def test_le_parcours_se_desactive(self, vus, monkeypatch):
+        monkeypatch.setattr(constats, "AUTOCODE_PARCOURS", False)
+        assert constats._depuis_le_parcours() == []
+
+    def test_lidentifiant_change_a_chaque_visite(self, vus, monkeypatch):
+        """Un identifiant stable serait écarté par le refroidissement de la visite
+        précédente — ou retiré du vivier pour toujours si un correctif était appliqué."""
+        from datetime import timedelta
+
+        premier = constats._depuis_le_parcours()[0]["id"]
+        reel = constats.datetime
+
+        class _Demain:
+            fromisoformat = reel.fromisoformat
+
+            @staticmethod
+            def now(tz=None):
+                return reel.now(tz) + timedelta(days=1)
+
+        monkeypatch.setattr(constats, "datetime", _Demain)
+        assert constats._depuis_le_parcours()[0]["id"] != premier
+
+    def test_une_lecture_de_controle_passe_apres_un_symptome(self, vus, monkeypatch):
+        """La règle qui protège le dispositif : un défaut observé ne doit jamais céder son
+        créneau à une lecture préventive."""
+        monkeypatch.setattr(constats, "_depuis_tracebacks", lambda t: [{
+            "id": "MAIN-reel", "constat": "défaut observé", "cible": [],
+            "notes": "", "origine": "journal", "poids": 3,
+        }])
+        monkeypatch.setattr(constats, "_a_la_main", list)
+        monkeypatch.setattr(constats.store, "cibles_appliquees", set)
+        monkeypatch.setattr(constats.store, "en_cooldown", lambda i: False)
+        eligibles, _ = constats.recueillir()
+        assert eligibles[0]["id"] == "MAIN-reel"
+        assert eligibles[-1]["id"].startswith("SCAN-")

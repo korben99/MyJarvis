@@ -216,6 +216,14 @@ async def _cycle(dry_run: bool, revue: bool = False, perimetre: str = "") -> dic
             "exclus": exclus,
         }
 
+    # La visite est posée ici, et non à la proposition : un module écarté au profit d'un
+    # symptôme réel n'a pas été lu, et doit rester candidat la nuit suivante. Posée avant
+    # l'exécution plutôt qu'après, pour qu'un cycle qui échoue ne fasse pas revenir le
+    # même module indéfiniment.
+    if retenu.get("origine") == "parcours":
+        for cible in retenu.get("cible") or []:
+            store.parcours_marquer(cible)
+
     return await _executer(_admin(), retenu, eligibles, exclus)
 
 

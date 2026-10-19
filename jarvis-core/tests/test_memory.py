@@ -324,3 +324,62 @@ class TestVocabulaireSatisfaction:
         assert all(d == humeur_seule for d in vus), (
             "une satisfaction neutre ne doit rien ajouter à l'effet de l'humeur"
         )
+
+
+class TestCalibrationEmotionnelle:
+    """La table des deltas est calibrée contre les taux HORAIRES, qui ne s'appliquent
+    qu'en mode `clock`. Le mode actif est `exchange`, où la décroissance est un pas
+    uniforme : une poussée inférieure ou égale à ce pas est reprise en entier avant la
+    suivante, et sa dimension ne peut mathématiquement jamais bouger.
+    """
+
+    def _simuler(self, sequence):
+        import emotional_state as E
+
+        etat = {"humeur": 0.0, "confiance": 0.0, "energie": 0.0}
+        for mood, satisfaction in sequence:
+            E._apply_decay(etat, 0)
+            for table, cle in ((E._MOOD_DELTAS, mood), (E._SATISFACTION_DELTAS, satisfaction)):
+                for dim, delta in table.get(cle, {}).items():
+                    etat[dim] = round(max(-1.0, min(1.0, etat[dim] + delta)), 3)
+        return etat
+
+    def test_lhumeur_la_plus_frequente_peut_bouger_sa_dimension(self):
+        """`focused` est l'humeur dominante du trafic. Sa poussée doit dépasser le pas de
+        décroissance, sinon la dimension la plus sollicitée est la seule inerte."""
+        import emotional_state as E
+
+        assert E._MOOD_DELTAS["focused"]["energie"] > E._DECAY_PER_STEP
+
+    def test_la_confiance_peut_monter_autant_quelle_descend(self):
+        """Le défaut constaté : `satisfaction positive` poussait +0.20 contre un pas de
+        0.20 — inerte — quand `negative` poussait −0.30 et s'accumulait. La confiance ne
+        pouvait que se dégrader, et cet état nourrit le bloc injecté et le pilotage."""
+        monte = self._simuler([("happy", "positive")] * 10)["confiance"]
+        descend = self._simuler([("frustrated", "negative")] * 10)["confiance"]
+        assert monte == pytest.approx(-descend, abs=0.05), (
+            f"asymétrie : +{monte} vers le haut, {descend} vers le bas"
+        )
+
+    def test_une_poussee_recurrente_franchit_le_seuil_de_visibilite(self):
+        """Une dimension qui n'atteint jamais le seuil n'est jamais injectée : elle est
+        écrite pour rien."""
+        import emotional_state as E
+
+        etat = self._simuler([("focused", "unknown")] * 3)
+        assert abs(etat["energie"]) >= E._THRESHOLD
+
+    def test_aucune_dimension_nest_structurellement_inerte(self):
+        """Le garde de régression : si quelqu'un retouche le pas ou la table, cette
+        vérification dit lesquelles redeviennent impossibles à faire bouger."""
+        import emotional_state as E
+
+        inertes = [
+            dim for dim in E._DIMS
+            if not any(
+                abs(d.get(dim, 0.0)) > E._DECAY_PER_STEP
+                for table in (E._MOOD_DELTAS, E._SATISFACTION_DELTAS)
+                for d in table.values()
+            )
+        ]
+        assert not inertes, f"dimension(s) qu'aucune poussée ne peut faire bouger : {inertes}"

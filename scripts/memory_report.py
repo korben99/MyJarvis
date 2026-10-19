@@ -49,6 +49,7 @@ PROFIL_CHANGES_MAX = _env("METRIC_PROFILE_CHANGES_MAX", 5)
 CONFIANCE_FIGEE_J = _env("METRIC_EMOTION_FROZEN_DAYS", 5)
 RISQUE_MAX = _env("METRIC_RISK_MAX", 0.5)
 LISTE_REMPLISSAGE = _env("METRIC_LIST_FILL_RATIO", 0.8)
+GROWTH_LOG_SILENCE_J = _env("METRIC_GROWTH_LOG_SILENCE_DAYS", 7)
 REFLEXION_STERILE_N = _env("METRIC_REFLECTION_STERILE", 3)
 
 _HIST_KEY = "jarvis:metrics:{}"
@@ -351,9 +352,27 @@ def i10_listes_self() -> list:
     tailles = {k: len(d.get(k) or []) for k in plafonds}
     _enregistrer("self_listes", tailles)
 
+    # `growth_log` est hors du test de remplissage : il tourne par construction — une
+    # entrée par utilisateur et par jour de conversation, contre un plafond qui vaut
+    # plusieurs mois, alors que l'introspection n'en lit que les quatorze derniers jours.
+    # Atteindre le plafond est donc son état stationnaire, et l'alerte se déclenchait tous
+    # les jours sans jamais rien dire. Ce qui le concerne est l'inverse : qu'il CESSE
+    # d'être alimenté — c'est alors la revue nocturne qui n'écrit plus.
     pleines = [f"{k} {n}/{plafonds[k]}" for k, n in tailles.items()
-               if plafonds[k] and n >= plafonds[k] * LISTE_REMPLISSAGE]
+               if k != "growth_log" and plafonds[k] and n >= plafonds[k] * LISTE_REMPLISSAGE]
     detail = ", ".join(f"{k}:{n}/{plafonds[k]}" for k, n in sorted(tailles.items()))
+
+    dates = sorted(str(e.get("date") or "")[:10] for e in (d.get("growth_log") or [])
+                   if isinstance(e, dict) and e.get("date"))
+    if dates:
+        try:
+            age_growth = (datetime.now(timezone.utc).date()
+                          - datetime.strptime(dates[-1], "%Y-%m-%d").date()).days
+        except ValueError:
+            age_growth = None
+    else:
+        age_growth = None
+    _enregistrer("growth_log_age_j", age_growth if age_growth is not None else -1)
     # Les neuf axes d'introspection n'ont pas de plafond — ils sont bornés par
     # construction. Ce qu'on surveille chez eux, c'est l'inverse : un axe qui ne se
     # remplit JAMAIS est un axe qui ne mord pas sur ce qu'est Jarvis, et c'est le signal
@@ -368,6 +387,12 @@ def i10_listes_self() -> list:
     return [
         ("Listes de self.json", detail,
          f"proche du plafond — {', '.join(pleines)}" if pleines else None),
+        ("Fraîcheur du growth_log",
+         f"dernière entrée {dates[-1]} (il y a {age_growth} j)" if age_growth is not None
+         else "aucune entrée datée",
+         f"plus alimenté depuis {age_growth} jours — la revue nocturne n'écrit plus"
+         if age_growth is not None and age_growth > GROWTH_LOG_SILENCE_J
+         else ("growth_log vide ou sans date" if age_growth is None else None)),
         ("Axes d'introspection", f"{len(remplis)}/{len(INTROSPECTION_AXES)} remplis",
          f"jamais remplis — {', '.join(vides)}" if vides else None),
     ]

@@ -251,3 +251,33 @@ class TestCommandeDeChat:
         monkeypatch.setattr(R, "arreter_serie", arretees.append)
         self._envoyer(C, "agent: arrête 1a2b3c4d5e6f", user="AUTRE")
         assert arretees == []
+
+
+class TestPlanificationAuDemarrage:
+    """`main` était inimportable sous les stubs de test — aucun travail planifié n'avait
+    donc de couverture possible, celui-ci compris. La cause tenait au simulacre de
+    `qdrant_client.models`, qui énumérait les symboles au lieu de répondre à tous.
+    """
+
+    def test_main_est_importable(self):
+        import main
+
+        assert main
+
+    def test_la_relance_est_posee_sur_le_planificateur(self):
+        """Une fonction qui existe mais que personne n'appelle ne relance rien.
+
+        Lu dans la source : le planificateur est monté dans le `lifespan`, qu'on ne peut
+        pas dérouler sans charger le modèle. Vérifier le texte vaut mieux que ne rien
+        vérifier — ce test tombe si le travail est supprimé, renommé, ou décroché de ses
+        constantes de configuration.
+        """
+        import inspect
+
+        import main
+
+        src = inspect.getsource(main.lifespan)
+        assert 'id="agent_recurrent"' in src
+        assert "relancer_les_series" in src
+        assert "day_of_week=AGENT_RECURRENT_DAY" in src
+        assert "hour=AGENT_RECURRENT_HOUR" in src

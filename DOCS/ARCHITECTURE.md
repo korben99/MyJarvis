@@ -567,7 +567,7 @@ plus accès à internet en ce moment…"* — instead of silently returning no r
 │   │   │   ├── loop.py · worker.py · store.py · tools.py
 │   │   │   └── shell.py (seatbelt) · sandbox.py · report.py · cti.py
 │   │   ├── autocode/           # SELF-CORRECTION — one journey: prove it, then fix it
-│   │   │   ├── constats.py     # The facts: tracebacks + hand-added (1-constats.json)
+│   │   │   ├── constats.py     # The facts: tracebacks + hand-added + control reading (1-constats.json)
 │   │   │   ├── choix.py        # LLM 1 — picks one fact from a closed list (2-choix.json)
 │   │   │   ├── chantier.py     # git worktrees, agentic task, diff (3-patch.diff)
 │   │   │   ├── mesure.py       # red→green, suite, vacuity, verdict (4-mesure.json)

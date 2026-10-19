@@ -46,8 +46,21 @@ _DIMS = ("humeur", "confiance", "energie")
 # Un pas unique pour les trois dimensions : leur hiérarchie de persistance (le doute plus
 # tenace que l'humeur) était portée par des taux horaires qui n'ont plus cours ici. La
 # rétablir demanderait de la mesurer, pas de la postuler — elle ne l'a jamais été.
+#
+# Ramené de 0.20 à 0.10 malgré ce relevé, qui mesurait la variabilité du bloc et non sa
+# JUSTESSE. À 0.20, le pas égalait ou dépassait huit des onze poussées de la table — dont
+# `focused`, l'humeur la plus fréquente, et `satisfaction positive` : ces dimensions ne
+# pouvaient mathématiquement pas s'accumuler, tandis que leurs contreparties négatives
+# (−0.30) le pouvaient. `confiance` plafonnait ainsi à +0.20 vers le haut et saturait à
+# −1.0 vers le bas. Un état qui ne peut que se dégrader varie beaucoup, et c'est
+# précisément ce que l'indicateur retenu récompensait.
+#
+# La table des deltas, elle, est calibrée contre les taux HORAIRES ci-dessous, qui ne
+# s'appliquent qu'en mode "clock". Règle à tenir si l'on retouche l'un ou l'autre : en
+# mode "exchange", une poussée récurrente doit dépasser _DECAY_PER_STEP, sinon elle est
+# reprise en entier avant la suivante.
 _DECAY_MODE = os.getenv("EMOTION_DECAY_MODE", "exchange").strip().lower()
-_DECAY_PER_STEP = float(os.getenv("EMOTION_DECAY_STEP", "0.20"))
+_DECAY_PER_STEP = float(os.getenv("EMOTION_DECAY_STEP", "0.10"))
 
 # Conservé pour _DECAY_MODE="clock" uniquement. Décroissance LINÉAIRE (v − taux × heures).
 _DECAY_PER_HOUR: dict[str, float] = {

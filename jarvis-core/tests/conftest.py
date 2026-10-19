@@ -88,12 +88,14 @@ class PointIdsList:
 
 
 if "qdrant_client" not in sys.modules:
-    _qdrant_models = types.ModuleType("qdrant_client.models")
+    # Module simulé par un MagicMock plutôt que par une liste de symboles : il répond à
+    # n'importe quel attribut, donc `from qdrant_client.models import X` passe quel que
+    # soit X. Une énumération doit être tenue à jour à la main, et elle ne l'est pas —
+    # chaque symbole importé pour la première fois rend muet tout test qui traverse le
+    # module importateur, par une ImportError sans rapport avec ce qu'il vérifie.
+    # PointIdsList garde sa vraie classe, posée par-dessus.
+    _qdrant_models = MagicMock()
     _qdrant_models.PointIdsList = PointIdsList
-    _qdrant_models.Filter = MagicMock()
-    _qdrant_models.FieldCondition = MagicMock()
-    _qdrant_models.MatchValue = MagicMock()
-    _qdrant_models.MatchAny = MagicMock()
     _qdrant = types.ModuleType("qdrant_client")
     _qdrant.models = _qdrant_models
     _qdrant.QdrantClient = MagicMock()

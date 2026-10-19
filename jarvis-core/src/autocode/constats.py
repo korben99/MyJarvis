@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 
 from config import (
     AUTOCODE_MAX_TARGET_LINES,
+    AUTOCODE_PARCOURS,
+    AUTOCODE_PARCOURS_JOURS,
     AUTOCODE_POOL_FILE,
     AUTOCODE_PROTECTED,
     JARVIS_ROOT,
@@ -333,6 +335,80 @@ def _a_la_main() -> list[dict]:
         return []
 
 
+_RACINE_PARCOURUE = os.path.join("jarvis-core", "src")
+
+
+def _modules_candidats() -> list[str]:
+    """Chemins relatifs des modules du code source, protégés exclus.
+
+    Les protégés sont écartés ICI et non par `motif_exclusion`, qui les laisse passer à
+    dessein : un symptôme réel mérite qu'on aille les lire. Une lecture préventive, non —
+    elle ne pourrait déboucher sur rien d'applicable.
+    """
+    racine = os.path.join(JARVIS_ROOT, _RACINE_PARCOURUE)
+    trouves = []
+    for dossier, _, fichiers in os.walk(racine):
+        if "__pycache__" in dossier:
+            continue
+        for nom in fichiers:
+            if not nom.endswith(".py"):
+                continue
+            chemin = os.path.relpath(os.path.join(dossier, nom), JARVIS_ROOT)
+            if not est_protege(chemin):
+                trouves.append(chemin)
+    return sorted(trouves)
+
+
+def _depuis_le_parcours() -> list[dict]:
+    """Le module le moins récemment examiné, ou rien.
+
+    Un seul à la fois : le cycle n'en retient qu'un par nuit, et en proposer dix ne ferait
+    que gonfler la liste que le modèle doit lire pour choisir. Jamais examiné passe avant
+    examiné il y a longtemps — sans quoi le parcours tournerait sur les mêmes modules sans
+    jamais atteindre ceux qu'il n'a pas vus.
+
+    L'identifiant porte la DATE : une visite est un constat, pas un module. Un identifiant
+    stable serait écarté par le refroidissement de la visite précédente, ou retiré pour
+    toujours du vivier si un de ses correctifs était appliqué.
+    """
+    if not AUTOCODE_PARCOURS:
+        return []
+
+    vus = store.parcours_vu()
+    maintenant = datetime.now(timezone.utc)
+    candidats = []
+    for chemin in _modules_candidats():
+        quand = vus.get(chemin)
+        if not quand:
+            candidats.append((0.0, chemin))  # jamais lu : priorité absolue
+            continue
+        try:
+            age = (maintenant - datetime.fromisoformat(quand)).days
+        except ValueError:
+            age = 10_000  # horodatage illisible : traité comme très ancien
+        if age >= AUTOCODE_PARCOURS_JOURS:
+            candidats.append((1.0 / (age + 1), chemin))
+
+    if not candidats:
+        return []
+    _, chemin = min(candidats)
+    jour = maintenant.date().isoformat()
+    return [{
+        "id": _identifiant("SCAN", f"{chemin}:{jour}"),
+        "constat": f"Lecture de contrôle de {chemin}",
+        "cible": [chemin],
+        "notes": (
+            "Aucun symptôme ne désigne ce module : la lecture est préventive, et "
+            "« rien à signaler » est une issue normale. Cherche ce qu'aucun journal ne "
+            "montre — un cas non traité, une garde absente, un écart entre ce que le code "
+            "fait et ce que son commentaire annonce. N'invente pas un défaut pour avoir "
+            "quelque chose à rendre."
+        ),
+        "origine": "parcours",
+        "poids": 0,
+    }]
+
+
 # ── Filtres et assemblage ─────────────────────────────────────────────────
 
 
@@ -361,7 +437,10 @@ def motif_exclusion(constat: dict, traites: set[str]) -> str | None:
 
 def recueillir() -> tuple[list[dict], list[tuple[str, str]]]:
     """(constats éligibles, exclusions motivées). Les plus lourds d'abord."""
-    bruts = _depuis_tracebacks(_lire_queue()) + _a_la_main()
+    # Le parcours EN DERNIER, et le tri est stable : à poids égal il reste derrière les
+    # ajouts à la main, qui eux-mêmes passent après les symptômes observés. Une lecture
+    # préventive ne doit jamais prendre le créneau d'un défaut qui s'est manifesté.
+    bruts = _depuis_tracebacks(_lire_queue()) + _a_la_main() + _depuis_le_parcours()
     traites = store.cibles_appliquees()
 
     eligibles, exclus = [], []

@@ -25,6 +25,7 @@ _COOLDOWN_PREFIX = "jarvis:autocode:cooldown"
 _APPLIQUEES_KEY = "jarvis:autocode:appliquees"
 _EN_VOL_KEY = "jarvis:autocode:en_vol"
 _VERROU_PREFIX = "jarvis:autocode:verrou"
+_PARCOURS_KEY = "jarvis:autocode:parcours"
 
 # 25 h : recouvre la journée sans jamais laisser deux nuits consécutives se recouvrir.
 _VERROU_TTL = 90000
@@ -99,6 +100,30 @@ def marquer_appliquee(constat_id: str) -> None:
 
 def cibles_appliquees() -> set[str]:
     return set(get_redis().smembers(_APPLIQUEES_KEY))
+
+
+# ── Parcours de lecture ───────────────────────────────────────────────────
+
+
+def parcours_vu() -> dict[str, str]:
+    """{chemin: horodatage de la dernière lecture de contrôle}.
+
+    État propre au parcours, et non le refroidissement commun : celui-ci porte sur un
+    constat, qui vaut pour une visite. Un module relu doit redevenir candidat sans que
+    la visite précédente l'exclue par son identifiant.
+    """
+    brut = get_redis().hgetall(_PARCOURS_KEY) or {}
+    return {
+        (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
+        for k, v in brut.items()
+    }
+
+
+def parcours_marquer(chemin: str) -> None:
+    """Pose la visite. Appelée quand le cycle RETIENT le module, pas quand il le propose :
+    un module écarté au profit d'un symptôme réel n'a pas été lu, et doit rester candidat.
+    """
+    get_redis().hset(_PARCOURS_KEY, chemin, now_iso())
 
 
 # ── Patch en vol ──────────────────────────────────────────────────────────

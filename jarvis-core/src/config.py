@@ -565,6 +565,15 @@ AUTOCODE_MAX_DIFF_LINES = int(os.getenv("AUTOCODE_MAX_DIFF_LINES", "200"))
 # mécanisme est borné en DÉBIT, l'approbation humaine est le filtre de pertinence.
 AUTOCODE_COOLDOWN_DAYS = int(os.getenv("AUTOCODE_COOLDOWN_DAYS", "30"))
 
+# Lecture de contrôle : le vivier ne se remplit que de tracebacks et d'ajouts à la main,
+# donc un module qui ne tombe jamais n'est jamais relu. Le parcours ajoute le module le
+# moins récemment examiné, au rang le plus bas — un symptôme réel passe toujours devant.
+AUTOCODE_PARCOURS = os.getenv("AUTOCODE_PARCOURS", "true").lower() == "true"
+
+# Délai avant qu'un module relu redevienne candidat. Trop court, le parcours repasse sur
+# ce qu'il vient de lire au lieu d'avancer ; il tient le rythme d'un module par nuit.
+AUTOCODE_PARCOURS_JOURS = int(os.getenv("AUTOCODE_PARCOURS_JOURS", "60"))
+
 # Plafond de lignes d'un fichier cible. AGENT_READ_MAX_CHARS vaut 32 000 caractères, soit
 # ~800 lignes de Python : au-delà il faudrait paginer, et la pagination est ce que le
 # modèle rate le plus — il rejoue la même lecture jusqu'à épuiser le budget.

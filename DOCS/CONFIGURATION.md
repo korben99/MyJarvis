@@ -303,13 +303,18 @@ Off by default, with a second switch for the shell. Every variable is listed in
 |----------|---------|-------------|
 | `AGENT_ENABLED` | `false` | Master switch. `false` ⇒ no worker, routes answer `503`. |
 | `AGENT_SHELL_ENABLED` | `false` | The `shell` tool. A shell running under your account is the loop's most dangerous capability: it is enabled knowingly, never inherited from a configuration. |
+| `AGENT_RECURRENT_DAY` | `mon` | Day the recurring series are relaunched (`tâche agent hebdo: …`). |
+| `AGENT_RECURRENT_HOUR` | `6` | Hour of that relaunch. After the CVE scan, early enough to hand the GPU back before the morning briefing. No enable flag: the job is inert until a task carries a cadence. |
+| `AGENT_RECURRENT_MAX_TITRES` | `20` | Headings of the previous deliverable carried over to the next turn. |
+| `AGENT_RECURRENT_MAX_DOMAINES` | `40` | Domains already consulted, carried over so the next turn does not repeat itself. |
 
 ## Nightly autocoding (`autocode/`)
 
-Once a night, Jarvis takes a fact about himself — a traceback from his own log, or a line you
-added to `DOCS/AUTOCODE.md` — writes a test that fails to prove the defect is real, fixes it,
-and drops the patch on a shelf. It **never applies anything**: applying stays a `git apply`
-you type after reading the diff.
+Once a night, Jarvis takes a fact about himself — a traceback from his own log, a line you
+added to `DOCS/AUTOCODE.md`, or, failing both, the module he has not re-read in longest —
+writes a test that fails to prove the defect is real, fixes it, and drops the patch on a
+shelf. It **never applies anything**: applying stays a `git apply` you type after reading
+the diff.
 
 Requires `AGENT_ENABLED` as well, but is switched separately: two capabilities, two decisions.
 
@@ -321,8 +326,10 @@ Requires `AGENT_ENABLED` as well, but is switched separately: two capabilities, 
 | `AUTOCODE_DIR` | `/opt/jarvis/autocode` | Shelf for the patches, one sub-directory per cycle. |
 | `AUTOCODE_MAX_STEPS` | `40` | Writing code takes more steps than writing a note. |
 | `AUTOCODE_TIMEOUT_MINUTES` | `90` | Wall-clock budget. At 2 a.m. nothing competes for the GPU. |
-| `AUTOCODE_MAX_DIFF_LINES` | `200` | Above this the patch is rejected. A diff that overflows is not a big fix, it is a fix that drifted. |
+| `AUTOCODE_MAX_DIFF_LINES` | `200` | Above this the patch is flagged, not rejected: a diff that overflows is not a big fix but a fix that drifted — and that is yours to judge. |
 | `AUTOCODE_COOLDOWN_DAYS` | `30` | How long a target you rejected sleeps. |
+| `AUTOCODE_PARCOURS` | `true` | Control reading: each night the least recently examined module of `jarvis-core/src/` joins the pool, ranked last. Without it a module that never crashes is never re-read, and the pool can sit empty. |
+| `AUTOCODE_PARCOURS_JOURS` | `60` | Before a module read this way becomes a candidate again. With ~79 modules at one a night, a full sweep takes about three months. |
 | `AUTOCODE_MAX_TARGET_LINES` | `800` | Target files above this are filtered out: beyond it a single `read_file` no longer covers the file, and pagination is what the model handles worst. |
 | `AUTOCODE_PROTECTED` | `config.py`, `prompts*.py`, `.env`, `users_list.json`, `jarvis-self.json` | Files a patch may never touch, even with approval. |
 

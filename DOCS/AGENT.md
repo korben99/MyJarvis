@@ -263,7 +263,14 @@ The verdict is therefore not a *type* of task but a **distance travelled**:
 | `gardé` | no defect, but a test that now guards the property — **a patch to review** |
 | `signalé` | nothing testable, but sourced findings written to `revue.md` — **something to read**, no diff |
 | `rien trouvé` | no test, or a test proving nothing — **no deliverable** |
-| `rejeté` | protected file modified, vacuous test, error instead of assertion, suite broken, **or a source changed with no test that flips** |
+| `rejeté` | **code that does not hold** — compilation fails, unit suite red, the added test breaks others, an undefined name is introduced, or a protected file was modified |
+
+Everything else that used to reject now **travels with the patch** as a reserve, at the
+top of the report: a fix over `AUTOCODE_MAX_DIFF_LINES`, a vacuous test, a test that could
+not be replayed against `HEAD`, a source changed with no test that flips, a `pyflakes`
+regression. A rejection *destroys* — the finding goes back to sleep and the pool has to
+rediscover it — so it is reserved for what no reviewer could accept. A reserve never makes
+applicable what was not: an unsupported fix still stays out of play.
 
 `reproduit` is a good result: it turns a suspicion into a fact. `rien trouvé` is one too —
 a finding says *this was observed*, not *here is the defect*. A model pushed to report a
@@ -445,7 +452,7 @@ than its exit code, and distinguishes `failed` (an assertion tripped) from `erro
 | `failed` — assertion | yes | `corrigé` |
 | `failed` — assertion | no | `reproduit` |
 | `error` — import/collection | **yes** | `corrigé` — see below |
-| `error` — import/collection | no | `rejeté` |
+| `error` — import/collection | no | `reproduit`, with a reserve: the test shows it does not run, not that a defect exists |
 | `passed` | — | `gardé` if the test is non-vacuous and touches no source, else `rien trouvé` |
 
 The third row was found by exercising, not by reasoning: a *"the function is missing"*

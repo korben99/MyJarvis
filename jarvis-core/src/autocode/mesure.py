@@ -443,24 +443,31 @@ def verdict(m: dict) -> tuple[str, list[str]]:
     tranche. Il rédige le rapport, il ne décide pas de son issue — c'est ce qui empêche un
     patch cassé d'être présenté comme un succès par une prose convaincante.
     """
-    motifs: list[str] = []
+    # Deux familles, et la frontière est nette. BLOQUANT : du code qui ne tient pas —
+    # compilation, nom indéfini, suite rouge — plus la seule limite de sûreté, les fichiers
+    # protégés. RÉSERVE : tout ce qui porte sur la QUALITÉ DE LA PREUVE ou la forme du
+    # correctif. Une réserve suit le patch jusqu'à l'humain au lieu de le détruire : un
+    # diagnostic juste rendu dans un correctif trop long reste un diagnostic juste, et le
+    # jeter oblige le vivier à le redécouvrir au cycle suivant, indéfiniment.
+    bloquants: list[str] = []
+    reserves: list[str] = []
     a_corrige = m["apres"] == PASSE
 
     # Un fichier protégé peut être EXAMINÉ — le parcours s'arrête alors à la preuve. Ce qui
     # est refusé, c'est de le modifier.
     if m["fichiers_proteges"]:
-        motifs.append(f"fichiers protégés modifiés : {', '.join(m['fichiers_proteges'])}")
+        bloquants.append(f"fichiers protégés modifiés : {', '.join(m['fichiers_proteges'])}")
     if not m["compile_ok"]:
-        motifs.append("la compilation échoue")
+        bloquants.append("la compilation échoue")
     if m["vain"]:
-        motifs.append("le test ajouté ne référence rien — il ne peut rien démontrer")
+        reserves.append("le test ajouté ne référence rien — il ne peut rien démontrer")
     if m["avant"] == ERREUR and not a_corrige:
         # Une erreur sur HEAD ne distingue pas « la chose manque » d'« mon test est cassé ».
         # Quand le test PASSE ensuite, la seconde moitié du contrat lève l'ambiguïté : le
         # symbole était bien absent, il existe maintenant — c'est la forme normale d'un
         # défaut « la fonction manque ». Sans « après », rien ne la lève, et une faute de
         # frappe passerait pour une preuve.
-        motifs.append(
+        reserves.append(
             "le test ajouté tombe sur une erreur (import, collecte ou fixture) et non sur "
             "une assertion, et rien ne le corrige — il démontre qu'il ne tourne pas, pas "
             "qu'un défaut existe"
@@ -471,59 +478,61 @@ def verdict(m: dict) -> tuple[str, list[str]]:
         # la NameError que si elle traverse la ligne, et le test ajouté prouve la propriété
         # visée — pas la survie du reste du module. Un patch qui supprime une constante en
         # laissant ses usages passe donc rouge→vert, suite verte, et casse à l'exécution.
-        motifs.append(
+        bloquants.append(
             "nom(s) indéfini(s) introduit(s) par le correctif : "
             + ", ".join(m["noms_indefinis"])
         )
     if a_corrige and m["lignes_source"] > AUTOCODE_MAX_DIFF_LINES:
-        motifs.append(
+        reserves.append(
             f"correctif de {m['lignes_source']} lignes (plafond {AUTOCODE_MAX_DIFF_LINES})"
         )
     if a_corrige and not m["suite_ok"]:
-        motifs.append("la suite unitaire est rouge")
+        bloquants.append("la suite unitaire est rouge")
     if not a_corrige and m["tests_ajoutes"] and m.get("suite_hors_test_ok") is False:
-        motifs.append("le test ajouté en fait tomber d'autres — la preuve n'est pas isolée")
+        bloquants.append("le test ajouté en fait tomber d'autres — la preuve n'est pas isolée")
     if m["sources_touchees"] and not _bascule(m):
         # Le contrat n'a qu'une forme, et elle commence par la preuve. Une source modifiée
         # que rien ne fait basculer du rouge au vert n'est pas « rien trouvé » — c'est une
         # modification que rien n'étaye, qu'il n'y ait PAS de test ou qu'il y en ait un qui
         # passait déjà. Le diff reste dans le dossier : refuser n'est pas jeter.
-        motifs.append(
+        reserves.append(
             f"sources modifiées sans test qui bascule : {', '.join(m['sources_touchees'])}"
         )
     if m["tests_ajoutes"] and m["avant"] is None:
-        motifs.append("le test ajouté n'a pas pu être éprouvé contre HEAD")
-    if motifs:
-        return REJETE, motifs
+        reserves.append("le test ajouté n'a pas pu être éprouvé contre HEAD")
+    if bloquants:
+        return REJETE, bloquants
 
     if not m["tests_ajoutes"]:
         # Rien de testable, mais peut-être quelque chose de situé. Le rang le plus bas qui
         # laisse de quoi lire — sans lui, une trouvaille intestable serait perdue.
         if m["constats_ecrits"] and m["citations"]:
-            return SIGNALE, [
+            return SIGNALE, reserves + [
                 f"{len(m['constats_ecrits'])} constat(s) sans test, "
                 f"{len(m['citations'])} citation(s) vérifiée(s) contre ce qui a été ouvert"
             ]
         # Bredouille, et c'est une issue légitime : un constat dit « ceci a été observé »,
         # pas « voici le défaut ». Un modèle poussé à rapporter une prise en fabriquerait une.
-        return RIEN_TROUVE, ["ni test ni constat sourcé — rien n'a pu être étayé"]
+        return RIEN_TROUVE, reserves + ["ni test ni constat sourcé — rien n'a pu être étayé"]
     if m["avant"] == PASSE:
         if garde_proposee(m):
-            return GARDE, [
+            return GARDE, reserves + [
                 f"aucun défaut — la propriété tient. {', '.join(m['tests_ajoutes'])} la "
                 "garde désormais : elle ne pourra plus se rompre en silence"
             ]
-        return RIEN_TROUVE, ["le test ajouté passe déjà sur HEAD — il décrit ce qui marchait"]
+        return RIEN_TROUVE, reserves + [
+            "le test ajouté passe déjà sur HEAD — il décrit ce qui marchait"
+        ]
 
     if m["pyflakes_apres"] > m["pyflakes_avant"]:
-        motifs.append(
+        reserves.append(
             f"pyflakes passe de {m['pyflakes_avant']} à {m['pyflakes_apres']} signalements"
         )
 
     if a_corrige:
-        return CORRIGE, motifs + [
+        return CORRIGE, reserves + [
             "test rouge sur HEAD et vert avec le correctif, suite verte"
         ]
-    return REPRODUIT, motifs + [
+    return REPRODUIT, reserves + [
         f"défaut prouvé par {', '.join(m['tests_ajoutes'])}, non corrigé"
     ]
