@@ -22,7 +22,101 @@ You ──► Open WebUI / iOS app ──► Jarvis API ──► Qwen3.6-35B (M
 
 ---
 
+## Quick guide
+
+Jarvis has **two surfaces** — Open WebUI in a browser (`http://<machine>:3000`) and the
+iOS app, by voice or wake word — and the same sentences work in both. One rule covers
+almost all of it: **you ask in plain language.** An intent router reads what you want, so
+there is no command vocabulary to learn. Only a handful of actions need an exact phrase,
+and they are exactly the ones that must never fire by accident.
+
+### Your first five minutes
+
+Nothing installed yet? **[Install](#install)** first — one script, then three things to
+fill in by hand.
+
+1. **Start it** — `jarvis-start`, then give it about two minutes: the 35 B model loads at
+   boot. `jarvis-status` says whether the service is up, `scripts/jarvis-status.sh` checks
+   the whole stack (Redis, Qdrant, Open WebUI, the API).
+2. **Open the chat** — `http://<machine>:3000`, and pick the `jarvis` model. In Open WebUI
+   you are recognised by the email of your account, matched against the `mail` field of
+   your entry in `jarvis-core/JarvisData/users_list.json`; the iOS app uses your `code`
+   instead. An unknown email gets a `401` rather than an anonymous session — there is no
+   such thing as a user without a memory here.
+3. **Tell it something true about you** — *"je bosse sur la rénovation de la cuisine"*.
+   That is how you write to memory: no form, no field, no command.
+4. **Ask for something it has to go and fetch** — *"j'ai des mails ?"*, *"quel temps
+   demain ?"*, *"quoi de neuf sur <sujet> ?"*, *"qu'est-ce que j'ai dans mon agenda
+   jeudi ?"*
+5. **Come back tomorrow morning.** The briefing is in your mailbox, and the night has
+   sorted through what it learned.
+
+### Just ask — the plain-language half
+
+| You want | Say something like |
+|---|---|
+| Your mail | *"j'ai des mails importants ?"*, *"résume-moi le mail de la banque"* |
+| Your day | *"mon agenda de jeudi"*, *"je suis libre vendredi après-midi ?"* |
+| The weather | *"il fait quoi demain à Bordeaux ?"* |
+| The web | *"quoi de neuf sur <sujet> ?"*, *"cherche <sujet>"* |
+| Your own documents | *"qu'est-ce que dit mon contrat d'assurance sur <sujet> ?"* |
+| A photo read | attach the image and ask your question about it |
+| Your portfolio | *"où en sont mes positions ?"*, *"propose-moi des seuils"* |
+| Your projects | *"où j'en suis sur <projet> ?"*, *"j'ai fini <projet>"* |
+| The briefing, now | *"donne-moi le briefing"* — the one already assembled, or a fresh one |
+| Jarvis himself | *"comment vas-tu ?"*, *"tes dernières réflexions"*, *"tu as des CVE critiques ?"* |
+
+Telling him things is how you write to memory. *"J'ai commencé un nouveau projet…"* opens
+the entry, *"j'ai fini…"* closes it, a deadline mentioned in passing becomes a date, and a
+fact that contradicts an older one is retracted during the night. There is no command for
+any of that, and nothing to maintain by hand.
+
+### Say it exactly — the other half
+
+| To do this | Type |
+|---|---|
+| Launch a background task — **admins** | `tâche agent: <objectif>` · also `agent:`, `agent task:`, `task:` |
+| Relaunch it every week — **admins** | `tâche agent hebdo: <objectif>` · also `agent hebdo:`, `weekly:` — the first run starts at once, each later one picks up from what the previous found |
+| Follow your tasks | `tâche agent: statut` — open to everyone, for their own tasks |
+| Stop a weekly series — **admins** | `tâche agent: arrête <id de série>` — the run under way still finishes |
+| Put something in your calendar | *"ajoute un rendez-vous jeudi 14 h chez le dentiste"*, then **`confirme`** or **`annule`** (*oui* / *non* work too) |
+| Read a pending prompt rewrite | *"montre les propositions"*, then *"accepte la proposition `<id>`"* — **admins** decide |
+| Read a pending patch — **admins** | *"montre le patch"*, then *"accepte le patch `<id>`"* or *"rejette le patch `<id>`"* |
+
+The English forms are accepted whatever `JARVIS_LANG` is set to — `task:`, `status`,
+`confirm`, `cancel`. Nothing is written to your calendar until you confirm, and the
+proposed event is dropped if you leave it for ten minutes.
+
+The two decisions do **not** behave the same way, on purpose. Approving a prompt rewrite
+*applies* it — the override is written and takes effect without a restart. Accepting a
+patch applies nothing: it records *I will do it myself, stop proposing it*, and the diff
+still waits for the `git apply` you type after reading it.
+
+### At the terminal
+
+The aliases are installed in your shell by `install.sh`.
+
+| Command | What it does |
+|---|---|
+| `jarvis-start` · `jarvis-stop` | Start or stop the service (launchd) |
+| `jarvis-restart` | Reload the code — **required after any change**, the server does not hot-reload |
+| `jarvis-status` | Is the service running? |
+| `scripts/jarvis-status.sh` | Health of the whole stack: containers, LLM providers, external APIs, RAG, memory, proto-self |
+| `jarvis-config` | Open the configuration page on your `.env` |
+| `tail -f logs/jarvis-api.log` | Watch what it is doing |
+| `curl localhost:8000/status` | One-line health check |
+| `./venv/bin/python scripts/uploadrag.py --dry-run` | Index new documents dropped in `RAGData/` — **always dry-run first** |
+| `./scripts/backup-jarvis.sh` | Back up the state; `backup-jarvis.sh updates` also upgrades Docker and the venv |
+
+Everything beyond that is operator work rather than conversation — queueing a task over
+HTTP, launching a maintenance review, importing a broker CSV — and it lives in
+**[API.md](DOCS/API.md)**.
+
+---
+
 ## What it does
+
+*The rest of this README explains how each of these works, and why it was built that way.*
 
 ### It remembers
 
@@ -223,53 +317,6 @@ command. A blank secret field means *leave it alone*, and the file is rewritten 
 line so your comments survive.
 
 Full walkthrough in **[DOCS/INSTALL.md](DOCS/INSTALL.md)**.
-
----
-
-## Pilotage — what to say
-
-Two surfaces, Open WebUI in the browser and the iOS app by voice or wake word, and the
-same sentences work in both. One rule: **almost everything is asked in plain language**,
-and only a handful of actions need an exact phrase — those that must never fire by
-accident.
-
-### Just ask
-
-A router reads the intent, so there is nothing to memorise. Your mail, your calendar, the
-weather, the web, your documents, your positions, your projects — and Jarvis himself:
-*"comment vas-tu ?"*, *"tes dernières réflexions"*, *"tu as des CVE critiques ?"*. Ask for
-the morning briefing at any hour and you get the one already assembled, or a fresh one
-built on the spot.
-
-Telling him things is how you write to memory. *"J'ai commencé un nouveau projet…"* opens
-the entry, *"j'ai fini…"* closes it, a deadline mentioned in passing becomes a date, and a
-fact that contradicts an older one is retracted during the night. There is no command for
-any of that, and nothing to maintain by hand. Attach a photo and ask about it — a local
-vision model reads it.
-
-### Say it exactly
-
-| To do this | Type |
-|---|---|
-| Launch a background task — **admins** | `tâche agent: <objectif>` · also `agent:`, `agent task:`, `task:` |
-| Follow your tasks | `tâche agent: statut` — open to everyone, for their own tasks |
-| Put something in your calendar | *"ajoute un rendez-vous jeudi 14 h chez le dentiste"*, then **`confirme`** or **`annule`** |
-| Read a pending prompt rewrite | *"montre les propositions"*, then *"accepte la proposition `<id>`"* — **admins** decide |
-| Read a pending patch — **admins** | *"montre le patch"*, then *"accepte le patch `<id>`"* or *"rejette le patch `<id>`"* |
-
-The English forms are accepted whatever `JARVIS_LANG` is set to — `task:`, `status`,
-`confirm`, `cancel`. Nothing is written to your calendar until you confirm, and the
-proposed event is dropped if you leave it for ten minutes.
-
-The two decisions do **not** behave the same way, on purpose. Approving a prompt rewrite
-*applies* it — the override is written and takes effect without a restart. Accepting a
-patch applies nothing: it records *I will do it myself, stop proposing it*, and the diff
-still waits for the `git apply` you type after reading it.
-
-Everything else is operator work rather than conversation — queueing a task for yourself
-over HTTP, launching a maintenance review, importing a broker CSV — and it lives in
-**[API.md](DOCS/API.md)**. To feed the document base, drop files in `RAGData/` and run
-`scripts/uploadrag.py --dry-run` before the real pass.
 
 ---
 
