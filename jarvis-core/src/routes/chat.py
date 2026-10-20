@@ -17,6 +17,8 @@ from config import (
     AGENT_ENABLED,
     AGENT_RECURRENT_DAY,
     AGENT_RECURRENT_HOUR,
+    AGENT_RECURRENT_MAX_STEPS,
+    AGENT_RECURRENT_TIMEOUT_MINUTES,
     BRIEFING_TIMEZONE,
     DEFAULT_TEMP,
     HIST_CONV_SUMMARIZE_THRESHOLD,
@@ -763,6 +765,7 @@ def _handle_agent_task(
     # plusieurs jours si l'objectif était seulement tenable.
     meta = None
     suite = ""
+    budgets: dict = {}
     if recurrent:
         from agent.recurrent import CADENCE_HEBDO, nouvelle_serie
 
@@ -771,11 +774,17 @@ def _handle_agent_task(
             "serie": nouvelle_serie(),
             "objectif_source": objective,
         }
+        # Dès le premier tour : il sert de référence aux suivants, et un premier tour
+        # écourté par un budget ordinaire livrerait un rappel maigre à toute la série.
+        budgets = {
+            "max_steps": AGENT_RECURRENT_MAX_STEPS,
+            "timeout_minutes": AGENT_RECURRENT_TIMEOUT_MINUTES,
+        }
         suite = (
             f" Je reprends ensuite chaque semaine ({AGENT_RECURRENT_DAY} à "
             f"{AGENT_RECURRENT_HOUR}h), en repartant de ce que j'aurai trouvé cette fois-ci."
         )
-    task = create_task(user_code, objective, meta=meta)
+    task = create_task(user_code, objective, meta=meta, **budgets)
     return _instant_reply(
         req, user_code,
         f"C'est parti — je m'en occupe en arrière-plan (tâche {task['id'][:8]}).{suite} "

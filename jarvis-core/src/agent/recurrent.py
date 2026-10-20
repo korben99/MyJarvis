@@ -23,7 +23,9 @@ from urllib.parse import urlparse
 
 from config import (
     AGENT_RECURRENT_MAX_DOMAINES,
+    AGENT_RECURRENT_MAX_STEPS,
     AGENT_RECURRENT_MAX_TITRES,
+    AGENT_RECURRENT_TIMEOUT_MINUTES,
 )
 from helpers import get_logger, get_redis
 from prompts import get_prompt
@@ -160,8 +162,8 @@ def relancer_les_series() -> list[dict]:
             objective=source + rappel_du_tour_precedent(precedent),
             origin=precedent.get("origin", "human"),
             meta={**meta, "objectif_source": source, "serie": serie},
-            max_steps=precedent.get("max_steps", 0),
-            timeout_minutes=precedent.get("timeout_minutes", 0),
+            max_steps=AGENT_RECURRENT_MAX_STEPS,
+            timeout_minutes=AGENT_RECURRENT_TIMEOUT_MINUTES,
         )
         creees.append(tache)
         logger.info(

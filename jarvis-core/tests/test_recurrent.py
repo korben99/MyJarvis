@@ -90,11 +90,42 @@ class TestHeritageDeLObjectif:
         assert creees[0]["objective"].startswith("veille stockage")
         assert creees[0]["meta"]["objectif_source"] == "veille stockage"
 
-    def test_la_serie_et_les_budgets_sont_transmis(self):
-        creees = _relancer([{**_BASE, "max_steps": 25, "timeout_minutes": 60,
-                             "meta": _meta("s1")}])
-        assert creees[0]["meta"]["serie"] == "s1"
-        assert creees[0]["max_steps"] == 25 and creees[0]["timeout_minutes"] == 60
+    def test_la_serie_est_transmise(self):
+        assert _relancer([{**_BASE, "meta": _meta("s1")}])[0]["meta"]["serie"] == "s1"
+
+    def test_les_budgets_viennent_de_la_configuration_pas_du_tour_precedent(self):
+        """Réglés à chaque tour et non hérités : sinon changer la clé n'aurait d'effet que
+        sur les séries créées ensuite, et une série ancienne resterait au budget du jour
+        où elle a été lancée — invisible, et impossible à corriger sans la recréer."""
+        from config import AGENT_RECURRENT_MAX_STEPS, AGENT_RECURRENT_TIMEOUT_MINUTES
+
+        creee = _relancer([{**_BASE, "max_steps": 5, "timeout_minutes": 5,
+                            "meta": _meta("s1")}])[0]
+        assert creee["max_steps"] == AGENT_RECURRENT_MAX_STEPS
+        assert creee["timeout_minutes"] == AGENT_RECURRENT_TIMEOUT_MINUTES
+
+    def test_le_budget_de_serie_depasse_le_budget_ordinaire(self):
+        """Toute la raison d'être du réglage : une tâche qui creuse ouvre ses sources une à
+        une, et le budget ordinaire la fait conclure alors qu'il lui restait à lire."""
+        from config import AGENT_MAX_STEPS, AGENT_RECURRENT_MAX_STEPS
+
+        assert AGENT_RECURRENT_MAX_STEPS > AGENT_MAX_STEPS
+
+    def test_la_serie_rend_la_main_avant_le_briefing(self):
+        """La contrainte haute n'est pas l'ambition mais le créneau : le briefing du matin
+        est la seule tâche de la nuit attendue à une heure dite."""
+        from config import (
+            AGENT_RECURRENT_HOUR,
+            AGENT_RECURRENT_TIMEOUT_MINUTES,
+            BRIEFING_TIME,
+        )
+
+        fin = AGENT_RECURRENT_HOUR * 60 + AGENT_RECURRENT_TIMEOUT_MINUTES
+        h, m = (int(x) for x in BRIEFING_TIME.split(":"))
+        assert fin <= h * 60 + m, (
+            f"la série peut courir jusqu'à {fin // 60}h{fin % 60:02d}, "
+            f"le briefing part à {BRIEFING_TIME}"
+        )
 
     def test_lobjectif_nenfle_pas_de_tour_en_tour(self):
         """LE défaut à ne pas laisser passer : si le successeur héritait de l'objectif
@@ -176,7 +207,8 @@ class TestCommandeDeChat:
         appels = {}
 
         def _faux_create(user_code, objective, origin="human", meta=None, **kw):
-            appels.update({"objective": objective, "meta": meta, "user_code": user_code})
+            appels.update({"objective": objective, "meta": meta,
+                           "user_code": user_code, **kw})
             return {"id": "abcd1234ef567890"}
 
         monkeypatch.setattr(agent, "create_task", _faux_create)
@@ -227,6 +259,23 @@ class TestCommandeDeChat:
     def test_la_reponse_annonce_la_recurrence(self, banc):
         C, _ = banc
         assert "chaque semaine" in self._envoyer(C, "agent hebdo: veille stockage objet")["txt"]
+
+    def test_le_premier_tour_recoit_deja_le_budget_de_serie(self, banc):
+        """Il sert de référence aux suivants : un premier tour écourté livrerait un rappel
+        maigre — sommaire creux, peu de sources — à toute la série."""
+        from config import AGENT_RECURRENT_MAX_STEPS, AGENT_RECURRENT_TIMEOUT_MINUTES
+
+        C, appels = banc
+        self._envoyer(C, "agent hebdo: veille concurrentielle sur le stockage objet")
+        assert appels["max_steps"] == AGENT_RECURRENT_MAX_STEPS
+        assert appels["timeout_minutes"] == AGENT_RECURRENT_TIMEOUT_MINUTES
+
+    def test_une_tache_ponctuelle_garde_le_budget_ordinaire(self, banc):
+        """Le budget élargi suit la cadence, pas la commande : une tâche unique n'a aucune
+        raison de monopoliser le GPU plus longtemps."""
+        C, appels = banc
+        self._envoyer(C, "tâche agent: un travail ponctuel bien assez long")
+        assert "max_steps" not in appels and "timeout_minutes" not in appels
 
     def test_un_non_administrateur_ne_peut_pas_lancer_de_serie(self, banc):
         C, appels = banc

@@ -1350,3 +1350,19 @@ class TestParcoursDeLecture:
         eligibles, _ = constats.recueillir()
         assert eligibles[0]["id"] == "MAIN-reel"
         assert eligibles[-1]["id"].startswith("SCAN-")
+
+    def test_la_lecture_de_controle_est_marquee_pour_le_choix(self, vus):
+        """Sans marque, le choix juge une lecture préventive au critère d'un symptôme — et
+        la première nuit, il a rendu `null` en disant « l'état du système est stable ». Or
+        c'est précisément l'état dans lequel une lecture de contrôle a lieu d'être."""
+        rendu = constats.rendre(constats._depuis_le_parcours())
+        assert "lecture de contrôle" in rendu
+
+    def test_le_prompt_de_choix_traite_le_cas(self):
+        """La marque ne sert à rien si la consigne ne la nomme pas : la règle du `null`
+        l'emporterait à nouveau."""
+        from prompts import get_prompt
+
+        regles = get_prompt("AUTOCODE_SELECT_SYSTEM")
+        assert "lecture de contrôle" in regles
+        assert "plancher" in regles

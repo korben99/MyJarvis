@@ -477,6 +477,18 @@ AGENT_TASK_TTL = int(os.getenv("AGENT_TASK_TTL_DAYS", "30")) * 86400
 AGENT_RECURRENT_DAY = os.getenv("AGENT_RECURRENT_DAY", "mon")
 AGENT_RECURRENT_HOUR = int(os.getenv("AGENT_RECURRENT_HOUR", "6"))
 
+# Budgets propres aux séries, qui surchargent AGENT_MAX_STEPS et AGENT_TASK_TIMEOUT_MINUTES.
+# Une tâche récurrente creuse un sujet plutôt que de répondre à une demande ponctuelle :
+# elle ouvre ses sources une à une, et le budget ordinaire la force à conclure alors qu'il
+# lui restait à lire. La contrainte haute n'est pas l'ambition mais le créneau —
+# AGENT_RECURRENT_HOUR + la durée doit rester avant BRIEFING_TIME, seule tâche de la nuit
+# attendue à une heure dite.
+#
+# Appliqués à CHAQUE tour, pas seulement à la création : une série relancée reprend la
+# valeur courante, sinon régler ces clés n'aurait d'effet que sur les séries futures.
+AGENT_RECURRENT_MAX_STEPS = int(os.getenv("AGENT_RECURRENT_MAX_STEPS", "30"))
+AGENT_RECURRENT_TIMEOUT_MINUTES = int(os.getenv("AGENT_RECURRENT_TIMEOUT_MINUTES", "60"))
+
 # Bornes du rappel passé au successeur. Le digest entre dans l'objectif, donc dans le
 # contexte de chaque pas : plafonné pour qu'il reste une contrainte et ne devienne pas un
 # texte à paraphraser.

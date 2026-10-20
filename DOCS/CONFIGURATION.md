@@ -305,6 +305,8 @@ Off by default, with a second switch for the shell. Every variable is listed in
 | `AGENT_SHELL_ENABLED` | `false` | The `shell` tool. A shell running under your account is the loop's most dangerous capability: it is enabled knowingly, never inherited from a configuration. |
 | `AGENT_RECURRENT_DAY` | `mon` | Day the recurring series are relaunched (`tâche agent hebdo: …`). |
 | `AGENT_RECURRENT_HOUR` | `6` | Hour of that relaunch. After the CVE scan, early enough to hand the GPU back before the morning briefing. No enable flag: the job is inert until a task carries a cadence. |
+| `AGENT_RECURRENT_MAX_STEPS` | `30` | Overrides `AGENT_MAX_STEPS` for a series. A recurring task digs into a subject, opening its sources one by one; the ordinary budget makes it conclude while it still had reading to do. |
+| `AGENT_RECURRENT_TIMEOUT_MINUTES` | `60` | Overrides `AGENT_TASK_TIMEOUT_MINUTES`. The ceiling is the slot, not the ambition: `AGENT_RECURRENT_HOUR` + this must stay before `BRIEFING_TIME`. Applied at **every** turn, so changing it reaches series already running. |
 | `AGENT_RECURRENT_MAX_TITRES` | `20` | Headings of the previous deliverable carried over to the next turn. |
 | `AGENT_RECURRENT_MAX_DOMAINES` | `40` | Domains already consulted, carried over so the next turn does not repeat itself. |
 

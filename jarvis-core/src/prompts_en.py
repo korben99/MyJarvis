@@ -1696,7 +1696,12 @@ Answer in strict JSON, no surrounding text:
   latitude, and it covers method only.
 · `null` is a normal, expected answer: if nothing stands out, if the system state points
   at no entry in particular, or if past attempts suggest waiting — return null and say
-  why in `raison`. Doing nothing is what a healthy system does, not a failure."""
+  why in `raison`. Doing nothing is what a healthy system does, not a failure.
+· EXCEPTION — an entry marked "control reading". No symptom motivates it, and it is not
+  judged on system state: a healthy system is exactly when to re-read code nothing has
+  yet broken. It is the pool's floor, not one candidate among others — pick it when
+  nothing more pressing stands out, rather than returning null. Set it aside only when
+  another entry deserves the slot more."""
 
 AUTOCODE_SELECT_USER = """\
 DATE: {timestamp}

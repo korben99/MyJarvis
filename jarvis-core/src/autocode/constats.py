@@ -476,5 +476,10 @@ def rendre(constats: list[dict]) -> str:
             bloc.append(f"    notes : {c['notes']}")
         if any(est_protege(f) for f in c["cible"]):
             bloc.append("    ⚠ fichier protégé : reproduire seulement, ne pas corriger")
+        # Marqué explicitement : sans cela le choix juge une lecture préventive au même
+        # critère qu'un symptôme — « le système va bien, rien ne justifie le GPU » — et
+        # l'écarte précisément quand elle a lieu d'être.
+        if c.get("origine") == "parcours":
+            bloc.append("    ↻ lecture de contrôle : aucun symptôme ne la motive, c'est normal")
         blocs.append("\n".join(bloc))
     return "\n".join(blocs)

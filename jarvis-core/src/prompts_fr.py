@@ -1707,7 +1707,12 @@ Réponds en JSON strict, sans texte autour :
 · `null` est une réponse normale et attendue : si rien ne ressort, si l'état du système
   ne désigne aucune entrée plutôt qu'une autre, ou si les tentatives passées suggèrent
   d'attendre — rends null et dis pourquoi dans `raison`. Ne rien faire est le
-  comportement d'un système sain, pas un échec."""
+  comportement d'un système sain, pas un échec.
+· EXCEPTION — une entrée marquée « lecture de contrôle ». Aucun symptôme ne la motive, et
+  elle ne se juge pas à l'état du système : un système sain est exactement le moment de
+  relire du code que rien n'a encore fait tomber. Elle est le plancher du vivier, pas une
+  candidate parmi d'autres — choisis-la quand rien de plus pressant ne ressort, plutôt que
+  de rendre null. Ne l'écarte que si une autre entrée mérite davantage le créneau."""
 
 AUTOCODE_SELECT_USER = """\
 DATE : {timestamp}
