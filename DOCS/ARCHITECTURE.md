@@ -71,8 +71,13 @@ Tier 0 — EMBED ROUTER  Zero-LLM fast path — cosine similarity against pre-em
                         or the message is ≥ EMBED_MAX_CHARS (130) — see below.
 
 Tier 1 — ROUTER        Full LLM intent classifier, JSON only
-                        Target: Qwen2.5-1.5B-router-v1-4bit (local MLX, ~1 GB)
-                        LoRA fine-tuned on Qwen2.5-1.5B-Instruct bf16 — 492 samples, val loss 0.047
+                        Serving: Qwen2.5-1.5B-router-v3-6bit (local MLX, ~1 GB)
+                        LoRA fine-tuned on Qwen2.5-1.5B-Instruct bf16 — 730 samples, French only
+                        Its prompt is part of the trained artefact: ROUTER_SYSTEM and
+                        ROUTER_USER go into every training line and are masked out of the
+                        loss, so editing either without retraining puts the model out of
+                        distribution (measured: 88% → 82%). They are excluded from
+                        REFINABLE_PROMPTS for that reason — see DOCS/ROUTER.md
                         LRU-cached — system prompt ~1510 tok, hits from turn 2 onward (~95% cache hit)
                         Context-aware: <last_jarvis> (truncated to 300 chars) injected into ROUTER_USER
                         when available — lets elliptical messages route correctly ("look at the
@@ -679,21 +684,29 @@ Reflection cycle detects repeated knowledge gap
 
 ### Refineable prompts
 
+The authoritative list is `REFINABLE_PROMPTS` in `prompts.py`; a startup guard refuses to
+boot if it names a constant that does not exist, and `test_la_prose_et_le_code_disent_la_meme_chose`
+fails if it diverges from the list announced to the model in `REFLECTION_PROMPT`.
+
 | Constant | Description |
 |----------|-------------|
-| `SYSTEM_BASE_FR` | Core Jarvis personality and instructions |
-| `BRIEFING_USER` | Morning briefing assembly instructions |
+| `SYSTEM_BASE` | Core Jarvis personality and instructions |
+| `IDENTITY` | Self-model: existential framing, how the injected blocks are read |
 | `ANALYSIS_PROMPT` | Conversation analysis (mood/fact extraction) |
-| `ROUTER_USER` | LLM intent router decision criteria |
+| `BRIEFING_USER` | Morning briefing assembly instructions |
+| `WEB_RELEVANCE_JUDGE` | Are these search results enough to answer? |
 | `NIGHTLY_FACTS_SYSTEM` / `NIGHTLY_FACTS_PROMPT` | Nightly call 1 — user insight extraction, relation update, suggestions |
 | `NIGHTLY_SELF_SYSTEM` / `NIGHTLY_SELF_PROMPT` | Nightly call 2 — Jarvis self-reflection, opinions, day diary |
 | `NIGHTLY_CLEANING_SYSTEM` / `NIGHTLY_CLEANING_PROMPT` | Nightly call 3 — Qdrant autobio curation (archive outdated, delete errors) |
-| `CONSOLIDATION_PROMPT` | Monthly episodic → autobio fact extraction (called in `_consolidate_user_memories`) |
-| `CURATIVE_CLEANUP_PROMPT` | Nightly Redis profile dedup (called in `curative_profile_cleanup`) |
 | `REFLECTION_PROMPT` / `REFLECTION_SYSTEM` | Global autonomous reflection — action selection + system context |
 | `REFLECTION_USER_PROMPT` / `REFLECTION_USER_SYSTEM` | Per-user autonomous reflection — personalized action selection |
 
-The first four are user-facing quality prompts. The remaining seven are internal autonomy and memory prompts — they can also be refined when the reflection loop identifies recurring self-improvement opportunities.
+**Deliberately excluded:** `ROUTER_SYSTEM` and `ROUTER_USER`, because the Tier-1 router is a
+LoRA trained on those exact texts — an approved override would apply live, with no retrain,
+and degrade it (**[ROUTER.md](ROUTER.md)**). The agent and autocoding prompts are excluded
+too: they are judged on a deliverable, not on an exchange, so the reflection loop has no
+observation that bears on them. `REFINE_PROMPT_SYSTEM` and `REFINE_PROMPT_USER` are excluded
+so the mechanism cannot rewrite itself.
 
 ### Data files
 

@@ -254,9 +254,9 @@ class TestGardes:
         monkeypatch.setattr(constats.store, "en_cooldown", lambda _: False)
 
     def test_une_cible_trop_longue_est_ecartee(self, monkeypatch):
-        """Au-delà, la lecture ne tient plus en un appel — et la pagination est le mode
-        d'échec le mieux établi de la boucle."""
-        monkeypatch.setattr(constats, "_lignes_du_fichier", lambda _: 1800)
+        """La garde reste, au-dessus du plus gros module du dépôt : elle borne la cible
+        qu'on présente au modèle, la lecture étant déjà couverte par la carte du module."""
+        monkeypatch.setattr(constats, "_lignes_du_fichier", lambda _: 99_999)
         entree = {"id": "X", "cible": ["jarvis-core/src/llm/local.py"]}
         assert "trop longue" in constats.motif_exclusion(entree, set())
 
@@ -1278,6 +1278,43 @@ class TestParcoursDeLecture:
 
     def test_un_module_jamais_lu_devient_candidat(self, vus):
         assert constats._depuis_le_parcours()
+
+    def test_le_vivier_ne_contient_aucun_module_au_dela_du_plafond(self, monkeypatch):
+        """L'invariant, et non la liste : au-delà du plafond `motif_exclusion` écarterait
+        la cible en aval, et le parcours n'en propose qu'une."""
+        import os
+
+        from config import JARVIS_ROOT
+
+        avant = constats._modules_candidats()
+        monkeypatch.setattr(constats, "AUTOCODE_MAX_TARGET_LINES", 10)
+        apres = constats._modules_candidats()
+
+        assert len(apres) < len(avant), "le plafond abaissé doit écarter des modules"
+        for chemin in apres:
+            lignes = constats._lignes_du_fichier(os.path.join(JARVIS_ROOT, chemin))
+            assert lignes <= 10, f"{chemin} fait {lignes} lignes"
+
+    def test_le_parcours_ne_sarrete_pas_sur_un_module_trop_long(self, vus, monkeypatch):
+        """La visite n'est posée qu'en cas de passage réel. Un module trop long proposé
+        puis écarté ressortirait donc à chaque cycle, et le parcours n'avancerait plus
+        jamais — c'est pourquoi il est retiré du vivier en amont.
+        """
+        monkeypatch.setattr(constats.store, "en_cooldown", lambda _: False)
+        vrai = constats._lignes_du_fichier
+        premier = constats._modules_candidats()[0]
+
+        # Le premier module du vivier devient le seul à dépasser le plafond : sans le
+        # filtre amont c'est lui que `min()` sortirait, indéfiniment.
+        monkeypatch.setattr(
+            constats, "_lignes_du_fichier",
+            lambda c: 99_999 if c.endswith(premier) else vrai(c),
+        )
+
+        retenu = constats._depuis_le_parcours()
+        assert retenu, "le parcours doit proposer un autre module, pas rien"
+        assert retenu[0]["cible"][0] != premier
+        assert constats.motif_exclusion(retenu[0], set()) is None
 
     def test_le_parcours_avance_a_chaque_visite(self, vus):
         """Sans pose de visite, le parcours rendrait le même module toutes les nuits."""

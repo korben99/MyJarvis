@@ -203,4 +203,6 @@ async def recent_activity(limit: int = 30) -> str:
         for p in posts[:limit]
         if isinstance(p, dict)
     ]
+    if not lines:
+        return "Aucune publication récente détectée."
     return "Publications récentes (tous groupes) :\n" + "\n".join(lines)

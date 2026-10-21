@@ -221,7 +221,7 @@ Nine tools, and the count is deliberate — every extra tool is one more chance 
 | `list_dir` · `read_file` · `write_file` | filesystem, confined to the task workspace |
 | `plan` | the only tool allowed alongside an action in the same turn |
 | `shell` | command execution — **off by default** |
-| `grep` · `appelants` · `verify` | exact-text search, callers of a module or a function, compile + lint + test suite — autocoding tasks only |
+| `grep` · `appelants` · `edit_file` · `verify` | exact-text search, callers of a module or a function, replace one exact unique excerpt, compile + lint + test suite — autocoding tasks only |
 
 The set a task gets is a function of **who asked for it**, not of the configuration: a task Jarvis gives itself does not inherit the rights of a task you hand it. An autocoding task has no web, no document base and no free shell, even with the shell enabled — it gets those three tools of its own instead.
 
@@ -331,6 +331,7 @@ Full walkthrough in **[DOCS/INSTALL.md](DOCS/INSTALL.md)**.
 | **[AUTOCODE.example.md](DOCS/examples/AUTOCODE.example.md)** | Format for hand-added findings — copy to `DOCS/AUTOCODE.md` |
 | **[CONFIGURATION.md](DOCS/CONFIGURATION.md)** | Every `.env` variable, tier by tier — and the configuration page |
 | **[API.md](DOCS/API.md)** | Endpoint reference |
+| **[ROUTER.md](DOCS/ROUTER.md)** | The Tier-1 router: a LoRA whose prompt is part of the trained artefact — French-only, retraining procedure |
 | **[PERFORMANCE.md](DOCS/PERFORMANCE.md)** | TTFT measurements, KV cache, LLM call map |
 | **[SECURITY.md](DOCS/SECURITY.md)** | Threat model, network exposure, agent sandbox |
 | **[OPERATIONS.md](DOCS/OPERATIONS.md)** | Logs, diagnostics, dependency upgrades |

@@ -586,10 +586,12 @@ AUTOCODE_PARCOURS = os.getenv("AUTOCODE_PARCOURS", "true").lower() == "true"
 # ce qu'il vient de lire au lieu d'avancer ; il tient le rythme d'un module par nuit.
 AUTOCODE_PARCOURS_JOURS = int(os.getenv("AUTOCODE_PARCOURS_JOURS", "60"))
 
-# Plafond de lignes d'un fichier cible. AGENT_READ_MAX_CHARS vaut 32 000 caractères, soit
-# ~800 lignes de Python : au-delà il faudrait paginer, et la pagination est ce que le
-# modèle rate le plus — il rejoue la même lecture jusqu'à épuiser le budget.
-AUTOCODE_MAX_TARGET_LINES = int(os.getenv("AUTOCODE_MAX_TARGET_LINES", "800"))
+# Plafond de lignes d'un fichier cible. Il gardait contre la pagination d'un module qui ne
+# tient pas dans AGENT_READ_MAX_CHARS ; `read_file` rend désormais une CARTE de ce module —
+# ses imports, puis chaque définition avec son numéro de ligne — au lieu de le tronquer, et
+# c'est elle qui répond au problème : l'agent rouvre à l'offset qu'il vise. Le plafond est
+# donc porté au-dessus du plus gros module du dépôt, pour n'en écarter aucun du vivier.
+AUTOCODE_MAX_TARGET_LINES = int(os.getenv("AUTOCODE_MAX_TARGET_LINES", "2500"))
 
 # Fichiers qu'un patch ne peut pas toucher, même avec approbation. Le tronc commun
 # (config, prompts) casse tout le monde à la fois ; les fichiers d'état sont des données,

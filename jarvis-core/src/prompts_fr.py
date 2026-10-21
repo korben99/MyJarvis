@@ -313,7 +313,7 @@ Retourne UNIQUEMENT un JSON valide avec ces champs :
       placement   → épargne, investissements, patrimoine
       preference  → préférences générales (voyage, alimentation…)
       interet     → centres d'intérêt intellectuels
-      apprécie    → choses explicitement appréciées
+      apprecie    → choses explicitement appréciées
       aversion    → choses explicitement rejetées
       langue      → langues parlées ou apprises
     INTERDIT absolu : toute CLÉ contenant un nom de marque, modèle, référence produit.
@@ -632,7 +632,7 @@ taux de conversations sans résumé sur 7 jours.
 **refine_prompt** — proposer une amélioration de prompt.
   params: {{"prompt_name":"...","topic":"...","context":"...","user_code":"..."}}
   • context OBLIGATOIRE : décrire l'échec concret observé ET pourquoi CE prompt en est responsable
-  • Noms valides : SYSTEM_BASE · IDENTITY · ROUTER_SYSTEM · ROUTER_USER
+  • Noms valides : SYSTEM_BASE · IDENTITY
                   · ANALYSIS_PROMPT · BRIEFING_USER · WEB_RELEVANCE_JUDGE
                   · NIGHTLY_FACTS_PROMPT · NIGHTLY_FACTS_SYSTEM
                   · NIGHTLY_SELF_PROMPT · NIGHTLY_SELF_SYSTEM
@@ -641,7 +641,9 @@ taux de conversations sans résumé sur 7 jours.
                   · REFLECTION_USER_PROMPT · REFLECTION_USER_SYSTEM
   • Routing — quel prompt cibler selon le type de lacune :
       réponse conversationnelle incorrecte/imprécise → SYSTEM_BASE
-      routage d'intent erroné                        → ROUTER_SYSTEM / ROUTER_USER
+      routage d'intent erroné                        → AUCUN prompt. Le routeur est un
+        modèle entraîné sur son prompt : le réécrire le dégrade au lieu de le corriger.
+        Un routage faux se signale par alert_admin, il se répare par un réentraînement.
       analyse de conversation insuffisante           → ANALYSIS_PROMPT
       briefing incomplet ou mal structuré            → BRIEFING_USER
       réflexion autonome (comportement Phase 1/2)    → REFLECTION_SYSTEM / REFLECTION_PROMPT
@@ -1250,28 +1252,8 @@ CLASSIFICATION DES PROMPTS :
     ANALYSIS_PROMPT, NIGHTLY_*, REFLECTION_*, BRIEFING_*, PRUNE_SELF_MEMORY_*,
     CONSOLIDATION_PROMPT, CURATIVE_CLEANUP_PROMPT
 
-BUDGETS TOKENS par prompt (approximation : 1 token ≈ 3,6 caractères français) :
-  SYSTEM_BASE            →  650 tokens max  (inline, KV-cached — ne pas dépasser)
-  IDENTITY               → 1200 tokens max  (inline, KV-cached — identité existentielle)
-  ROUTER_SYSTEM          → 1800 tokens max  (Qwen2.5-1.5B LoRA, KV-cached, 17 exemples + last_jarvis ctx)
-  ROUTER_USER            →  600 tokens max  (inclut last_jarvis_block dynamique + message)
-  ANALYSIS_PROMPT        → 3200 tokens max  (async Qwen3 — précision avant tout)
-  BRIEFING_SYSTEM        →  150 tokens max
-  BRIEFING_USER          →  850 tokens max  (hors données injectées)
-  WEB_RELEVANCE_JUDGE    →  250 tokens max
-  REFLECTION_SYSTEM      →  500 tokens max
-  REFLECTION_PROMPT      → 1500 tokens max  (hors données injectées)
-  REFLECTION_USER_SYSTEM →  650 tokens max
-  REFLECTION_USER_PROMPT → 1000 tokens max  (hors données injectées)
-  PROACTIVE_PUSH_PROMPT  →  800 tokens max  (hors conv_text/projets injectés)
-  NIGHTLY_FACTS_SYSTEM   →  450 tokens max
-  NIGHTLY_FACTS_PROMPT   →  550 tokens max  (hors données injectées)
-  NIGHTLY_SELF_SYSTEM    → 2500 tokens max
-  NIGHTLY_SELF_PROMPT    →  500 tokens max  (hors données injectées)
-  NIGHTLY_CLEANING_SYSTEM →  450 tokens max
-  NIGHTLY_CLEANING_PROMPT →  250 tokens max  (hors données injectées)
-  CONSOLIDATION_PROMPT   →  200 tokens max  (hors données injectées)
-  CURATIVE_CLEANUP_PROMPT → 1000 tokens max  (hors données injectées)
+Le budget du prompt que tu travailles t'est donné avec son texte, et il est vérifié après
+coup : un proposed_text qui le dépasse est rejeté. C'est ce chiffre-là qui fait foi.
 
 Pour les prompts INLINE : si ta modification dépasse le budget, compense en retirant ailleurs.
 Pour les prompts ASYNC : le budget est un plafond de sécurité, pas un objectif."""
@@ -1471,8 +1453,12 @@ CE QUI FAIT PERDRE UN TOUR
 · Deux actions dans le même tour. Seul `plan` peut en accompagner une.
 · Décrire un appel au lieu de l'émettre : du texte qui ressemble à un appel n'en est pas un.
 · Supposer un résultat au lieu de le lire.
-· Paginer un fichier qui tient en une lecture. Ne fixe `limit` que pour revenir sur un
-  passage précis — jamais pour découvrir un fichier.
+· Paginer. Un fichier qui tient en une lecture se lit sans `limit`. Un module trop long te
+  rend sa CARTE — ses imports, puis chaque définition avec son numéro de ligne : elle est
+  là pour que tu VISES. Relis-la, choisis l'offset qui t'intéresse, ouvre-le. Défiler le
+  module par tranches coûte un tour par tranche et te rend surtout ce que tu ne cherchais
+  pas. Et si une lecture te dit qu'elle a été coupée par ton `limit`, relance-la au même
+  offset SANS `limit` : le reste tient en un seul appel.
 
 CE QUI TE REVIENT
 Ton raisonnement ne t'est pas rendu — seule ta phrase en clair te revient au tour suivant.
@@ -1532,8 +1518,12 @@ CE QUI FAIT PERDRE UN TOUR
 · Deux actions dans le même tour. Seul `plan` peut en accompagner une.
 · Décrire un appel au lieu de l'émettre : du texte qui ressemble à un appel n'en est pas un.
 · Supposer un résultat au lieu de le lire.
-· Paginer un fichier qui tient en une lecture. Ne fixe `limit` que pour revenir sur un
-  passage précis — jamais pour découvrir un fichier.
+· Paginer. Un fichier qui tient en une lecture se lit sans `limit`. Un module trop long te
+  rend sa CARTE — ses imports, puis chaque définition avec son numéro de ligne : elle est
+  là pour que tu VISES. Relis-la, choisis l'offset qui t'intéresse, ouvre-le. Défiler le
+  module par tranches coûte un tour par tranche et te rend surtout ce que tu ne cherchais
+  pas. Et si une lecture te dit qu'elle a été coupée par ton `limit`, relance-la au même
+  offset SANS `limit` : le reste tient en un seul appel.
 
 CE QUI TE REVIENT
 Ton raisonnement ne t'est pas rendu — seule ta phrase en clair te revient au tour suivant.
@@ -1547,8 +1537,10 @@ CE QUE TU AVANCES
 · Dis ce que tu n'as pas trouvé.
 
 TES LIVRABLES SONT DES FICHIERS
-Ce qui n'est pas écrit sur disque est perdu. Procède par ajouts : après chaque écriture la
-fin du fichier t'est rendue — reprends après elle, ne la réécris pas.
+Ce qui n'est pas écrit sur disque est perdu. Un fichier que tu CRÉES — ton test, tes
+constats — se construit par ajouts : après chaque écriture sa fin t'est rendue, reprends
+après elle. Une source du dépôt, elle, ne se réécrit pas : elle s'édite avec `edit_file`,
+qui remplace l'extrait exact que tu lui donnes et rien d'autre.
 {write_max_chars} caractères produits par tour au maximum.
 
 BUDGET
@@ -1756,8 +1748,11 @@ CE QUI EST DEMANDÉ — dans cet ordre, et l'ordre compte :
    il doit dire « failed », jamais « error ». Une erreur d'import, de collecte ou de
    fixture ne démontre pas le défaut, seulement que ton test ne tourne pas — et elle
    fait rejeter le travail. Répare-la avant d'aller plus loin.
-3. CORRIGE, le plus chirurgicalement possible. Préserve les branches existantes à
-   l'identique : tu combles un cas manquant ou ajustes un seuil, tu ne restructures pas.
+3. CORRIGE avec `edit_file`, le plus chirurgicalement possible : tu lui donnes l'extrait
+   exact à remplacer et son remplacement. N'écris JAMAIS un diff — rien ici ne l'applique,
+   et `write_file` sur une source qui existe déjà est refusé. Préserve les branches
+   existantes à l'identique : tu combles un cas manquant ou ajustes un seuil, tu ne
+   restructures pas.
 4. `verify` à nouveau : ton test passe, et les tests déjà là restent verts.
 5. `finish` avec ce que tu as changé et pourquoi.
 
@@ -1822,9 +1817,10 @@ Dans `jarvis-core/tests/`, nommé `test_….py` — le seul dossier que la suite
 `verify` compile, passe le lint et lance la suite sur ton dépôt de travail.
 
 SI TU MODIFIES DU CODE
-{max_lignes} lignes de correctif au maximum, tests non comptés. Ce qui distingue une
-correction d'une affirmation, c'est un test qui échoue sur l'état actuel et passe avec ta
-modification.
+Avec `edit_file` : tu lui donnes l'extrait exact à remplacer et son remplacement. N'écris
+jamais un diff, rien ici ne l'applique. {max_lignes} lignes de correctif au maximum, tests
+non comptés. Ce qui distingue une correction d'une affirmation, c'est un test qui échoue
+sur l'état actuel et passe avec ta modification.
 
 Quand tu as fini : `finish`."""
 
@@ -1834,6 +1830,22 @@ Tu rends compte d'une tentative d'auto-correction, à son administrateur.
 Le verdict est DÉJÀ tranché par les mesures qui te sont données. Tu ne le discutes pas,
 tu ne le contredis pas, tu ne le rattrapes pas : tu expliques ce qui a été fait et ce
 qu'il faut regarder. Ton lecteur va relire un diff — aide-le à savoir où poser les yeux.
+
+TES TROIS SOURCES N'ONT PAS LE MÊME STATUT :
+
+  les mesures et le verdict   établis — calculés, jamais rendus par un modèle
+  le patch                    établi — c'est ce qui a réellement changé
+  le résumé de l'agent        une AFFIRMATION, qui peut être fausse
+
+L'agent se trompe sur le code qu'il vient de lire : il cite des signatures de fonction
+qui n'existent pas, décrit un rouge-puis-vert qu'il n'a pas obtenu, tient pour durable une
+panne qu'un autre mécanisme rattrape. Rien ne devient un fait parce qu'il l'a écrit.
+
+Donc : un risque ou un angle mort se tire du PATCH ou des MESURES, jamais du seul résumé.
+Ce qui ne vient que de l'agent se rapporte en le lui attribuant — « l'agent affirme
+que… » — et ne se transforme pas en risque pour le lecteur. Et ce que le patch contredit,
+tu le dis : un relecteur averti d'un écart entre le récit et le diff est mieux servi
+qu'un relecteur à qui on répète le récit.
 
 Réponds en JSON strict, sans texte autour :
 {"resume": "<3 à 6 phrases>", "risques": ["<...>"], "angles_morts": ["<...>"]}
@@ -1860,7 +1872,7 @@ MESURES :
   suite unitaire : {suite}
   pyflakes : {pyflakes_avant} → {pyflakes_apres}
 
-CE QU'A DIT L'AGENT EN TERMINANT :
+CE QUE L'AGENT AFFIRME EN TERMINANT — déclaratif, non vérifié, à confronter au patch :
 {resume_agent}
 
 LE PATCH :

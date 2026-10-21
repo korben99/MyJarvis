@@ -877,6 +877,183 @@ class TestAppelants:
         assert "bon.py:1: import cible" in self._chercher(tmp_path, "cible")
 
 
+class TestEditionDeSource:
+    """Corriger une source est une édition, pas une réécriture.
+
+    `write_file` remplace tout le contenu et plafonne par appel : devant ce seul outil, un
+    modèle exprime une correction comme un diff unifié — sa forme canonique partout
+    ailleurs — que rien ici n'applique, et le fichier est perdu. Ces tests portent donc sur
+    ce qui REFUSE autant que sur ce qui édite.
+    """
+
+    SOURCE = (
+        "def f(x):\n"
+        "    if x > 0:\n"
+        "        return x\n"
+        "    return 0\n"
+        "\n"
+        "def g(x):\n"
+        "    return x\n"
+    )
+
+    @pytest.fixture
+    def depot(self, tmp_path, monkeypatch):
+        from agent import sandbox
+
+        src = tmp_path / "repo" / "jarvis-core" / "src"
+        tests = tmp_path / "repo" / "jarvis-core" / "tests"
+        src.mkdir(parents=True)
+        tests.mkdir(parents=True)
+        (src / "exemple.py").write_text(self.SOURCE, encoding="utf-8")
+        (src / "config.py").write_text("A = 1\n", encoding="utf-8")
+        (tests / "test_exemple.py").write_text(
+            "def test_a(): assert True\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(
+            sandbox, "task_workspace", lambda tid, create=True: str(tmp_path)
+        )
+        return {"id": "t1", "origin": "autocode", "workspace": str(tmp_path)}
+
+    def _appel(self, task, outil, **args):
+        import asyncio
+
+        from agent.tools import execute_tool
+
+        return asyncio.run(execute_tool(task, outil, args))
+
+    def _source(self, tmp_path):
+        return (tmp_path / "repo" / "jarvis-core" / "src" / "exemple.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_un_extrait_unique_est_remplace(self, depot, tmp_path):
+        r = self._appel(
+            depot, "edit_file",
+            path="repo/jarvis-core/src/exemple.py",
+            old="    if x > 0:\n        return x\n",
+            new="    if x > 0:\n        return x * 2\n",
+        )
+        assert "Modifié" in r
+        apres = self._source(tmp_path)
+        assert "return x * 2" in apres
+        assert "def g(x):" in apres, "le reste du fichier doit être intact"
+
+    def test_un_extrait_absent_ne_modifie_rien(self, depot, tmp_path):
+        r = self._appel(
+            depot, "edit_file",
+            path="repo/jarvis-core/src/exemple.py",
+            old="    if x >= 0:\n", new="peu importe",
+        )
+        assert "introuvable" in r
+        assert self._source(tmp_path) == self.SOURCE
+
+    def test_un_extrait_en_double_ne_modifie_rien(self, depot, tmp_path):
+        """Frapper une occurrence homonyme est le défaut propre à la correction par motif,
+        et il est silencieux. Ici l'échec est rendu, donc rattrapable au pas suivant."""
+        r = self._appel(
+            depot, "edit_file",
+            path="repo/jarvis-core/src/exemple.py",
+            old="    return x\n", new="    return -x\n",
+        )
+        assert "2 fois" in r
+        assert self._source(tmp_path) == self.SOURCE
+
+    def test_une_suppression_est_exprimable(self, depot, tmp_path):
+        r = self._appel(
+            depot, "edit_file",
+            path="repo/jarvis-core/src/exemple.py",
+            old="\ndef g(x):\n    return x\n", new="",
+        )
+        assert "Modifié" in r
+        assert "def g" not in self._source(tmp_path)
+
+    def test_write_file_refuse_une_source_existante(self, depot, tmp_path):
+        """Le cas exact qui a détruit un module de 10 ko : un diff écrit par-dessus la
+        source, `overwrite` posé pour lever la garde anti-écrasement."""
+        r = self._appel(
+            depot, "write_file",
+            path="repo/jarvis-core/src/exemple.py",
+            content="--- a/x\n+++ b/x\n@@ -52,6 +52,9 @@\n",
+            overwrite=True,
+        )
+        assert "REFUSÉE" in r and "edit_file" in r
+        assert self._source(tmp_path) == self.SOURCE
+
+    def test_write_file_cree_toujours_un_fichier_neuf(self, depot, tmp_path):
+        """L'objectif EXIGE un test ajouté : le refus ne peut pas porter sur la création."""
+        r = self._appel(
+            depot, "write_file",
+            path="repo/jarvis-core/tests/test_neuf.py",
+            content="def test_n(): assert True\n",
+        )
+        assert "Écrit" in r
+        assert (tmp_path / "repo" / "jarvis-core" / "tests" / "test_neuf.py").exists()
+
+    def test_write_file_laisse_reprendre_son_propre_test(self, depot):
+        """Un test écrit puis corrigé — une erreur d'import, par exemple — est le cycle
+        normal de l'étape 2, pas une réécriture de source."""
+        r = self._appel(
+            depot, "write_file",
+            path="repo/jarvis-core/tests/test_exemple.py",
+            content="import pytest\n\ndef test_a(): assert True\n",
+        )
+        assert "Écrit" in r
+
+    def test_un_fichier_protege_ne_change_par_aucun_outil(self, depot, tmp_path):
+        """Le prompt l'annonce déjà. Sans ce contrôle la phrase est une promesse, et la
+        violation n'est relevée qu'au verdict — après les pas dépensés dessus."""
+        cfg = tmp_path / "repo" / "jarvis-core" / "src" / "config.py"
+        for outil, args in (
+            ("edit_file", {"old": "A = 1\n", "new": "A = 2\n"}),
+            ("write_file", {"content": "A = 2\n", "overwrite": True}),
+        ):
+            r = self._appel(depot, outil, path="repo/jarvis-core/src/config.py", **args)
+            assert "protégé" in r, f"{outil} a laissé passer un fichier protégé"
+        assert cfg.read_text(encoding="utf-8") == "A = 1\n"
+
+    def test_un_content_vide_est_refuse(self, depot, tmp_path):
+        """Un `content` vide laisse un fichier de zéro octet que le compte rendu annonce
+        « Écrit », et que le diff porte ensuite comme un livrable."""
+        tst = tmp_path / "repo" / "jarvis-core" / "tests" / "test_exemple.py"
+        r = self._appel(depot, "write_file",
+                        path="repo/jarvis-core/tests/test_exemple.py",
+                        content="", overwrite=True)
+        assert "REFUSÉE" in r and "supprimer" in r
+        assert tst.read_text(encoding="utf-8"), "le fichier ne doit pas avoir été vidé"
+
+    def test_une_suppression_demandee_par_son_nom_aboutit(self, depot, tmp_path):
+        """Retirer un test qu'on renonce à livrer est légitime — c'est l'intention
+        implicite qui ne l'est pas."""
+        tst = tmp_path / "repo" / "jarvis-core" / "tests" / "test_exemple.py"
+        r = self._appel(depot, "write_file",
+                        path="repo/jarvis-core/tests/test_exemple.py", supprimer=True)
+        assert "Supprimé" in r
+        assert not tst.exists()
+
+    def test_une_source_existante_ne_se_supprime_pas(self, depot, tmp_path):
+        """La garde du dépôt couvre la suppression comme l'écriture : retirer un module
+        n'est pas une correction chirurgicale."""
+        src = tmp_path / "repo" / "jarvis-core" / "src" / "exemple.py"
+        r = self._appel(depot, "write_file",
+                        path="repo/jarvis-core/src/exemple.py", supprimer=True)
+        assert "REFUSÉE" in r
+        assert src.exists()
+
+    def test_une_tache_humaine_nest_pas_concernee(self, tmp_path, monkeypatch):
+        """La garde se déduit de la présence de `repo/`, que seul le chantier d'autocoding
+        prépare : une tâche humaine écrit dans son workspace sans rien savoir de tout ça."""
+        from agent import sandbox
+
+        monkeypatch.setattr(
+            sandbox, "task_workspace", lambda tid, create=True: str(tmp_path)
+        )
+        task = {"id": "t2", "origin": "human", "workspace": str(tmp_path)}
+        (tmp_path / "rapport.md").write_text("# Titre\n\nUn paragraphe.\n", encoding="utf-8")
+        r = self._appel(task, "write_file", path="rapport.md",
+                        content="# Titre\n\nUn paragraphe refondu, plus long.\n")
+        assert "Écrit" in r
+
+
 class TestSignatureDeLecture:
     """L'offset sépare la pagination — qu'une lecture partielle réclame — de l'enlisement,
     qui redemande le même début."""
@@ -900,6 +1077,24 @@ class TestSignatureDeLecture:
 
         assert _signature(self._appel(path="a.py", limit=200)) == _signature(
             self._appel(path="a.py", limit=50)
+        )
+
+    def test_lacher_limit_nest_pas_une_repetition(self):
+        """Une lecture coupée par `limit` annonce que le fichier tient entier et invite à
+        relancer sans lui. Signer les deux pareil refuse cette relance, et il ne reste que
+        la pagination — ce que le message cherchait à éviter."""
+        from agent.loop import _signature
+
+        assert _signature(self._appel(path="a.py", offset=151, limit=150)) != _signature(
+            self._appel(path="a.py", offset=151)
+        )
+
+    def test_deux_limites_sur_le_meme_debut_restent_une_repetition(self):
+        """La valeur de `limit` ne change pas l'endroit demandé : c'est le même enlisement."""
+        from agent.loop import _signature
+
+        assert _signature(self._appel(path="a.py", offset=151, limit=150)) == _signature(
+            self._appel(path="a.py", offset=151, limit=30)
         )
 
     def test_un_offset_absent_vaut_zero(self):
@@ -929,6 +1124,68 @@ class TestSignatureDeLecture:
                                  "arguments": _json.dumps({"path": "a.md", "content": contenu})}}
 
         assert _signature(ecriture("un")) != _signature(ecriture("deux"))
+
+
+class TestSignatureDeVerification:
+    """`verify` est sans arguments : seules les écritures qui le précèdent le distinguent."""
+
+    def _verify(self):
+        return {"function": {"name": "verify", "arguments": "{}"}}
+
+    def test_une_correction_entre_deux_verifications_les_distingue(self):
+        """Le cycle demandé par l'objectif d'autocoding — vérifier, corriger, vérifier —
+        tient sous la fenêtre de la garde, qui refusait donc la seconde vérification."""
+        from agent.loop import _signature
+
+        assert _signature(self._verify(), 0) != _signature(self._verify(), 1)
+
+    def test_deux_verifications_sans_ecriture_restent_une_repetition(self):
+        from agent.loop import _signature
+
+        assert _signature(self._verify(), 2) == _signature(self._verify(), 2)
+
+    def test_une_edition_compte_comme_une_ecriture(self):
+        """`edit_file` est l'outil qui CORRIGE une source : le cycle normal est vérifier,
+        éditer, vérifier. S'il ne comptait pas, la seconde vérification serait refusée —
+        la panne même que ce compteur répare."""
+        import json as _json
+
+        from agent.loop import _repetition, _signature
+
+        recent: list[str] = []
+        ecritures = 0
+        vus = []
+        for nom in ("verify", "edit_file", "verify"):
+            if nom in ("write_file", "edit_file"):
+                ecritures += 1
+            appel = {"function": {"name": nom, "arguments": _json.dumps(
+                {"path": "a.py", "old": "x", "new": "y"}) if nom == "edit_file" else "{}"}}
+            vus.append(_repetition(recent, _signature(appel, ecritures)))
+        assert vus == [0, 0, 0], "la vérification qui suit une édition doit s'exécuter"
+
+    def test_le_cycle_corrige_verifie_traverse_la_garde(self):
+        """Rejoue la séquence qui faisait échouer le cycle : la vérification qui suit une
+        écriture doit s'exécuter, et trois vérifications stériles doivent tuer la tâche."""
+        import json as _json
+
+        from agent.loop import _repetition, _signature
+
+        recent: list[str] = []
+        ecritures = 0
+        vus = []
+        for nom in ("verify", "write_file", "verify"):
+            if nom == "write_file":
+                ecritures += 1
+            appel = {"function": {"name": nom,
+                                  "arguments": _json.dumps({"path": "t.py", "content": "x"})
+                                  if nom == "write_file" else "{}"}}
+            vus.append(_repetition(recent, _signature(appel, ecritures)))
+        assert vus == [0, 0, 0]
+
+        recent, steriles = [], []
+        for _ in range(3):
+            steriles.append(_repetition(recent, _signature(self._verify(), 7)))
+        assert steriles == [0, 1, 2]
 
 
 class TestRelance:

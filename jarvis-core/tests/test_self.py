@@ -189,6 +189,39 @@ class TestListeBlancheRefinePrompt:
         for n in ("REFINE_PROMPT_SYSTEM", "REFINE_PROMPT_USER"):
             assert n not in prompts.REFINABLE_PROMPTS
 
+    def test_les_prompts_du_routeur_ne_sont_pas_modifiables(self):
+        """Le routeur de rang 2 est un LoRA entraîné SUR ces deux textes, masqués dans la
+        perte : il ne les lit pas, il décide conditionné à eux. Appliquer une surcharge sans
+        réentraîner le place hors distribution — mesuré à −6 points de validation."""
+        for n in ("ROUTER_SYSTEM", "ROUTER_USER"):
+            assert n not in prompts.REFINABLE_PROMPTS
+
+    def test_le_prompt_du_routeur_correspond_a_son_dataset(self):
+        """La garde qui manquait, et qui attrape une édition faite de bonne foi : le dataset
+        porte le prompt système sur chaque ligne. Dès qu'ils divergent, le modèle servi n'est
+        plus celui qui a été entraîné, et rien ne le signale à l'exécution.
+        """
+        import json
+        import pathlib
+
+        # Le jeu FRANÇAIS, et non `prompts` : le dataset est en français, donc c'est lui qui
+        # doit rester en phase quelle que soit JARVIS_LANG. Une instance anglaise sert un
+        # prompt sur lequel ce LoRA n'a jamais été entraîné — état connu, pas une dérive.
+        import prompts_fr
+
+        dataset = pathlib.Path("/opt/jarvis/RouterData/train.jsonl")
+        if not dataset.exists():  # pragma: no cover - artefacts d'entraînement hors dépôt
+            pytest.skip("train.jsonl absent — dataset d'entraînement non versionné")
+
+        with dataset.open(encoding="utf-8") as f:
+            premier = json.loads(f.readline())
+        systeme = premier["messages"][0]
+        assert systeme["role"] == "system"
+        assert systeme["content"] == prompts_fr.ROUTER_SYSTEM, (
+            "ROUTER_SYSTEM a divergé de train.jsonl : le LoRA servi a été entraîné sur "
+            "l'autre texte. Régénère le dataset et réentraîne, ou rétablis le prompt."
+        )
+
 
 # ── Fenêtre de la revue nocturne ─────────────────────────────────────────────
 

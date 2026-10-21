@@ -55,9 +55,17 @@ globals().update({
 # dans un cycle : identité, routage, analyse, briefing, réflexion, revue nocturne. En sont
 # exclus les prompts de la boucle agentique (jugés sur un livrable, pas sur un échange) et
 # les prompts de service courts, où une réécriture coûte plus qu'elle ne rapporte.
+# ROUTER_SYSTEM et ROUTER_USER n'y figurent PAS, et c'est structurel : le routeur de rang 2
+# est un LoRA entraîné sur ces deux textes. `build_dataset_v2.py` les importe d'ici et les
+# écrit dans chaque ligne de `train.jsonl`, où le prompt système est identique partout et
+# masqué dans la perte (`mask_prompt: true`) — le modèle n'apprend pas à le lire, il apprend
+# à décider conditionné à ce préfixe exact. Le réécrire à l'inférence le place hors
+# distribution, et le coût est mesuré : une seule ligne ajoutée à ROUTER_SYSTEM sans
+# réentraînement a fait tomber la validation de 88 % à 82 % (voir lora_config_v3.yaml).
+# Une approbation de proposition appliquant l'override sans toucher au LoRA referait ce
+# geste. Les corriger passe par le dataset et un réentraînement, pas par ce mécanisme.
 REFINABLE_PROMPTS: frozenset[str] = frozenset({
     "SYSTEM_BASE", "IDENTITY",
-    "ROUTER_SYSTEM", "ROUTER_USER",
     "ANALYSIS_PROMPT", "BRIEFING_USER", "WEB_RELEVANCE_JUDGE",
     "NIGHTLY_FACTS_PROMPT", "NIGHTLY_FACTS_SYSTEM",
     "NIGHTLY_SELF_PROMPT", "NIGHTLY_SELF_SYSTEM",

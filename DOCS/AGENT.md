@@ -51,6 +51,9 @@ step.
 | `write_file` | write into the task workspace | `AGENT_WRITE_MAX_CHARS` |
 | `plan` | the only tool allowed alongside an action in the same turn | — |
 | `shell` | command execution — off by default | `AGENT_SHELL_TIMEOUT` |
+| `grep` | literal text search, with `file:line` — **autocoding tasks only** | `AGENT_MAX_TOOL_OUTPUT` |
+| `appelants` | who calls this module or function — **autocoding tasks only** | `AGENT_MAX_TOOL_OUTPUT` |
+| `edit_file` | replace one exact, unique excerpt in an existing file — **autocoding tasks only** | `AGENT_WRITE_MAX_CHARS` |
 | `verify` | compile + lint + unit suite — **autocoding tasks only** | 180 s |
 
 `finish` is not dispatched as a tool: it is the exit from the loop.
@@ -62,8 +65,8 @@ recorded on the task and `tools.schemas_for(task)` derives the set from it:
 
 | Origin | Tools |
 |---|---|
-| `human` (default) | everything above except `verify` |
-| `autocode` | `plan`, `list_dir`, `read_file`, `write_file`, `verify`, `finish` |
+| `human` (default) | everything above except `grep`, `appelants`, `edit_file`, `verify` |
+| `autocode` | `plan`, `list_dir`, `read_file`, `write_file`, `grep`, `appelants`, `edit_file`, `verify`, `finish` |
 
 An autocoding task therefore has no web, no RAG and **no free shell**, even when
 `AGENT_SHELL_ENABLED=true`. Two capabilities, two decisions.
@@ -93,6 +96,13 @@ Three, independent, each bounding a different failure:
 | Steps | `AGENT_MAX_STEPS` | 20 | reasoning in circles |
 | Wall clock | `AGENT_TASK_TIMEOUT_MINUTES` | 45 | how long chat waits behind it |
 | No progress | — | 2 identical calls | tight loops on a failing tool |
+
+A call's identity is its name plus the arguments that change its **result**, not every
+argument it carries. A read is signed on its path, its offset and whether a `limit` bounds
+it — but not on that limit's value, since two limits on the same start are the same stall,
+while dropping the limit is the whole-file read the truncation notice invites. `verify`
+takes no arguments at all, so it is signed on the number of writes that precede it:
+verify → fix → verify is the cycle the objective asks for, and it has to cross the guard.
 
 Two token budgets sit underneath:
 
@@ -133,6 +143,32 @@ network are the two ways a mistake leaves the machine, and those are the ones th
 The network is cut inside the shell even though the agent has `web_search` and `fetch_url`:
 those two go through Jarvis's own code, logged and bounded. A `curl` in a shell is not, and
 it is the shortest exfiltration path there is.
+
+### Correcting a source is an edit, never a rewrite
+
+`write_file` replaces a file's whole content and is capped per call, so reaching three lines
+inside a 10 KB module would mean re-emitting it in five chained pieces — each one a chance
+to truncate it. A model given only that tool expresses a correction the way every corpus
+teaches: as a unified diff, which nothing here applies. What lands on disk is then the diff
+text itself, and the module is gone.
+
+`edit_file` takes the exact excerpt and its replacement, so it needs no line numbers at all,
+and it **refuses** when the excerpt is missing or appears more than once rather than picking
+an occurrence. That refusal is the guard: striking a lookalike elsewhere in the file is the
+failure mode of any pattern-based correction, and it is silent. Here the agent is told, and
+lengthens its excerpt on the next step.
+
+Two writes are therefore refused inside `repo/`, by either tool:
+
+| Refused | Why |
+|---|---|
+| `write_file` on a source that **already exists** | it would replace all of it — use `edit_file`. Creating is untouched: the objective *requires* a new test file, and the agent reworks that file until it runs |
+| either tool on a file in `AUTOCODE_PROTECTED` | the objective already announces these as read-only. Without the check the sentence is a promise, and the breach only surfaces in the verdict — after the steps were spent on it |
+| `write_file` with an empty `content` | it would leave a zero-byte file that the result announces as "written" and the diff then carries as a deliverable. Removing a file is legitimate — a test one gives up on, a draft — and it is asked for by name: `supprimer: true`, which the repo guards above still apply to |
+
+Files under `repo/jarvis-core/tests/` are outside the first rule: that test is the agent's
+own deliverable. The verdict counts only a **created** test as proof anyway, so retouching a
+pre-existing one gains nothing.
 
 ### `verify` goes through the same sandbox
 

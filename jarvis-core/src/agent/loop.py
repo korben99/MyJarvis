@@ -39,7 +39,16 @@ from vitals import risk_scalar
 
 from . import store
 from .store import append_transcript, save_messages, save_task
-from .tools import FINISH, PLAN, TOOL_SCHEMAS, execute_tool, render_plan, schemas_for
+from .tools import (
+    EDIT_FILE,
+    FINISH,
+    PLAN,
+    TOOL_SCHEMAS,
+    VERIFY,
+    execute_tool,
+    render_plan,
+    schemas_for,
+)
 
 logger = get_logger("jarvis-agent")
 
@@ -551,7 +560,7 @@ async def _jouer_tour(
     return think, text, calls
 
 
-def _signature(call: dict) -> str:
+def _signature(call: dict, ecritures: int = 0) -> str:
     """Identité d'un appel d'outil : nom + arguments normalisés.
 
     Une lecture se signe sur son chemin ET son offset, `limit` exclu. L'offset est ce qui
@@ -560,8 +569,20 @@ def _signature(call: dict) -> str:
     le même début est l'enlisement. Signer sur le seul chemin les confond, et la garde
     refuse alors la continuation qu'elle vient elle-même d'indiquer.
 
-    `limit` reste exclu : il ne change pas l'endroit du fichier demandé, seulement la
-    quantité rendue.
+    La VALEUR de `limit` reste exclue : elle ne change pas l'endroit demandé, seulement la
+    quantité rendue, et deux limites différentes sur le même début sont le même enlisement.
+    Sa PRÉSENCE, elle, compte : une lecture coupée par `limit` annonce que le fichier tient
+    entier et invite à relancer sans lui. Confondre les deux refuse cette relance — la
+    continuation que l'outil vient lui-même d'indiquer —, et il ne reste plus que la
+    pagination, que ce message cherchait justement à éviter.
+
+    `verify` se signe sur le nombre d'écritures faites avant lui, et non sur ses arguments
+    — il n'en prend aucun, donc sa signature serait constante et la fenêtre le refuserait
+    dès le deuxième appel. C'est l'inverse du cycle demandé : vérifier, corriger, vérifier
+    à nouveau tient en deux ou trois pas, bien en deçà de la fenêtre. Son résultat dépend
+    de l'arbre, pas de l'appel ; compter les écritures distingue deux vérifications
+    séparées par une correction, et laisse identiques deux vérifications consécutives sans
+    rien écrire entre elles — le seul enlisement que la garde doit encore attraper ici.
     """
     fn = call.get("function") or {}
     args = fn.get("arguments") or "{}"
@@ -571,7 +592,13 @@ def _signature(call: dict) -> str:
         except json.JSONDecodeError:
             args = {}
     if fn.get("name") == "read_file" and isinstance(args, dict):
-        args = {"path": args.get("path"), "offset": args.get("offset") or 0}
+        args = {
+            "path": args.get("path"),
+            "offset": args.get("offset") or 0,
+            "borne": bool(args.get("limit")),
+        }
+    if fn.get("name") == VERIFY:
+        return f"{VERIFY}:{ecritures}"
     return f"{fn.get('name')}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
 
 
@@ -635,6 +662,9 @@ async def run_task(task: dict) -> dict:
     # read_file / fetch_url / read_file en boucle sans jamais atteindre le
     # seuil fatal. Compter les occurrences dans la fenêtre attrape les deux formes.
     recent_signatures: list[str] = []
+
+    # Signe les appels de `verify` — voir `_signature`.
+    ecritures = 0
 
     try:
         while task["steps"] < max_steps:
@@ -738,8 +768,16 @@ async def run_task(task: dict) -> dict:
             if name == FINISH:
                 return _finir(task, messages, args, text)
 
+            # `edit_file` COMPRIS : c'est lui qui corrige une source, donc le cycle normal
+            # est vérifier, éditer, vérifier. Ne compter que write_file y refuserait la
+            # seconde vérification, soit précisément la panne que ce compteur répare.
+            # Une écriture refusée compte quand même : relire son résultat pour le savoir
+            # serait fragile, et laisser tourner un verify de trop est le côté sûr.
+            if name in ("write_file", EDIT_FILE):
+                ecritures += 1
+
             # ── Boucle : même appel, mêmes arguments, dans la fenêtre récente.
-            seen = _repetition(recent_signatures, _signature(call))
+            seen = _repetition(recent_signatures, _signature(call, ecritures))
             if seen >= 2:
                 return await _conclure(
                     task, messages,

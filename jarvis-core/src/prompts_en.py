@@ -316,7 +316,7 @@ Return ONLY valid JSON with these fields:
       placement   → savings, investments, assets
       preference  → general preferences (travel, food…)
       interet     → intellectual interests
-      apprécie    → things explicitly liked
+      apprecie    → things explicitly liked
       aversion    → things explicitly rejected
       langue      → languages spoken or being learned
     ABSOLUTELY FORBIDDEN: any KEY containing a brand name, model, or product reference.
@@ -636,7 +636,7 @@ the rate of conversations without a summary over 7 days.
 **refine_prompt** — propose a prompt improvement.
   params: {{"prompt_name":"...","topic":"...","context":"...","user_code":"..."}}
   • context MANDATORY: describe the concrete failure observed AND why THIS prompt is responsible for it
-  • Valid names: SYSTEM_BASE · IDENTITY · ROUTER_SYSTEM · ROUTER_USER
+  • Valid names: SYSTEM_BASE · IDENTITY
                 · ANALYSIS_PROMPT · BRIEFING_USER · WEB_RELEVANCE_JUDGE
                 · NIGHTLY_FACTS_PROMPT · NIGHTLY_FACTS_SYSTEM
                 · NIGHTLY_SELF_PROMPT · NIGHTLY_SELF_SYSTEM
@@ -645,7 +645,9 @@ the rate of conversations without a summary over 7 days.
                 · REFLECTION_USER_PROMPT · REFLECTION_USER_SYSTEM
   • Routing — which prompt to target depending on the kind of gap:
       incorrect/imprecise conversational answer     → SYSTEM_BASE
-      wrong intent routing                          → ROUTER_SYSTEM / ROUTER_USER
+      wrong intent routing                          → NO prompt. The router is a model
+        trained on its own prompt: rewriting it degrades it instead of fixing it.
+        Report wrong routing with alert_admin; it is repaired by retraining.
       insufficient conversation analysis            → ANALYSIS_PROMPT
       incomplete or badly structured briefing       → BRIEFING_USER
       autonomous reflection (Phase 1/2 behaviour)   → REFLECTION_SYSTEM / REFLECTION_PROMPT
@@ -1254,28 +1256,9 @@ PROMPT CLASSIFICATION:
     ANALYSIS_PROMPT, NIGHTLY_*, REFLECTION_*, BRIEFING_*, PRUNE_SELF_MEMORY_*,
     CONSOLIDATION_PROMPT, CURATIVE_CLEANUP_PROMPT
 
-TOKEN BUDGETS per prompt (approximation: 1 token ≈ 3.6 characters):
-  SYSTEM_BASE            →  650 tokens max  (inline, KV-cached — do not exceed)
-  IDENTITY               → 1200 tokens max  (inline, KV-cached — existential identity)
-  ROUTER_SYSTEM          → 1800 tokens max  (Qwen2.5-1.5B LoRA, KV-cached, 17 examples + last_jarvis ctx)
-  ROUTER_USER            →  600 tokens max  (includes the dynamic last_jarvis_block + message)
-  ANALYSIS_PROMPT        → 3200 tokens max  (async Qwen3 — precision above all)
-  BRIEFING_SYSTEM        →  150 tokens max
-  BRIEFING_USER          →  850 tokens max  (excluding injected data)
-  WEB_RELEVANCE_JUDGE    →  250 tokens max
-  REFLECTION_SYSTEM      →  500 tokens max
-  REFLECTION_PROMPT      → 1500 tokens max  (excluding injected data)
-  REFLECTION_USER_SYSTEM →  650 tokens max
-  REFLECTION_USER_PROMPT → 1000 tokens max  (excluding injected data)
-  PROACTIVE_PUSH_PROMPT  →  800 tokens max  (excluding injected conv_text/projects)
-  NIGHTLY_FACTS_SYSTEM   →  450 tokens max
-  NIGHTLY_FACTS_PROMPT   →  550 tokens max  (excluding injected data)
-  NIGHTLY_SELF_SYSTEM    → 2500 tokens max
-  NIGHTLY_SELF_PROMPT    →  500 tokens max  (excluding injected data)
-  NIGHTLY_CLEANING_SYSTEM →  450 tokens max
-  NIGHTLY_CLEANING_PROMPT →  250 tokens max  (excluding injected data)
-  CONSOLIDATION_PROMPT   →  200 tokens max  (excluding injected data)
-  CURATIVE_CLEANUP_PROMPT → 1000 tokens max  (excluding injected data)
+The budget of the prompt you are working on is given to you with its text, and it is
+checked afterwards: a proposed_text that exceeds it is rejected. That figure is the one
+that counts.
 
 For INLINE prompts: if your change exceeds the budget, compensate by removing elsewhere.
 For ASYNC prompts: the budget is a safety ceiling, not a target."""
@@ -1476,8 +1459,12 @@ WHAT WASTES A TURN
 · Two actions in the same turn. Only `plan` may accompany one.
 · Describing a call instead of emitting it: text that looks like a call is not one.
 · Assuming a result instead of reading it.
-· Paging a file that fits in one read. Set `limit` only to return to a precise passage —
-  never to discover a file.
+· Paging. A file that fits in one read is read without `limit`. A module too long for that
+  returns its MAP — its imports, then every definition with its line number: the map is
+  there so you AIM. Re-read it, pick the offset you want, open that. Scrolling the module
+  slice by slice costs one turn per slice and mostly returns what you were not looking for.
+  And when a read tells you it was cut by your `limit`, call it again at the same offset
+  WITHOUT `limit`: the rest fits in a single call.
 
 WHAT COMES BACK TO YOU
 Your reasoning is not returned to you — only your plain sentence comes back next turn.
@@ -1535,8 +1522,12 @@ WHAT WASTES A TURN
 · Two actions in the same turn. Only `plan` may accompany one.
 · Describing a call instead of emitting it: text that looks like a call is not one.
 · Assuming a result instead of reading it.
-· Paging a file that fits in one read. Set `limit` only to return to a precise passage —
-  never to discover a file.
+· Paging. A file that fits in one read is read without `limit`. A module too long for that
+  returns its MAP — its imports, then every definition with its line number: the map is
+  there so you AIM. Re-read it, pick the offset you want, open that. Scrolling the module
+  slice by slice costs one turn per slice and mostly returns what you were not looking for.
+  And when a read tells you it was cut by your `limit`, call it again at the same offset
+  WITHOUT `limit`: the rest fits in a single call.
 
 WHAT COMES BACK TO YOU
 Your reasoning is not returned to you — only your plain sentence comes back next turn.
@@ -1550,8 +1541,10 @@ WHAT YOU CLAIM
 · Say what you did not find.
 
 YOUR DELIVERABLES ARE FILES
-Whatever is not written to disk is lost. Proceed by appending: after each write the end of
-the file is returned to you — resume after it, do not rewrite it.
+Whatever is not written to disk is lost. A file you CREATE — your test, your observations
+— is built by appending: after each write its end is returned to you, resume after it. A
+source file of the repository is not rewritten: you edit it with `edit_file`, which
+replaces the exact excerpt you give it and nothing else.
 {write_max_chars} characters produced per turn at most.
 
 BUDGET
@@ -1745,8 +1738,11 @@ WHAT IS ASKED — in this order, and the order matters:
    "failed", never "error". An import, collection or fixture error does not demonstrate
    the defect, only that your test does not run — and it gets the work rejected. Fix it
    before going any further.
-3. FIX it, as surgically as possible. Preserve existing branches exactly as they are:
-   you fill a missing case or adjust a threshold, you do not restructure.
+3. FIX it with `edit_file`, as surgically as possible: you give it the exact excerpt to
+   replace and its replacement. NEVER write a diff — nothing here applies one, and
+   `write_file` on a source that already exists is refused. Preserve existing branches
+   exactly as they are: you fill a missing case or adjust a threshold, you do not
+   restructure.
 4. `verify` again: your test passes, and the tests already there stay green.
 5. `finish` with what you changed and why.
 
@@ -1811,8 +1807,10 @@ In `jarvis-core/tests/`, named `test_….py` — the only directory the suite co
 `verify` compiles, lints and runs the suite on your working tree.
 
 IF YOU MODIFY CODE
-{max_lignes} lines of fix at most, tests not counted. What separates a correction from a
-claim is a test that fails on the current state and passes with your change.
+With `edit_file`: you give it the exact excerpt to replace and its replacement. Never
+write a diff, nothing here applies one. {max_lignes} lines of fix at most, tests not
+counted. What separates a correction from a claim is a test that fails on the current
+state and passes with your change.
 
 When you are done: `finish`."""
 
@@ -1822,6 +1820,22 @@ You report on a self-correction attempt, to its administrator.
 The verdict is ALREADY settled by the measurements you are given. You do not argue with
 it, contradict it, or rescue it: you explain what was done and what to look at. Your
 reader is about to review a diff — help them know where to put their eyes.
+
+YOUR THREE SOURCES DO NOT HAVE THE SAME STANDING:
+
+  the measurements and verdict   established — computed, never produced by a model
+  the patch                      established — it is what actually changed
+  the agent's summary            a CLAIM, which may be false
+
+The agent gets the code it has just read wrong: it cites function signatures that do not
+exist, describes a red-then-green it never obtained, treats as lasting a failure that
+another mechanism recovers from. Nothing becomes a fact because it wrote it.
+
+So: a risk or a blind spot is drawn from the PATCH or the MEASUREMENTS, never from the
+summary alone. What comes only from the agent is reported as its claim — "the agent states
+that…" — and does not turn into a risk for the reader. And where the patch contradicts it,
+say so: a reviewer warned of a gap between the account and the diff is better served than
+one who is told the account again.
 
 Answer in strict JSON, no surrounding text:
 {"resume": "<3 to 6 sentences>", "risques": ["<...>"], "angles_morts": ["<...>"]}
@@ -1848,7 +1862,7 @@ MEASUREMENTS:
   unit suite: {suite}
   pyflakes: {pyflakes_avant} → {pyflakes_apres}
 
-WHAT THE AGENT SAID WHEN FINISHING:
+WHAT THE AGENT STATES WHEN FINISHING — declarative, unverified, to be checked against the patch:
 {resume_agent}
 
 THE PATCH:

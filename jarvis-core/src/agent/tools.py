@@ -280,8 +280,16 @@ TOOL_SCHEMAS: list[dict] = [
                             "court. Sans ce drapeau, un tel remplacement est refusé."
                         ),
                     },
+                    "supprimer": {
+                        "type": "boolean",
+                        "description": (
+                            "true = RETIRER le fichier. C'est la seule façon de le faire : "
+                            "un `content` vide est refusé, parce qu'il laisserait un "
+                            "fichier de zéro octet au lieu de rien."
+                        ),
+                    },
                 },
-                "required": ["path", "content"],
+                "required": ["path"],
             },
         },
     },
@@ -329,6 +337,7 @@ TOOL_NAMES = frozenset(t["function"]["name"] for t in TOOL_SCHEMAS)
 VERIFY = "verify"
 GREP = "grep"
 APPELANTS = "appelants"
+EDIT_FILE = "edit_file"
 
 # Recherche littérale, jamais une expression régulière. Une regex fournie par le modèle
 # s'exécute sur deux cents fichiers et peut s'emballer sans qu'on sache l'interrompre ;
@@ -403,16 +412,61 @@ _VERIFY_SCHEMA: dict = {
     },
 }
 
+# Corriger une source est une ÉDITION, jamais une réécriture. `write_file` remplace tout le
+# contenu et plafonne par appel : reprendre trois lignes dans un module de 10 ko demanderait
+# de le réémettre en cinq morceaux, chacun une occasion de le tronquer. Un modèle placé
+# devant ce seul outil écrit un diff unifié — la forme canonique d'une correction partout
+# ailleurs — que rien ici n'applique. L'extrait exact, lui, ne demande aucun numéro de ligne,
+# et il échoue bruyamment quand il n'est pas unique au lieu de frapper la mauvaise occurrence.
+_EDIT_FILE_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": EDIT_FILE,
+        "description": (
+            "Remplace un extrait exact dans un fichier qui existe déjà — c'est ainsi que "
+            "tu corriges du code. L'extrait doit apparaître UNE SEULE FOIS : absent ou "
+            "présent plusieurs fois, rien n'est modifié et on te dit lequel des deux. "
+            "Hors de cet extrait, le fichier n'est pas touché."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Ex : 'repo/jarvis-core/src/exemple.py'.",
+                },
+                "old": {
+                    "type": "string",
+                    "description": (
+                        "L'extrait à remplacer, recopié CARACTÈRE POUR CARACTÈRE depuis ta "
+                        "lecture, indentation comprise. Prends les lignes voisines qu'il "
+                        "faut pour qu'il n'apparaisse qu'une fois."
+                    ),
+                },
+                "new": {
+                    "type": "string",
+                    "description": (
+                        "Ce qui prend sa place. Chaîne vide pour supprimer l'extrait."
+                    ),
+                },
+            },
+            "required": ["path", "old", "new"],
+        },
+    },
+}
+
 # Pas de web ni de RAG pour une tâche de code : elle n'en a pas besoin, et chaque schéma
 # est rendu en tête de prompt à CHAQUE pas — un outil inutile se paie quarante fois et
 # reste une occasion de se tromper de choix.
 _OUTILS_AUTOCODE = frozenset(
-    {PLAN, GREP, APPELANTS, "list_dir", "read_file", "write_file", VERIFY, FINISH}
+    {PLAN, GREP, APPELANTS, "list_dir", "read_file", "write_file", EDIT_FILE, VERIFY,
+     FINISH}
 )
 
 # Ajoutés avant finish : l'ordre des schémas est l'ordre de lecture du modèle, et
-# « chercher », « remonter les appelants », « vérifier » se lisent avant « terminer ».
-_SCHEMAS_AUTOCODE = (_GREP_SCHEMA, _APPELANTS_SCHEMA, _VERIFY_SCHEMA)
+# « chercher », « remonter les appelants », « corriger », « vérifier » se lisent avant
+# « terminer ».
+_SCHEMAS_AUTOCODE = (_GREP_SCHEMA, _APPELANTS_SCHEMA, _EDIT_FILE_SCHEMA, _VERIFY_SCHEMA)
 
 
 def schemas_for(task: dict) -> list[dict]:
@@ -1192,14 +1246,91 @@ async def _read_file(task: dict, args: dict) -> str:
     return f"{warning}\n\n{body}\n{warning}"
 
 
+def _rel_depot(task: dict, path: str) -> str | None:
+    """Chemin relatif à `repo/` si `path` y est, None sinon.
+
+    `repo/` est l'arbre jetable que le chantier prépare : seule une tâche d'autocoding en a
+    un, donc un workspace sans lui rend None pour tout chemin.
+    """
+    racine = task.get("workspace")
+    if not racine:
+        return None
+    depot = os.path.realpath(os.path.join(racine, "repo"))
+    reel = os.path.realpath(path)
+    if reel != depot and not reel.startswith(depot + os.sep):
+        return None
+    return os.path.relpath(reel, depot)
+
+
+# Les tests sont hors de la garde ci-dessous : l'objectif en réclame un, et l'agent le
+# reprend jusqu'à ce qu'il tombe juste. Le verdict, lui, ne compte comme preuve qu'un test
+# CRÉÉ — retoucher un test préexistant n'y gagne rien.
+_TESTS_DEPOT = "jarvis-core/tests/"
+
+
+def _garde_depot(task: dict, path: str, *, edition: bool) -> str | None:
+    """Message de refus d'écriture dans `repo/`, ou None. Commun aux deux outils d'écriture.
+
+    Deux interdits, qui ne portent pas sur la même chose :
+
+      · un fichier protégé ne change pas, par quelque outil que ce soit. Le prompt l'annonce
+        déjà ; sans ce contrôle la phrase est une promesse, et la violation n'est relevée
+        qu'au verdict — après que l'agent a dépensé ses pas dessus ;
+      · une source qui existe déjà ne se REMPLACE pas, elle s'édite. L'interdit ne vise que
+        le remplacement : créer reste ouvert, sinon le test de l'étape 2 serait impossible.
+    """
+    rel = _rel_depot(task, path)
+    if rel is None:
+        return None
+
+    from autocode.constats import est_protege
+
+    if est_protege(rel):
+        return (
+            f"Écriture REFUSÉE : {rel} est protégé en écriture — tu peux le lire, pas le "
+            "changer. Si le défaut est là, écris le test qui le prouve et arrête-toi : la "
+            "preuve seule est un résultat."
+        )
+    if edition or rel.startswith(_TESTS_DEPOT) or not os.path.exists(path):
+        return None
+    return (
+        f"Écriture REFUSÉE : {rel} existe déjà, et write_file remplacerait TOUT son "
+        f"contenu — ce n'est pas ce que tu veux faire d'une source. Utilise edit_file : "
+        f"tu lui donnes l'extrait exact à remplacer et son remplacement, et rien d'autre "
+        f"ne bouge. N'écris pas un diff, rien ne l'applique."
+    )
+
+
 async def _write_file(task: dict, args: dict) -> str:
     rel = args.get("path") or ""
+    supprimer = bool(args.get("supprimer"))
     content = args.get("content")
-    if content is None:
+    if content is None and not supprimer:
         return "Erreur : content manquant."
-    if not isinstance(content, str):
+    if content is not None and not isinstance(content, str):
         content = json.dumps(content, ensure_ascii=False, indent=2)
     path = resolve(task["id"], rel, write=True)
+    if (refus := _garde_depot(task, path, edition=False)):
+        return refus
+
+    # Retirer un livrable est un geste légitime — un test qu'on renonce à livrer, un
+    # brouillon. Il se demande par son NOM : un `content` vide passé à une écriture laisse
+    # un fichier de zéro octet que le compte rendu annonce « Écrit », et le diff le porte
+    # ensuite comme un livrable. Les deux intentions sont distinctes, les deux appels aussi.
+    if supprimer:
+        if not os.path.exists(path):
+            return f"Rien à supprimer : {relative(task['id'], path)} n'existe pas."
+        try:
+            os.remove(path)
+        except OSError as exc:
+            return f"Suppression impossible : {exc}"
+        return f"Supprimé : {relative(task['id'], path)}."
+    if not content:
+        return (
+            f"Écriture REFUSÉE : un `content` vide ne mettrait rien dans "
+            f"{relative(task['id'], path)} et le viderait s'il existe. Pour le retirer, "
+            "demande-le : `supprimer: true`. Sinon, donne le contenu à écrire."
+        )
     ensure_parent(path)
     append = bool(args.get("append"))
 
@@ -1257,6 +1388,93 @@ async def _write_file(task: dict, args: dict) -> str:
     )
 
 
+# Lignes de contexte rendues autour d'une édition. Assez pour que l'agent vérifie son
+# indentation et la frontière du bloc, pas assez pour qu'une édition coûte une lecture.
+_EDIT_CONTEXTE = 3
+
+
+async def _edit_file(task: dict, args: dict) -> str:
+    """Remplace un extrait exact et unique. Rien d'écrit si l'extrait n'est pas unique.
+
+    L'unicité est le garde-fou, et il tient à ce que l'échec soit RENDU : frapper une
+    occurrence homonyme ailleurs dans le fichier est le défaut propre à toute correction
+    par motif, et il est silencieux. Ici l'agent apprend au pas suivant qu'il doit allonger
+    son extrait.
+    """
+    rel_arg = args.get("path") or ""
+    ancien = args.get("old")
+    nouveau = args.get("new")
+    if not isinstance(ancien, str) or not ancien:
+        return "Erreur : old manquant — donne l'extrait exact à remplacer."
+    if nouveau is None:
+        return 'Erreur : new manquant. Pour supprimer l\'extrait, passe new="".'
+    if not isinstance(nouveau, str):
+        nouveau = json.dumps(nouveau, ensure_ascii=False, indent=2)
+    if len(nouveau) > AGENT_WRITE_MAX_CHARS:
+        return (
+            f"Remplacement trop long : {len(nouveau)} caractères pour un plafond de "
+            f"{AGENT_WRITE_MAX_CHARS}. Découpe ta correction en plusieurs éditions."
+        )
+
+    path = resolve(task["id"], rel_arg, write=True)
+    if (refus := _garde_depot(task, path, edition=True)):
+        return refus
+    if not os.path.isfile(path):
+        return (
+            f"Fichier introuvable : {rel_arg}. edit_file modifie un fichier qui existe "
+            "déjà ; pour en créer un, c'est write_file."
+        )
+    try:
+        with open(path, encoding="utf-8") as f:
+            contenu = f.read()
+    except OSError as exc:
+        return f"Lecture impossible : {exc}"
+
+    trouve = contenu.count(ancien)
+    if trouve == 0:
+        # La lecture d'une source d'autocoding retire les docstrings : un extrait recopié
+        # par-dessus l'un d'eux ne peut PAS correspondre au fichier réel. Sans ce rappel,
+        # l'échec est incompréhensible depuis ce que l'agent a sous les yeux.
+        return (
+            f"Extrait introuvable dans {relative(task['id'], path)} — rien n'a été "
+            "modifié. Il doit correspondre CARACTÈRE POUR CARACTÈRE, indentation "
+            "comprise. Attention : read_file te rend une source sans ses docstrings, "
+            "donc un extrait qui en contenait un ne correspondra jamais. Relis la zone "
+            "et recopie-la depuis ce que la lecture te rend."
+        )
+    if trouve > 1:
+        return (
+            f"Extrait présent {trouve} fois dans {relative(task['id'], path)} — rien n'a "
+            "été modifié, je ne choisis pas pour toi laquelle. Allonge-le avec les lignes "
+            "qui l'entourent jusqu'à ce qu'il n'apparaisse qu'une fois."
+        )
+
+    debut = contenu.index(ancien)
+    premiere = contenu[:debut].count("\n") + 1
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(contenu[:debut] + nouveau + contenu[debut + len(ancien):])
+    except OSError as exc:
+        return f"Écriture impossible : {exc}"
+
+    _noter_source(task, path)
+
+    # On rend la zone TELLE QU'ELLE EST APRÈS, numérotée : c'est la seule façon pour l'agent
+    # de constater que son remplacement s'est posé à la bonne indentation, sans redemander
+    # une lecture au pas suivant.
+    lignes = (contenu[:debut] + nouveau + contenu[debut + len(ancien):]).splitlines()
+    # `splitlines` et non `count("\n") + 1` : un extrait qui finit par un saut de ligne
+    # compterait une ligne de trop, et une suppression (`new` vide) en compterait une.
+    retires, poses = len(ancien.splitlines()), len(nouveau.splitlines())
+    haut = max(premiere - _EDIT_CONTEXTE, 1)
+    bas = min(premiere + poses + _EDIT_CONTEXTE, len(lignes))
+    vue = "".join(f"{i}\t{lignes[i - 1]}\n" for i in range(haut, bas + 1))
+    return (
+        f"Modifié : {relative(task['id'], path)} — {retires} ligne(s) remplacée(s) par "
+        f"{poses}, à partir de la ligne {premiere}.\n{vue}"
+    )
+
+
 _DISPATCH = {
     "web_search": _web_search,
     "fetch_url": _fetch_url,
@@ -1267,6 +1485,7 @@ _DISPATCH = {
     "list_dir": _list_dir,
     "read_file": _read_file,
     "write_file": _write_file,
+    EDIT_FILE: _edit_file,
     VERIFY: _verify,
     GREP: _grep,
     APPELANTS: _appelants,

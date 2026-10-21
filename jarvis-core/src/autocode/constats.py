@@ -339,11 +339,17 @@ _RACINE_PARCOURUE = os.path.join("jarvis-core", "src")
 
 
 def _modules_candidats() -> list[str]:
-    """Chemins relatifs des modules du code source, protégés exclus.
+    """Chemins relatifs des modules du code source, protégés et trop longs exclus.
 
     Les protégés sont écartés ICI et non par `motif_exclusion`, qui les laisse passer à
     dessein : un symptôme réel mérite qu'on aille les lire. Une lecture préventive, non —
     elle ne pourrait déboucher sur rien d'applicable.
+
+    Un module plus long que le plafond relève du même raisonnement, et l'écarter ici est
+    REQUIS : `_depuis_le_parcours` n'en propose qu'un seul, `motif_exclusion` l'écarterait
+    en aval, et le cycle ne retiendrait alors aucun constat. La visite n'étant enregistrée
+    qu'en cas de passage réel, le même module ressortirait à chaque fois — le parcours
+    s'arrête définitivement sur le premier trop long qu'il rencontre.
     """
     racine = os.path.join(JARVIS_ROOT, _RACINE_PARCOURUE)
     trouves = []
@@ -354,8 +360,11 @@ def _modules_candidats() -> list[str]:
             if not nom.endswith(".py"):
                 continue
             chemin = os.path.relpath(os.path.join(dossier, nom), JARVIS_ROOT)
-            if not est_protege(chemin):
-                trouves.append(chemin)
+            if est_protege(chemin):
+                continue
+            if _lignes_du_fichier(os.path.join(dossier, nom)) > AUTOCODE_MAX_TARGET_LINES:
+                continue
+            trouves.append(chemin)
     return sorted(trouves)
 
 
