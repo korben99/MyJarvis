@@ -1268,11 +1268,45 @@ def _rel_depot(task: dict, path: str) -> str | None:
 _TESTS_DEPOT = "jarvis-core/tests/"
 
 
+def _garde_prefixe_depot(task: dict, path: str) -> str | None:
+    """Message de refus pour un chemin du dépôt écrit à CÔTÉ de `repo/`, ou None.
+
+    Le workspace est ouvert en écriture — c'est là que vivent les livrables —, donc un
+    chemin qui recopie l'arborescence du dépôt sans son préfixe y atterrit sans un mot.
+    Hors de `repo/`, rien n'est compilé ni testé : `verify` passe alors au vert sans voir
+    le fichier, et le pas suivant est dépensé sur un signal qui ne porte sur rien.
+
+    Le premier segment est comparé au contenu réel de `repo/` plutôt qu'à une liste de
+    noms : la garde suit le dépôt sans qu'on ait à la tenir à jour. Un fichier de tête
+    reste accepté — `rapport.md` à la racine du workspace est un livrable, pas un préfixe
+    oublié, et seul un répertoire du dépôt lève l'ambiguïté.
+    """
+    racine = task.get("workspace")
+    if not racine:
+        return None
+    depot = os.path.join(os.path.realpath(racine), "repo")
+    if not os.path.isdir(depot):
+        return None
+
+    rel_ws = os.path.relpath(os.path.realpath(path), os.path.realpath(racine))
+    tete = rel_ws.split(os.sep)[0]
+    if tete == os.pardir or not os.path.isdir(os.path.join(depot, tete)):
+        return None
+    return (
+        f"Écriture REFUSÉE : {rel_ws} tombe hors de l'arbre de travail, alors que "
+        f"repo/{tete}/ existe — c'est le préfixe `repo/` qui manque. Écris plutôt "
+        f"repo/{rel_ws} : hors de repo/, rien n'est compilé ni testé, et verify "
+        f"répondrait vert sans avoir vu ton fichier."
+    )
+
+
 def _garde_depot(task: dict, path: str, *, edition: bool) -> str | None:
     """Message de refus d'écriture dans `repo/`, ou None. Commun aux deux outils d'écriture.
 
-    Deux interdits, qui ne portent pas sur la même chose :
+    Trois interdits, qui ne portent pas sur la même chose :
 
+      · un chemin du dépôt écrit à côté de `repo/` est un préfixe oublié, pas un livrable —
+        voir `_garde_prefixe_depot` ;
       · un fichier protégé ne change pas, par quelque outil que ce soit. Le prompt l'annonce
         déjà ; sans ce contrôle la phrase est une promesse, et la violation n'est relevée
         qu'au verdict — après que l'agent a dépensé ses pas dessus ;
@@ -1281,7 +1315,7 @@ def _garde_depot(task: dict, path: str, *, edition: bool) -> str | None:
     """
     rel = _rel_depot(task, path)
     if rel is None:
-        return None
+        return _garde_prefixe_depot(task, path)
 
     from autocode.constats import est_protege
 

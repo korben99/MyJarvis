@@ -1039,6 +1039,25 @@ class TestEditionDeSource:
         assert "REFUSÉE" in r
         assert src.exists()
 
+    def test_un_prefixe_repo_oublie_est_refuse(self, depot, tmp_path):
+        """Le workspace est ouvert en écriture : sans ce refus, le fichier atterrit hors de
+        tout arbre et `verify` répond vert sans l'avoir vu."""
+        for outil, args in (
+            ("write_file", {"content": "def test_n(): assert True\n"}),
+            ("edit_file", {"old": "a", "new": "b"}),
+        ):
+            r = self._appel(depot, outil, path="jarvis-core/tests/test_neuf.py", **args)
+            assert "REFUSÉE" in r, f"{outil} a laissé passer un préfixe oublié"
+            assert "repo/jarvis-core/tests/test_neuf.py" in r, "le refus doit donner le chemin"
+        assert not (tmp_path / "jarvis-core").exists(), "rien ne doit être écrit hors de repo/"
+
+    def test_un_livrable_de_tete_reste_ecrivable(self, depot, tmp_path):
+        """Seul un répertoire du dépôt distingue le préfixe oublié du livrable : la racine
+        du workspace reste l'endroit normal des rapports et des patchs."""
+        r = self._appel(depot, "write_file", path="rapport.md", content="# Titre\n")
+        assert "Écrit" in r
+        assert (tmp_path / "rapport.md").exists()
+
     def test_une_tache_humaine_nest_pas_concernee(self, tmp_path, monkeypatch):
         """La garde se déduit de la présence de `repo/`, que seul le chantier d'autocoding
         prépare : une tâche humaine écrit dans son workspace sans rien savoir de tout ça."""

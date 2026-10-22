@@ -151,7 +151,7 @@ def relancer_les_series() -> list[dict]:
     """
     creees = []
     for serie, precedent in dernier_tour_par_serie().items():
-        if precedent.get("status") in ("queued", "running"):
+        if precedent.get("status") in ("queued", "running", "interrupted"):
             logger.info("récurrence : série %s encore en cours, tour sauté", serie)
             continue
 

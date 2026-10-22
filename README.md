@@ -318,6 +318,60 @@ line so your comments survive.
 
 Full walkthrough in **[DOCS/INSTALL.md](DOCS/INSTALL.md)**.
 
+## Update
+
+Releases are tags, never a branch. `main` carries work in progress, and an updater pointed at
+a branch ships it as it comes. Publishing a version is, on the maintainer's side:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+On the receiving side nothing moves until you ask for it:
+
+```bash
+jarvis-update            # compare only — writes nothing, restarts nothing
+jarvis-update --apply    # deploy the newest tag
+```
+
+The comparison prints the version on disk, the version actually answering on `/status` when
+the two diverge, the commits you are about to get, and the `.env` keys your own file is
+missing. That last one matters: `install.sh` never touches an existing `.env`, so a setting
+added upstream stays absent and `config.py` applies its default without a word — a feature
+that ships but never switches on. It also warns when `requirements.txt`, `docker-compose.yml`
+or a migration script changes. Exit code is `10` when an update is waiting and `0` when you
+are up to date, which is enough to wire a notification from cron without deploying anything:
+
+```bash
+jarvis-update; [ $? -eq 10 ] && your-notification-here
+```
+
+`--apply` takes a lock, refuses to run on a dirty working tree, records a rollback point (the
+current ref, plus a `pip freeze` under `logs/update/`), checks out the tag, replays
+`install.sh` non-interactively, restarts the service and waits for `/status` to answer. That
+wait is real readiness and not merely "process started": model preloading runs inside the
+FastAPI lifespan, so nothing listens before it finishes. It then compares the version the API
+reports to the tag just deployed, and rolls back if they differ — a restart that failed
+quietly and left the old process standing is an outcome worth catching.
+
+Two limits to know before relying on it. **Dependencies are not rolled back**: the
+`pip freeze` taken beforehand is kept and the restore command printed, but replaying it
+during an incident stays your decision. And **migration scripts are flagged, never run** —
+there is no migration framework here, and a schema change remains a deliberate act. Note that
+`--apply` leaves the repository on a detached HEAD, which is the right state for a deployment
+but means `git pull` is no longer how this machine moves forward.
+
+The deployed version is readable at any time, and is the only dependable way to tell which
+code is in memory rather than on disk:
+
+```bash
+curl -s localhost:8000/status | jq .version
+```
+
+Tuning, if the defaults do not fit: `JARVIS_URL`, `JARVIS_UPDATE_TIMEOUT` (420 s) and
+`JARVIS_TAG_PATTERN` are read by `scripts/jarvis-update.sh`.
+
 ---
 
 ## Documentation
