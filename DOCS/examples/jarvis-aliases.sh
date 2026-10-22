@@ -16,6 +16,11 @@ alias jarvis-restart="$JARVIS_LAUNCHD restart"
 alias jarvis-reload="$JARVIS_LAUNCHD restart"
 alias jarvis-status="$JARVIS_LAUNCHD status"
 
+# Mise à jour par tag. Sans argument : comparaison seule, rien n'est touché.
+#   jarvis-update            état, contenu de la mise à jour, clés .env manquantes
+#   jarvis-update --apply    déploie le dernier tag, avec retour en arrière si l'API ne revient pas
+alias jarvis-update="$(dirname "$JARVIS_LAUNCHD")/jarvis-update.sh"
+
 # Éditeur de configuration : ouvre la page locale (aucun serveur, aucun script).
 #
 # Le chemin du .env est copié dans le presse-papier au passage : macOS masque les fichiers

@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import pathlib
+import subprocess
 
 from dotenv import load_dotenv
 
@@ -16,6 +17,37 @@ _ENV_FILE = os.getenv(
 load_dotenv(_ENV_FILE)
 
 logger = logging.getLogger("jarvis-config")
+
+
+# ── Version déployée ─────────────────────────────────────────────────────────
+# Résolue au chargement du module, et jamais rafraîchie ensuite : le serveur ne recharge
+# pas à chaud, donc la seule valeur exploitable est celle du code en mémoire. Un /status
+# qui annonce encore le tag précédent après un déploiement dénonce un redémarrage qui n'a
+# pas eu lieu — c'est précisément ce qu'on veut pouvoir lire.
+#
+# `git describe` plutôt qu'un numéro écrit dans un fichier : son suffixe `-dirty` distingue
+# un tag déployé tel quel d'un tag retouché à la main, et son suffixe de distance signale
+# un déploiement en avance sur le dernier tag. Un fichier de version ne dit ni l'un ni
+# l'autre, il dit ce qu'on y a écrit.
+def _version_deployee() -> str:
+    racine = pathlib.Path(__file__).resolve().parents[2]
+    try:
+        res = subprocess.run(
+            ["git", "describe", "--tags", "--always", "--dirty"],
+            cwd=racine,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # git absent, ou dépôt récupéré en archive : l'API doit démarrer quand même.
+        return "inconnue"
+    if res.returncode != 0:
+        return "inconnue"
+    return res.stdout.strip() or "inconnue"
+
+
+JARVIS_VERSION = _version_deployee()
 
 # ── Shared OpenAI credentials (fallback for any tier not explicitly configured) ──
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")

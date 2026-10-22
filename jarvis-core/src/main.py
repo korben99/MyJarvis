@@ -37,6 +37,7 @@ from config import (
     BRIEFING_TIMEZONE,
     CONV_ANALYSIS_INTERVAL_MINUTES,
     CORS_ORIGINS,
+    JARVIS_VERSION,
     LLM_LOCAL,
     NIGHTLY_REVIEW_HOUR,
     OPENAI_API_KEY,
@@ -350,7 +351,7 @@ async def lifespan(app: FastAPI):
 
 # ── App + routers ──────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Jarvis API", version="8.0", lifespan=lifespan)
+app = FastAPI(title="Jarvis API", version=JARVIS_VERSION, lifespan=lifespan)
 
 # `allow_credentials` reste à False, et c'est ce qui rend la liste ci-dessus sûre : avec
 # les identifiants activés, Starlette cesse de répondre « * » et renvoie en écho l'origine
@@ -452,6 +453,7 @@ async def status():
 
     return {
         "status": "online",
+        "version": JARVIS_VERSION,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "services": services,
     }
