@@ -1744,10 +1744,13 @@ CE QUI EST DEMANDÉ — dans cet ordre, et l'ordre compte :
    Il va dans `jarvis-core/tests/`, nommé `test_…py`, et NULLE PART ailleurs : c'est le
    seul dossier que la suite collecte, et le seul où le `conftest.py` pose les chemins,
    les simulations et l'environnement de test. Un test posé à côté ne démarre pas.
-   Lance `verify` pour le voir échouer, et lis le bilan :
-   il doit dire « failed », jamais « error ». Une erreur d'import, de collecte ou de
-   fixture ne démontre pas le défaut, seulement que ton test ne tourne pas — et elle
-   fait rejeter le travail. Répare-la avant d'aller plus loin.
+   Lance `verify` pour le voir échouer, et lis le bilan : c'est le TYPE de l'exception qui
+   compte, et la forme attendue est une `AssertionError`. « failed » ne suffit pas — pytest
+   y compte toute exception levée pendant ton test. Une erreur d'import, de collecte ou de
+   fixture ne démontre pas le défaut, seulement que ton test ne tourne pas : répare-la
+   avant d'aller plus loin. Si le défaut EST un plantage du code appelé, nomme dans
+   `finish` l'appelant qui produit cet état — sans lui, le rouge vient de ton test et non
+   du dépôt.
 3. CORRIGE avec `edit_file`, le plus chirurgicalement possible : tu lui donnes l'extrait
    exact à remplacer et son remplacement. N'écris JAMAIS un diff — rien ici ne l'applique,
    et `write_file` sur une source qui existe déjà est refusé. Préserve les branches
@@ -1775,6 +1778,10 @@ LIMITES :
 · Ne touche qu'aux fichiers ci-dessus, plus le test que tu ajoutes. Tout autre fichier
   modifié fait rejeter le travail entier.
 · {max_lignes} lignes de correctif au maximum — le test ajouté ne compte pas.
+· Un état que seul ton test peut produire n'est pas un défaut. Si tu dois retirer une clé,
+  vider un champ ou contourner le constructeur pour faire tomber ton test, nomme l'appelant
+  qui produit cet état. À défaut, tolérer cet état ne corrige rien : ça rend muet ce qui
+  protestait.
 · Le comportement correct doit être évident, ou démontrable depuis le code et ses
   commentaires. Si tu dois SUPPOSER ce qui est attendu, tu n'as pas trouvé un défaut :
   tu as trouvé une question. Dis-la dans `finish` au lieu d'en faire un test."""

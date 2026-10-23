@@ -535,6 +535,14 @@ class TestVerdict:
         maintenant. Rejeter ce cas exclurait toute une famille de défauts légitimes."""
         assert mesure.verdict(_m(avant=mesure.ERREUR, apres=mesure.PASSE))[0] == CORRIGE
 
+    def test_une_erreur_rattrapee_porte_reserve(self):
+        """Même forme pour deux choses différentes : un symbole absent devenu présent, et
+        un état que seul le test produit avant d'être toléré. Le verdict ne les sépare pas,
+        la réserve le dit au relecteur."""
+        verdict, motifs = mesure.verdict(_m(avant=mesure.ERREUR, apres=mesure.PASSE))
+        assert verdict == CORRIGE
+        assert any("appelant" in x for x in motifs)
+
     def test_un_test_vain_est_signale_sans_rejeter(self):
         verdict, motifs = mesure.verdict(_m(vain=True))
         assert verdict == CORRIGE

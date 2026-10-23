@@ -297,10 +297,22 @@ def _noms_indefinis(sortie: str) -> set[str]:
 
 
 async def _pyflakes(task: dict, arbre: str) -> str:
+    """Les tests sont dans le périmètre : le cycle en CRÉE un, et c'est le seul fichier
+    dont le patch soit entièrement responsable. Hors périmètre, le compte annoncé au
+    verdict ne dit rien de lui — un import mort y passe inaperçu.
+
+    Le décompte de départ n'a pas à être nul : il est relevé sur les deux arbres de la même
+    façon, et c'est son ÉCART qui vaut réserve.
+    """
     return await _lancer(
         task,
         f"cd {arbre} || exit 1\n"
-        + _py("pyflakes", "jarvis-core/src/*.py", "jarvis-core/src/*/*.py"),
+        + _py(
+            "pyflakes",
+            "jarvis-core/src/*.py",
+            "jarvis-core/src/*/*.py",
+            "jarvis-core/tests/*.py",
+        ),
     )
 
 
@@ -461,17 +473,25 @@ def verdict(m: dict) -> tuple[str, list[str]]:
         bloquants.append("la compilation échoue")
     if m["vain"]:
         reserves.append("le test ajouté ne référence rien — il ne peut rien démontrer")
-    if m["avant"] == ERREUR and not a_corrige:
+    if m["avant"] == ERREUR:
         # Une erreur sur HEAD ne distingue pas « la chose manque » d'« mon test est cassé ».
-        # Quand le test PASSE ensuite, la seconde moitié du contrat lève l'ambiguïté : le
-        # symbole était bien absent, il existe maintenant — c'est la forme normale d'un
-        # défaut « la fonction manque ». Sans « après », rien ne la lève, et une faute de
-        # frappe passerait pour une preuve.
-        reserves.append(
-            "le test ajouté tombe sur une erreur (import, collecte ou fixture) et non sur "
-            "une assertion, et rien ne le corrige — il démontre qu'il ne tourne pas, pas "
-            "qu'un défaut existe"
-        )
+        # Quand le test PASSE ensuite, l'ambiguïté se déplace au lieu de disparaître : c'est
+        # la forme normale du défaut « la fonction manque » — symbole absent, puis présent —,
+        # et c'est aussi celle d'un test qui fabrique un état qu'aucun appelant ne produit
+        # avant de le tolérer. Les deux se lisent de la même façon ici ; seule la relecture
+        # les sépare, donc les deux portent réserve. Jamais bloquant : un diagnostic juste
+        # dont la preuve est d'une forme discutable reste un diagnostic juste.
+        if a_corrige:
+            reserves.append(
+                "le test ajouté tombe sur une exception et non sur une assertion — "
+                "vérifier qu'un appelant peut produire l'état testé"
+            )
+        else:
+            reserves.append(
+                "le test ajouté tombe sur une erreur (import, collecte ou fixture) et non "
+                "sur une assertion, et rien ne le corrige — il démontre qu'il ne tourne "
+                "pas, pas qu'un défaut existe"
+            )
     if m.get("noms_indefinis"):
         # Rejet, et non un simple motif ajouté au verdict : le reste du contrat ne peut pas
         # voir ce défaut. `compileall` ne valide que la syntaxe, la suite unitaire ne lève

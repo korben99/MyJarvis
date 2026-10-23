@@ -1734,10 +1734,13 @@ WHAT IS ASKED — in this order, and the order matters:
    It goes in `jarvis-core/tests/`, named `test_….py`, and NOWHERE else: that is the only
    directory the suite collects, and the only one where `conftest.py` sets up paths,
    mocks and the test environment. A test placed elsewhere does not even start.
-   Run `verify` to watch it fail, and read the summary: it must say
-   "failed", never "error". An import, collection or fixture error does not demonstrate
-   the defect, only that your test does not run — and it gets the work rejected. Fix it
-   before going any further.
+   Run `verify` to watch it fail, and read the summary: what counts is the TYPE of the
+   exception, and the expected shape is an `AssertionError`. "failed" is not enough —
+   pytest counts every exception raised during your test under it. An import, collection or
+   fixture error does not demonstrate the defect, only that your test does not run: fix it
+   before going any further. If the defect IS a crash in the code called, name in `finish`
+   the caller that produces that state — without it, the red comes from your test and not
+   from the repository.
 3. FIX it with `edit_file`, as surgically as possible: you give it the exact excerpt to
    replace and its replacement. NEVER write a diff — nothing here applies one, and
    `write_file` on a source that already exists is refused. Preserve existing branches
@@ -1765,6 +1768,10 @@ LIMITS:
 · Touch only the files above, plus the test you add. Any other modified file gets the
   whole work rejected.
 · {max_lignes} lines of fix at most — the test you add does not count.
+· A state only your test can produce is not a defect. If you have to remove a key, blank a
+  field or bypass the constructor to make your test trip, name the caller that produces
+  that state. Failing that, tolerating the state fixes nothing: it silences what was
+  protesting.
 · The correct behaviour must be obvious, or demonstrable from the code and its comments.
   If you have to ASSUME what is expected, you have not found a defect: you have found a
   question. Say it in `finish` instead of turning it into a test."""
