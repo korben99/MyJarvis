@@ -300,3 +300,16 @@ def describe() -> str:
     """One-line French summary for prompts (proactive messaging, self-reflection)."""
     lines = render_prompt_lines()
     return ", ".join(lines) if lines else "neutre"
+
+
+def describe_dimensions() -> str:
+    """Les trois dimensions avec leur valeur signée, au-dessus du seuil comme en dessous.
+
+    `describe` répond « quel état injecter maintenant » et tait donc tout ce qui n'atteint
+    pas _THRESHOLD. Un lecteur qui cherche CE QUI A BOUGÉ a besoin de l'inverse : une
+    dimension à +0.05 n'est pas un état à afficher, mais elle dit qu'une poussée a eu lieu
+    et a presque été reprise. Rendue ici, et non reconstruite chez l'appelant, parce que
+    les noms de dimensions n'ont pas à sortir de ce module.
+    """
+    state = get_state()
+    return ", ".join(f"{dim} {state.get(dim, 0.0):+.2f}" for dim in _DIMS)

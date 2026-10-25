@@ -90,6 +90,72 @@ class TestAxesIntrospection:
         assert not manquants, f"axes absents de NIGHTLY_SELF_SYSTEM : {manquants}"
 
 
+# ── Matière des axes d'introspection ─────────────────────────────────────────
+
+class TestMatiereDesAxes:
+    """Le prompt interdit d'écrire une ligne d'axe qu'on ne puisse rattacher à un échange
+    de <conversations> ou à un fait de <ton_fonctionnement>. Un axe dont la matière n'entre
+    par aucune des deux portes reste donc vide indéfiniment, et le modèle a RAISON de
+    s'abstenir : rien ne le signale, ni erreur ni journal. C'est la classe d'écart que ces
+    tests ferment, du côté de l'entrée plutôt que du prompt.
+    """
+
+    @pytest.fixture
+    def nuit_sans_sondes(self, monkeypatch):
+        """`_etat_operationnel` avec ses autres sondes neutralisées : seule la ligne
+        d'affect est sous test, et le bloc ne dépend d'aucun service joignable."""
+        from self import nightly
+
+        monkeypatch.setattr(nightly, "_check_service_health", lambda: {"redis": "ok"})
+        monkeypatch.setattr(nightly, "_check_memory_health", lambda: {})
+        monkeypatch.setattr(nightly, "_fmt_memory_health", lambda _: "  (rien)")
+        monkeypatch.setattr(nightly, "recent_incidents", lambda _: [])
+        return nightly
+
+    def test_letat_affectif_entre_dans_letat_operationnel(self, nuit_sans_sondes, monkeypatch):
+        """`affect_antecedent` porte sur CE QUI DÉCLENCHE les états de Jarvis. `conv_text`
+        n'en montre que l'entrée (`[mood:…]`), jamais l'état obtenu : sans cette ligne,
+        l'axe n'a aucune source et reste le seul à ne jamais pouvoir se remplir."""
+        nightly = nuit_sans_sondes
+        monkeypatch.setattr(
+            nightly.emotional_state, "get_state",
+            lambda: {"humeur": -0.3, "confiance": 0.0, "energie": 0.1},
+        )
+        bloc = nightly._etat_operationnel()
+        assert "état affectif" in bloc
+        assert "humeur -0.30" in bloc
+        assert "energie +0.10" in bloc
+
+    def test_une_dimension_sous_le_seuil_est_quand_meme_rapportee(self, monkeypatch):
+        """`describe` tait ce qui n'atteint pas le seuil d'injection. Une révision d'axe
+        cherche le MOUVEMENT : une poussée presque reprise doit rester lisible, sinon la
+        nuit ne voit « neutre » que parce que l'affichage l'a arrondi."""
+        import emotional_state
+
+        monkeypatch.setattr(
+            emotional_state, "get_state",
+            lambda: {"humeur": 0.04, "confiance": 0.0, "energie": 0.0},
+        )
+        assert emotional_state.describe() == "neutre"
+        assert "humeur +0.04" in emotional_state.describe_dimensions()
+
+    def test_un_affect_indisponible_nefface_pas_le_reste_du_bloc(
+        self, nuit_sans_sondes, monkeypatch
+    ):
+        """Même tolérance que les autres sondes : une ligne disparaît, le bloc reste. Sans
+        ça, Redis injoignable priverait l'introspection de TOUTE sa matière opérationnelle
+        pour une seule sonde en échec."""
+        nightly = nuit_sans_sondes
+
+        def tombe():
+            raise RuntimeError("état injoignable")
+
+        monkeypatch.setattr(nightly.emotional_state, "describe_dimensions", tombe)
+        bloc = nightly._etat_operationnel()
+        assert "état affectif" not in bloc
+        assert "services" in bloc
+
+
 # ── Prompt de revue nocturne ─────────────────────────────────────────────────
 
 class TestPromptNocturne:

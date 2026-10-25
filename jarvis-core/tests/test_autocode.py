@@ -1411,3 +1411,184 @@ class TestParcoursDeLecture:
         regles = get_prompt("AUTOCODE_SELECT_SYSTEM")
         assert "lecture de contrôle" in regles
         assert "plancher" in regles
+
+
+# ── Source : les alertes de la sonde mémoire ─────────────────────────────────
+
+class TestSondeMemoire:
+    """Un traceback ne voit qu'un mécanisme qui LÈVE. Un étage de mémoire qui cesse
+    d'écrire ne lève rien, et c'est le mode de défaillance dominant de ce dépôt : le vivier
+    se remplissait donc de lectures préventives tirées au hasard pendant que la sonde
+    signalait le même défaut chaque matin.
+    """
+
+    @staticmethod
+    def _jour(n=0):
+        from datetime import timezone
+
+        return (datetime.now(timezone.utc).date() - timedelta(days=n)).isoformat()
+
+    @pytest.fixture
+    def sonde(self, monkeypatch):
+        """Remplace le relevé publié par la sonde. Rend un poseur {date: alertes}."""
+        import json as _json
+
+        def poser(par_date):
+            class R:
+                def hgetall(self, _cle):
+                    return {
+                        d: (v if isinstance(v, str) else _json.dumps(v))
+                        for d, v in par_date.items()
+                    }
+
+            monkeypatch.setattr(constats, "get_redis", lambda: R())
+
+        return poser
+
+    _ALERTE = {
+        "libelle": "Axes d'introspection",
+        "valeur": "8/9 remplis",
+        "alerte": "jamais remplis — affect_antecedent",
+    }
+
+    def test_une_alerte_devient_un_constat_cible(self, sonde):
+        """La sonde ne connaît aucun chemin de source : c'est le rapprochement ici qui
+        fait d'une alerte un constat, puisqu'un constat doit nommer un fichier."""
+        sonde({self._jour(): [self._ALERTE]})
+        [c] = constats._depuis_la_sonde()
+        assert c["origine"] == "sonde"
+        assert c["cible"] == ["jarvis-core/src/self/nightly.py"]
+        assert "Axes d'introspection" in c["constat"]
+
+    def test_le_releve_de_la_veille_est_accepte(self, sonde):
+        """La sonde passe le matin, le cycle la nuit : n'accepter que la date du jour
+        viderait cette source toutes les nuits."""
+        sonde({self._jour(1): [self._ALERTE]})
+        assert constats._depuis_la_sonde()
+
+    def test_un_releve_perime_est_ignore(self, sonde):
+        """Une alerte que plus aucun passage ne confirme ne doit pas ressusciter."""
+        sonde({self._jour(30): [self._ALERTE]})
+        assert constats._depuis_la_sonde() == []
+
+    def test_un_releve_detat_ne_produit_pas_de_constat(self, sonde):
+        """Un compte d'incidents ou un risque élevé ne se corrigent dans aucun fichier :
+        en faire un constat enverrait l'agent chercher un bug là où il n'y a qu'une
+        mesure."""
+        sonde({self._jour(): [
+            {"libelle": "Incidents consolidés", "valeur": "30", "alerte": "en hausse"}
+        ]})
+        assert constats._depuis_la_sonde() == []
+
+    def test_un_libelle_inconnu_est_signale(self, sonde, caplog):
+        """Le rapprochement se fait sur le libellé de la sonde, qui vit dans un autre
+        fichier. Sans cet avertissement, un libellé renommé taris cette source en
+        silence — le mode d'échec qu'on cherche précisément à supprimer."""
+        sonde({self._jour(): [
+            {"libelle": "Indicateur renommé", "valeur": "1", "alerte": "x"}
+        ]})
+        with caplog.at_level(logging.WARNING):
+            assert constats._depuis_la_sonde() == []
+        assert "sans cible connue" in caplog.text
+
+    def test_un_releve_illisible_nemporte_pas_les_autres(self, sonde, caplog):
+        sonde({self._jour(): [self._ALERTE], self._jour(3): "{pas du json"})
+        with caplog.at_level(logging.WARNING):
+            assert len(constats._depuis_la_sonde()) == 1
+        assert "illisible" in caplog.text
+
+    def test_une_sonde_injoignable_ne_leve_pas(self, monkeypatch):
+        """Le vivier doit se constituer même sans Redis : une source en panne retire son
+        bloc, elle n'annule pas le cycle."""
+        def tombe():
+            raise RuntimeError("Redis indisponible")
+
+        monkeypatch.setattr(constats, "get_redis", tombe)
+        assert constats._depuis_la_sonde() == []
+
+    def test_le_poids_compte_les_jours_dalerte(self, sonde):
+        """Même barème que les occurrences d'un traceback : un mécanisme muet depuis trois
+        semaines passe avant celui qui l'est depuis la veille."""
+        sonde({self._jour(n): [self._ALERTE] for n in range(3)})
+        assert constats._depuis_la_sonde()[0]["poids"] == 3
+
+    def test_lidentifiant_ne_depend_pas_du_jour(self, sonde):
+        """L'indicateur est l'unité de défaut : un refus humain doit faire taire
+        l'indicateur, non attendre que la date change pour revenir le lendemain."""
+        sonde({self._jour(): [self._ALERTE]})
+        hier = constats._depuis_la_sonde()[0]["id"]
+        sonde({self._jour(1): [self._ALERTE]})
+        assert constats._depuis_la_sonde()[0]["id"] == hier
+
+    def test_une_cible_disparue_est_ecartee(self, sonde, monkeypatch, caplog):
+        """Les fichiers de la table peuvent avoir été scindés ou renommés : envoyer
+        l'agent lire un chemin mort consommerait le créneau sans rien pouvoir rendre."""
+        monkeypatch.setitem(
+            constats._CIBLES_SONDE, "Axes d'introspection",
+            ("jarvis-core/src/self/module_disparu.py",),
+        )
+        sonde({self._jour(): [self._ALERTE]})
+        with caplog.at_level(logging.WARNING):
+            assert constats._depuis_la_sonde() == []
+        assert "introuvables" in caplog.text
+
+    def test_une_alerte_passe_avant_une_lecture_preventive(self, sonde, monkeypatch):
+        """Un symptôme observé ne doit jamais céder le créneau à un parcours au hasard."""
+        sonde({self._jour(): [self._ALERTE]})
+        monkeypatch.setattr(constats, "_depuis_tracebacks", lambda _t: [])
+        monkeypatch.setattr(constats, "_lire_queue", str)
+        monkeypatch.setattr(constats, "_a_la_main", list)
+        monkeypatch.setattr(constats.store, "cibles_appliquees", set)
+        monkeypatch.setattr(constats.store, "en_cooldown", lambda _i: False)
+        monkeypatch.setattr(constats, "AUTOCODE_PARCOURS", True)
+        monkeypatch.setattr(constats.store, "parcours_vu", dict)
+
+        eligibles, _ = constats.recueillir()
+        assert eligibles[0]["origine"] == "sonde"
+        assert eligibles[-1]["origine"] == "parcours"
+
+    def test_un_traceback_repete_passe_avant_une_alerte(self, sonde, monkeypatch):
+        """À poids égal l'exception garde la main : elle dit OÙ le code a cédé, l'alerte
+        dit seulement qu'un résultat manque."""
+        sonde({self._jour(): [self._ALERTE]})
+        monkeypatch.setattr(constats, "_lire_queue", str)
+        monkeypatch.setattr(constats, "_depuis_tracebacks", lambda _t: [{
+            "id": "SIG-reel", "constat": "exception observée", "cible": [],
+            "notes": "", "origine": "journal", "poids": 9,
+        }])
+        monkeypatch.setattr(constats, "_a_la_main", list)
+        monkeypatch.setattr(constats, "AUTOCODE_PARCOURS", False)
+        monkeypatch.setattr(constats.store, "cibles_appliquees", set)
+        monkeypatch.setattr(constats.store, "en_cooldown", lambda _i: False)
+
+        eligibles, _ = constats.recueillir()
+        assert eligibles[0]["id"] == "SIG-reel"
+        assert eligibles[1]["origine"] == "sonde"
+
+    def test_chaque_libelle_de_la_sonde_est_connu_de_la_table(self):
+        """Test de COHÉRENCE entre deux fichiers que rien ne relie : la sonde vit dans
+        scripts/, la table ici. Un libellé ajouté là-bas sans cible ici n'alerterait que
+        dans un journal, et seulement la nuit où il se déclenche."""
+        import importlib.util
+        import pathlib
+
+        from config import JARVIS_ROOT
+
+        chemin = pathlib.Path(JARVIS_ROOT) / "scripts" / "memory_report.py"
+        spec = importlib.util.spec_from_file_location("sonde_memoire", chemin)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        # Les indicateurs rangent leur valeur du jour en passant. Un test ne doit pas
+        # écrire dans l'historique de l'instance : seuls leurs LIBELLÉS sont sous test.
+        module._enregistrer = lambda _nom, _valeur: None
+
+        inconnus = []
+        for fn in module.INDICATEURS:
+            try:
+                lignes = fn()
+            except Exception:
+                continue  # sonde indisponible ici : ce n'est pas l'objet du test
+            for libelle, _valeur, _alerte in lignes:
+                if not any(frag in libelle for frag in constats._CIBLES_SONDE):
+                    inconnus.append(libelle)
+        assert not inconnus, f"libellés de sonde sans cible : {inconnus}"

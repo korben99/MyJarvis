@@ -79,6 +79,28 @@ def _enregistrer(nom: str, valeur) -> None:
         r.hdel(cle, *vieux)
 
 
+def _publier_alertes(lignes: list) -> None:
+    """Range les alertes du jour là où un autre processus peut les relire.
+
+    La sonde est le seul mécanisme qui regarde les étages de mémoire DU DEHORS, et son
+    rapport ne va qu'à un humain. Le cycle autocode, lui, ne voit que ses tracebacks : sans
+    ces alertes il tire sa cible au hasard des modules jamais relus, pendant qu'un
+    mécanisme muet est signalé ici chaque matin.
+
+    Les publier ne donne aucune permission de plus : elles entrent dans son vivier comme un
+    traceback, et un correctif y reste soumis au même critère rouge-vert.
+
+    Même hash date→valeur que les indicateurs, donc même fenêtre d'historique et même
+    purge. C'est ce qui permet au lecteur de pondérer une alerte par sa PERSISTANCE, et
+    de retrouver celle de la veille — la sonde passe le matin, le cycle la nuit.
+    """
+    _enregistrer("alertes", [
+        {"libelle": lib, "valeur": str(val), "alerte": str(a)}
+        for lib, val, a in lignes
+        if a
+    ])
+
+
 def _historique(nom: str, jours: int) -> list:
     """Les `jours` dernières valeurs connues, de la plus ancienne à la plus récente."""
     brut = get_redis().hgetall(_HIST_KEY.format(nom)) or {}
@@ -440,8 +462,10 @@ def main() -> int:
     ap.add_argument("--all", action="store_true", help="afficher tous les indicateurs")
     args = ap.parse_args()
 
-    texte, n = rendre(collecter(), args.all)
+    lignes = collecter()
+    texte, n = rendre(lignes, args.all)
     print(texte)
+    _publier_alertes(lignes)
 
     # Rien à envoyer quand rien ne cloche : une sonde qui écrit tous les jours finit
     # filtrée par son destinataire, et n'alerte plus quand il le faudrait.

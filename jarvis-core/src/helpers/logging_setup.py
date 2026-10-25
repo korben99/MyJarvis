@@ -64,6 +64,15 @@ def setup_logging(log_file: str = "/opt/jarvis/logs/jarvis-api.log") -> None:
         "hyper",
         "ddgs",
         "ddgs.ddgs",
+        # Même pile Rust que `reqwest`/`hyper` ci-dessus, mais journalisée un cran plus
+        # bas : `hickory_*` émet plusieurs lignes par résolution DNS et `hpack` une par
+        # en-tête HTTP/2. À DEBUG, une poignée de recherches web suffit à reléguer les
+        # lignes de Jarvis en minorité dans jarvis-debug.log — le fichier reste écrit,
+        # mais il n'est plus lisible, donc plus consulté quand il faudrait.
+        "hickory_net",
+        "hickory_resolver",
+        "cookie_store",
+        "hpack",
     ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 

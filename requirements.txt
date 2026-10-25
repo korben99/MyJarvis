@@ -11,7 +11,7 @@ python-dotenv==1.2.2
 
 # ── Storage / infra clients ────────────────────────────────────────────────
 redis==7.4.0
-qdrant-client==1.17.1
+qdrant-client==1.19.1
 
 # ── Embeddings (RAG + memory search) ───────────────────────────────────────
 sentence-transformers==5.4.1

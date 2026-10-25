@@ -40,6 +40,7 @@ from helpers import (
     get_redis,
     get_user_tz,
 )
+import emotional_state
 from llm.local import _NIGHTLY_PROMPTS_LOG_PATH, journal_de_cycle
 from memory import (
     archive_autobiographical_event,
@@ -183,11 +184,22 @@ def _render_introspection(data: dict) -> str:
 
 
 def _etat_operationnel() -> str:
-    """L'état de Jarvis lui-même sur la journée : services, incidents, santé mémoire.
+    """L'état de Jarvis lui-même sur la journée : services, santé mémoire, état affectif,
+    incidents.
 
     Sans ce bloc, l'introspection ne se nourrit que des conversations et l'axe
     `meta_personne` ne peut rien apprendre de son propre fonctionnement — un angle mort
     relevé, quand `self_notes` (la seule à voir ces signaux) a été retirée.
+
+    L'état affectif y entre pour la même raison, et elle est contraignante : le prompt
+    interdit d'écrire une ligne d'axe qu'on ne puisse rattacher à un échange de
+    <conversations> ou à un fait d'ici. Or `affect_antecedent` porte sur CE QUI DÉCLENCHE
+    ces états, et `conv_text` n'en montre que l'entrée (`[mood:…]`), jamais l'état obtenu.
+    C'est le seul axe dont la matière n'arrive par aucune autre porte : sans cette ligne,
+    un modèle qui respecte la consigne s'abstient, et s'abstenir est la bonne réponse.
+
+    Les valeurs SIGNÉES et non `describe()` seul : ce qui intéresse une révision d'axe est
+    le mouvement, pas la seule étiquette franchissant le seuil d'injection.
 
     Déterministe et tolérant : si une sonde est indisponible, on n'invente rien, la ligne
     disparaît.
@@ -200,6 +212,13 @@ def _etat_operationnel() -> str:
         lignes.append("santé mémoire :\n" + _fmt_memory_health(_check_memory_health()))
     except Exception as exc:
         logger.debug("état opérationnel : santé indisponible (%s)", type(exc).__name__)
+    try:
+        lignes.append(
+            f"état affectif : {emotional_state.describe_dimensions()} "
+            f"— ressenti : {emotional_state.describe()}"
+        )
+    except Exception as exc:
+        logger.debug("état opérationnel : affect indisponible (%s)", type(exc).__name__)
     try:
         recents = recent_incidents(1)
         if recents:

@@ -1,27 +1,29 @@
 """Phase 1 — les faits que Jarvis a sur lui-même. Aucun appel LLM.
 
-Un constat, c'est une chose observée qui nomme un fichier. Rien de plus. Deux sources
+Un constat, c'est une chose observée qui nomme un fichier. Rien de plus. Trois sources
 aujourd'hui, et elles rendent la MÊME forme :
 
     tracebacks     ce que Jarvis a constaté seul, dans son propre journal
+    sonde mémoire  ce qu'un étage de mémoire cesse de produire, sans lever d'exception
     ajouts à la main   ce que tu as vu et qu'il n'a pas su observer
 
-La seconde n'est pas une voie à part avec ses règles : c'est une façon d'ajouter un fait.
+Aucune n'est une voie à part avec ses règles : chacune est une façon d'ajouter un fait.
 Le parcours qui suit est identique, et le critère de réussite ne se négocie pas par
 entrée — il est fixe pour toutes les tâches (un test qui passe du rouge au vert). C'est ce
 qui remplace l'ancien champ `preuve` : l'ancrage anti-dérive n'a pas disparu, il est
 remonté d'un cran, là où aucun modèle ne peut le renégocier.
 
 Élargir le champ de vision de Jarvis, c'est ajouter une source ICI, et rien d'autre
-ailleurs. Un invariant rompu, un test rouge dans sa propre suite, une anomalie de mémoire
-sont des faits au même titre qu'un traceback : ils entreront par cette porte et suivront
-le même parcours.
+ailleurs. Un invariant rompu ou un test rouge dans sa propre suite sont des faits au même
+titre qu'un traceback : ils entreront par cette porte et suivront le même parcours — c'est
+par là que la sonde mémoire est entrée.
 """
 
 import hashlib
+import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from config import (
     AUTOCODE_MAX_TARGET_LINES,
@@ -31,7 +33,7 @@ from config import (
     AUTOCODE_PROTECTED,
     JARVIS_ROOT,
 )
-from helpers import get_logger
+from helpers import get_logger, get_redis
 
 from . import store
 
@@ -253,6 +255,140 @@ def _depuis_tracebacks(texte: str) -> list[dict]:
     return constats
 
 
+# ── Source : les alertes de la sonde mémoire ──────────────────────────────
+
+# Hash date→alertes publié par scripts/memory_report.py (voir `_publier_alertes`).
+_CLE_ALERTES = "jarvis:metrics:alertes"
+
+# La sonde passe le matin, le cycle la nuit : le relevé le plus récent porte donc la date
+# de la VEILLE, et n'accepter que celui du jour viderait cette source toutes les nuits.
+# Deux jours laissent passer un matin manqué sans ressusciter une alerte que plus rien ne
+# confirme.
+_ALERTE_AGE_MAX_JOURS = 2
+
+# Libellé de la sonde → fichier(s) où le défaut se corrigerait, reconnu par FRAGMENT de
+# libellé. Le rapprochement vit ici et non dans la sonde : celle-ci surveille l'instance
+# depuis l'extérieur, et lui faire porter des chemins du code la lierait à un arbre de
+# sources qu'elle n'a pas à connaître. Un fragment plutôt que le libellé entier pour qu'une
+# précision ajoutée à l'affichage ne vide pas cette source.
+#
+# `None` dit « relevé d'état, pas défaut de code ». Un risque de disparition élevé ou un
+# compte d'incidents ne se corrigent dans aucun fichier : en faire un constat enverrait
+# l'agent chercher un bug là où il n'y a qu'une mesure. Un libellé ABSENT de la table est
+# en revanche journalisé — c'est le seul signe qu'un libellé a bougé, sans quoi cette
+# source se tarirait en silence.
+_CIBLES_SONDE: dict[str, tuple[str, ...] | None] = {
+    "Axes d'introspection": ("jarvis-core/src/self/nightly.py",),
+    "revue nocturne": ("jarvis-core/src/self/nightly.py",),
+    "growth_log": ("jarvis-core/src/self/nightly.py",),
+    "autobiographiques": ("jarvis-core/src/self/nightly.py",),
+    "épisodiques": ("jarvis-core/src/analyzer.py",),
+    "Champs de profil": ("jarvis-core/src/memory/profile.py",),
+    "Dimensions émotionnelles": ("jarvis-core/src/emotional_state.py",),
+    "Mobilité émotionnelle": ("jarvis-core/src/emotional_state.py",),
+    "Réflexions productives": ("jarvis-core/src/self/engine.py",),
+    "Listes de self.json": ("jarvis-core/src/self/actions.py",),
+    "Risque de disparition": None,
+    "Couplage vitals": None,
+    "Incidents consolidés": None,
+}
+
+
+def _releves_sonde() -> dict[str, list[dict]]:
+    """{date: alertes} pour tout l'historique publié par la sonde. Vide si illisible."""
+    try:
+        brut = get_redis().hgetall(_CLE_ALERTES) or {}
+    except Exception as exc:
+        logger.debug("autocode: sonde mémoire injoignable (%s)", type(exc).__name__)
+        return {}
+    out = {}
+    for cle, valeur in brut.items():
+        jour = cle.decode() if isinstance(cle, bytes) else cle
+        texte = valeur.decode() if isinstance(valeur, bytes) else valeur
+        try:
+            releve = json.loads(texte)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("autocode: relevé de sonde du %s illisible", jour)
+            continue
+        if isinstance(releve, list):
+            out[jour] = [a for a in releve if isinstance(a, dict) and a.get("libelle")]
+    return out
+
+
+def _cible_de_la_sonde(libelle: str) -> tuple[str, ...] | None:
+    """Les fichiers visés par ce libellé, ou None s'il n'y a rien à corriger dans un
+    fichier. Journalise un libellé inconnu : la table a dérivé de la sonde."""
+    for fragment, cibles in _CIBLES_SONDE.items():
+        if fragment in libelle:
+            return cibles
+    logger.warning(
+        "autocode: libellé de sonde sans cible connue (%s) — table à revoir", libelle[:60]
+    )
+    return None
+
+
+def _depuis_la_sonde() -> list[dict]:
+    """Un constat par alerte du dernier passage de la sonde, la plus persistante d'abord.
+
+    Une alerte de la sonde est un symptôme OBSERVÉ au même titre qu'un traceback : elle dit
+    qu'un mécanisme a cessé de produire ce qu'il devrait SANS lever d'exception — le mode de
+    défaillance que les tracebacks, par construction, ne peuvent pas voir. C'est aussi le
+    mode dominant de ce dépôt, celui que la sonde existe pour attraper.
+
+    Le poids est le nombre de jours où l'indicateur a alerté dans la fenêtre d'historique.
+    Même barème que les occurrences d'un traceback, et même raison : à coût de tâche égal,
+    un mécanisme muet depuis trois semaines passe avant celui qui l'est depuis la veille.
+
+    L'identifiant ne retient que le LIBELLÉ, et non le texte de l'alerte : l'indicateur est
+    l'unité de défaut, et un refus humain doit faire taire cet indicateur — non attendre
+    qu'un détail de formulation change pour revenir dès le lendemain.
+    """
+    releves = _releves_sonde()
+    if not releves:
+        return []
+
+    jour = max(releves)
+    try:
+        age = (datetime.now(timezone.utc).date() - date.fromisoformat(jour)).days
+    except ValueError:
+        logger.warning("autocode: date de relevé de sonde illisible (%s)", jour[:20])
+        return []
+    if age > _ALERTE_AGE_MAX_JOURS:
+        logger.debug("autocode: sonde mémoire muette depuis %d jours", age)
+        return []
+
+    constats = []
+    for alerte in releves[jour]:
+        libelle = alerte["libelle"]
+        cibles = _cible_de_la_sonde(libelle)
+        if not cibles:
+            continue
+        # Les fichiers de la table peuvent avoir été scindés ou renommés depuis : envoyer
+        # l'agent lire un chemin mort consommerait le créneau sans rien pouvoir rendre.
+        vivantes = [c for c in cibles if os.path.isfile(os.path.join(JARVIS_ROOT, c))]
+        if not vivantes:
+            logger.warning("autocode: cibles de sonde introuvables pour %s", libelle[:60])
+            continue
+        jours = sum(
+            1 for r in releves.values() if any(libelle == a["libelle"] for a in r)
+        )
+        constats.append({
+            "id": _identifiant("SONDE", libelle),
+            "constat": f"la sonde mémoire alerte sur « {libelle} » : {alerte['alerte']}",
+            "cible": vivantes,
+            "notes": (
+                f"Relevé du {jour}, valeur mesurée « {alerte['valeur']} ». "
+                f"L'indicateur alerte depuis {jours} jour(s) d'historique. "
+                "Aucune exception n'est levée : cherche le cas où le mécanisme n'écrit "
+                "rien, et non une erreur. Si la mesure est juste et le code correct, "
+                "« rien trouvé » est l'issue attendue."
+            ),
+            "origine": "sonde",
+            "poids": jours,
+        })
+    return constats
+
+
 # ── Source : les constats ajoutés à la main ───────────────────────────────
 
 
@@ -449,7 +585,16 @@ def recueillir() -> tuple[list[dict], list[tuple[str, str]]]:
     # Le parcours EN DERNIER, et le tri est stable : à poids égal il reste derrière les
     # ajouts à la main, qui eux-mêmes passent après les symptômes observés. Une lecture
     # préventive ne doit jamais prendre le créneau d'un défaut qui s'est manifesté.
-    bruts = _depuis_tracebacks(_lire_queue()) + _a_la_main() + _depuis_le_parcours()
+    #
+    # La sonde est dans le même rang que les tracebacks — les deux rapportent un symptôme
+    # observé — mais derrière eux à poids égal : une exception dit où le code a cédé, une
+    # alerte dit seulement qu'un résultat manque.
+    bruts = (
+        _depuis_tracebacks(_lire_queue())
+        + _depuis_la_sonde()
+        + _a_la_main()
+        + _depuis_le_parcours()
+    )
     traites = store.cibles_appliquees()
 
     eligibles, exclus = [], []
