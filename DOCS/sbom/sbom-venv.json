@@ -3305,7 +3305,7 @@
       "version": "2026.1.post1"
     },
     {
-      "bom-ref": "qdrant-client==1.17.1",
+      "bom-ref": "qdrant-client==1.19.1",
       "description": "Client library for the Qdrant vector search engine",
       "externalReferences": [
         {
@@ -3334,9 +3334,9 @@
         }
       ],
       "name": "qdrant-client",
-      "purl": "pkg:pypi/qdrant-client@1.17.1",
+      "purl": "pkg:pypi/qdrant-client@1.19.1",
       "type": "library",
-      "version": "1.17.1"
+      "version": "1.19.1"
     },
     {
       "bom-ref": "redis==7.4.0",
@@ -5456,7 +5456,7 @@
         "pydantic==2.13.3",
         "urllib3==2.7.0"
       ],
-      "ref": "qdrant-client==1.17.1"
+      "ref": "qdrant-client==1.19.1"
     },
     {
       "dependsOn": [

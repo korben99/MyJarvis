@@ -196,9 +196,10 @@ def store_autobiographical_event(
     """
     Store a major life / project milestone for the user.
 
-    Skips storage if a semantically identical autobiographical memory already exists
-    (cosine similarity ≥ AUTOBIO_DEDUP_THRESHOLD) to prevent the collection from
-    accumulating redundant variants of the same fact over time.
+    Skips storage if a semantically identical CURRENT autobiographical memory already
+    exists (cosine similarity ≥ AUTOBIO_DEDUP_THRESHOLD) to prevent the collection from
+    accumulating redundant variants of the same fact over time. A match on an archived
+    memory is a revival instead: the archived point goes, the fact is written anew.
 
     Returns True when the call left a mark — a new point, or an existing one reinforced
     with a higher importance. Returns False when the fact was dropped as a duplicate, or
@@ -225,7 +226,13 @@ def store_autobiographical_event(
                 "must": [
                     {"key": "user_code", "match": {"value": user_code}},
                     {"key": "memory_type", "match": {"value": "autobiographical"}},
-                ]
+                ],
+                # Les faits archivés sont exclus ici et traités plus bas. Sans cette
+                # exclusion, un fait archivé capte la dédup et fait écarter sa propre
+                # réécriture : il ne peut plus jamais redevenir courant, alors que
+                # `get_autobiographical_facts` ne rend que les courants. Même exclusion
+                # que dans `_autobio_op("archive")`, pour la même raison.
+                "must_not": [{"key": "status", "match": {"value": "past"}}],
             },
         ).points
         # The collection uses Distance.DOT — raw dot product score can exceed 1.0 when
@@ -254,6 +261,42 @@ def store_autobiographical_event(
                 dedup_score,
             )
             return False
+
+        # Un fait re-formulé alors qu'il était archivé est un fait redevenu vrai. Le point
+        # archivé est retiré et l'écriture normale reprend la main : elle repose le
+        # `status="current"`, l'horodatage du jour et l'identifiant dérivé de la nouvelle
+        # formulation. Réveiller le point sur place, par `set_payload`, lui laisserait son
+        # ancien libellé et un identifiant qui ne dérive plus de son texte — un même fait
+        # re-soumis plus tard créerait alors un second point.
+        archive = qdrant.query_points(
+            collection_name=QDRANT_MEMORY_COLLECTION,
+            query=vector,
+            limit=1,
+            query_filter={
+                "must": [
+                    {"key": "user_code", "match": {"value": user_code}},
+                    {"key": "memory_type", "match": {"value": "autobiographical"}},
+                    {"key": "status", "match": {"value": "past"}},
+                ]
+            },
+        ).points
+        archive_score = min(archive[0].score, 1.0) if archive else 0.0
+        if archive and archive_score >= AUTOBIO_DEDUP_THRESHOLD:
+            # L'importance ne redescend pas, comme dans la branche de renforcement
+            # ci-dessus : un fait jugé marquant avant son archivage le reste.
+            importance = max(
+                importance, float(archive[0].payload.get("importance", 0))
+            )
+            qdrant.delete(
+                collection_name=QDRANT_MEMORY_COLLECTION,
+                points_selector=PointIdsList(points=[archive[0].id]),
+            )
+            logger.info(
+                "Autobio resurrected: '%s' (archivé le %s, similaire=%.2f)",
+                summary[:60],
+                archive[0].payload.get("archived_date", "date inconnue"),
+                archive_score,
+            )
 
         point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{user_code}:autobio:{summary}"))
 
