@@ -351,6 +351,13 @@ RAW_EFFORT_MODELS: dict[str, tuple[bool, int]] = {
 }
 
 
+# Seuil au-delà duquel un appel sans outils n'est plus tenu pour un appel de service.
+# Un titre ou un résumé de tour tient en quelques centaines de caractères ; un tour
+# d'agent, lui, embarque ses schémas d'outils et son historique et se compte en dizaines
+# de milliers. L'écart est tel que la valeur exacte n'a pas à être fine.
+RAW_AUX_MAX_CHARS = 4000
+
+
 class _RawChatRequest(_OAIChatRequest):
     no_think: Optional[bool] = None          # override explicite du client
     thinking_budget: Optional[int] = None    # niveau d'effort demandé par le client
@@ -382,7 +389,41 @@ def _garde_raw(authorization: str | None) -> None:
     )
 
 
+# L'alias `/v1/raw/v1/…` existe parce qu'un client peut retirer le segment de version
+# final de la base URL qu'on lui donne, puis rajouter `/v1/models` et
+# `/v1/chat/completions` de lui-même. `/v1/raw` devient alors `/v1/raw/v1/…`, et aucune
+# base URL saisissable ne tombe sur la route.
+@router.get("/v1/raw/models")
+@router.get("/v1/raw/v1/models")
+async def raw_list_models(authorization: str = Header(default=None)):
+    """Expose les paliers d'effort aux clients qui découvrent les modèles de l'endpoint.
+
+    Aucune métadonnée de paramètres n'accompagne les entrées. Un `supported_parameters`
+    explicite fait autorité chez le client : omettre `reasoning_effort` d'une liste par
+    ailleurs complète revient à déclarer un modèle incapable de raisonner, ce qui est faux
+    — la route raisonne, elle ne lit simplement pas ce paramètre, l'effort se demandant
+    par l'id de modèle. Sans liste du tout, le client se rabat sur « niveaux inconnus » et
+    n'envoie aucun paramètre de raisonnement, ce qui décrit exactement la situation.
+    """
+    _garde_raw(authorization)
+    if not LLM_LOCAL:
+        raise HTTPException(503, "LLM_LOCAL non activé — endpoint raw indisponible")
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": nom,
+                "object": "model",
+                "created": 0,
+                "owned_by": "jarvis",
+            }
+            for nom in RAW_EFFORT_MODELS
+        ],
+    }
+
+
 @router.post("/v1/raw/chat/completions")
+@router.post("/v1/raw/v1/chat/completions")
 async def raw_chat(req: _RawChatRequest, authorization: str = Header(default=None)):
     """
     Bypass endpoint — appel direct à stream_local() sur PRIMARY_MODEL.
@@ -431,8 +472,19 @@ async def raw_chat(req: _RawChatRequest, authorization: str = Header(default=Non
     # "jarvis/jarvis-deep" → on ne garde que le nom du modèle.
     effort = RAW_EFFORT_MODELS.get((req.model or "").split("/")[-1].strip())
 
+    # Appel de service : un client d'agent accompagne chaque vrai tour de ses schémas
+    # d'outils, jamais ses générations annexes (titre de conversation, résumé d'un tour).
+    # Sans outils ET court, l'appel attend une ligne, pour laquelle la réflexion coûte
+    # plus que la réponse. Le palier d'effort ne peut pas trancher : il vient du champ
+    # `model`, que le client renseigne à l'identique sur toutes ses requêtes.
+    _appel_de_service = not req.tools and sum(
+        len(m.get("content") or "") for m in messages
+    ) <= RAW_AUX_MAX_CHARS
+
     if req.no_think is not None:
         no_think = req.no_think
+    elif _appel_de_service:
+        no_think = True
     elif effort is not None:
         no_think = effort[0]
     else:

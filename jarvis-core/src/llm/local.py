@@ -448,6 +448,21 @@ async def _acquire_infer_lock_chat(t0: float) -> float:
 _lru_caches: dict[str, LRUPromptCache] = {}
 _lru_lock = threading.Lock()
 
+# Interrupteur de dev — snapshot du prompt seul dans le LRU.
+#
+# Sans lui, une conversation en mode réflexion ne réutilise jamais que l'entrée système :
+# la clé posée après génération porte la sortie BRUTE (`<think>` compris), qui n'est le
+# préfixe d'aucun prompt suivant puisque celui-ci ne reçoit que la réponse nettoyée.
+# `fetch_nearest_cache` ne peut servir cette entrée qu'en la rognant, ce que la famille
+# Qwen3 hybride interdit (`ArraysCache` non trimmable), et retombe donc sur le système.
+#
+# Le snapshot pose une seconde clé, sur `prompt_token_ids` seul. Le prompt d'un tour étant
+# le préfixe exact de celui du tour suivant, cette entrée est servie sans aucun rognage.
+#
+# Deux coûts, raison de l'interrupteur : un `deepcopy` du cache au premier jeton, donc sur
+# le TTFT, et une entrée de plus dans un LRU qui ne compte que 8 slots.
+_LRU_PREFIX_SNAPSHOT = True
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -877,6 +892,48 @@ def _lru_insert(
         )
     except Exception as exc:
         logger.warning("LRU insert failed (%s) — non-fatal", exc)
+
+
+def _lru_insert_prompt_prefix(
+    model_path: str, prompt_token_ids: list[int], cache, model_short: str
+) -> None:
+    """Pose une entrée LRU indexée sur le prompt seul, sans les jetons générés.
+
+    Appelée au premier pas de décodage, quand le cache porte `prompt + 1 jeton` : le reset
+    d'`offset` déclare la longueur réellement couverte, tandis que l'état récurrent des
+    couches `ArraysCache` conserve les jetons en trop, faute d'offset à corriger. C'est la
+    même approximation que celle de l'entrée système (`_make_system_kv`).
+
+    Le DERNIER jeton du prompt est exclu de la clé. Le prompt de génération se termine sur
+    `<think>` suivi d'un unique saut de ligne, là où le tour suivant rend ce même bloc
+    refermé, dont les deux sauts de ligne fusionnent en un seul jeton. Le prompt d'un tour
+    est donc préfixe du suivant au niveau du texte, mais faux d'un jeton au niveau des
+    jetons — et le trie, qui indexe des jetons, écarterait l'entrée.
+
+    Le `deepcopy` est nécessaire parce que la génération continue de muter `cache` après
+    cet appel. `cache_type` doit valoir l'un des types connus du LRU, sinon son compteur
+    d'octets par type lève ; `user` est le plus proche, l'entrée s'arrêtant au tour
+    utilisateur. Non fatal en cas d'échec.
+    """
+    if len(prompt_token_ids) < 2:
+        return
+    cle = prompt_token_ids[:-1]
+    try:
+        snapshot = copy.deepcopy(cache)
+        for layer_cache in snapshot:
+            if hasattr(layer_cache, "offset"):
+                layer_cache.offset = len(cle)
+        _eval_kv_cache(snapshot)
+        lru = _get_lru(model_path)
+        lru.insert_cache(model_path, cle, snapshot, cache_type="user")
+        logger.debug(
+            "LRU insert (préfixe): key=%d tok model=%s — %d/%d slots | %.2f/%.1f GB (lru)",
+            len(cle), model_short,
+            len(lru), lru.max_size,
+            lru.nbytes / 1024**3, lru.max_bytes / 1024**3,
+        )
+    except Exception as exc:
+        logger.warning("LRU prefix snapshot failed (%s) — non-fatal", exc)
 
 
 # ── Model loading ─────────────────────────────────────────────────────────
@@ -1562,6 +1619,17 @@ async def stream_local(
                 profile, tokenizer, no_think, thinking_budget, temperature, max_tokens
             )
 
+            # Le snapshot ne peut pas s'accrocher à `first` : ce drapeau ne bascule qu'au
+            # premier texte non vide, alors que le cache porte le jeton généré dès le
+            # premier pas, y compris quand le tampon du détokeniseur le rend vide.
+            # Conditionné à `tools` : seul un tour assistant porteur de `tool_calls` est
+            # re-rendu avec son bloc de réflexion vide, donc seul ce trafic produit un
+            # prompt qui soit le préfixe exact du prompt suivant. Ailleurs l'entrée ne
+            # serait jamais servie, et le deepcopy se paierait sur le TTFT pour rien.
+            _prefix_pending = (
+                _LRU_PREFIX_SNAPSHOT and lru_cache is not None and bool(tools)
+            )
+
             for chunk in stream_generate(
                 mlx_model, tokenizer, prompt=remaining, max_tokens=budget,
                 sampler=sampler, logits_processors=stream_procs,
@@ -1569,6 +1637,11 @@ async def stream_local(
             ):
                 if stop_flag.is_set():
                     break
+                if _prefix_pending:
+                    _prefix_pending = False
+                    _lru_insert_prompt_prefix(
+                        model, tok_ids, lru_cache, model.split("/")[-1]
+                    )
                 # Compté AVANT le filtre sur chunk.text : un pas rendu vide par le
                 # tampon du détokeniseur consomme quand même un token du budget.
                 _tok_generes += 1
