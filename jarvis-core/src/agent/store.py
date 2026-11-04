@@ -130,9 +130,13 @@ def get_task(task_id: str) -> dict | None:
 
 
 def list_tasks(
-    limit: int = 20, user_code: str | None = None, origin: str | None = None
+    limit: int | None = 20, user_code: str | None = None, origin: str | None = None
 ) -> list[dict]:
     """Tâches les plus récentes d'abord. Les entrées expirées sont purgées de l'index.
+
+    `limit=None` rend l'index entier. C'est ce qu'il faut à un appelant qui cherche un
+    statut plutôt que les dernières tâches : une borne numérique, même haute, laisse
+    passer ce qui se trouve au-delà sans le signaler.
 
     `user_code` filtre sur le demandeur. À passer systématiquement dès qu'une liste est
     rendue à un utilisateur : Jarvis est multi-utilisateurs et ne montre jamais à l'un ce
@@ -147,7 +151,8 @@ def list_tasks(
     """
     r = get_redis()
     filtre = user_code or origin
-    ids = r.zrevrange(_INDEX_KEY, 0, -1 if filtre else max(limit, 1) - 1)
+    tout = limit is None
+    ids = r.zrevrange(_INDEX_KEY, 0, -1 if (tout or filtre) else max(limit, 1) - 1)
     tasks, stale = [], []
     for task_id in ids:
         task = get_task(task_id)
@@ -159,7 +164,7 @@ def list_tasks(
         if origin and task.get("origin", "human") != origin:
             continue
         tasks.append(task)
-        if len(tasks) >= limit:
+        if not tout and len(tasks) >= limit:
             break
     if stale:
         r.zrem(_INDEX_KEY, *stale)
@@ -185,9 +190,14 @@ def requeue_interrupted() -> int:
 
     Le contexte est dans messages.json, la boucle le rechargera — une tâche coupée en
     plein milieu reprend donc là où elle en était plutôt que de repartir de zéro.
+
+    L'index est lu en entier : rien ne garantit qu'une tâche laissée en cours figure parmi
+    les plus récentes, et aucun autre chemin ne revisite ce statut. Une tâche hors fenêtre
+    resterait donc `running` indéfiniment — ni reprise, ni close, ni visible comme échec.
+    Le volume est borné par AGENT_TASK_TTL, et ce parcours n'a lieu qu'au démarrage.
     """
     count = 0
-    for task in list_tasks(limit=100):
+    for task in list_tasks(limit=None):
         if task.get("status") == STATUS_RUNNING:
             task["status"] = STATUS_INTERRUPTED
             save_task(task)

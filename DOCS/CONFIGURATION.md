@@ -90,6 +90,11 @@ so a slow model is accommodated by those two knobs rather than by a per-tier con
 |----------|---------|-------------|
 | `LLM_LOCAL` | `yes` | Uses mlx_lm directly — models loaded into unified memory at startup, no HTTP server needed |
 | `HF_HOME` | `/opt/jarvis/models` | Root directory for HuggingFace model cache |
+| `QUANT_KV` | off | Quantize the KV cache with mlx_lm's `QuantizedKVCache`. **Honoured only by the Qwen3-family profiles** (`llm/local.py::_model_profile`) — the Qwen2.5 router, Hermes and the fallback profile keep a standard cache whatever this is set to. Fewer bits per cached token also means more sequences fit inside `LRU_KV_GB`. |
+| `QUANT_KV_BITS` | `4` | Bit width when `QUANT_KV` is on: `4` halves memory again, `8` is near-lossless, `6` is the balance used in production. `kv_group_size` (64) and `quantized_kv_start` (256) are fixed in code. |
+| `LRU_KV_SIZE` | `16` | Slots in the per-model prompt-prefix cache. Chat and background jobs need a few; an agent conversation holds one large slot plus one per auxiliary call. |
+| `LRU_KV_GB` | `4.0` | Total byte budget for all LRU caches. Acts as the backstop that evicts a stale entry a conversation can no longer read. |
+| `METAL_WIRED_LIMIT_MB` | — (macOS default) | Unified-memory ceiling (`iogpu.wired_limit_mb`), applied at service start by `scripts/jarvis-entrypoint.sh`. The model weights alone hold ~30 GB, so under the default ceiling a long agent prompt fails its Metal allocation mid-prefill. Leave ~8 GB for the OS and containers. The sysctl is volatile and needs a sudoers NOPASSWD rule; without one the step is skipped and logged. |
 | `THINKING_BUDGET_COMPACT` | `1024` | Hard-cut budget (tok) for quick-judgment calls (prune, action review) |
 | `THINKING_BUDGET_MEDIUM` | `2048` | Hard-cut budget for chat synthesis + trading thresholds |
 | `THINKING_BUDGET_DEEP` | `4000` | Hard-cut budget for reasoning + refine_prompt |
@@ -292,7 +297,7 @@ versioned — keep a copy before removing an entry.
 | `RAW_NO_THINK` | `false` | Disables reasoning. The default is `false`: reasoning is the main quality lever for a coding agent. |
 | `RAW_THINKING_BUDGET` | `3000` | Reasoning cap when the client does not impose one. **Never leave at 0** with thinking on: nothing would bound the reasoning, which shares `RAW_MAX_TOKENS` with the answer — the model can burn its whole budget without ever emitting the tool call. |
 | `RAW_MAX_TOKENS` | `16000` | Reasoning **and** answer share this envelope. |
-| `RAW_DEBUG_PROMPTS` | `true` | Journalisation vers `logs/opencode-prompts.log`. |
+| `RAW_DEBUG_PROMPTS` | `true` | Journalisation vers `logs/raw-prompts.log`. |
 
 ## Agentic loop (`agent/`)
 

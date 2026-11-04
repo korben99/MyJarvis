@@ -17,6 +17,28 @@ if lsof -iTCP:8000 -sTCP:LISTEN -t >/dev/null 2>&1; then
     exit 0
 fi
 
+# Plafond de mémoire GPU unifiée, lu dans .env et jamais en dur : la valeur dépend de la
+# RAM de la machine et de ce qu'il faut y laisser au système et aux conteneurs. Sous le
+# plafond que macOS applique par défaut, un prompt d'agent de plusieurs dizaines de
+# milliers de jetons fait échouer l'allocation Metal en cours de prefill — les poids du
+# modèle et le cache de préfixes occupent déjà l'essentiel du budget.
+# Le réglage est volatile, il retombe à 0 à chaque démarrage de la machine : d'où sa place
+# ici plutôt que dans une procédure d'installation.
+# `sudo -n` n'invite jamais à saisir un mot de passe, launchd n'ayant pas de terminal.
+# Sans règle sudoers, le réglage est donc sauté et journalisé ; le service démarre.
+LIMITE_METAL_MB="$(
+    sed -n 's/^[[:space:]]*METAL_WIRED_LIMIT_MB[[:space:]]*=[[:space:]]*\([0-9]\{1,\}\).*/\1/p' \
+        "$JARVIS_HOME/.env" 2>/dev/null | tail -1
+)"
+if [ -n "$LIMITE_METAL_MB" ] &&
+   [ "$(sysctl -n iogpu.wired_limit_mb 2>/dev/null)" != "$LIMITE_METAL_MB" ]; then
+    if sudo -n sysctl -w "iogpu.wired_limit_mb=$LIMITE_METAL_MB" >/dev/null 2>&1; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') jarvis-service: iogpu.wired_limit_mb=$LIMITE_METAL_MB appliqué" >&2
+    else
+        echo "$(date '+%Y-%m-%d %H:%M:%S') jarvis-service: iogpu.wired_limit_mb laissé au défaut système — sudo sans mot de passe indisponible" >&2
+    fi
+fi
+
 # Attendre qu'OrbStack/Docker soit prêt (max 60s après le boot)
 for i in $(seq 1 30); do
     timeout 5 docker info >/dev/null 2>&1 && break

@@ -26,7 +26,7 @@ Seven logs record the prompt and the **raw** LLM response:
 | `analyzer-prompts.log` | `LLM_DEBUG_PROMPTS` | conversation analysis (hourly) |
 | `nightly-prompts.log` | `LLM_DEBUG_PROMPTS` | nightly review — **everything** it calls |
 | `reflection-prompts.log` | `LLM_DEBUG_PROMPTS` | reflection cycle, self-challenges included |
-| `opencode-prompts.log` | `RAW_DEBUG_PROMPTS` | `/v1/raw` only (coding agents) |
+| `raw-prompts.log` | `RAW_DEBUG_PROMPTS` | `/v1/raw` only — every client of the route, coding agents among them |
 | `agent-prompts.log` | `AGENT_DEBUG_PROMPTS` | agentic loop — tasks **you** hand it |
 | `autocode-prompts.log` | `AGENT_DEBUG_PROMPTS` | one nightly autocoding cycle, **end to end** |
 

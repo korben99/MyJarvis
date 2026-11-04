@@ -9,7 +9,8 @@
 | **Conditional no_think** | −4 s on plain chat | `chat_no_think=True` except for RAG/web/reasoning. `thinking_budget=0` via chat template (KV-safe). |
 | **ThinkingBudgetProcessor** | −2 to −5 s | Hard logit cut on `</think>` at the exact budget (COMPACT/MEDIUM/DEEP) — prevents runaway reasoning. |
 | **Trimmed system prompt** | −0.3 s | `SYSTEM_BASE_FR` reduced by ~400 chars / ~100 tokens. |
-| **KV prefix caching** | −1 to −3 s from turn 2 | Per-session MLX KV cache (LRU ×8). Only new tokens are computed each turn. |
+| **KV prefix caching** | −1 to −3 s from turn 2 | Per-session MLX KV cache (LRU ×16). Only new tokens are computed each turn. |
+| **Agent prefix chaining** (`/v1/raw` + `tools`) | −30 to −90 s per turn | Prefix entry taken during prefill, so a tool-calling conversation re-prefills only its delta instead of the whole history. Holds past 70 k tokens; voided if the client's tool declaration changes. |
 | **Vision resize to 1024 px** | ~3–5× on VLM inference | iPhone photo (12 MP) resized before `vlm_generate` — from 8–10 tiles to 2–4. `max_tokens` 1200 → 700. |
 | **Qwen2.5-1.5B LoRA router** | −0.5 to −1.2 s vs Hermes-3B | Fine-tuned on 492 samples (val loss 0.047). Warmup with `ROUTER_SYSTEM` → LRU hit from the first call. Turn 2+: 95 % cache hit (1044/1093 tok). |
 | **Stable profile in system prompt** | ~0.1 s / turn | `<profil_utilisateur>` (~80 tokens) injected per-user into the system prompt — never reprocessed after warmup. |

@@ -16,11 +16,15 @@ Turn 1 → toujours LRU miss : système KV construit
 Turn 2 → hit partiel : préfixe sys+turn1 réutilisé
 Turn 3+  → hit croissant : contexte accumulé réutilisé
 
+Portée : l'entrée posée APRÈS génération, sur `prompt + sortie`, via `_generate_sync`. La
+réutilisation multi-tours du flux agent repose sur un autre mécanisme — l'entrée préfixe
+posée pendant le prefill — que ce banc ne traverse pas : voir test_lru_prefix_snapshot.py.
+
 Usage :
   cd /opt/jarvis && source venv/bin/activate
-  python scripts/test_lru_cache.py
-  python scripts/test_lru_cache.py --no-think    # sans thinking → meilleur prefix sharing
-  python scripts/test_lru_cache.py --model router
+  python jarvis-core/tests/test_lru_cache.py
+  python jarvis-core/tests/test_lru_cache.py --no-think    # sans thinking → meilleur prefix sharing
+  python jarvis-core/tests/test_lru_cache.py --model router
 
 Jarvis doit être arrêté avant : jarvis-stop
 """
@@ -28,7 +32,6 @@ Jarvis doit être arrêté avant : jarvis-stop
 import argparse
 import os
 import subprocess
-import sys
 import time
 
 # Le chemin d'import est posé par conftest.py. L'insertion qui vivait ici pointait sur
@@ -75,10 +78,6 @@ from llm.local import (  # noqa: E402
     _generate_sync,
     _get_lru,
     _load_model,
-    _lru_get_cache,
-    _lru_insert,
-    _model_profile,
-    _prompt_token_ids,
 )
 from config import PRIMARY_MODEL, REASONING_MODEL, ROUTER_MODEL, THINKING_BUDGET_COMPACT  # noqa: E402
 
@@ -109,8 +108,10 @@ _orig_get = lru_mod._lru_get_cache
 _orig_insert = lru_mod._lru_insert
 
 
-def _patched_get(model_path, model, tokenizer, sys_content, prompt_token_ids):
-    cache, remaining = _orig_get(model_path, model, tokenizer, sys_content, prompt_token_ids)
+def _patched_get(model_path, model, tokenizer, sys_content, prompt_token_ids, tools=None):
+    cache, remaining = _orig_get(
+        model_path, model, tokenizer, sys_content, prompt_token_ids, tools
+    )
     _stats["prompt_len"] = len(prompt_token_ids)
     _stats["remaining_len"] = len(remaining)
     _stats["hit"] = cache is not None

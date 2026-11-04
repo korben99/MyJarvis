@@ -1705,3 +1705,118 @@ class TestProfondeurDeRecherche:
         systeme = get_prompt("AGENT_SYSTEM")
         assert "au moins une source" not in systeme.lower()
         assert "pour chaque point" in systeme.lower()
+
+
+class TestRequeueDesTachesInterrompues:
+    """`requeue_interrupted` doit voir TOUT l'index, pas une fenêtre de tête.
+
+    Une tâche laissée en `running` par un arrêt du service n'est pas forcément parmi les
+    plus récentes, et aucun autre chemin ne revisite ce statut : hors fenêtre, elle reste
+    `running` pour toujours — ni reprise, ni close, ni visible comme échec.
+    """
+
+    class _FauxRedis:
+        """Juste assez de Redis pour exercer l'indexation réelle de `store.py`.
+
+        Les sémantiques reproduites sont celles dont `list_tasks` dépend : `zrevrange`
+        rend une tranche INCLUSIVE dont `-1` signifie « jusqu'au bout », et un `get` sur
+        une clé absente rend None. Un mock qui rendrait une liste constante ne fenêtrerait
+        jamais, et le test passerait sans toucher au défaut.
+        """
+
+        def __init__(self):
+            self.index: list[str] = []          # du plus récent au plus ancien
+            self.valeurs: dict[str, str] = {}
+            self.file: list[str] = []
+            self.portees: list[int] = []        # bornes demandées à zrevrange
+
+        def zrevrange(self, key, start, stop):
+            self.portees.append(stop)
+            return self.index[start:] if stop == -1 else self.index[start : stop + 1]
+
+        def zrem(self, key, *ids):
+            for tid in ids:
+                if tid in self.index:
+                    self.index.remove(tid)
+
+        def setex(self, key, ttl, value):
+            self.valeurs[key] = value
+
+        def get(self, key):
+            return self.valeurs.get(key)
+
+        def rpush(self, key, value):
+            self.file.append(value)
+
+    def _index(self, monkeypatch, total, running_aux_rangs=()):
+        """Pose un index de `total` tâches, celles aux rangs donnés étant `running`."""
+        import json
+
+        from agent import store
+
+        faux = self._FauxRedis()
+        for rang in range(total):
+            tid = f"t{rang:04d}"
+            faux.index.append(tid)
+            faux.valeurs[store._TASK_KEY.format(tid)] = json.dumps({
+                "id": tid,
+                "status": (
+                    store.STATUS_RUNNING if rang in running_aux_rangs
+                    else store.STATUS_DONE
+                ),
+                "user_code": "TEST",
+                "origin": "human",
+            })
+        monkeypatch.setattr(store, "get_redis", lambda: faux)
+        return store, faux
+
+    def test_une_tache_running_au_dela_de_la_fenetre_est_bien_remise_en_file(
+        self, monkeypatch
+    ):
+        """Le rang est choisi loin derrière la tête sans viser une borne particulière :
+        le test porte sur « tout l'index », pas sur la valeur d'une limite."""
+        store, faux = self._index(monkeypatch, total=150, running_aux_rangs=(3, 120))
+
+        assert store.requeue_interrupted() == 2
+        assert faux.file == ["t0003", "t0120"]
+
+    def test_le_statut_passe_a_interrupted_et_est_persiste(self, monkeypatch):
+        import json
+
+        store, faux = self._index(monkeypatch, total=150, running_aux_rangs=(120,))
+        store.requeue_interrupted()
+
+        enregistre = json.loads(faux.valeurs[store._TASK_KEY.format("t0120")])
+        assert enregistre["status"] == store.STATUS_INTERRUPTED
+
+    def test_le_parcours_demande_bien_tout_lindex(self, monkeypatch):
+        """`-1` et non une borne numérique : une borne, même haute, laisse passer ce qui
+        se trouve au-delà sans le signaler."""
+        store, faux = self._index(monkeypatch, total=150)
+        store.requeue_interrupted()
+
+        assert faux.portees == [-1]
+
+    def test_la_limite_par_defaut_de_list_tasks_fenetre_toujours(self, monkeypatch):
+        """Garde-fou : rendre l'index entier sur `requeue_interrupted` ne doit pas avoir
+        délié les appels paginés, qui servent des listes à l'utilisateur."""
+        store, faux = self._index(monkeypatch, total=150)
+
+        assert len(store.list_tasks()) == 20
+        assert faux.portees == [19]
+
+    def test_limit_none_rend_lindex_entier(self, monkeypatch):
+        store, _ = self._index(monkeypatch, total=150)
+
+        assert len(store.list_tasks(limit=None)) == 150
+
+    def test_une_entree_expiree_est_purgee_meme_sans_limite(self, monkeypatch):
+        """La purge des entrées orphelines vivait dans le chemin borné : elle doit tenir
+        aussi quand l'index est lu en entier, sinon l'index enfle sans fin."""
+        store, faux = self._index(monkeypatch, total=150, running_aux_rangs=(120,))
+        del faux.valeurs[store._TASK_KEY.format("t0010")]
+
+        store.requeue_interrupted()
+
+        assert "t0010" not in faux.index
+        assert len(faux.index) == 149

@@ -15,7 +15,7 @@ Changes vs llm_local.py
 
 Config env vars (new)
 ---------------------
-LRU_KV_SIZE=4    max cached sequences per model (default 4)
+LRU_KV_SIZE=16    max cached sequences per model (default 16)
 LRU_KV_GB=4.0    total RAM budget for all LRU caches in GB (default 4.0)
 """
 
@@ -111,7 +111,7 @@ _PROMPTS_LOG_PATH = os.path.join(_LOGS, "prompts.log")
 # tout le contexte du dépôt et noieraient prompts.log. Gate indépendante, pour pouvoir
 # suivre OpenCode sans réactiver la journalisation de tout le trafic conversationnel.
 RAW_DEBUG_PROMPTS = os.getenv("RAW_DEBUG_PROMPTS", "true").lower() in ("yes", "true", "1")
-_RAW_PROMPTS_LOG_PATH = os.path.join(_LOGS, "opencode-prompts.log")
+_RAW_PROMPTS_LOG_PATH = os.path.join(_LOGS, "raw-prompts.log")
 
 # Journal dédié à la boucle agentique. Même raison que pour OpenCode : un pas d'agent
 # embarque les schémas des dix outils plus tout le contexte accumulé, et noierait les
@@ -158,7 +158,7 @@ def journal_de_cycle(path: str):
 QUANT_KV = os.getenv("QUANT_KV", "").lower() in ("yes", "true", "1")
 QUANT_KV_BITS = int(os.getenv("QUANT_KV_BITS", "4"))
 
-LRU_KV_MAX_SIZE = int(os.getenv("LRU_KV_SIZE", "4"))
+LRU_KV_MAX_SIZE = int(os.getenv("LRU_KV_SIZE", "16"))
 LRU_KV_MAX_BYTES = int(float(os.getenv("LRU_KV_GB", "4.0")) * 1024**3)
 
 
@@ -462,6 +462,15 @@ _lru_lock = threading.Lock()
 # Deux coûts, raison de l'interrupteur : un `deepcopy` du cache au premier jeton, donc sur
 # le TTFT, et une entrée de plus dans un LRU qui ne compte que 8 slots.
 _LRU_PREFIX_SNAPSHOT = True
+
+# Clés préfixes posées, par modèle. Une lignée de conversation ne peut jamais servir que
+# sa clé la plus récente : la chaîne ne remonte pas au-delà d'un tour. Les précédentes
+# sont donc retirées dès que la suivante est posée, reconnaissables au fait qu'elles en
+# sont un préfixe. Sans ce ménage, chaque tour laisse derrière lui un cache de plusieurs
+# centaines de Mo que plus rien ne peut relire — `insert_cache` ne purge les préfixes que
+# sur un cache rognable, ce qu'un modèle hybride n'est pas.
+_prefixes_poses: dict[str, list[list[int]]] = {}
+_PREFIXES_SUIVIS = 8
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -824,6 +833,14 @@ def _lru_get_cache(
                 )
                 return None, prompt_token_ids
         _eval_kv_cache(cache)
+        liberees = _lru_liberer_lignee(lru, model_path, prompt_token_ids, cached_len)
+        if liberees:
+            logger.debug(
+                "LRU: %d entrée(s) de lignée libérée(s) après lecture — "
+                "%d/%d slots | %.2f/%.1f GB (lru) | %s",
+                liberees, len(lru), lru.max_size,
+                lru.nbytes / 1024**3, lru.max_bytes / 1024**3, _metal_mem_str(),
+            )
         return cache, remaining
 
     # LRU miss: build fresh system KV cache
@@ -894,43 +911,108 @@ def _lru_insert(
         logger.warning("LRU insert failed (%s) — non-fatal", exc)
 
 
+def _lru_retirer(lru, model_path: str, cle: list[int]) -> bool:
+    """Retire une entrée du LRU par sa clé. Vrai si elle a bien été retirée.
+
+    `LRUPromptCache` n'expose aucun retrait unitaire — seulement l'insertion et un élagage
+    global, qui emporterait les entrées utiles. D'où l'accès direct au trie, borné à ce
+    seul usage et non fatal : un échec laisse l'entrée en place, ce qui coûte de la
+    mémoire mais ne compromet aucune génération.
+    """
+    try:
+        entree = lru._trie.pop(model_path, cle)
+        lru._n_bytes -= entree.nbytes
+        lru._n_bytes_by_type[entree.cache_type] -= entree.nbytes
+        lru._lru.remove(model_path, cle)
+        return True
+    except Exception as exc:
+        logger.debug("LRU: retrait de l'entrée préfixe périmée impossible (%s)", exc)
+        return False
+
+
+def _lru_liberer_lignee(
+    lru, model_path: str, prompt_token_ids: list[int], cached_len: int
+) -> int:
+    """Libère les entrées préfixes de la lignée que ce prompt vient de consommer.
+
+    `fetch_nearest_cache` rend une copie profonde de l'entrée : sans ce retrait, le cache
+    stocké et la copie de travail coexistent pendant tout le tour, soit deux fois le même
+    cache de plusieurs dizaines de milliers de jetons. Or une entrée de lignée est morte
+    dès qu'elle est lue — la chaîne ne sert jamais qu'une clé, celle qui vient de l'être,
+    et le tour en cours en posera une plus longue. La libérer ici rend sa mémoire pour le
+    prefill et la génération, c'est-à-dire la fenêtre où elle manque ; l'insertion
+    suivante la rendrait trop tard.
+
+    Seules les clés de `_prefixes_poses` sont candidates. L'entrée système est partagée
+    par toutes les conversations et doit survivre ; les entrées `assistant` relèvent d'un
+    autre mécanisme. Contrepartie assumée : un client qui rejoue un tour à l'identique ne
+    retrouve plus l'entrée et repart du préfixe système.
+
+    L'appelant doit avoir forcé l'évaluation de la copie : les tableaux MLX sont paresseux,
+    et libérer la source avant ferait porter la copie sur des tampons déjà rendus.
+    """
+    suivis = _prefixes_poses.get(model_path)
+    if not suivis:
+        return 0
+    consommees = [
+        cle for cle in suivis
+        if len(cle) <= cached_len and prompt_token_ids[: len(cle)] == cle
+    ]
+    for cle in consommees:
+        _lru_retirer(lru, model_path, cle)
+        suivis.remove(cle)
+    return len(consommees)
+
+
 def _lru_insert_prompt_prefix(
     model_path: str, prompt_token_ids: list[int], cache, model_short: str
 ) -> None:
-    """Pose une entrée LRU indexée sur le prompt seul, sans les jetons générés.
+    """Pose une entrée LRU sur le prompt privé de son dernier jeton.
 
-    Appelée au premier pas de décodage, quand le cache porte `prompt + 1 jeton` : le reset
-    d'`offset` déclare la longueur réellement couverte, tandis que l'état récurrent des
-    couches `ArraysCache` conserve les jetons en trop, faute d'offset à corriger. C'est la
-    même approximation que celle de l'entrée système (`_make_system_kv`).
+    Appelée depuis le rappel de progression du prefill, à son dernier appel. La boucle de
+    prefill de `generate_step` s'arrête à l'avant-dernier jeton et le premier décodage n'a
+    lieu qu'après : le cache couvre donc alors exactement `prompt_token_ids[:-1]`, sans
+    qu'aucun jeton généré ne l'ait touché. L'entrée est exacte pour les couches `KVCache`
+    comme pour l'état récurrent des couches `ArraysCache`, qu'aucun `offset` ne permet de
+    rectifier — c'est ce qui la distingue d'un instantané pris en cours de décodage.
 
-    Le DERNIER jeton du prompt est exclu de la clé. Le prompt de génération se termine sur
-    `<think>` suivi d'un unique saut de ligne, là où le tour suivant rend ce même bloc
-    refermé, dont les deux sauts de ligne fusionnent en un seul jeton. Le prompt d'un tour
-    est donc préfixe du suivant au niveau du texte, mais faux d'un jeton au niveau des
-    jetons — et le trie, qui indexe des jetons, écarterait l'entrée.
+    Cette clé amputée est aussi celle qu'impose la tokenisation : le prompt de génération
+    se termine sur `<think>` suivi d'un unique saut de ligne, là où le tour suivant rend ce
+    même bloc refermé, dont les deux sauts de ligne fusionnent en un seul jeton. Le prompt
+    d'un tour est donc préfixe du suivant au niveau du texte, mais faux d'un jeton au
+    niveau des jetons — et le trie indexe des jetons.
 
     Le `deepcopy` est nécessaire parce que la génération continue de muter `cache` après
     cet appel. `cache_type` doit valoir l'un des types connus du LRU, sinon son compteur
     d'octets par type lève ; `user` est le plus proche, l'entrée s'arrêtant au tour
     utilisateur. Non fatal en cas d'échec.
     """
-    if len(prompt_token_ids) < 2:
-        return
     cle = prompt_token_ids[:-1]
+    if not cle:
+        return
     try:
-        snapshot = copy.deepcopy(cache)
-        for layer_cache in snapshot:
-            if hasattr(layer_cache, "offset"):
-                layer_cache.offset = len(cle)
-        _eval_kv_cache(snapshot)
         lru = _get_lru(model_path)
+
+        # Ménage AVANT le deepcopy : libérer l'entrée périmée avant d'allouer la nouvelle
+        # abaisse le pic, qui est le moment où la mémoire manque.
+        suivis = _prefixes_poses.setdefault(model_path, [])
+        perimees = [k for k in suivis if len(k) < len(cle) and cle[: len(k)] == k]
+        for ancienne in perimees:
+            _lru_retirer(lru, model_path, ancienne)
+            suivis.remove(ancienne)
+
+        snapshot = copy.deepcopy(cache)
+        _eval_kv_cache(snapshot)
         lru.insert_cache(model_path, cle, snapshot, cache_type="user")
+        suivis.append(cle)
+        del suivis[:-_PREFIXES_SUIVIS]
         logger.debug(
-            "LRU insert (préfixe): key=%d tok model=%s — %d/%d slots | %.2f/%.1f GB (lru)",
-            len(cle), model_short,
+            "LRU insert (préfixe): key=%d tok model=%s — %d périmée(s) retirée(s) | "
+            "%d/%d slots | %.2f/%.1f GB (lru) | %s",
+            len(cle), model_short, len(perimees),
             len(lru), lru.max_size,
             lru.nbytes / 1024**3, lru.max_bytes / 1024**3,
+            _metal_mem_str(),
         )
     except Exception as exc:
         logger.warning("LRU prefix snapshot failed (%s) — non-fatal", exc)
@@ -1591,6 +1673,7 @@ async def stream_local(
         first = True
         _generation_ok = True
         _truncated_by_stop = False
+        _prefixe_pose = False
         _tok_generes = 0
         model_short = model.split("/")[-1]
         prompt_text = ""
@@ -1619,29 +1702,36 @@ async def stream_local(
                 profile, tokenizer, no_think, thinking_budget, temperature, max_tokens
             )
 
-            # Le snapshot ne peut pas s'accrocher à `first` : ce drapeau ne bascule qu'au
-            # premier texte non vide, alors que le cache porte le jeton généré dès le
-            # premier pas, y compris quand le tampon du détokeniseur le rend vide.
+            # Le snapshot se pose au dernier appel du rappel de prefill, quand il reste
+            # un seul jeton à traiter. C'est le seul instant où le cache couvre le prompt
+            # sans qu'aucun jeton généré ne l'ait touché.
             # Conditionné à `tools` : seul un tour assistant porteur de `tool_calls` est
             # re-rendu avec son bloc de réflexion vide, donc seul ce trafic produit un
             # prompt qui soit le préfixe exact du prompt suivant. Ailleurs l'entrée ne
             # serait jamais servie, et le deepcopy se paierait sur le TTFT pour rien.
-            _prefix_pending = (
-                _LRU_PREFIX_SNAPSHOT and lru_cache is not None and bool(tools)
+
+            def _au_prefill(traites: int, total: int) -> None:
+                nonlocal _prefixe_pose
+                if _prefixe_pose or traites == 0 or traites != total - 1:
+                    return
+                _prefixe_pose = True
+                _lru_insert_prompt_prefix(
+                    model, tok_ids, lru_cache, model.split("/")[-1]
+                )
+
+            snapshot_kwarg = (
+                {"prompt_progress_callback": _au_prefill}
+                if _LRU_PREFIX_SNAPSHOT and lru_cache is not None and tools
+                else {}
             )
 
             for chunk in stream_generate(
                 mlx_model, tokenizer, prompt=remaining, max_tokens=budget,
                 sampler=sampler, logits_processors=stream_procs,
-                **cache_kwarg, **quant_kwargs,
+                **cache_kwarg, **quant_kwargs, **snapshot_kwarg,
             ):
                 if stop_flag.is_set():
                     break
-                if _prefix_pending:
-                    _prefix_pending = False
-                    _lru_insert_prompt_prefix(
-                        model, tok_ids, lru_cache, model.split("/")[-1]
-                    )
                 # Compté AVANT le filtre sur chunk.text : un pas rendu vide par le
                 # tampon du détokeniseur consomme quand même un token du budget.
                 _tok_generes += 1
@@ -1695,9 +1785,16 @@ async def stream_local(
             # préfixe d'aucun prompt futur. L'entrée ne resservira jamais et, étant la plus
             # longue possible, évince des entrées utiles d'un LRU qui ne compte que 4 à 8
             # slots.
+            # L'entrée préfixe REMPLACE celle-ci quand elle a été posée, au lieu de s'y
+            # ajouter. La clé construite ici vaut `prompt + sortie brute`, `<think>`
+            # compris : elle n'est préfixe d'aucun prompt suivant, et ne peut donc être
+            # servie qu'en la rognant — ce que `ArraysCache` interdit sur un modèle
+            # hybride. La garder doublerait le volume du LRU pour une entrée que rien ne
+            # relira jamais.
             if (
                 lru_cache is not None and raw_resp and _generation_ok
                 and not stop_flag.is_set() and not _truncated_by_stop
+                and not _prefixe_pose
                 and _tok_generes < budget
             ):
                 _lru_insert(model, mlx_model, tok_ids, raw_resp, lru_cache, tokenizer)

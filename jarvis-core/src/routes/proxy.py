@@ -6,6 +6,7 @@ Auth: set Jarvis user code as API key, or use X-OpenWebUI-User-Email header.
 Session: derived from user_code + first user message (stable per thread).
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -357,6 +358,10 @@ RAW_EFFORT_MODELS: dict[str, tuple[bool, int]] = {
 # de milliers. L'écart est tel que la valeur exacte n'a pas à être fine.
 RAW_AUX_MAX_CHARS = 4000
 
+# Période d'émission du ping SSE sur la route raw, en secondes. Tenue bien en dessous du
+# délai d'inactivité des clients usuels, qui se compte en dizaines de secondes.
+RAW_KEEPALIVE_S = 15.0
+
 
 class _RawChatRequest(_OAIChatRequest):
     no_think: Optional[bool] = None          # override explicite du client
@@ -598,9 +603,53 @@ async def raw_chat(req: _RawChatRequest, authorization: str = Header(default=Non
         yield _final_chunk("stop")
         yield "data: [DONE]\n\n"
 
+    async def _avec_keepalive(source):
+        """Intercale des pings dans les silences du flux SSE.
+
+        Cette route reste muette plusieurs minutes d'affilée : attente du verrou GPU,
+        prefill d'un prompt de plusieurs dizaines de milliers de jetons, puis, quand des
+        outils sont demandés, toute la génération — `_generate_with_tools` ne cède rien
+        avant de tenir le texte complet. Un client qui borne son inactivité ferme alors
+        la connexion avant le premier octet utile, et sa reprise empile une seconde
+        génération derrière la première, qui elle continue jusqu'à son terme.
+
+        Le ping est un commentaire SSE, que la spécification impose d'ignorer : il ne
+        peut pas atterrir dans le contenu, contrairement à un chunk de delta vide que
+        certains clients concatènent. Il ne couvre que l'inactivité réseau — un client
+        qui borne le temps jusqu'au premier jeton coupera quand même.
+
+        L'itération est manuelle parce qu'`asyncio.wait_for` annulerait `__anext__` à
+        chaque expiration, donc la génération elle-même ; `asyncio.wait` laisse la tâche
+        vivre et on la réattend au tour suivant. En sortie, annuler cette tâche suffit à
+        fermer la source : l'annulation se propage dans son `await`, qui lève le drapeau
+        d'arrêt du worker. Hors de ce cas, la source est fermée explicitement, sans quoi
+        une déconnexion en cours de flux laisserait la génération aller à son plafond.
+        """
+        it = source.__aiter__()
+        tache = None
+        try:
+            while True:
+                if tache is None:
+                    tache = asyncio.ensure_future(it.__anext__())
+                fini, _ = await asyncio.wait({tache}, timeout=RAW_KEEPALIVE_S)
+                if not fini:
+                    yield ": ping\n\n"
+                    continue
+                en_cours, tache = tache, None
+                try:
+                    morceau = en_cours.result()
+                except StopAsyncIteration:
+                    return
+                yield morceau
+        finally:
+            if tache is not None:
+                tache.cancel()
+            else:
+                await source.aclose()
+
     if req.stream:
         return StreamingResponse(
-            _generate_with_tools() if req.tools else _generate(),
+            _avec_keepalive(_generate_with_tools() if req.tools else _generate()),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
