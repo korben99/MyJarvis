@@ -1458,10 +1458,14 @@ async def _edit_file(task: dict, args: dict) -> str:
             f"Fichier introuvable : {rel_arg}. edit_file modifie un fichier qui existe "
             "déjà ; pour en créer un, c'est write_file."
         )
+    # Décodage STRICT ici, contrairement aux lectures d'affichage du module : ce contenu
+    # repart en écriture entière plus bas, donc un octet remplacé par `errors="replace"`
+    # serait perdu sur disque, loin de l'extrait édité et sans que rien ne le signale. Un
+    # fichier non décodable n'est pas éditable par motif, et le refus est l'issue correcte.
     try:
         with open(path, encoding="utf-8") as f:
             contenu = f.read()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         return f"Lecture impossible : {exc}"
 
     trouve = contenu.count(ancien)

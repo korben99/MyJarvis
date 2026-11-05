@@ -1751,6 +1751,11 @@ CE QUI EST DEMANDÉ — dans cet ordre, et l'ordre compte :
    avant d'aller plus loin. Si le défaut EST un plantage du code appelé, nomme dans
    `finish` l'appelant qui produit cet état — sans lui, le rouge vient de ton test et non
    du dépôt.
+   Une `AssertionError` ne suffit pas non plus : elle doit venir du mécanisme visé. Un
+   appel dont les arguments ne correspondent pas à la signature appelée ressort en amont,
+   sur une garde ou un argument manquant, et laisse le défaut intact derrière un rouge
+   convaincant. Nomme dans `finish` la ligne du code testé qui produit l'échec, et relis
+   sa signature dans le fichier au lieu de la supposer.
 3. CORRIGE avec `edit_file`, le plus chirurgicalement possible : tu lui donnes l'extrait
    exact à remplacer et son remplacement. N'écris JAMAIS un diff — rien ici ne l'applique,
    et `write_file` sur une source qui existe déjà est refusé. Préserve les branches

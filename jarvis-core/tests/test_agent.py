@@ -967,6 +967,20 @@ class TestEditionDeSource:
         assert "Modifié" in r
         assert "def g" not in self._source(tmp_path)
 
+    def test_un_fichier_non_utf8_est_refuse_sans_etre_reecrit(self, depot, tmp_path):
+        """Le contenu lu repart en écriture entière : tolérer les octets non décodables
+        les remplacerait sur disque, loin de l'extrait édité et sans rien signaler."""
+        chemin = tmp_path / "repo" / "jarvis-core" / "src" / "binaire.py"
+        octets = b"A = 1\nTAG = b'\xff\xfe'\n"
+        chemin.write_bytes(octets)
+        r = self._appel(
+            depot, "edit_file",
+            path="repo/jarvis-core/src/binaire.py",
+            old="A = 1\n", new="A = 2\n",
+        )
+        assert "Lecture impossible" in r
+        assert chemin.read_bytes() == octets
+
     def test_write_file_refuse_une_source_existante(self, depot, tmp_path):
         """Le cas exact qui a détruit un module de 10 ko : un diff écrit par-dessus la
         source, `overwrite` posé pour lever la garde anti-écrasement."""

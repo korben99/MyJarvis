@@ -1741,6 +1741,11 @@ WHAT IS ASKED — in this order, and the order matters:
    before going any further. If the defect IS a crash in the code called, name in `finish`
    the caller that produces that state — without it, the red comes from your test and not
    from the repository.
+   An `AssertionError` is not enough either: it must come from the mechanism aimed at. A
+   call whose arguments do not match the signature called exits upstream, on a guard or a
+   missing argument, and leaves the defect intact behind a convincing red. Name in
+   `finish` the line of the code under test that produces the failure, and re-read its
+   signature in the file instead of assuming it.
 3. FIX it with `edit_file`, as surgically as possible: you give it the exact excerpt to
    replace and its replacement. NEVER write a diff — nothing here applies one, and
    `write_file` on a source that already exists is refused. Preserve existing branches
