@@ -337,6 +337,16 @@ RAG_TOP_K = int(os.getenv("RAG_TOP_K", os.getenv("QDRANT_TOP_K", "8")))
 RAG_SCORE_THRESHOLD = float(os.getenv("RAG_SCORE_THRESHOLD", "0.55"))
 OWUI_MAX_DOC_CHARS = int(os.getenv("OWUI_MAX_DOC_CHARS", "80000"))
 
+# Plafond d'une requête entrante, en caractères, appliqué AVANT tout travail GPU sur les
+# routes de chat. C'est la seule borne en amont du prefill : une boucle d'agent qui ne
+# converge pas (relecture sans fin, délégation récursive) gonfle son contexte d'un tour à
+# l'autre, et le prefill de ce contexte est ce qui sature le GPU et la mémoire wired Metal.
+# Le modèle accepte 256k tokens et la route ne tronque pas l'entrée — sans ce plafond, rien
+# n'arrête la croissance avant l'échec d'allocation. Compté en caractères et non en tokens
+# pour ne dépendre ni du tokenizer ni du modèle chargé : ~4 caractères par token sur ce
+# trafic, donc 240000 ≈ 60000 tokens.
+MAX_INPUT_CHARS = int(os.getenv("MAX_INPUT_CHARS", "240000"))
+
 # ── Origines autorisées à appeler l'API depuis un NAVIGATEUR ──────────────
 # Vide par défaut, et ce défaut n'enlève rien : CORS ne s'applique qu'aux navigateurs.
 # L'app iOS, OpenCode, curl et les scripts ne consultent jamais ces en-têtes, et Open WebUI

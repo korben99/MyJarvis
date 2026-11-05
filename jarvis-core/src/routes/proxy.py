@@ -18,6 +18,7 @@ from typing import Optional
 from config import (
     EMAIL_TO_CODE,
     LLM_LOCAL,
+    MAX_INPUT_CHARS,
     OWUI_MAX_DOC_CHARS,
     PRIMARY_API_KEY,
     PRIMARY_API_URL,
@@ -427,6 +428,21 @@ async def raw_list_models(authorization: str = Header(default=None)):
     }
 
 
+def _garde_taille_entree(n_chars: int) -> None:
+    """Rejette une requête dont l'entrée dépasse MAX_INPUT_CHARS, avant tout travail GPU.
+
+    Posée en tête des deux routes de chat parce que le prefill d'un gros contexte est ce
+    qui sature le GPU et la mémoire wired, et qu'aucune autre borne n'existe en amont : le
+    modèle accepte 256k tokens et la route ne tronque pas. 413 (Payload Too Large) pour que
+    le client distingue un refus de taille d'une erreur de génération.
+    """
+    if n_chars > MAX_INPUT_CHARS:
+        raise HTTPException(
+            413,
+            f"Requête trop volumineuse : {n_chars} caractères (limite {MAX_INPUT_CHARS}).",
+        )
+
+
 @router.post("/v1/raw/chat/completions")
 @router.post("/v1/raw/v1/chat/completions")
 async def raw_chat(req: _RawChatRequest, authorization: str = Header(default=None)):
@@ -469,6 +485,13 @@ async def raw_chat(req: _RawChatRequest, authorization: str = Header(default=Non
             message["name"] = m.name
         messages.append(message)
     messages = normalise_messages_for_template(messages)
+
+    # Garde de taille avant le prefill. Tous les messages sont conservés sur cette route, et
+    # les schémas d'outils pèsent autant que le contenu : les deux comptent dans l'entrée.
+    _taille_entree = sum(len(m.get("content") or "") for m in messages)
+    if req.tools:
+        _taille_entree += len(json.dumps(req.tools))
+    _garde_taille_entree(_taille_entree)
 
     # Priorité : body explicite > palier d'effort choisi via `model` > env var.
     # Défaut sans thinking passé à false : le raisonnement est le principal
@@ -745,6 +768,11 @@ async def proxy_chat(
         raise HTTPException(400, "No usable message found")
 
     message, image_parts = _extract_content_parts(last_user_msg.content)
+
+    # Garde de taille avant le prefill. Cette route n'envoie au modèle que le dernier
+    # message user (le reste est écrasé et réinjecté par Jarvis) : c'est donc lui qu'on borne.
+    _garde_taille_entree(len(message))
+
     logger.info(
         "proxy: content type=%s image_parts=%d extra_keys=%s",
         type(last_user_msg.content).__name__,
