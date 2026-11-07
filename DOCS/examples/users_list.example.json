@@ -10,6 +10,7 @@
     "timezone": "Europe/Paris",
     "briefing_enabled": true,
     "trading": false,
+    "enfant": true,
     "google": false,
     "profile": {}
   }

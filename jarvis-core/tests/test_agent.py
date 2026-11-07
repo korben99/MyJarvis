@@ -72,6 +72,11 @@ class TestAccesAuxSecrets:
     def test_lire_les_secrets_est_refuse(self, cible):
         assert shell.verifier(f"cat {shell._RACINE}/{cible}") is not None
 
+    def test_les_identifiants_oauth_sont_refuses(self):
+        """`client_secret.json` est sous `scripts/`, que la lecture laisse ouvert — alors
+        que `.env` est fermé juste à côté."""
+        assert shell.verifier("cat scripts/client_secret.json") is not None
+
     def test_le_profil_seatbelt_ferme_lecriture_hors_zone(self):
         profil = shell._profil_seatbelt("/tmp/atelier-test")
         assert "(deny file-write*)" in profil
@@ -83,6 +88,7 @@ class TestAccesAuxSecrets:
         assert f'{shell._RACINE}/.env' in profil
         assert f'{shell._HOME}/.ssh' in profil
         assert "Keychains" in profil
+        assert "client_secret.json" in profil
 
     def test_le_profil_est_allow_default(self):
         """Un deny-default casse la moitié des outils Unix sur macOS et rendrait le shell
@@ -118,6 +124,23 @@ class TestSandboxChemins:
         chemin = os.path.realpath(resolve("tachetest", "note.md", write=True))
         atelier = os.path.realpath(task_workspace("tachetest"))
         assert chemin.startswith(atelier)
+
+    def test_un_fichier_de_secrets_sous_une_racine_lisible_est_refuse(self):
+        """Une racine autorise un DOSSIER, pas un inventaire. `scripts/` est lisible pour
+        que l'agent puisse relire l'installation, et les identifiants OAuth y sont."""
+        from config import GOOGLE_CLIENT_SECRET_FILE
+
+        with pytest.raises(SandboxError):
+            resolve("tachetest", GOOGLE_CLIENT_SECRET_FILE, write=False)
+
+    def test_le_reste_de_la_racine_lisible_le_demeure(self):
+        """Le refus doit porter sur le fichier, pas emporter sa racine."""
+        import os
+
+        from config import JARVIS_ROOT
+
+        voisin = os.path.join(JARVIS_ROOT, "scripts", "jarvis-status.sh")
+        assert resolve("tachetest", voisin, write=False)
 
 
 # ── Outils ───────────────────────────────────────────────────────────────────
@@ -183,6 +206,78 @@ class TestBudgets:
         AGENT_MAX_TOOL_OUTPUT, pas par ce seuil. On garde seulement une plage plausible —
         à 0, tout remonte ; au-delà de 0.6, les requêtes par titre sont rejetées."""
         assert 0.2 <= cfg.AGENT_DOCS_MIN_SCORE <= 0.6
+
+
+class TestPlafondParUtilisateur:
+    """`compter_taches_ouvertes` — ce que le plafond AGENT_MAX_OPEN_TASKS mesure.
+
+    Ce qui compte ici est ce qu'il NE compte pas : une tâche close a rendu son créneau, et
+    l'autocoding nocturne tourne sous le code d'un administrateur sans être une commande
+    de sa part.
+    """
+
+    @staticmethod
+    def _inventaire(monkeypatch, taches):
+        from agent import store
+
+        def _liste(limit=20, user_code=None, origin=None):
+            return [
+                t for t in taches
+                if (not user_code or t.get("user_code") == user_code)
+                and (not origin or t.get("origin", "human") == origin)
+            ]
+
+        monkeypatch.setattr(store, "list_tasks", _liste)
+        return store
+
+    def test_les_statuts_ouverts_comptent(self, monkeypatch):
+        store = self._inventaire(monkeypatch, [
+            {"user_code": "A", "status": "queued"},
+            {"user_code": "A", "status": "running"},
+            {"user_code": "A", "status": "interrupted"},
+        ])
+        assert store.compter_taches_ouvertes("A") == 3
+
+    @pytest.mark.parametrize("statut", ["done", "failed", "cancelled"])
+    def test_une_tache_close_rend_son_creneau(self, monkeypatch, statut):
+        store = self._inventaire(monkeypatch, [{"user_code": "A", "status": statut}])
+        assert store.compter_taches_ouvertes("A") == 0
+
+    def test_le_compte_est_par_utilisateur(self, monkeypatch):
+        store = self._inventaire(monkeypatch, [
+            {"user_code": "A", "status": "running"},
+            {"user_code": "B", "status": "running"},
+            {"user_code": "B", "status": "queued"},
+        ])
+        assert store.compter_taches_ouvertes("A") == 1
+        assert store.compter_taches_ouvertes("B") == 2
+
+    def test_lautocoding_ne_pese_pas_sur_le_quota(self, monkeypatch):
+        """Il tourne sous le code d'un administrateur. Le compter lui ferait refuser sa
+        propre commande au motif d'un travail qu'il n'a pas demandé."""
+        store = self._inventaire(monkeypatch, [
+            {"user_code": "A", "status": "running", "origin": "autocode"},
+            {"user_code": "A", "status": "queued", "origin": "autocode"},
+            {"user_code": "A", "status": "running", "origin": "human"},
+        ])
+        assert store.compter_taches_ouvertes("A") == 1
+
+    def test_une_tache_sans_origine_vaut_humaine(self, monkeypatch):
+        """Les tâches créées avant l'existence du champ n'en portent pas."""
+        store = self._inventaire(monkeypatch, [{"user_code": "A", "status": "running"}])
+        assert store.compter_taches_ouvertes("A") == 1
+
+    def test_le_store_ne_porte_pas_le_plafond_lui_meme(self):
+        """`create_task` est aussi appelé par `relancer_les_series`. Un plafond à
+        l'intérieur ferait sauter en silence le tour hebdomadaire de quelqu'un qui a trois
+        tâches ouvertes par ailleurs, et la série mourrait sans que personne ne l'apprenne.
+        La garde vit sur les deux surfaces de COMMANDE, qui peuvent refuser devant leur
+        auteur."""
+        import inspect
+
+        from agent import store
+
+        assert "AGENT_MAX_OPEN_TASKS" not in inspect.getsource(store.create_task)
 
 
 class TestInterrupteurs:

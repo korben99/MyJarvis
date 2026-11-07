@@ -19,10 +19,17 @@ confinée au workspace de la tâche. Aucune exécution — le shell arrive en Ph
     worker    consommation de la file, une tâche à la fois, notification finale
 """
 
-from .store import create_task, get_task, list_tasks, request_cancel
+from .store import (
+    compter_taches_ouvertes,
+    create_task,
+    get_task,
+    list_tasks,
+    request_cancel,
+)
 from .worker import start_worker, stop_worker, surveiller, worker_vivant
 
 __all__ = [
+    "compter_taches_ouvertes",
     "create_task",
     "get_task",
     "list_tasks",

@@ -73,7 +73,6 @@ if user_code:
     print(f"GOOGLE_REFRESH_TOKEN_{user_code}={creds.refresh_token}")
     print()
     print(f"Also ensure users_list.json has  \"google\": true  for {user_code}")
-    print(f"and docker-compose.yml forwards  GOOGLE_REFRESH_TOKEN_{user_code}  to the container.")
 else:
     print(f"GOOGLE_CLIENT_ID={creds.client_id}")
     print(f"GOOGLE_CLIENT_SECRET={creds.client_secret}")

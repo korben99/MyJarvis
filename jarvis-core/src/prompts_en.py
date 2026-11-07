@@ -1655,11 +1655,11 @@ AGENT_NO_TOOL_NUDGE = (
     "the objective is reached."
 )
 
-# Announcement of the agent capability, injected into the system prompt of ADMINISTRATORS
-# ONLY when the loop is active (pipeline.build_system_prompt).
+# Announcement of the agent capability, injected into the system prompt of every
+# recognised user when the loop is active (pipeline.build_system_prompt).
 #
 # Deliberately short: it lives on the side of the prompt that diverges PER USER, so every
-# line is reprocessed for each administrator on the first turn.
+# line is reprocessed for each of them on the first turn.
 AGENT_CAPABILITY = (
     "{firstname} can hand you a background task: a message starting with "
     "\"agent task:\" followed by the objective queues it, and you then answer "

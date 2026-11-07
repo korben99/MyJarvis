@@ -93,10 +93,10 @@ def build_system_prompt(user_code: str = "") -> str:
         parts.append(
             f"Tu parles avec {firstname}. Tutoie toujours, quelle que soit la langue du contexte injecté."
         )
-    # Capacité agent : admins seulement, et seulement si la boucle est active. Placée ici,
-    # du côté qui diverge déjà par utilisateur — la mettre dans SYSTEM_BASE annoncerait
-    # à tous une commande que seuls les admins peuvent lancer.
-    if AGENT_ENABLED and user_code in USER_ADMINS:
+    # Capacité agent : tout utilisateur reconnu, et seulement si la boucle est active.
+    # Elle reste de ce côté du prompt parce que le texte porte le prénom — c'est lui qui
+    # l'empêche d'aller dans SYSTEM_BASE, partagé entre tous.
+    if AGENT_ENABLED and user_code in USERS:
         parts.append(get_prompt("AGENT_CAPABILITY").format(firstname=firstname or "l'utilisateur"))
 
     if profile:
@@ -235,7 +235,7 @@ def build_dynamic_prefix(
         from vitals import incr_usage, render_prompt_block, risk_scalar
 
         incr_usage(user_code)
-        # Admins seulement — même raison que la capacité agent dans build_system_prompt.
+        # Admins seulement, et pour une raison qui lui est propre.
         # Ce bloc porte l'âge des sauvegardes, les CVE critiques et le compte d'erreurs, et
         # le prompt d'identité ORDONNE de l'énoncer comme un fait : injecté, il ressort
         # dans la réponse, chiffres compris. C'est donc une donnée à ne pas faire descendre

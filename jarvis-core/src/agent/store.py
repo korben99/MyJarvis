@@ -171,6 +171,25 @@ def list_tasks(
     return tasks
 
 
+def compter_taches_ouvertes(user_code: str) -> int:
+    """Tâches de cet utilisateur qui occupent encore la file ou le worker.
+
+    Sert le plafond par utilisateur (AGENT_MAX_OPEN_TASKS). Ne compte QUE l'origine
+    `human` : l'autocoding nocturne tourne sous le code d'un administrateur, et le faire
+    peser sur son quota lui ferait refuser sa propre commande au motif d'un travail qu'il
+    n'a pas demandé.
+
+    `interrupted` compte comme ouverte : la tâche est remise en file au démarrage suivant,
+    elle reprendra. L'exclure laisserait un redémarrage rendre des créneaux qui vont être
+    réoccupés dans la minute.
+    """
+    return sum(
+        1
+        for t in list_tasks(limit=None, user_code=user_code, origin="human")
+        if t.get("status") in _OPEN_STATUSES
+    )
+
+
 # ── File d'attente ────────────────────────────────────────────────────────
 
 

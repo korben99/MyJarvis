@@ -1660,15 +1660,15 @@ AGENT_NO_TOOL_NUDGE = (
     "l'objectif est atteint."
 )
 
-# Annonce de la capacité agent, injectée dans le prompt système des SEULS administrateurs
-# quand la boucle est active (pipeline.build_system_prompt).
+# Annonce de la capacité agent, injectée dans le prompt système de tout utilisateur
+# reconnu quand la boucle est active (pipeline.build_system_prompt).
 #
 # `pipeline.py` l'appelait déjà, mais la constante n'a jamais été écrite : get_prompt
 # rendait "" et la ligne était donc vide depuis l'introduction du fast-track. La capacité
 # existait sans que personne n'en soit informé.
 #
 # Volontairement courte : elle vit du côté du prompt qui diverge PAR UTILISATEUR, donc
-# chaque ligne y est reprocessée pour chaque administrateur au premier tour.
+# chaque ligne y est reprocessée pour chacun au premier tour.
 AGENT_CAPABILITY = (
     "{firstname} peut te confier une tâche de fond : un message qui commence par "
     "« tâche agent: » suivi de l'objectif la met en file, et tu réponds alors par "

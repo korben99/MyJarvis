@@ -96,6 +96,23 @@ Three, independent, each bounding a different failure:
 | Steps | `AGENT_MAX_STEPS` | 20 | reasoning in circles |
 | Wall clock | `AGENT_TASK_TIMEOUT_MINUTES` | 45 | how long chat waits behind it |
 | No progress | — | 2 identical calls | tight loops on a failing tool |
+| Open tasks | `AGENT_MAX_OPEN_TASKS` | 3 | one person filling the queue ahead of everyone |
+
+**The per-user cap counts simultaneous open tasks, not tasks per day.** The worker runs one
+task at a time, so what needs bounding is the queue one person can build in front of the
+others — not how many commands they issue over a day. A daily cap would refuse a legitimate
+third request in the evening while the machine sits idle, and would still let all three be
+stacked at once in the morning. The count empties itself: `done`, `failed` and `cancelled`
+have released their slot, while `interrupted` still holds one, since it is requeued at the
+next start.
+
+The guard sits on the two **command** surfaces — the chat fast-track and `POST /agent/tasks`
+— and deliberately **not** inside `store.create_task`. `relancer_les_series` calls that same
+function: a cap inside it would silently drop the weekly turn of someone who happens to have
+three open tasks, and the series would die with nobody told. On a command, the refusal lands
+in front of its author, who can wait or cancel. For the same reason the cap ignores
+`origin="autocode"`: nightly autocoding runs under an administrator's code, and counting it
+would refuse that administrator their own morning command.
 
 A call's identity is its name plus the arguments that change its **result**, not every
 argument it carries. A read is signed on its path, its offset and whether a `limit` bounds
@@ -212,22 +229,42 @@ tâche agent: compare les trois offres de … et écris-moi une note
 tâche agent: statut
 ```
 
-Accepted prefixes: `tâche agent:`, `agent:`, `agent task:`, `task:`, with or without a
+Accepted prefixes: `tâche agent:`, `agent:`, `agent task:`, `task:`, and the recurring
+`tâche agent hebdo:`, `agent hebdo:`, `agent weekly:`, `weekly:` — each with or without a
 space before the colon. The English ones work whatever `JARVIS_LANG` is set to — a command
 is not prose, and recognising both costs nothing.
 
-`statut` (also `status`, `état`, `où en es-tu`) lists your last five tasks with their state
-and result. **That consultation is open to every user**, for their own tasks; *creating* a
-task stays restricted to administrators. This is the only route from the iOS app, where
-`curl` is not an option.
+Accents and case are neutralised, and the common misspellings of *tâche* are accepted:
+`taches agent:`, `tâche-agent:`, `tâche  agent:` (double space), plus `tâche agent
+hebdomadaire:` written out. Each of these exists in **both** the recurring and the one-off
+list, and it has to: `taches agent hebdo:` does not start with `taches agent:`, since the
+one-off prefix carries its colon straight after *agent* — a variant known only to the
+one-off list would not be recognised at all rather than fall back to it.
+
+The colon itself is **not** optional: `tâche agent fais X` is deliberately not a command.
+It is what guarantees that prose mentioning the word *agent* never sends a multi-minute
+autonomous task off.
+
+**Creating a task is open to every declared user**, as is `statut` (also `status`, `état`,
+`où en es-tu`), which lists your last five tasks with their state and result. Both are
+scoped to the caller: `list_tasks` filters on `user_code`, and the task carries the
+requester's code, so the deliverable and the push go back to them and to nobody else.
+Stopping a recurring series is restricted to **its owner** — the series id is enough to
+cut it otherwise. This is the only route from the iOS app, where `curl` is not an option.
 
 ---
 
 ## API
 
-Task creation is **restricted to administrators** (`admin: true` in `users_list.json`).
-The guard sits on the router (`agent_routes.py::exige_admin`), so it covers the reads too,
-and the code travels as `Authorization: Bearer <code>`.
+**The HTTP API stays restricted to administrators** (`admin: true` in `users_list.json`),
+unlike the chat fast-track. The guard sits on the router (`agent_routes.py::exige_admin`),
+so it covers the reads too, and the code travels as `Authorization: Bearer <code>`.
+
+The restriction is not a leftover: `GET /agent/tasks` without `user_code` returns every
+user's tasks, and `GET /agent/tasks/{id}` returns one task's whole record — `user_code`
+included, which is the very secret that authorises creating a task. Opening this router
+would hand every caller the other accounts' codes. The chat fast-track has no such
+problem: it only ever renders the caller's own tasks.
 
 `user_code` in the body is **the caller's own code, not a target**: `_exige_soi_meme`
 rejects any other with `403`. There is deliberately no way to launch a task in someone
@@ -566,6 +603,7 @@ Every variable, with its default:
 | `AGENT_WORKSPACE` | `/opt/jarvis/agent_workspace` | one directory per task |
 | `AGENT_MAX_STEPS` | `20` | step budget |
 | `AGENT_TASK_TIMEOUT_MINUTES` | `45` | wall-clock budget |
+| `AGENT_MAX_OPEN_TASKS` | `3` | simultaneous open tasks per user; `0` lifts the cap |
 | `AGENT_STEP_MAX_TOKENS` | `2200` | reasoning + output + tool call per step |
 | `AGENT_THINKING_BUDGET` | `1000` | reasoning share of the above |
 | `AGENT_WRITE_MAX_TOKENS` | `6000` | writing step only |
@@ -583,6 +621,15 @@ Every variable, with its default:
 | `AGENT_SHELL_MAX_CALLS` | `25` | shell calls per task |
 | `AGENT_SHELL_NETWORK` | `false` | network inside the sandbox |
 | `AGENT_READONLY_ROOTS` | `src`, `scripts`, `DOCS` | paths the agent may read outside its workspace |
+| `GOOGLE_CLIENT_SECRET_FILE` | `scripts/client_secret.json` | not read by anything — declared so both guards can **refuse** it |
+
+A read-only root grants a **directory, not an inventory**. `scripts/` is readable so the
+agent can re-read the install, and the Google OAuth client secret sits in it — so
+`sandbox.resolve` refuses that one file outright, before comparing against the roots, and
+the seatbelt profile denies it too. `.env`, `keys/`, `users_list.json` and
+`jarvis-self.json` are outside the roots today; they are listed in the same refusal anyway,
+so that a root added tomorrow does not expose them in silence. That is exactly how
+`client_secret.json` became readable in the first place.
 
 Nightly autocoding, switched separately — it also requires `AGENT_ENABLED`:
 

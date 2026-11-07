@@ -275,9 +275,10 @@ const CHAMPS = [
   {n:"MAX_CHAIN_ITERATIONS", d:"3", t:"number", a:"Actions enchaînées par cycle."},
 ]],
 ["Boucle agentique", [
-  {n:"AGENT_ENABLED", d:"false", t:"select", o:["false","true"], a:"Tâches de fond confiées par un admin. Voir DOCS/AGENT.md."},
+  {n:"AGENT_ENABLED", d:"false", t:"select", o:["false","true"], a:"Tâches de fond confiées depuis le chat par tout utilisateur déclaré ; l'API HTTP reste réservée aux admins. Voir DOCS/AGENT.md."},
   {n:"AGENT_WORKSPACE", d:"/opt/jarvis/agent_workspace"},
   {n:"AGENT_MAX_STEPS", d:"20", t:"number"},
+  {n:"AGENT_MAX_OPEN_TASKS", d:"3", t:"number", a:"Tâches simultanées par utilisateur, pas par jour : le worker n'en exécute qu'une à la fois, c'est la file devant les autres qu'on borne. Le compte se vide quand une tâche se termine. 0 lève le plafond. Ne s'applique pas aux relances de séries hebdomadaires ni à l'autocoding."},
   {n:"AGENT_TASK_TIMEOUT_MINUTES", d:"45", t:"number"},
   {n:"AGENT_STEP_MAX_TOKENS", d:"2200", t:"number", a:"Pire cas d'attente imposé à un tour de chat."},
   {n:"AGENT_THINKING_BUDGET", d:"1000", t:"number"},

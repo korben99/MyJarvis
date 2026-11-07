@@ -416,6 +416,16 @@ AGENT_WORKSPACE = os.getenv("AGENT_WORKSPACE", "/opt/jarvis/agent_workspace")
 AGENT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "20"))
 AGENT_TASK_TIMEOUT_MINUTES = int(os.getenv("AGENT_TASK_TIMEOUT_MINUTES", "45"))
 
+# Tâches SIMULTANÉES par utilisateur, et non par jour : le worker n'en exécute qu'une à la
+# fois, donc ce qu'il faut borner est la file qu'une personne peut constituer devant les
+# autres, pas le nombre de commandes qu'elle passe dans la journée. Un plafond journalier
+# refuserait une troisième demande légitime le soir alors que la machine est libre, et
+# laisserait quand même empiler les trois d'un coup le matin.
+#
+# Le compte se vide de lui-même : une tâche terminée, échouée ou annulée n'est plus ouverte.
+# 0 lève le plafond.
+AGENT_MAX_OPEN_TASKS = int(os.getenv("AGENT_MAX_OPEN_TASKS", "3"))
+
 # Plafond de tokens PAR PAS. Volontairement bas : le lock GPU background ne cède qu'ENTRE
 # deux générations, donc ce plafond est le pire cas d'attente imposé à un tour de chat.
 # Mesuré ~50 tok/s sur Qwen3.6-35B-A3B-5bit ⇒ 1200 tok ≈ 24 s. Ne pas monter sans mesurer.
@@ -588,6 +598,16 @@ AUTOCODE_ENABLED = os.getenv("AUTOCODE_ENABLED", "false").lower() in ("yes", "tr
 
 # Racine du dépôt, d'où partent le worktree et le patch.
 JARVIS_ROOT = os.getenv("JARVIS_ROOT", str(pathlib.Path(__file__).resolve().parents[2]))
+
+# Identifiants OAuth du projet Google, déposés à la main pour la génération de jetons.
+# La constante n'existe pas pour lire ce fichier — aucun code de Jarvis ne le lit — mais
+# pour que l'agent puisse le REFUSER : il est sous `scripts/`, qui est une racine de
+# lecture, donc sans elle `read_file` le rend en clair. Déclaré ici, à un seul endroit,
+# pour que le bac à sable et le profil seatbelt ne puissent pas désigner deux chemins.
+GOOGLE_CLIENT_SECRET_FILE = os.getenv(
+    "GOOGLE_CLIENT_SECRET_FILE",
+    os.path.join(JARVIS_ROOT, "scripts", "client_secret.json"),
+)
 
 # Étagère des livrables : un sous-dossier par run, stable et consultable. Distinct du
 # workspace de la tâche, qui est un brouillon et dont le worktree est détruit à la fin.

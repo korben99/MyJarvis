@@ -34,6 +34,7 @@ from config import (
     AGENT_SHELL_MAX_CALLS,
     AGENT_SHELL_NETWORK,
     AGENT_SHELL_TIMEOUT,
+    GOOGLE_CLIENT_SECRET_FILE,
     SELF_MEMORY_PATH,
     USERS_LIST_PATH,
 )
@@ -56,8 +57,12 @@ _HOME = str(pathlib.Path.home())
 #   jarvis-self.json  la mémoire propre de Jarvis. L'agent en reçoit déjà ce qui le
 #                     concerne par son contexte ; le fichier entier est une donnée, pas
 #                     une source, et rien ne se lit correctement dedans à la main.
+#   client_secret.json  identifiants OAuth du projet Google. Il est sous `scripts/`, que
+#                     la lecture laisse ouvert, alors que .env est fermé juste à côté.
 _FICHIERS_SECRETS = tuple(
-    os.path.realpath(p) for p in (USERS_LIST_PATH, SELF_MEMORY_PATH) if p
+    os.path.realpath(p)
+    for p in (USERS_LIST_PATH, SELF_MEMORY_PATH, GOOGLE_CLIENT_SECRET_FILE)
+    if p
 )
 
 # Motifs refusés avant même d'atteindre le bac à sable. Volontairement courts et lisibles :
@@ -76,6 +81,7 @@ _INTERDITS: tuple[tuple[str, str], ...] = (
     (r"\b(diskutil|fdisk|newfs)\b", "manipulation de volumes"),
     (rf"{re.escape(_RACINE)}/\.env|{re.escape(_RACINE)}/keys", "accès aux secrets"),
     (r"\busers_list\.json\b|\bjarvis-self\.json\b", "accès aux fichiers d'état"),
+    (r"\bclient_secret\.json\b", "accès aux identifiants OAuth"),
 )
 
 

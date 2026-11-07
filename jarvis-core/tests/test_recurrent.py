@@ -212,8 +212,11 @@ class TestCommandeDeChat:
             return {"id": "abcd1234ef567890"}
 
         monkeypatch.setattr(agent, "create_task", _faux_create)
+        # Le compteur du plafond lit l'index Redis. Simulé à zéro par défaut : sans ça,
+        # chaque test de cette classe se connecterait au magasin réel pour un chiffre dont
+        # il ne parle pas — le garde-réseau de la suite le refuse, et il a raison.
+        monkeypatch.setattr(agent, "compter_taches_ouvertes", lambda uc: 0)
         monkeypatch.setattr(C, "_instant_reply", lambda req, uc, txt: {"txt": txt})
-        monkeypatch.setattr(C, "USER_ADMINS", {"K"})
         monkeypatch.setattr(C, "AGENT_ENABLED", True)
         return C, appels
 
@@ -226,6 +229,11 @@ class TestCommandeDeChat:
 
     @pytest.mark.parametrize("prefixe", [
         "tâche agent hebdo:", "tache agent hebdo :", "agent hebdo:", "agent weekly:",
+        # Fautes de frappe sur « tâche ». Elles doivent figurer dans la liste RÉCURRENTE
+        # aussi : « taches agent hebdo: » ne commence pas par « taches agent: », donc une
+        # variante connue du seul préfixe ponctuel ne serait pas reconnue du tout.
+        "taches agent hebdo:", "tâche-agent hebdo:", "tâche  agent hebdo:",
+        "tâche agent hebdomadaire:",
     ])
     def test_les_variantes_declarent_une_cadence(self, banc, prefixe):
         C, appels = banc
@@ -238,6 +246,17 @@ class TestCommandeDeChat:
         C, appels = banc
         self._envoyer(C, "tâche agent: un travail ponctuel bien assez long")
         assert appels["meta"] is None
+
+    @pytest.mark.parametrize("prefixe", [
+        "taches agent:", "tâches agent:", "tâche-agent:", "tâche  agent:",
+    ])
+    def test_les_fautes_de_frappe_restent_ponctuelles(self, banc, prefixe):
+        """Reconnues, et sans cadence : une faute de frappe ne doit pas faire d'une tâche
+        unique une série hebdomadaire."""
+        C, appels = banc
+        self._envoyer(C, f"{prefixe} un travail ponctuel bien assez long")
+        assert appels["meta"] is None
+        assert appels["objective"] == "un travail ponctuel bien assez long"
 
     def test_le_prefixe_recurrent_nemporte_pas_le_mot_hebdo_dans_lobjectif(self, banc):
         C, appels = banc
@@ -277,10 +296,46 @@ class TestCommandeDeChat:
         self._envoyer(C, "tâche agent: un travail ponctuel bien assez long")
         assert "max_steps" not in appels and "timeout_minutes" not in appels
 
-    def test_un_non_administrateur_ne_peut_pas_lancer_de_serie(self, banc):
+    def test_un_utilisateur_ordinaire_peut_lancer_une_serie(self, banc):
+        """La création n'est plus réservée aux administrateurs. Ce que ce test garde, c'est
+        que la tâche porte le code du DEMANDEUR : c'est lui qui reçoit le livrable par
+        courriel et la notification, et `list_tasks` filtre là-dessus."""
         C, appels = banc
-        reponse = self._envoyer(C, "agent hebdo: veille stockage objet", user="AUTRE")
-        assert not appels and "administrateurs" in reponse["txt"]
+        self._envoyer(C, "agent hebdo: veille stockage objet", user="AUTRE")
+        assert appels["user_code"] == "AUTRE"
+        assert appels["meta"]["cadence"] == CADENCE_HEBDO
+
+    def test_le_plafond_refuse_une_tache_de_trop(self, banc, monkeypatch):
+        """Le worker n'exécute qu'une tâche à la fois : sans plafond, une personne peut
+        constituer la file devant toutes les autres."""
+        import agent
+
+        C, appels = banc
+        monkeypatch.setattr(C, "AGENT_MAX_OPEN_TASKS", 3)
+        monkeypatch.setattr(agent, "compter_taches_ouvertes", lambda uc: 3)
+        reponse = self._envoyer(C, "tâche agent: un travail ponctuel bien assez long")
+        assert not appels
+        assert "plafond" in reponse["txt"]
+
+    def test_le_plafond_laisse_passer_en_dessous_de_la_limite(self, banc, monkeypatch):
+        import agent
+
+        C, appels = banc
+        monkeypatch.setattr(C, "AGENT_MAX_OPEN_TASKS", 3)
+        monkeypatch.setattr(agent, "compter_taches_ouvertes", lambda uc: 2)
+        self._envoyer(C, "tâche agent: un travail ponctuel bien assez long")
+        assert appels["objective"]
+
+    def test_un_plafond_a_zero_leve_la_limite(self, banc, monkeypatch):
+        """0 doit valoir « pas de plafond » et non « aucune tâche autorisée » — c'est la
+        porte de sortie quand le réglage gêne."""
+        import agent
+
+        C, appels = banc
+        monkeypatch.setattr(C, "AGENT_MAX_OPEN_TASKS", 0)
+        monkeypatch.setattr(agent, "compter_taches_ouvertes", lambda uc: 99)
+        self._envoyer(C, "tâche agent: un travail ponctuel bien assez long")
+        assert appels["objective"]
 
     def test_une_serie_sarrete_depuis_le_chat(self, banc, monkeypatch):
         """Sans cette commande, couper une récurrence demanderait d'éditer Redis à la main."""
@@ -289,17 +344,39 @@ class TestCommandeDeChat:
 
         arretees = []
         monkeypatch.setattr(R, "arreter_serie", arretees.append)
+        monkeypatch.setattr(
+            R, "dernier_tour_par_serie", lambda: {"1a2b3c4d5e6f": {"user_code": "K"}}
+        )
         reponse = self._envoyer(C, "agent: arrête 1a2b3c4d5e6f")
         assert arretees == ["1a2b3c4d5e6f"] and "arrêtée" in reponse["txt"]
 
-    def test_un_non_administrateur_ne_peut_pas_couper_une_serie(self, banc, monkeypatch):
+    def test_une_serie_ne_se_coupe_que_par_son_proprietaire(self, banc, monkeypatch):
+        """La garde administrateur couvrait aussi l'arrêt. Sans contrôle de propriété à sa
+        place, un identifiant de série aperçu ailleurs suffirait à couper la récurrence de
+        quelqu'un d'autre."""
         C, _ = banc
         import agent.recurrent as R
 
         arretees = []
         monkeypatch.setattr(R, "arreter_serie", arretees.append)
+        monkeypatch.setattr(
+            R, "dernier_tour_par_serie", lambda: {"1a2b3c4d5e6f": {"user_code": "K"}}
+        )
+        reponse = self._envoyer(C, "agent: arrête 1a2b3c4d5e6f", user="AUTRE")
+        assert arretees == [] and "n'est pas la tienne" in reponse["txt"]
+
+    def test_une_serie_sans_proprietaire_connu_sarrete_quand_meme(self, banc, monkeypatch):
+        """Série déjà arrêtée, ou dont les tours ont quitté l'index : l'opération est
+        idempotente et ne touche la récurrence de personne. La refuser rendrait impossible
+        de reposer un arrêt sur une série dont la trace a expiré."""
+        C, _ = banc
+        import agent.recurrent as R
+
+        arretees = []
+        monkeypatch.setattr(R, "arreter_serie", arretees.append)
+        monkeypatch.setattr(R, "dernier_tour_par_serie", dict)
         self._envoyer(C, "agent: arrête 1a2b3c4d5e6f", user="AUTRE")
-        assert arretees == []
+        assert arretees == ["1a2b3c4d5e6f"]
 
 
 class TestPlanificationAuDemarrage:

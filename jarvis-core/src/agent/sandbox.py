@@ -16,11 +16,37 @@ de shell ici, c'est l'objet de la Phase 2 (seatbelt + denylist + quotas).
 
 import os
 
-from config import AGENT_READONLY_ROOTS, AGENT_WORKSPACE
+from config import (
+    AGENT_READONLY_ROOTS,
+    AGENT_WORKSPACE,
+    GOOGLE_CLIENT_SECRET_FILE,
+    JARVIS_ROOT,
+    SELF_MEMORY_PATH,
+    USERS_LIST_PATH,
+)
 
 
 class SandboxError(ValueError):
     """Chemin hors des racines autorisées. Le message est destiné au modèle."""
+
+
+# Fichiers refusés quelles que soient les racines. Une racine autorise un DOSSIER, pas un
+# inventaire : `scripts/` est lisible pour que l'agent puisse relire l'installation, et les
+# identifiants OAuth du projet Google s'y trouvent.
+#
+# Les autres entrées sont hors des racines aujourd'hui. Elles figurent quand même ici pour
+# qu'une racine ajoutée demain ne les expose pas en silence — c'est exactement ainsi que
+# `client_secret.json` est devenu lisible.
+_FICHIERS_INTERDITS = frozenset(
+    os.path.realpath(p)
+    for p in (
+        GOOGLE_CLIENT_SECRET_FILE,
+        os.path.join(JARVIS_ROOT, ".env"),
+        USERS_LIST_PATH,
+        SELF_MEMORY_PATH,
+    )
+    if p
+)
 
 
 def task_workspace(task_id: str, create: bool = True) -> str:
@@ -70,6 +96,15 @@ def resolve(task_id: str, path: str, *, write: bool) -> str:
     # pire, inscriptible à travers le lien. realpath d'un chemin inexistant est sûr — il
     # résout les composants qui existent et laisse le reste tel quel.
     resolved = os.path.realpath(raw)
+
+    # Avant la comparaison aux racines : un fichier de secrets est refusé même s'il est
+    # SOUS une racine autorisée, et le refus doit porter sur le chemin résolu pour qu'un
+    # lien symbolique ne le contourne pas.
+    if resolved in _FICHIERS_INTERDITS:
+        raise SandboxError(
+            f"chemin refusé : {path!r} porte des secrets (identifiants, codes d'accès). "
+            "Il n'entre pas dans une tâche, même en lecture."
+        )
 
     roots = _resolved_roots(task_id, write)
     if not any(_is_within(resolved, root) for root in roots):

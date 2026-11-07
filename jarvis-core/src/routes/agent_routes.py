@@ -14,8 +14,14 @@ protégée sans que personne ait à y penser.
 import json
 import os
 
-from agent import create_task, get_task, list_tasks, request_cancel
-from config import AGENT_ENABLED, AGENT_MAX_STEPS
+from agent import (
+    compter_taches_ouvertes,
+    create_task,
+    get_task,
+    list_tasks,
+    request_cancel,
+)
+from config import AGENT_ENABLED, AGENT_MAX_OPEN_TASKS, AGENT_MAX_STEPS
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -55,6 +61,17 @@ async def post_task(req: _NewTask, demandeur: str = Depends(exige_admin)):
     objective = req.objective.strip()
     if len(objective) < 10:
         raise HTTPException(422, "objectif trop court pour être exécutable")
+    # Même plafond que le fast-track du chat, et il doit être posé sur les DEUX surfaces :
+    # porté par le seul chat, il se contournerait par un appel HTTP. Il ne descend pas dans
+    # `create_task` pour ne pas faire sauter les relances de séries.
+    if AGENT_MAX_OPEN_TASKS:
+        ouvertes = compter_taches_ouvertes(req.user_code)
+        if ouvertes >= AGENT_MAX_OPEN_TASKS:
+            raise HTTPException(
+                429,
+                f"{ouvertes} tâches déjà ouvertes pour {req.user_code} — plafond "
+                f"AGENT_MAX_OPEN_TASKS={AGENT_MAX_OPEN_TASKS}",
+            )
     return create_task(req.user_code, objective)
 
 

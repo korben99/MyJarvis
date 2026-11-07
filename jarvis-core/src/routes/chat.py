@@ -15,6 +15,7 @@ from typing import Optional
 from briefing import gather_briefing, get_stored_briefing, store_briefing
 from config import (
     AGENT_ENABLED,
+    AGENT_MAX_OPEN_TASKS,
     AGENT_RECURRENT_DAY,
     AGENT_RECURRENT_HOUR,
     AGENT_RECURRENT_MAX_STEPS,
@@ -34,7 +35,6 @@ from config import (
     SESSION_SUMMARY_TOKENS,
     THINKING_BUDGET_COMPACT,
     THINKING_BUDGET_MEDIUM,
-    USER_ADMINS,
     USER_CITIES,
     USER_CODES,
     USER_TIMEZONES,
@@ -685,9 +685,18 @@ def _handle_agent_task(
     # Les variantes récurrentes d'abord : « agent: » ne peut pas les capter — le préfixe
     # porte le deux-points immédiatement après « agent » —, mais l'ordre rend l'intention
     # lisible et protège d'un préfixe plus court ajouté un jour au-dessus.
+    #
+    # Les fautes de frappe sur « tâche » figurent dans les DEUX listes, et il le faut :
+    # « taches agent hebdo: » ne commence pas par « taches agent: », le deux-points du
+    # préfixe ponctuel tombant après « agent ». Une variante absente d'ici ne serait donc
+    # pas rattrapée en ponctuel, elle ne serait pas reconnue du tout.
     recurrent = False
     for prefix in (
         "tache agent hebdo:", "tache agent hebdo :", "agent hebdo:", "agent hebdo :",
+        "taches agent hebdo:", "taches agent hebdo :",
+        "tache-agent hebdo:", "tache-agent hebdo :",
+        "tache  agent hebdo:", "tache  agent hebdo :",
+        "tache agent hebdomadaire:", "tache agent hebdomadaire :",
         "agent weekly:", "agent weekly :", "weekly:", "weekly :",
     ):
         if lowered.startswith(prefix):
@@ -697,6 +706,9 @@ def _handle_agent_task(
     else:
         for prefix in (
             "tache agent:", "tache agent :", "agent:", "agent :",
+            "taches agent:", "taches agent :",
+            "tache-agent:", "tache-agent :",
+            "tache  agent:", "tache  agent :",
             "agent task:", "agent task :", "task:", "task :",
         ):
             if lowered.startswith(prefix):
@@ -708,7 +720,7 @@ def _handle_agent_task(
     if not AGENT_ENABLED:
         return _instant_reply(req, user_code, "Le mode agent est désactivé (AGENT_ENABLED=false).")
 
-    from agent import create_task, list_tasks
+    from agent import compter_taches_ouvertes, create_task, list_tasks
 
     # Consultation depuis l'iPhone : sans ça la fonctionnalité serait à sens unique,
     # curl n'étant pas une option sur un téléphone.
@@ -735,22 +747,30 @@ def _handle_agent_task(
             )
         return _instant_reply(req, user_code, "Tes dernières tâches :\n" + "\n".join(lines))
 
-    if user_code not in USER_ADMINS:
-        return _instant_reply(req, user_code, "Le mode agent est réservé aux administrateurs.")
-
-    # Arrêt d'une série, sous la même garde que la création : qui ne peut pas lancer de
-    # tâche n'a pas à pouvoir couper celle d'un autre. Le tour en cours n'est pas annulé —
-    # couper une récurrence dit de ne plus recommencer, pas de jeter le travail engagé.
+    # Arrêt d'une série, réservé à son propriétaire. La garde ne s'adosse plus à celle de
+    # la création, qui n'existe plus : sans vérification ici, un identifiant de série
+    # aperçu ailleurs suffirait à couper la récurrence de quelqu'un d'autre. Un
+    # propriétaire inconnu — série déjà arrêtée, ou dont les tours ont quitté l'index —
+    # laisse passer : l'opération est alors idempotente et ne touche personne.
+    #
+    # Le tour en cours n'est pas annulé : couper une récurrence dit de ne plus recommencer,
+    # pas de jeter le travail engagé.
     arret = re.match(
         r"(?:arrete|arrête|stop)\s+([0-9a-f]{6,16})$", objective.strip().lower()
     )
     if arret:
-        from agent.recurrent import arreter_serie
+        from agent.recurrent import arreter_serie, dernier_tour_par_serie
 
-        arreter_serie(arret.group(1))
+        serie = arret.group(1)
+        proprietaire = (dernier_tour_par_serie().get(serie) or {}).get("user_code")
+        if proprietaire and proprietaire != user_code:
+            return _instant_reply(
+                req, user_code, f"La série {serie} n'est pas la tienne."
+            )
+        arreter_serie(serie)
         return _instant_reply(
             req, user_code,
-            f"Série {arret.group(1)} arrêtée — je ne la relancerai plus. "
+            f"Série {serie} arrêtée — je ne la relancerai plus. "
             "Le tour en cours, s'il y en a un, va jusqu'au bout.",
         )
 
@@ -784,6 +804,21 @@ def _handle_agent_task(
             f" Je reprends ensuite chaque semaine ({AGENT_RECURRENT_DAY} à "
             f"{AGENT_RECURRENT_HOUR}h), en repartant de ce que j'aurai trouvé cette fois-ci."
         )
+    # Plafond par utilisateur, posé ICI et non dans `create_task`. Le store est aussi
+    # appelé par `relancer_les_series` : un plafond à l'intérieur ferait sauter en silence
+    # le tour hebdomadaire de quelqu'un qui a trois tâches ouvertes par ailleurs, et la
+    # série mourrait sans que personne ne l'apprenne. Une garde sur la COMMANDE refuse
+    # devant son auteur, qui peut attendre ou annuler.
+    if AGENT_MAX_OPEN_TASKS:
+        ouvertes = compter_taches_ouvertes(user_code)
+        if ouvertes >= AGENT_MAX_OPEN_TASKS:
+            return _instant_reply(
+                req, user_code,
+                f"J'ai déjà {ouvertes} tâches en cours pour toi, c'est mon plafond. "
+                "Attends qu'une se termine, ou dis-moi « tâche agent: statut » pour voir "
+                "où elles en sont.",
+            )
+
     task = create_task(user_code, objective, meta=meta, **budgets)
     return _instant_reply(
         req, user_code,
