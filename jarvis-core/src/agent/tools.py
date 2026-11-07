@@ -1237,6 +1237,18 @@ async def _read_file(task: dict, args: dict) -> str:
             f"{len(lines)}. Le fichier tient ENTIER dans une seule lecture : relance "
             f"read_file sur ce chemin sans `limit`, au lieu de paginer.]"
         )
+    elif path.endswith(".py") and _carte_du_module("".join(lines), len(lines)):
+        # Un module qui a une carte ne s'annonce pas « à suivre ». Donner l'offset suivant,
+        # c'est inviter à le défiler tranche par tranche — un tour par tranche, pour un
+        # contenu qu'on y cherche rarement dans l'ordre —, alors que le prompt système
+        # demande de viser depuis la carte. L'outil ne doit pas contredire la consigne :
+        # c'est lui que le modèle lit en dernier, et c'est lui qu'il suit.
+        warning = (
+            f"[LECTURE PARTIELLE — lignes {offset} à {next_offset - 1} sur {len(lines)}. "
+            f"Ce module a une CARTE : read_file sur ce chemin sans offset ni limit te la "
+            f"rend. Vise la définition qui t'intéresse au lieu de défiler — la suite "
+            f"immédiate est rarement ce que tu cherches.]"
+        )
     else:
         warning = (
             f"[LECTURE PARTIELLE — lignes {offset} à {next_offset - 1} sur {len(lines)}. "

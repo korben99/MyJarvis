@@ -1442,10 +1442,14 @@ VISION_USER_PROMPT = (
     "Analyse the image to answer this question. "
     "Describe first what allows it to be answered, then the useful complementary details. "
     "Structure: "
-    "(1) Identification of the main subject — exact type, brand, model, colour, context. "
+    "(1) Nature of the image and main subject — photo, screenshot, document, diagram, "
+    "medical imaging… ; for an object: exact type, brand, model, colour, context. "
     "(2) Visible text and inscriptions — transcribed word for word. "
-    "(3) Distinctive characteristics — shape, finish, recognisable features. "
-    "Factual only, without interpretation. 150 to 250 words. No markdown."
+    "(3) Detailed observations — shapes, positions, proportions, alignments, unusual "
+    "elements. For a technical or medical image, name the visible structures with the "
+    "domain's vocabulary and describe what you observe, even if you cannot conclude. "
+    "Stay faithful to what is visible: flag uncertainty rather than invent, "
+    "but never refuse to describe. 150 to 300 words. No markdown."
 )
 
 
@@ -1456,8 +1460,11 @@ VISION_USER_PROMPT = (
 # choices, all drawn from what this class of model gets wrong in practice:
 #   — the objective is restated at EVERY step (user message re-injected by the loop), not
 #     only in the system prompt: beyond ~10 turns, an objective stated once dilutes;
-#   — one tool call per turn, imposed explicitly — the model tends to stack three at once
-#     then reason about results it does not have yet;
+#   — one ACTION per turn, imposed explicitly — the model tends to stack three at once
+#     then reason about results it does not have yet. `plan` is the exception, and it must
+#     be stated positively, with its cost: filed under a prohibition, the model keeps only
+#     the prohibition and lays out its plan alone — a step of budget and a whole generation
+#     spent on bookkeeping;
 #   — the exit goes through a tool (finish) and not a free sentence, without which nothing
 #     distinguishes "I am done" from "I am thinking out loud".
 
@@ -1470,13 +1477,17 @@ Your current directory, and the only place you may write. Jarvis's source code
 is readable, never modifiable.
 
 SEQUENCE
-Turn 1: call `plan` — 3 to 6 short steps. It is redisplayed under each result.
+Turn 1: call `plan` — 3 to 6 short steps — and, in the same response, the first tool of
+your first step. The plan is redisplayed under each result.
 Then, each turn: read the result and your plan, write one sentence saying what you
-are doing, call a tool. Attach `plan` when a step is finished, or to re-plan.
+are doing, call a tool. When a step is finished, or to re-plan, emit `plan` IN THE SAME
+RESPONSE as the next tool: two calls, `plan` first. `plan` is not an action — alongside a
+tool it costs nothing, alone it costs you a whole turn.
 Objective reached: `finish`, with a summary for the user and the files produced.
 
 WHAT WASTES A TURN
-· Two actions in the same turn. Only `plan` may accompany one.
+· A turn where you call only `plan`.
+· Two actions in the same turn: only the first is executed. `plan` is not one.
 · Describing a call instead of emitting it: text that looks like a call is not one.
 · Assuming a result instead of reading it.
 · Paging. A file that fits in one read is read without `limit`. A module too long for that
@@ -1534,12 +1545,15 @@ Workspace: {workspace}
 Your current directory, and the only place you may write.
 
 FLOW
-Turn 1: call `plan` — 3 to 6 short steps, redisplayed under each result.
-Then, each turn: one plain sentence saying what you are doing, then ONE tool.
-Attach `plan` when a step is done. Objective reached: `finish`.
+Turn 1: call `plan` — 3 to 6 short steps, redisplayed under each result — and, in the
+same response, the first tool of your first step.
+Then, each turn: one plain sentence saying what you are doing, then ONE tool. When a step
+is done, emit `plan` in the SAME response as that tool, `plan` first: alone, it costs you
+a whole turn. Objective reached: `finish`.
 
 WHAT WASTES A TURN
-· Two actions in the same turn. Only `plan` may accompany one.
+· A turn where you call only `plan`.
+· Two actions in the same turn: only the first is executed. `plan` is not one.
 · Describing a call instead of emitting it: text that looks like a call is not one.
 · Assuming a result instead of reading it.
 · Paging. A file that fits in one read is read without `limit`. A module too long for that
@@ -1603,7 +1617,8 @@ Today's date: {date}.
 
 OBJECTIVE: {objective}
 
-[step 1/{max_steps}] First turn: lay out your plan with plan(steps=[...]). \
+[step 1/{max_steps}] First turn: lay out your plan with plan(steps=[...]) and launch, in \
+the same response, the first tool of your first step. \
 You have {max_steps} steps in total, this one included."""
 
 # Appended to EVERY tool result. Carrying the counter on an existing message rather than
@@ -1628,6 +1643,16 @@ AGENT_HINT_LOW_BUDGET = (
 AGENT_CAVEAT_NO_SOURCE = (
     "\n\n(Note: this deliverable cites no consulted source. If the subject called for any, "
     "check before relying on it.)"
+)
+
+# Added for the ONE retry only, after a generation cut off in the middle of a call. The
+# retry runs without reasoning: deprived of the thinking that led it to that call, the
+# model decides again, and most often picks another action — the cut generation is thrown
+# away and the write is pushed to a later turn, where it will be cut again.
+AGENT_TRUNCATED_RETRY = (
+    "Your response was cut off in the middle of the {name} call for lack of room: nothing "
+    "was executed. You now have the room you need. Emit that SAME {name} call again, "
+    "complete, and nothing else."
 )
 
 # Second identical call: served IN PLACE of the result, which the model already has.

@@ -1437,10 +1437,14 @@ VISION_USER_PROMPT = (
     "Analyse l'image pour répondre à cette question. "
     "Décris en priorité ce qui permet d'y répondre, puis les détails complémentaires utiles. "
     "Structure : "
-    "(1) Identification du sujet principal — type exact, marque, modèle, couleur, contexte. "
+    "(1) Nature de l'image et sujet principal — photo, capture d'écran, document, schéma, "
+    "imagerie médicale… ; pour un objet : type exact, marque, modèle, couleur, contexte. "
     "(2) Texte et inscriptions visibles — retranscrits mot pour mot. "
-    "(3) Caractéristiques distinctives — forme, finitions, éléments reconnaissables. "
-    "Factuel uniquement, sans interprétation. 150 à 250 mots. Sans markdown."
+    "(3) Observations détaillées — formes, positions, proportions, alignements, éléments "
+    "inhabituels. Pour une image technique ou médicale, nomme les structures visibles avec "
+    "le vocabulaire du domaine et décris ce que tu observes, même sans pouvoir conclure. "
+    "Reste fidèle à ce qui est visible : signale une incertitude plutôt que d'inventer, "
+    "mais ne refuse jamais de décrire. 150 à 300 mots, en français correct. Sans markdown."
 )
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1450,8 +1454,11 @@ VISION_USER_PROMPT = (
 # tous issus de ce que ce format de modèle rate en pratique :
 #   — l'objectif est rappelé à CHAQUE pas (message user réinjecté par la boucle), pas
 #     seulement dans le system : au-delà de ~10 tours, un objectif posé une fois se dilue ;
-#   — un seul appel d'outil par tour, imposé explicitement — le modèle a tendance à en
-#     empiler trois d'un coup puis à raisonner sur des résultats qu'il n'a pas encore ;
+#   — une seule ACTION par tour, imposée explicitement — le modèle a tendance à en
+#     empiler trois d'un coup puis à raisonner sur des résultats qu'il n'a pas encore.
+#     `plan` est l'exception, et elle doit être dite en positif, avec son coût : rangée
+#     sous une interdiction, le modèle n'en retient que l'interdiction et pose son plan
+#     seul — un pas de budget et une génération entière pour de la comptabilité ;
 #   — la sortie se fait par un outil (finish) et non par une phrase libre, sans quoi rien
 #     ne distingue « j'ai terminé » de « je réfléchis à voix haute ».
 
@@ -1464,13 +1471,17 @@ Ton répertoire courant, et le seul endroit où tu peux écrire. Le code source 
 est lisible, jamais modifiable.
 
 DÉROULÉ
-Tour 1 : appelle `plan` — 3 à 6 étapes courtes. Il est réaffiché sous chaque résultat.
+Tour 1 : appelle `plan` — 3 à 6 étapes courtes — et, dans la même réponse, le premier
+outil de ta première étape. Le plan est réaffiché sous chaque résultat.
 Ensuite, chaque tour : lis le résultat et ton plan, écris une phrase disant ce que tu
-fais, appelle un outil. Joins `plan` quand une étape est finie, ou pour replanifier.
+fais, appelle un outil. Quand une étape est finie, ou pour replanifier, émets `plan` DANS
+LA MÊME RÉPONSE que l'outil suivant : deux appels, `plan` d'abord. `plan` n'est pas une
+action — accompagnant un outil il ne coûte rien, seul il te coûte un tour entier.
 Objectif atteint : `finish`, avec un résumé pour l'utilisateur et les fichiers produits.
 
 CE QUI FAIT PERDRE UN TOUR
-· Deux actions dans le même tour. Seul `plan` peut en accompagner une.
+· Un tour où tu n'appelles que `plan`.
+· Deux actions dans le même tour : seule la première est exécutée. `plan` n'en est pas une.
 · Décrire un appel au lieu de l'émettre : du texte qui ressemble à un appel n'en est pas un.
 · Supposer un résultat au lieu de le lire.
 · Paginer. Un fichier qui tient en une lecture se lit sans `limit`. Un module trop long te
@@ -1530,12 +1541,15 @@ Espace de travail : {workspace}
 Ton répertoire courant, et le seul endroit où tu peux écrire.
 
 DÉROULÉ
-Tour 1 : appelle `plan` — 3 à 6 étapes courtes, réaffiché sous chaque résultat.
-Ensuite, chaque tour : une phrase en clair disant ce que tu fais, puis UN outil.
-Joins `plan` quand une étape est finie. Objectif atteint : `finish`.
+Tour 1 : appelle `plan` — 3 à 6 étapes courtes, réaffiché sous chaque résultat — et,
+dans la même réponse, le premier outil de ta première étape.
+Ensuite, chaque tour : une phrase en clair disant ce que tu fais, puis UN outil. Quand
+une étape est finie, émets `plan` dans la MÊME réponse que cet outil, `plan` d'abord :
+seul, il te coûte un tour entier. Objectif atteint : `finish`.
 
 CE QUI FAIT PERDRE UN TOUR
-· Deux actions dans le même tour. Seul `plan` peut en accompagner une.
+· Un tour où tu n'appelles que `plan`.
+· Deux actions dans le même tour : seule la première est exécutée. `plan` n'en est pas une.
 · Décrire un appel au lieu de l'émettre : du texte qui ressemble à un appel n'en est pas un.
 · Supposer un résultat au lieu de le lire.
 · Paginer. Un fichier qui tient en une lecture se lit sans `limit`. Un module trop long te
@@ -1599,7 +1613,8 @@ Date du jour : {date}.
 
 OBJECTIF : {objective}
 
-[pas 1/{max_steps}] Premier tour : pose ton plan avec plan(steps=[...]). \
+[pas 1/{max_steps}] Premier tour : pose ton plan avec plan(steps=[...]) et lance, dans \
+la même réponse, le premier outil de ta première étape. \
 Tu disposes de {max_steps} pas au total, celui-ci compris."""
 
 # Ajouté à la fin de CHAQUE résultat d'outil. Porter le compteur sur un message existant
@@ -1633,6 +1648,16 @@ AGENT_HINT_LOW_BUDGET = (
 AGENT_CAVEAT_NO_SOURCE = (
     "\n\n(Note : ce livrable ne cite aucune source consultée. Si le sujet en demandait, "
     "vérifie-le avant de t'en servir.)"
+)
+
+# Ajouté le temps de la SEULE reprise, après une génération coupée au milieu d'un appel.
+# La reprise se fait sans raisonnement : privé de la réflexion qui l'avait mené à cet appel,
+# le modèle redécide, et choisit le plus souvent une autre action — la génération coupée
+# est jetée et l'écriture repoussée à un tour ultérieur, où elle sera coupée à nouveau.
+AGENT_TRUNCATED_RETRY = (
+    "Ta réponse a été coupée au milieu de l'appel {name}, faute de place : rien n'a été "
+    "exécuté. Tu as maintenant la place nécessaire. Émets à nouveau CE MÊME appel {name}, "
+    "complet, et rien d'autre."
 )
 
 # Deuxième appel identique : servi À LA PLACE du résultat, que le modèle a déjà.

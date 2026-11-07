@@ -1896,6 +1896,7 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
     from mlx_vlm.utils import load_image as vlm_load_image
 
     from PIL import Image as _PIL
+    from PIL import ImageOps as _ImageOps
 
     _load_vlm()
     mx.clear_cache()  # libère les buffers de calcul MLX avant l'inférence VLM
@@ -1904,7 +1905,10 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
         url = (part.get("image_url") or {}).get("url", "")
         if url.startswith("data:"):
             _, b64data = url.split(",", 1)
-            pil_img = _PIL.open(io.BytesIO(_b64.b64decode(b64data))).convert("RGB")
+            pil_img = _PIL.open(io.BytesIO(_b64.b64decode(b64data)))
+            # Les photos iPhone stockent les pixels non tournés + un tag EXIF Orientation ;
+            # sans application du tag, le VLM reçoit l'image couchée.
+            pil_img = _ImageOps.exif_transpose(pil_img).convert("RGB")
             # Resize to max 1024px — reduces visual tiles and speeds up inference significantly.
             # iPhone photos (~12 MP) generate dozens of tiles at full resolution.
             max_dim = 1024
@@ -1937,8 +1941,10 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
     result = vlm_generate(
         _vlm_model, _vlm_processor, formatted,
         image=images[0] if len(images) == 1 else images,
-        max_tokens=700, temperature=0.7,
-        repetition_penalty=1.5, repetition_context_size=256, verbose=False,
+        # Pénalité basse : le français réutilise sans cesse les mêmes sous-mots
+        # (accents, suffixes) ; une pénalité forte les interdit et déforme l'orthographe.
+        max_tokens=700, temperature=0.1,
+        repetition_penalty=1.05, repetition_context_size=256, verbose=False,
     )
     return result.text if hasattr(result, "text") else str(result)
 

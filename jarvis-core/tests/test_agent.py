@@ -678,6 +678,90 @@ class TestLectureTronquee:
         assert "offset=" in sortie
         assert "COUPÉ PAR TON" not in sortie
 
+    def test_un_module_cartographie_renvoie_a_sa_carte_et_non_a_la_suite(self, tmp_path):
+        """Le prompt système demande de viser depuis la carte. Un outil qui répond « pour
+        la suite : offset=201 » le contredit, et c'est l'outil que le modèle suit : il
+        défile alors le module tranche par tranche, un tour par tranche."""
+        from config import AGENT_READ_MAX_CHARS
+
+        f = tmp_path / "gros.py"
+        # ~36 caractères par fonction : le double du budget, pour être nettement au-dessus
+        # du seuil de la carte, qui se mesure sur la source BRUTE et non numérotée.
+        n = AGENT_READ_MAX_CHARS // 18
+        f.write_text(
+            "".join(f"def fonction_{i}():\n    return {i}\n\n" for i in range(n)),
+            encoding="utf-8",
+        )
+        sortie = self._lire(f, offset=1, limit=200)
+        assert "CARTE" in sortie
+        assert "offset=201" not in sortie
+
+
+class TestRepriseSurTroncature:
+    """Une génération coupée au milieu d'un appel est rejouée sans raisonnement. Privé de
+    la réflexion qui l'y avait mené, le modèle redécide et émet le plus souvent une AUTRE
+    action : la génération coupée est perdue, et l'écriture repoussée à un tour où elle
+    sera coupée à nouveau. La reprise doit donc lui rappeler l'appel en cours."""
+
+    COUPE = ("<think>je rédige</think>\n<tool_call>\n<function=write_file>\n"
+             "<parameter=path>\nrevue.md\n</parameter>\n<parameter=content>\n# Revue")
+    COMPLET = ("<tool_call>\n<function=write_file>\n<parameter=path>\nrevue.md\n"
+               "</parameter>\n<parameter=content>\n# Revue\n</parameter>\n</function>\n"
+               "</tool_call>")
+
+    @pytest.mark.parametrize("raw, attendu", [
+        (COUPE, "write_file"),
+        # Un `plan` FERMÉ émis avec l'action : ce n'est pas lui qui a été coupé.
+        ("<tool_call>\n<function=plan>\n<parameter=steps>\n[]\n</parameter>\n"
+         "</function>\n</tool_call>\n<tool_call>\n<function=write_file>\n<parameter=c", "write_file"),
+        ("<tool_call>\n<funct", ""),
+    ])
+    def test_l_outil_coupe_est_celui_du_dernier_bloc_ouvert(self, raw, attendu):
+        from agent.loop import _outil_coupe
+
+        assert _outil_coupe(raw) == attendu
+
+    def _jouer(self, monkeypatch, sorties):
+        import asyncio
+
+        import agent.loop as L
+        import agent.worker as W
+
+        recus = []
+
+        async def _faux_generate(messages, with_tools, **kw):
+            recus.append([dict(m) for m in messages])
+            return sorties[len(recus) - 1]
+
+        monkeypatch.setattr(L, "_generate", _faux_generate)
+        monkeypatch.setattr(L, "_journal_de", lambda t: "/dev/null")
+        monkeypatch.setattr(L, "append_transcript", lambda t, e: None)
+        monkeypatch.setattr(L, "_accorder_le_corps", lambda: None)
+        monkeypatch.setattr(W, "battre", lambda: None)
+
+        fil = [{"role": "system", "content": "s"}, {"role": "user", "content": "[pas 3/30]"}]
+        tache = {"id": "x", "steps": 3, "origin": "human"}
+        _, _, appels = asyncio.run(L._jouer_tour(tache, fil))
+        return fil, recus, appels
+
+    def test_la_reprise_rappelle_l_appel_coupe(self, monkeypatch):
+        _, recus, appels = self._jouer(monkeypatch, [self.COUPE, self.COMPLET])
+        assert len(recus) == 2
+        derniere = recus[1][-1]
+        assert derniere["role"] == "user" and "write_file" in derniere["content"]
+        assert appels and appels[0]["function"]["name"] == "write_file"
+
+    def test_la_consigne_n_entre_pas_dans_le_fil_persiste(self, monkeypatch):
+        """Elle ne sert qu'à la reprise. Persistée, elle resterait dans le contexte de
+        tous les tours suivants, et une tâche reprise après redémarrage en hériterait."""
+        fil, recus, _ = self._jouer(monkeypatch, [self.COUPE, self.COMPLET])
+        assert len(fil) == 2
+        assert len(recus[1]) == len(recus[0]) + 1
+
+    def test_sans_troncature_aucune_reprise(self, monkeypatch):
+        _, recus, _ = self._jouer(monkeypatch, [self.COMPLET])
+        assert len(recus) == 1
+
 
 class TestPiedDePas:
     """Le pied est un message `user` distinct. C'est lui qui tient lieu de dernière vraie

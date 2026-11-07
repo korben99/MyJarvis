@@ -16,6 +16,7 @@ la tâche est remise en file au boot suivant (store.requeue_interrupted).
 import asyncio
 import json
 import os
+import re
 import time
 
 from config import (
@@ -405,6 +406,19 @@ def _truncated_tool_call(raw: str) -> bool:
     return raw.count("<tool_call>") > raw.count("</tool_call>")
 
 
+def _outil_coupe(raw: str) -> str:
+    """Nom de l'outil dont le bloc <tool_call> est resté ouvert, "" si illisible.
+
+    Lu dans le DERNIER bloc ouvert : les blocs fermés qui le précèdent (un `plan` émis avec
+    l'action, typiquement) ne sont pas ce qui a été coupé.
+    """
+    debut = raw.rfind("<tool_call>")
+    if debut < 0:
+        return ""
+    trouve = re.search(r"<function=([\w-]+)>", raw[debut:])
+    return trouve.group(1) if trouve else ""
+
+
 async def _generate(
     messages: list[dict],
     with_tools: bool,
@@ -532,11 +546,24 @@ async def _jouer_tour(
     # cache LRU rend le re-prefill quasi gratuit ; seule la génération est repayée. Une
     # seule reprise : si ça retronque, le document dépasse le budget et il faut le découper.
     if _truncated_tool_call(raw):
-        logger.info("agent: %s pas %d tronqué — reprise à %d tokens",
-                    task["id"], task["steps"], AGENT_WRITE_MAX_TOKENS)
-        append_transcript(task, {"event": "truncated_retry", "step": task["steps"]})
+        coupe = _outil_coupe(raw)
+        logger.info("agent: %s pas %d tronqué dans %s — reprise à %d tokens",
+                    task["id"], task["steps"], coupe or "?", AGENT_WRITE_MAX_TOKENS)
+        append_transcript(task, {"event": "truncated_retry", "step": task["steps"],
+                                 "name": coupe})
+        # Sans réflexion, le modèle ne sait plus pourquoi il avait choisi cet appel : on le
+        # lui rappelle, sinon il redécide et la génération coupée est perdue. Ajouté à la
+        # COPIE seulement — le fil persisté ne garde pas trace d'une consigne de reprise.
+        # Le cache de préfixe reste entier : tous les tours assistant précèdent déjà le
+        # dernier message utilisateur, et le template les rend donc à l'identique.
+        reprise = _compact(messages)
+        if coupe:
+            reprise.append({
+                "role": "user",
+                "content": get_prompt("AGENT_TRUNCATED_RETRY").format(name=coupe),
+            })
         raw = await _generate(
-            _compact(messages), with_tools=True, tools_override=outils,
+            reprise, with_tools=True, tools_override=outils,
             max_tokens=AGENT_WRITE_MAX_TOKENS, thinking_budget=0, log_path=journal,
         )
 
