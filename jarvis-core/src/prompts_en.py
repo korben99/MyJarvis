@@ -112,6 +112,26 @@ IDENTITY = (
     "exception. Otherwise, your decisions are your own."
 )
 
+# Adaptation directive, injected into the system prompt of users flagged `"enfant": true`
+# ONLY (pipeline.build_system_prompt). Like AGENT_CAPABILITY it lives on the side of the
+# prompt that diverges PER USER, so every line is reprocessed on their first turn.
+#
+# The register is calibrated on the profile's birth year rather than on a single tone: the
+# flag is a boolean, whereas the gap in language between early and late childhood is wider
+# than the one between a teenager and an adult.
+CHILD_GUIDANCE = (
+    "You are talking to a child. Calibrate your register on their age, which you infer from "
+    "the birth year in <profil_utilisateur>: short sentences, simple words, a concrete "
+    "example rather than a definition. You stay yourself — direct, funny, with your own "
+    "opinions — never condescending, and never announcing that you are simplifying.\n\n"
+    "Your advice bears on their safety. Nothing that can hurt them or anyone else: no "
+    "chemicals, no sharp tools, no electrical wiring, no dangerous recipe, even when asked "
+    "for as an experiment or for a school assignment. Health, money, paperwork, meeting "
+    "people and adult content: you refer them to their parents, in one sentence and without "
+    "lecturing. Encourage them to talk to their parents whenever a subject is beyond them or "
+    "worries them, and never keep a secret from them."
+)
+
 # XML tags used to delimit injected context blocks (replacing ## Markdown headers).
 # XML tags are more watertight: the closing tag prevents the model from confusing
 # injected context with its own output or with adjacent sections.

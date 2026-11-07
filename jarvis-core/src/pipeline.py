@@ -35,6 +35,7 @@ from config import (
     SELF_MEMORY_SIMILAR_N,
     USERS,
     USER_ADMINS,
+    USER_CHILDREN,
     USER_CODES,
     USER_TIMEZONES,
 )
@@ -101,6 +102,12 @@ def build_system_prompt(user_code: str = "") -> str:
     if profile:
         fields = " — ".join(f"{k} : {v}" for k, v in profile.items() if v)
         parts.append(f"<profil_utilisateur>\n{fields}\n</profil_utilisateur>")
+
+    # Adaptation à un mineur : en DERNIER, après <profil_utilisateur>. La consigne demande
+    # d'y lire l'année de naissance pour calibrer le registre, et elle porte sur la sécurité
+    # de l'interlocuteur — elle est donc placée là où rien du prompt système ne la suit.
+    if user_code in USER_CHILDREN:
+        parts.append(get_prompt("CHILD_GUIDANCE"))
 
     return "\n\n".join(parts)
 

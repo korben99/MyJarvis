@@ -25,6 +25,22 @@
     "google": false
   },
   {
+    "id": 4,
+    "firstname": "Chloé",
+    "name": "Example",
+    "code": "CHLOE4",
+    "mail": "chloe@example.com",
+    "city": "Paris",
+    "timezone": "Europe/Paris",
+    "briefing_enabled": true,
+    "trading": false,
+    "google": false,
+    "enfant": true,
+    "profile": {
+      "année de naissance": "2015"
+    }
+  },
+  {
     "id": 3,
     "firstname": "Test",
     "name": "Account",

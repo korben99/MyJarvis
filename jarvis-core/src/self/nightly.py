@@ -44,6 +44,7 @@ import emotional_state
 from llm.local import _NIGHTLY_PROMPTS_LOG_PATH, journal_de_cycle
 from memory import (
     archive_autobiographical_event,
+    cloturer_projets_dormants,
     consolidate_memories,
     curative_profile_cleanup,
     get_autobiographical_facts,
@@ -443,6 +444,17 @@ async def _entretien_nocturne(now: datetime, review_date: str) -> None:
         except Exception as exc:
             logger.warning(
                 "Entretien : narratif de profil en échec pour %s (%s)",
+                user_code, type(exc).__name__,
+            )
+
+        # Clôture des projets in_progress dormants. Ici, dans l'entretien qui tourne pour
+        # TOUS les utilisateurs : un projet s'endort précisément chez celui qui ne parle
+        # plus, et aucune relance ne le refermera si le canal de sortie est indisponible.
+        try:
+            await asyncio.to_thread(cloturer_projets_dormants, user_code)
+        except Exception as exc:
+            logger.warning(
+                "Entretien : clôture des projets dormants en échec pour %s (%s)",
                 user_code, type(exc).__name__,
             )
 

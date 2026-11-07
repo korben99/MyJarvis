@@ -274,6 +274,7 @@ Users are defined in `jarvis-core/JarvisData/users_list.json`. Each entry contai
 - `language` — `fr` or `en`
 - `briefing_enabled` — boolean
 - `trading` — boolean — set to `true` to enable hourly portfolio surveillance for this user
+- `enfant` — boolean — set to `true` to append the `CHILD_GUIDANCE` block to this user's system prompt (register adapted to their age, safety-first advice, referral to the parents). `config.USER_CHILDREN` carries the codes; the block is injected last, after `<profil_utilisateur>`, because it asks the model to calibrate on the `année de naissance` found there. A single boolean covers the whole of childhood, so keep that field filled.
 - `profile` — object of stable biographical facts injected into the cached system prompt (never in the dynamic prefix). Fields: `famille`, `taille`, `poids`, `année de naissance`, `habitation`, `travail`, `intérêts`, `voiture`. Add/remove keys freely — all non-empty values are rendered as `k : v` in `<profil_utilisateur>`. Update here, not via the analyzer (which tracks dynamic facts in Redis).
 
 Only users with `"trading": true` have a portfolio at all. The flag gates three separate

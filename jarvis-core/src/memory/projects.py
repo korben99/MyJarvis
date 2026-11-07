@@ -6,13 +6,20 @@ Isolé du profil et de l'épisodique parce que ces sections s'appellent mutuelle
 autour des projets — les regrouper ici casse le cycle d'import.
 """
 
+import difflib
 import re
 from datetime import datetime, timezone
 
-from config import DONE_PROJECT_TTL_DAYS
+from config import DONE_PROJECT_TTL_DAYS, STALE_PROJECT_DAYS
 from helpers import get_logger, redis_get_json, redis_set_json, rel_time_fr
 
 logger = get_logger("jarvis-memory")
+
+# Seuil de similarité caractère pour rapprocher deux noms sans token commun (variante de
+# casse, faute de frappe, pluriel). Volontairement strict : un rapprochement trop lâche
+# fusionne des projets distincts, et un rattachement abusif perd la tâche en silence, alors
+# qu'un doublon se voit et se corrige.
+_SEUIL_SIMILARITE_CARACTERE = 0.85
 
 
 def get_user_projects(user_code: str) -> list:
@@ -100,6 +107,43 @@ def update_user_projects(user_code: str, projects: list):
     redis_set_json(f"user:{user_code}:projects", result)
 
 
+def cloturer_projets_dormants(user_code: str, seuil_jours: int = STALE_PROJECT_DAYS) -> int:
+    """Clôt (status `done`) les projets in_progress sans mise à jour depuis `seuil_jours`.
+
+    `last_update` est laissé tel quel, et non ramené à maintenant : la purge des projets
+    clos (DONE_PROJECT_TTL_DAYS) doit compter à partir de la dernière activité réelle, pas
+    de la clôture, sinon un projet oublié depuis des mois repartirait pour 180 jours. Une
+    ligne d'update trace que la clôture est automatique et non confirmée par l'utilisateur.
+    Rend le nombre de projets clos.
+    """
+    projects = get_user_projects(user_code)
+    if not projects:
+        return 0
+    cutoff = datetime.now(timezone.utc).timestamp() - seuil_jours * 86400
+    today = datetime.now(timezone.utc).isoformat()[:10]
+    n = 0
+    for p in projects:
+        if p.get("status") != "in_progress" or not p.get("last_update"):
+            continue
+        try:
+            if datetime.fromisoformat(p["last_update"]).timestamp() >= cutoff:
+                continue
+        except (ValueError, TypeError):
+            continue
+        p["status"] = "done"
+        p.setdefault("updates", []).append(
+            {
+                "date": today,
+                "summary": f"Clôture automatique : sans activité depuis {seuil_jours} jours.",
+            }
+        )
+        n += 1
+    if n:
+        update_user_projects(user_code, projects)
+        logger.info("Projets dormants clôturés pour %s : %d", user_code, n)
+    return n
+
+
 def get_project_detail(user_code: str, project_name: str) -> dict | None:
     """Return the full project dict (with updates timeline) by fuzzy name match."""
     projects = get_user_projects(user_code)
@@ -173,11 +217,22 @@ def _fuzzy_project_name(
     for existing_name, existing_proj in project_map.items():
         words_ex = tokenize(existing_name)
         overlap = len(words_new & words_ex)
-        if overlap == 0:
+        # Le recouvrement de mots ne voit pas une variante À L'INTÉRIEUR d'un mot : deux
+        # noms mono-mot comme « ClaimSentry » et « claimssentry » n'ont aucun token commun
+        # et marquent 0. La similarité caractère rattrape ce cas, sous un seuil séparé et
+        # strict pour ne pas fusionner des projets réellement distincts.
+        char_ratio = difflib.SequenceMatcher(
+            None, name.lower(), existing_name.lower()
+        ).ratio()
+        if overlap == 0 and char_ratio < _SEUIL_SIMILARITE_CARACTERE:
             continue
-        general = overlap / max(len(words_new), len(words_ex))
-        subset = 1.0 if overlap == min(len(words_new), len(words_ex)) else 0.0
-        score = max(general, subset)
+        general = overlap / max(len(words_new), len(words_ex)) if overlap else 0.0
+        subset = (
+            1.0 if overlap and overlap == min(len(words_new), len(words_ex)) else 0.0
+        )
+        score = max(
+            general, subset, char_ratio if char_ratio >= _SEUIL_SIMILARITE_CARACTERE else 0.0
+        )
         if score < threshold:
             continue
         is_active = existing_proj.get("status") != "done"

@@ -822,6 +822,12 @@ MEMORY_CONSOLIDATION_IMPORTANCE = float(
 # lors du nightly review, donc l'information n'est pas perdue.
 DONE_PROJECT_TTL_DAYS = int(os.getenv("DONE_PROJECT_TTL_DAYS", "180"))
 
+# Au-delà de ce délai sans mise à jour, un projet in_progress est clos automatiquement :
+# l'analyzer ne referme jamais un projet qu'on cesse simplement d'évoquer, et la relance
+# vers l'utilisateur (flag_project_stall) ne passe pas quand aucun canal n'est disponible.
+# Sans ce plafond, un in_progress oublié encombre le contexte indéfiniment.
+STALE_PROJECT_DAYS = int(os.getenv("STALE_PROJECT_DAYS", "60"))
+
 # Nombre maximum d'entrées conservées dans le journal de croissance (growth_log) de jarvis-self.json.
 # Chaque entrée représente un résumé quotidien par utilisateur (1 entrée/utilisateur/jour).
 # Avec 2 utilisateurs actifs, 60 = environ un mois de journal avant rotation.
@@ -957,6 +963,9 @@ USER_CODES: dict[str, str] = {code: u["firstname"] for code, u in USERS.items()}
 
 # codes with admin: true — allowed to approve/reject prompt proposals
 USER_ADMINS: set[str] = {code for code, u in USERS.items() if u.get("admin") is True}
+
+# codes with enfant: true — receive CHILD_GUIDANCE in their system prompt
+USER_CHILDREN: set[str] = {code for code, u in USERS.items() if u.get("enfant") is True}
 
 # code → email (empty string = no email delivery)
 USER_EMAILS: dict[str, str] = {code: u.get("mail", "") for code, u in USERS.items()}

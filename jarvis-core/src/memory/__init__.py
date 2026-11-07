@@ -43,6 +43,7 @@ from .profile import (
 )
 from .projects import (
     apply_project_updates,
+    cloturer_projets_dormants,
     get_project_detail,
     get_project_timeline_text,
     get_user_projects,
@@ -92,7 +93,7 @@ __all__ = [
     "get_user_preferences", "update_user_preference",
     # projects
     "get_user_projects", "projets_actifs", "update_user_projects", "get_project_detail",
-    "get_project_timeline_text", "apply_project_updates",
+    "get_project_timeline_text", "apply_project_updates", "cloturer_projets_dormants",
     # episodic
     "log_conversation", "get_recent_conversations",
     # vectors
