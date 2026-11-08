@@ -39,6 +39,7 @@ from config import (
     USER_CODES,
     USER_TIMEZONES,
     VISION_MODEL,
+    VISION_NATIVE,
     is_qwen3,
     llm_timeout,
 )
@@ -68,7 +69,8 @@ from helpers import (
     set_sticky_rag,
 )
 from apns import send_apns_push
-from llm.client import describe_images, stream_openai
+from llm.client import describe_images, resolve_image_parts, stream_openai
+from llm.local import stream_local_vision
 from llm.router import llm_route
 from memory import (
     append_conversation_message,
@@ -334,6 +336,16 @@ class _SseCtx:
     original_message: str
     history_user_content: str  # req.message stripped of injected doc — saved to Redis/convlog
     image_parts: list  # non-empty when vision processing is deferred to _sse_stream
+    # (messages[-1]["content"], raw_user_content) d'avant la consigne de vision native,
+    # à rétablir dès que l'image n'atteint pas le modèle : sinon le modèle texte est
+    # assuré de voir une image qu'il n'a pas reçue, et en invente le contenu.
+    sans_image: tuple[str, str] | None = None
+
+
+def _retablir_sans_image(ctx: "_SseCtx") -> None:
+    if ctx.sans_image:
+        ctx.messages[-1]["content"], ctx.raw_user_content = ctx.sans_image
+        ctx.sans_image = None
 
 
 async def _complete_after_disconnect(ctx: _SseCtx) -> None:
@@ -348,6 +360,7 @@ async def _complete_after_disconnect(ctx: _SseCtx) -> None:
             "post-disconnect completion: user=%s session=%s", ctx.user_code, ctx.session_id
         )
         if ctx.image_parts:
+            _retablir_sans_image(ctx)
             logger.info("post-disconnect: processing deferred vision (%d parts)", len(ctx.image_parts))
             _img_desc = await describe_images(ctx.image_parts, ctx.original_message)
             ctx.image_parts = []
@@ -403,6 +416,47 @@ async def _complete_after_disconnect(ctx: _SseCtx) -> None:
         logger.warning("post-disconnect completion failed: %s", exc)
 
 
+def _flux_texte(ctx: _SseCtx):
+    return stream_openai(
+        ctx.messages,
+        ctx.use_model,
+        ctx.api_url,
+        ctx.api_key,
+        ctx.timeout,
+        no_think=ctx.no_think,
+        session_id=ctx.session_id,
+        max_tokens=ctx.max_tokens,
+        thinking_budget=ctx.thinking_budget,
+    )
+
+
+async def _flux_vision_natif(ctx: _SseCtx, images: list):
+    """Vision native, avec repli sur une réponse sans l'image.
+
+    stream_local_vision journalise ses erreurs (greffe des poids, image indécodable,
+    mlx_vlm) et finit sans jeton. Sans repli, le message entier resterait sans réponse,
+    là où le pipeline à deux étages perdait seulement la description. Pas de repli sur
+    un VLM chargé à part : ce serait une seconde copie du modèle principal en mémoire.
+    """
+    recu = False
+    async for chunk in stream_local_vision(
+        ctx.messages,
+        ctx.use_model,
+        images,
+        no_think=ctx.no_think,
+        max_tokens=ctx.max_tokens,
+        thinking_budget=ctx.thinking_budget,
+    ):
+        recu = True
+        yield chunk
+    if recu:
+        return
+    logger.warning("vision native : aucun jeton — réponse sans l'image")
+    _retablir_sans_image(ctx)
+    async for chunk in _flux_texte(ctx):
+        yield chunk
+
+
 async def _sse_stream(ctx: _SseCtx):
     """Générateur SSE pour le streaming Qwen3/cloud.
 
@@ -421,7 +475,30 @@ async def _sse_stream(ctx: _SseCtx):
         # describe_images can take 2+ min for large images. Running it here,
         # AFTER the StreamingResponse is returned, lets iOS receive this first
         # SSE event and reset its connection timeout before processing starts.
-        if ctx.image_parts:
+        #
+        # Vision native : l'image va au modèle principal lui-même, sans description
+        # préalable — seulement si c'est bien le modèle porteur des poids vision qui
+        # répond. ctx.image_parts reste posé : une déconnexion avant toute réponse
+        # visible bascule _complete_after_disconnect sur le pipeline à deux étages.
+        _native_images: list = []
+        if ctx.image_parts and VISION_NATIVE and ctx.use_model == VISION_MODEL:
+            yield "data: " + json.dumps({"think": "📷 Lecture de l'image…"}) + "\n\n"
+            # Rapatriées avant de prendre le GPU : laissée en http://, une URL interne
+            # serait téléchargée par mlx_vlm sous le lock, sans redressement ni réduction.
+            try:
+                _native_images = await resolve_image_parts(ctx.image_parts)
+            except Exception as exc:
+                logger.warning("vision native : résolution des images échouée (%s)", exc)
+                _native_images = ctx.image_parts
+            ctx.sans_image = (ctx.messages[-1]["content"], ctx.raw_user_content)
+            _new_raw = f"{ctx.original_message}\n\n{get_prompt('VISION_NATIVE_CONSIGNE')}"
+            _old_block = f"<user_message>\n{ctx.raw_user_content}\n</user_message>"
+            _new_block = f"<user_message>\n{_new_raw}\n</user_message>"
+            ctx.messages[-1]["content"] = ctx.messages[-1]["content"].replace(
+                _old_block, _new_block, 1
+            )
+            ctx.raw_user_content = _new_raw
+        if ctx.image_parts and not _native_images:
             yield "data: " + json.dumps({"think": "📷 Analyse de l'image en cours…"}) + "\n\n"
             _vision_task = asyncio.create_task(
                 describe_images(ctx.image_parts, ctx.original_message)
@@ -474,17 +551,12 @@ async def _sse_stream(ctx: _SseCtx):
         # tell real vs false close until the next chunk reveals what follows.
         _pending_close = False
 
-        async for chunk in stream_openai(
-            ctx.messages,
-            ctx.use_model,
-            ctx.api_url,
-            ctx.api_key,
-            ctx.timeout,
-            no_think=ctx.no_think,
-            session_id=ctx.session_id,
-            max_tokens=ctx.max_tokens,
-            thinking_budget=ctx.thinking_budget,
-        ):
+        _llm_stream = (
+            _flux_vision_natif(ctx, _native_images)
+            if _native_images
+            else _flux_texte(ctx)
+        )
+        async for chunk in _llm_stream:
             raw_chunks.append(chunk)
 
             # ── Think filtering ─────────────────────────────────────────────
@@ -1003,14 +1075,87 @@ async def _handle_briefing(
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 
+# Commentaire SSE : ignoré par les deux clients (lignes sans « data: »), mais tout octet
+# reçu remet à zéro le délai iOS sans réception (60 s, timeoutIntervalForRequest).
+_SSE_ATTENTE = ": attente\n\n"
+_SSE_ATTENTE_S = 15.0
+
+
+async def _vider(body_iterator) -> None:
+    async for _ in body_iterator:
+        pass
+
+
+async def _finir_apres_deconnexion(prep: asyncio.Task) -> None:
+    """Termine un tour dont le client est parti pendant la préparation.
+
+    Le générateur SSE est démarré puis annulé à sa première attente : c'est la même
+    déconnexion qu'en cours de flux, et son propre traitement (réponse complète en
+    arrière-plan, push APNs) s'applique sans être dupliqué ici.
+    """
+    try:
+        resp = await prep
+    except Exception as exc:
+        logger.warning("préparation du tour échouée après déconnexion : %s", exc)
+        return
+    if not isinstance(resp, StreamingResponse):
+        return
+    corps = asyncio.create_task(_vider(resp.body_iterator))
+    await asyncio.sleep(0)
+    corps.cancel()
+
+
+async def _sse_premier_octet(prep: asyncio.Task):
+    """Flux SSE ouvert dès la requête, pendant que _chat prépare le tour.
+
+    Routeur, contexte et attente du GPU derrière une tâche de fond précèdent le premier
+    jeton : sans octet pendant ce temps, iOS coupe la connexion au bout de 60 s.
+    """
+    try:
+        yield _SSE_ATTENTE
+        while not prep.done():
+            # asyncio.wait n'annule pas prep à l'expiration, contrairement à wait_for.
+            await asyncio.wait({prep}, timeout=_SSE_ATTENTE_S)
+            if not prep.done():
+                yield _SSE_ATTENTE
+    except asyncio.CancelledError:
+        logger.info("Client disconnected (préparation en cours)")
+        _spawn_bg(_finir_apres_deconnexion(prep))
+        raise
+
+    try:
+        resp = prep.result()
+    except Exception as exc:
+        logger.error("préparation du tour échouée : %s", exc)
+        _msg = "⚠️ Erreur pendant la préparation de la réponse. Réessaie dans un instant."
+        yield f"data: {json.dumps({'content': _msg})}\n\n"
+        yield f"data: {json.dumps({'done': True})}\n\n"
+        return
+    if isinstance(resp, StreamingResponse):
+        async for chunk in resp.body_iterator:
+            yield chunk
+    else:
+        yield f"data: {json.dumps({'content': resp.get('response', '')})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'model': resp.get('model', '')})}\n\n"
+
+
 @router.post("/chat")
 async def chat(req: ChatRequest):
     if not PRIMARY_API_KEY and not LLM_LOCAL:
         raise HTTPException(503, "No LLM API key configured")
-
-    user_code = req.user_code
-    if not user_code or user_code not in USER_CODES:
+    if not req.user_code or req.user_code not in USER_CODES:
         raise HTTPException(403, "Invalid user code")
+    if not req.stream:
+        return await _chat(req)
+    return StreamingResponse(
+        _sse_premier_octet(asyncio.create_task(_chat(req))),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+async def _chat(req: ChatRequest):
+    user_code = req.user_code
 
     # Timer starts here — before any processing — so all TTFT logs are accurate.
     _t0 = time.time()

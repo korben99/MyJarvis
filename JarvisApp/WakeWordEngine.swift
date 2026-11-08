@@ -27,6 +27,10 @@ class WakeWordEngine: ObservableObject {
     private static let maxRetries = 5
     // Stored so teardown() can cancel a pending retry sleep.
     private var retryTask: Task<Void, Never>?
+    // Une session annulée par teardown() rappelle encore son gestionnaire, avec une erreur
+    // d'annulation : sans ce numéro, elle déclencherait une relance qui annule la session
+    // en cours, et ainsi de suite toutes les secondes.
+    private var sessionGeneration = 0
 
     // MARK: - Lifecycle
 
@@ -72,13 +76,18 @@ class WakeWordEngine: ObservableObject {
 
         guard let recognizer, recognizer.isAvailable else { return }
 
-        retryCount = 0   // reset on each successful new session start
+        sessionGeneration += 1
+        let generation = sessionGeneration
 
         // Auto-restart before the 1-minute iOS limit kicks in.
         // Timer block is @Sendable — hop to MainActor to safely access actor-isolated state.
         restartTimer = Timer.scheduledTimer(withTimeInterval: 45, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.enabled else { return }
+                // Le plafond de tentatives borne une rafale d'échecs rapides, pas toute la
+                // vie du moteur : sans remise à zéro ici, une pièce silencieuse (sessions
+                // closes sur « aucune parole ») le laisserait sourd entre deux relances.
+                self.retryCount = 0
                 self.startSession()
             }
         }
@@ -124,9 +133,10 @@ class WakeWordEngine: ObservableObject {
                 let taskError = error
 
                 Task { @MainActor [weak self] in
-                    guard let self else { return }
+                    guard let self, generation == self.sessionGeneration else { return }
 
                     if let transcription {
+                        self.retryCount = 0   // la session reconnaît : le backoff repart de zéro
                         let words = transcription.lowercased().split(separator: " ")
                         // Only check the last 3 words to avoid stale matches
                         let recent = words.suffix(3).joined(separator: " ")
@@ -148,11 +158,13 @@ class WakeWordEngine: ObservableObject {
                         self.retryCount += 1
                         // Store the task so teardown() can cancel the sleep if stop() is called.
                         self.retryTask?.cancel()
-                        self.retryTask = Task { @MainActor [weak self] in
+                        // Capture faible sous un autre nom : `self` est déjà déballé en
+                        // référence forte dans ce bloc, et `[weak self]` la masquerait.
+                        self.retryTask = Task { @MainActor [weak engine = self] in
                             try? await Task.sleep(for: .seconds(delay))
                             // Re-check enabled after the sleep — stop() may have been called.
-                            guard let self, self.enabled else { return }
-                            self.startSession()
+                            guard let engine, engine.enabled else { return }
+                            engine.startSession()
                         }
                     }
                 }

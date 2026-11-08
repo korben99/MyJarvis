@@ -34,7 +34,9 @@ message long / détaillé
 
 import asyncio
 import json
+import re
 import time
+import unicodedata
 from datetime import date, datetime, timezone
 
 from config import (
@@ -55,7 +57,7 @@ from llm.local import (
     journal_de_cycle,
 )
 from prompts import get_prompt
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 logger = get_logger("jarvis-analyzer")
 
@@ -109,10 +111,70 @@ def _build_analysed_history(messages: list[dict], budget_chars: int) -> str:
     return "\n".join(kept)
 
 
+# Liste fermée d'ANALYSIS_PROMPT (« Catégories AUTORISÉES »). Les clés restent en français
+# quelle que soit la langue de l'instance, d'où une seule liste.
+_FACT_CATEGORIES = frozenset({
+    "situation", "famille", "profession", "competence", "loisir", "sport", "technologie",
+    "sante", "objectif", "etude", "placement", "preference", "interet", "apprecie",
+    "aversion", "langue",
+})
+# Catégorie hors liste au sens évident : remplacée plutôt que rejetée, parce qu'un fait
+# perdu ne se rattrape pas alors qu'une clé imparfaite se fusionne la nuit suivante. Le
+# booléen replie l'ancienne catégorie dans le sujet quand elle en porte le sens :
+# `collection:periode` devient `loisir:collection_periode`, pas `loisir:periode`.
+_FACT_CATEGORY_ALIASES: dict[str, tuple[str, bool]] = {
+    "collection": ("loisir", True), "hobby": ("loisir", False), "loisirs": ("loisir", False),
+    "sports": ("sport", False),
+    "familles": ("famille", False), "families": ("famille", False), "family": ("famille", False),
+    "travail": ("profession", False), "metier": ("profession", False), "emploi": ("profession", False),
+    "etudes": ("etude", False), "scolarite": ("etude", False), "matiere": ("etude", True),
+    "specialite": ("etude", True),
+    "tech": ("technologie", False),
+    "finance": ("placement", False), "patrimoine": ("placement", False),
+    "gout": ("preference", False), "gouts": ("preference", False),
+}
+
+
+def _segment_cle(texte: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", texte).strip("_")
+
+
+def _normaliser_cle(cle: str) -> str:
+    """Ramène une clé à `categorie:sujet` en minuscules ASCII, mots liés par `_`.
+
+    Normalise au lieu de rejeter : le gabarit d'ANALYSIS_PROMPT est suivi sur le fond, et
+    ses écarts sont de forme — espaces, accents, majuscules, catégorie voisine de la liste.
+    Une catégorie inconnue sans alias est gardée et journalisée : la fusion nocturne la
+    rattache, alors qu'un rejet perdrait le fait. Une clé sans `:` est une clé scalaire
+    (`profession`) et le reste.
+    """
+    brut = unicodedata.normalize("NFKD", cle).encode("ascii", "ignore").decode().lower()
+    categorie, sep, sujet = brut.partition(":")
+    categorie, sujet = _segment_cle(categorie), _segment_cle(sujet)
+    replier = False
+    if categorie in _FACT_CATEGORY_ALIASES:
+        cible, replier = _FACT_CATEGORY_ALIASES[categorie]
+        sujet = "_".join(s for s in ((categorie if replier else ""), sujet) if s)
+        categorie = cible
+    elif sep and categorie and categorie not in _FACT_CATEGORIES:
+        logger.warning("user_fact: catégorie hors liste conservée — %s", cle)
+    # Un alias replié devient le sujet même sans `:` — réduite à `etude`, la clé
+    # `matiere` écraserait `specialite` dans la même passe.
+    normalisee = f"{categorie}:{sujet}" if (sep or replier) and sujet else categorie
+    if normalisee != cle:
+        logger.info("user_fact: clé normalisée %r → %r", cle, normalisee)
+    return normalisee
+
+
 class UserFact(BaseModel):
     model_config = {"extra": "ignore"}
     key: str
     value: str
+
+    @field_validator("key")
+    @classmethod
+    def _cle_normalisee(cls, v: str) -> str:
+        return _normaliser_cle(v)
 
 
 class InterestWeight(BaseModel):
@@ -141,6 +203,16 @@ class AnalysisResult(BaseModel):
     interest_weights: list[InterestWeight] = Field(default_factory=list)
     memory_summary: str | None = None
     importance: float | None = None
+
+    # Seul rejet : une clé ou une valeur vide après normalisation, qui ne s'écrirait que
+    # comme un trou dans le profil.
+    @field_validator("user_facts")
+    @classmethod
+    def _faits_non_vides(cls, v: list[UserFact]) -> list[UserFact]:
+        gardes = [f for f in v if f.key and f.value.strip()]
+        if len(gardes) != len(v):
+            logger.warning("user_facts: %d fait(s) vide(s) écarté(s)", len(v) - len(gardes))
+        return gardes
 
 
 class JournalEntry(BaseModel):
@@ -229,13 +301,17 @@ async def analyze_exchange(
         )
 
 
-async def _journal_intime(conversation: str, user_code: str) -> bool:
+async def _journal_intime(conversation: str, user_code: str, analysed_history: str = "") -> bool:
     """Second appel — le journal de Jarvis. Rend True si un souvenir a été écrit.
 
     Séparé de `_analyse` parce que les deux consignes s'excluent : ANALYSIS_PROMPT ordonne
     « observer la personne, pas toi-même ». Le prompt reçoit son état du moment — humeur,
     dispositions, avis, relation à cet interlocuteur — sous IDENTITY : sans de quoi écrire
     à la première personne, la sortie serait un résumé de plus.
+
+    `analysed_history` est le même que celui d'ANALYSIS_PROMPT : sans les tours antérieurs,
+    un « elle » renvoyant à un message précédent n'a pas d'antécédent, et le souvenir écrit
+    devine le lien de parenté.
 
     Ne lève jamais : le journal est un ajout au cycle d'analyse, pas une condition de son
     succès.
@@ -262,6 +338,7 @@ async def _journal_intime(conversation: str, user_code: str) -> bool:
             relation="\n".join(f"- {k} : {v}" for k, v in rel.items() if k != "updated_at")
             or "- pas encore d'historique",
             conversation=conversation,
+            analysed_history=analysed_history or "aucun",
         )
         content = await call_llm_local_async_bg(
             [
@@ -631,7 +708,7 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
 
                 # Journal de Jarvis — appel séparé sur le même échange. Après le watermark :
                 # un échec ici ne doit pas faire réanalyser la session.
-                await _journal_intime(conversation, uc)
+                await _journal_intime(conversation, uc, analysed_history)
                 most_recent_analysis = analysis  # la dernière réussie en ordre chrono
 
                 # ── Fusion incrémentale ───────────────────────────────────

@@ -13,6 +13,8 @@ class JarvisAPI: ObservableObject {
     @Published var isProcessing = false
     @Published var activeNetwork: NetworkRoute = .unknown
     @Published var thinkingText: String = ""
+    @Published var isRecovering = false
+    private var recoveryCancelled = false
 
     private var localServerURL = ""
     private var vpnServerURL   = ""
@@ -39,16 +41,17 @@ class JarvisAPI: ObservableObject {
     // URLSession for SSE streaming. URLSession.shared has a 7-day resource timeout —
     // a server that hangs mid-stream would hold the connection open indefinitely.
     //
-    // timeoutIntervalForRequest  = time without receiving ANY byte (= TTFT budget).
-    //   Worst case: 512-token think budget (~8 s) + large-context prefill (~12 s)
-    //   + _infer_lock wait (~5 s) = ~25 s. 60 s gives a 35 s safety margin.
-    // timeoutIntervalForResource = total stream duration cap.
-    //   Longest plausible response: 2000-token briefing @ 60 tok/s (~33 s) + 25 s TTFT
-    //   = ~58 s. 180 s kills truly stalled streams without cutting off legitimate ones.
+    // timeoutIntervalForRequest  = délai maximal sans AUCUN octet reçu. Le serveur envoie
+    //   un commentaire SSE toutes les 15 s tant que le tour se prépare (routeur, contexte,
+    //   attente du GPU), puis les fragments de réflexion : 60 s ne se dépasse que si le
+    //   serveur ne répond plus du tout.
+    // timeoutIntervalForResource = durée totale du flux. Une attente du GPU derrière une
+    //   génération de fond (~60 s) suivie d'une réponse avec réflexion longue (~3000 jetons
+    //   de réflexion + réponse, ~90 s) dépasse 180 s ; 300 s ne coupe qu'un flux bloqué.
     private let sseSession: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest  = 60
-        config.timeoutIntervalForResource = 180
+        config.timeoutIntervalForResource = 300
         return URLSession(configuration: config)
     }()
 
@@ -106,6 +109,7 @@ class JarvisAPI: ObservableObject {
         let imageData = image?.jpegData(compressionQuality: 0.7)
         let imageBase64 = imageData.map { $0.base64EncodedString() }
 
+        let sentAt = Date()
         messages.append(ChatMessage(role: .user, content: text, imageData: imageData))
         let assistantMessage = ChatMessage(role: .assistant, content: "", isStreaming: true)
         messages.append(assistantMessage)
@@ -221,33 +225,70 @@ class JarvisAPI: ObservableObject {
                 .cannotFindHost,
             ].contains(urlErr?.code)
 
-            if let pos = messages.firstIndex(where: { $0.id == assistantID }) {
-                switch urlErr?.code {
-                case .timedOut:
-                    messages[pos].content = "⏱ Pas de réponse dans les délais — rechargement…"
-                case .networkConnectionLost:
-                    // Connection dropped (backgrounding, screen lock, network switch).
-                    // Server-side the response was saved — reload will recover it.
-                    messages[pos].content = "Connexion interrompue — rechargement…"
-                case .notConnectedToInternet, .cannotConnectToHost, .cannotFindHost:
-                    messages[pos].content = "Réseau inaccessible."
-                default:
-                    messages[pos].content = "Erreur : \(error.localizedDescription)"
-                }
-                messages[pos].isStreaming = false
-            }
-
             if isServerUnreachable {
+                if let pos = messages.firstIndex(where: { $0.id == assistantID }) {
+                    messages[pos].content = "Réseau inaccessible."
+                    messages[pos].isStreaming = false
+                }
                 // Server genuinely unreachable — clear cached URL so next send
                 // triggers a fresh probe, and surface the disconnected state.
                 resolvedURL = ""
                 connectionState = .error("Serveur inaccessible")
-            } else {
-                // Timeout or connection-lost — server is probably still up and may
-                // have finished generating the response. Reload to recover it.
-                await loadConversation()
+                return
+            }
+
+            // Seules ces deux coupures laissent le serveur finir le tour sans le client :
+            // il l'enregistre puis le pousse en APNs. Toute autre erreur s'affiche aussitôt.
+            guard urlErr?.code == .timedOut || urlErr?.code == .networkConnectionLost else {
+                if let pos = messages.firstIndex(where: { $0.id == assistantID }) {
+                    messages[pos].content = "Erreur : \(error.localizedDescription)"
+                    messages[pos].isStreaming = false
+                }
+                return
+            }
+
+            // La bulle reste « en cours » et l'envoi reste bloqué jusqu'à ce que la réponse
+            // arrive par l'historique — un renvoi du même message produirait une seconde
+            // réponse. L'utilisateur peut abandonner l'attente (cancelRecovery).
+            let recovered = await recoverResponse(to: text, sentAt: sentAt)
+            if !recovered, let pos = messages.firstIndex(where: { $0.id == assistantID }) {
+                messages[pos].content = "Réponse non reçue. Si le serveur la termine, elle arrivera par notification."
+                messages[pos].isStreaming = false
             }
         }
+    }
+
+    func cancelRecovery() {
+        recoveryCancelled = true
+    }
+
+    /// Attend que le serveur ait enregistré la réponse à `text`, puis resynchronise
+    /// l'historique. Faux après 3 min ou si l'utilisateur abandonne.
+    ///
+    /// Le serveur enregistre la question et la réponse ensemble, à la fin du tour :
+    /// une resynchronisation immédiate effacerait la question de l'écran. La paire doit
+    /// dater d'après l'envoi — un « ok » répété retrouverait sinon l'échange précédent.
+    /// Une paire sans horodatage n'est jamais acceptée.
+    private func recoverResponse(to text: String, sentAt: Date) async -> Bool {
+        isRecovering = true
+        recoveryCancelled = false
+        defer { isRecovering = false }
+        // Marge pour un léger décalage d'horloge entre l'iPhone et le serveur.
+        let notBefore = sentAt.timeIntervalSince1970 - 2
+        let deadline = ContinuousClock.now + .seconds(180)
+        while ContinuousClock.now < deadline, !recoveryCancelled {
+            try? await Task.sleep(for: .seconds(5))
+            guard !recoveryCancelled else { break }
+            guard let history = try? await fetchHistory() else { continue }
+            let tail = history.suffix(2)
+            if tail.count == 2, let user = tail.first, let reply = tail.last,
+               user.role == "user", user.content == text, (user.ts ?? 0) >= notBefore,
+               reply.role == "assistant" {
+                messages = chatMessages(from: history)
+                return true
+            }
+        }
+        return false
     }
 
     // MARK: - Private helpers
@@ -307,15 +348,8 @@ class JarvisAPI: ObservableObject {
         // Don't clobber an in-flight stream — isProcessing is true while SSE is active.
         guard !resolvedURL.isEmpty, !isProcessing else { return }
 
-        let userCode = UserDefaults.standard.string(forKey: "userCode") ?? "default"
-
-        guard let url = URL(string: "\(resolvedURL)/users/\(userCode)/history/\(sessionID)") else {
-            return
-        }
-
         do {
-            let (data, _) = try await apiSession.data(from: url)
-            let history = try JSONDecoder().decode([HistoryMessage].self, from: data)
+            let history = try await fetchHistory()
 
             // Smart merge — avoid replacing every ChatMessage with a new UUID,
             // which would force SwiftUI to re-render every bubble unnecessarily.
@@ -344,14 +378,28 @@ class JarvisAPI: ObservableObject {
             }
 
             // Full replace fallback (conversation was cleared or history diverged).
-            messages = history.map {
-                ChatMessage(role: ChatMessage.Role(rawValue: $0.role) ?? .assistant,
-                            content: $0.content,
-                            timestamp: $0.ts.map { Date(timeIntervalSince1970: $0) } ?? Date())
-            }
+            messages = chatMessages(from: history)
 
         } catch {
             print("History load error:", error)
+        }
+    }
+
+    private func fetchHistory() async throws -> [HistoryMessage] {
+        let userCode = UserDefaults.standard.string(forKey: "userCode") ?? "default"
+        guard !resolvedURL.isEmpty,
+              let url = URL(string: "\(resolvedURL)/users/\(userCode)/history/\(sessionID)") else {
+            throw URLError(.badURL)
+        }
+        let (data, _) = try await apiSession.data(from: url)
+        return try JSONDecoder().decode([HistoryMessage].self, from: data)
+    }
+
+    private func chatMessages(from history: [HistoryMessage]) -> [ChatMessage] {
+        history.map {
+            ChatMessage(role: ChatMessage.Role(rawValue: $0.role) ?? .assistant,
+                        content: $0.content,
+                        timestamp: $0.ts.map { Date(timeIntervalSince1970: $0) } ?? Date())
         }
     }
 }

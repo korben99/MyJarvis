@@ -60,6 +60,9 @@ struct JarvisApp: App {
                 .onChange(of: api.connectionState) { _, _ in
                     syncNotificationService()
                 }
+                .onReceive(NotificationCenter.default.publisher(for: .jarvisPushReceived)) { _ in
+                    Task { await api.loadConversation() }
+                }
                 .task {
                     await speechEngine.setup(model: settings.whisperModel)
                     speechEngine.language = settings.language

@@ -2,7 +2,7 @@
 // Jarvis proactive push notifications — Phase 1 (polling, no APNs required)
 //
 // Strategy:
-//   • Foreground: poll /device/pending/{userCode} every 15 min via a Timer.
+//   • Foreground: poll /device/pending/{userCode} every 30 min via a Timer.
 //   • Background: BGAppRefreshTask polls once (~every 2h, iOS-throttled).
 //   • All notifications are displayed as local UNUserNotificationCenter alerts.
 //
@@ -237,8 +237,16 @@ extension NotificationService: UNUserNotificationCenterDelegate {
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
+        // Une notification reçue app ouverte porte souvent une réponse terminée par le
+        // serveur après une coupure : elle est déjà dans l'historique, pas encore à l'écran.
+        NotificationCenter.default.post(name: .jarvisPushReceived, object: nil)
         completionHandler([.banner, .sound])
     }
+}
+
+extension Notification.Name {
+    // nonisolated : lu depuis le délégué de notification, qui ne tourne pas sur le main actor.
+    nonisolated static let jarvisPushReceived = Notification.Name("jarvisPushReceived")
 }
 
 // MARK: - Codable models

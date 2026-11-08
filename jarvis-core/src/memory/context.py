@@ -201,7 +201,7 @@ def build_memory_context(
     # Falls back to raw k/v if narrative not yet generated.
     if _profile_narrative:
         parts.append(
-            "<profil_narratif>\n" + _profile_narrative + "\n</profil_narratif>"
+            "<profil_narratif_utilisateur>\n" + _profile_narrative + "\n</profil_narratif_utilisateur>"
         )
     elif profile:
         grouped: dict[str, list[str]] = {}
@@ -215,7 +215,7 @@ def build_memory_context(
         plines = [f"- {k}: {v}" for k, v in scalars]
         plines += [f"- {cat}: {', '.join(vals)}" for cat, vals in grouped.items()]
         parts.append(
-            "<profil_narratif>\n" + "\n".join(plines) + "\n</profil_narratif>"
+            "<profil_narratif_utilisateur>\n" + "\n".join(plines) + "\n</profil_narratif_utilisateur>"
         )
 
     # User preferences

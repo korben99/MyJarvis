@@ -95,3 +95,34 @@ class TestPromptAnalyse:
             f"{sorted(manquants)} sont déclarés dans AnalysisResult mais jamais demandés "
             "au modèle : ils resteront à leur valeur par défaut pour toujours."
         )
+
+
+class TestNormalisationCles:
+    """Une clé mal formée se corrige ; seul un fait vide est écarté."""
+
+    @pytest.mark.parametrize("brute, attendue", [
+        ("loisir:collection voitures f1", "loisir:collection_voitures_f1"),
+        ("sante:kiné", "sante:kine"),
+        ("Matière:SES", "etude:matiere_ses"),
+        ("collection:periode", "loisir:collection_periode"),
+        ("travail:employeur", "profession:employeur"),
+        ("famille:belle-mère", "famille:belle_mere"),
+        ("profession", "profession"),
+        ("matiere", "etude:matiere"),
+        ("travail", "profession"),
+        ("situation:a:b", "situation:a_b"),
+    ])
+    def test_cle_normalisee(self, brute, attendue):
+        assert UserFact.model_validate({"key": brute, "value": "v"}).key == attendue
+
+    def test_categorie_inconnue_conservee(self):
+        """Un rejet perdrait le fait ; la fusion nocturne rattache la catégorie."""
+        assert UserFact.model_validate({"key": "voyage:japon", "value": "v"}).key == "voyage:japon"
+
+    def test_seuls_les_faits_vides_sont_ecartes(self):
+        r = AnalysisResult.model_validate({"user_facts": [
+            {"key": "loisir:tennis", "value": "joue en club"},
+            {"key": "  ", "value": "sans clé"},
+            {"key": "loisir:kart", "value": "  "},
+        ]})
+        assert [f.key for f in r.user_facts] == ["loisir:tennis"]

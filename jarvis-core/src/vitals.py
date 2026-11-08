@@ -51,7 +51,7 @@ import shutil
 import time
 from datetime import datetime, timedelta, timezone
 
-from helpers import get_logger, get_redis, redis_get_json, redis_set_json
+from helpers import get_logger, get_redis, redis_get_json, redis_set_json, rel_time_fr
 
 logger = get_logger("jarvis-vitals")
 
@@ -486,8 +486,11 @@ def render_prompt_block() -> str:
     if not saillants and not incidents:
         return "<etat_systeme>nominal</etat_systeme>"
     lignes = [f"- {k} : {v}" for k, v in saillants.items()]
+    # Daté parce qu'un incident reste affiché sept jours : sans son âge, une aggravation
+    # passée se lit comme l'état présent et contredit le dernier scan d'<internal_state>.
     for it in incidents[-5:]:
-        lignes.append(f"- incident {it.get('severity', '')} : {it['kind']} — {it['detail']}")
+        quand = f" ({rel_time_fr(it['at'])})" if it.get("at") else ""
+        lignes.append(f"- incident {it.get('severity', '')}{quand} : {it['kind']} — {it['detail']}")
     return "<etat_systeme>\n" + "\n".join(lignes) + "\n</etat_systeme>"
 
 

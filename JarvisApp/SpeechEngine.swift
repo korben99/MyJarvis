@@ -177,7 +177,7 @@ class SpeechEngine: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
                 // Use Timer(timeInterval:) + RunLoop.add to avoid double-scheduling:
                 // scheduledTimer already adds to .default; we want .common only.
-                let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+                let t = Timer(timeInterval: 0.1, repeats: true) { [weak self = self] _ in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
                         self.recordingDuration += 0.1

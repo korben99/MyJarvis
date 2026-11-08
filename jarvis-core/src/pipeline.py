@@ -46,6 +46,7 @@ from deps import (
     TOTAL_CONTEXT_BUDGET,
     WEB_CHAR_BUDGET,
 )
+from google_services import is_google_available
 from helpers import fmt_event_time, fmt_now_fr, get_logger, rel_time_fr
 from llm.client import trim_chunks
 from memory import (
@@ -98,6 +99,8 @@ def build_system_prompt(user_code: str = "") -> str:
     # l'empêche d'aller dans SYSTEM_BASE, partagé entre tous.
     if AGENT_ENABLED and user_code in USERS:
         parts.append(get_prompt("AGENT_CAPABILITY").format(firstname=firstname or "l'utilisateur"))
+    if is_google_available(user_code):
+        parts.append(get_prompt("CALENDAR_CAPABILITY").format(firstname=firstname or "l'utilisateur"))
 
     if profile:
         fields = " — ".join(f"{k} : {v}" for k, v in profile.items() if v)

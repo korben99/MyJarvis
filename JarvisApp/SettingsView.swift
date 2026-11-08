@@ -185,13 +185,13 @@ struct SettingsView: View {
                         infoRow("Speech → Text", "iPhone (WhisperKit, Neural Engine)")
                         infoRow("Text → Speech", "iPhone (iOS AVSpeech)")
                         infoRow("RAG / Memory", "Mini PC (Qdrant, Redis)")
-                        infoRow("LLM Inference", "chatGPT4o-mini for now")
+                        infoRow("LLM Inference", "Mac Mini (MLX, local)")
                     }
                     .font(.system(size: 12, design: .monospaced))
                 } header: {
                     Text("Architecture")
                 } footer: {
-                    Text("Audio never leaves your iPhone. Only text queries are sent to the mini PC, which forwards them to RunPod for LLM inference.")
+                    Text("Audio never leaves your iPhone. Only text queries are sent to the Mac Mini, which runs the LLM locally.")
                 }
             }
             .navigationTitle("Settings")

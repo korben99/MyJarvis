@@ -154,6 +154,12 @@ if LLM_LOCAL:
 # True when mlx_vlm local inference is active for image description.
 VISION_LOCAL = LLM_LOCAL and bool(VISION_MODEL)
 
+# Vision native : VISION_MODEL_LOCAL identique à PRIMARY_MODEL_LOCAL → le modèle principal
+# lit lui-même les images, ses poids vision greffés sur ceux déjà chargés (llm/local.py,
+# _load_vlm). Tout autre nom garde le pipeline à deux étages (description par un VLM
+# séparé, injectée en texte), seul utilisable avec un modèle principal sans vision.
+VISION_NATIVE = VISION_LOCAL and VISION_MODEL == PRIMARY_MODEL
+
 
 # ── Model compatibility helpers ───────────────────────────────────────────
 def is_qwen(model: str) -> bool:

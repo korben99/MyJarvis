@@ -46,6 +46,7 @@ from config import (
     ROUTER_MODEL,
     USE_THINKING_BUDGET_PROCESSOR,
     VISION_MODEL,
+    VISION_NATIVE,
     is_hermes,
     is_qwen,
     is_qwen25,
@@ -343,6 +344,17 @@ _bg_loop: asyncio.AbstractEventLoop | None = None  # loop that owns _bg_wakeup
 
 _last_chat_ts: float = 0.0  # dernière demande d'inférence en priorité chat
 
+# Un tour de chat enchaîne deux inférences, routeur puis réponse, séparées par la collecte
+# du contexte : _chat_waiters retombe à zéro entre les deux. Sans ce délai, une tâche de
+# fond prend le lock dans l'intervalle et la réponse attend toute une génération de fond,
+# assez pour que le client iOS abandonne avant le premier octet.
+_CHAT_GRACE_S = 10.0
+_last_chat_release: float = 0.0
+
+
+def _chat_grace_left() -> float:
+    return _CHAT_GRACE_S - (time.time() - _last_chat_release)
+
 
 def seconds_since_chat() -> float:
     """Secondes écoulées depuis la dernière demande d'inférence en priorité chat.
@@ -385,6 +397,14 @@ async def _acquire_infer_lock_bg() -> float:
         _bg_wakeup.set()
     _t0 = time.time()
     while True:
+        _grace = _chat_grace_left()
+        if _grace > 0:
+            _bg_wakeup.clear()
+            try:
+                await asyncio.wait_for(_bg_wakeup.wait(), timeout=_grace)
+            except asyncio.TimeoutError:
+                pass
+            continue
         with _chat_waiters_lock:
             if _chat_waiters == 0:
                 acquired = _infer_lock.acquire(blocking=False)
@@ -1559,7 +1579,11 @@ def call_llm_local_bg(
     _t0 = time.time()
     while True:
         with _chat_waiters_lock:
-            if _chat_waiters == 0 and _infer_lock.acquire(blocking=False):
+            if (
+                _chat_waiters == 0
+                and _chat_grace_left() <= 0
+                and _infer_lock.acquire(blocking=False)
+            ):
                 break
         if time.time() - _t0 > 300.0:
             logger.warning("[BG-INFER-SYNC] 300 s of chat priority — acquiring anyway")
@@ -1589,6 +1613,7 @@ async def call_llm_local_async(
     **_kwargs,
 ) -> str:
     """Async non-streaming inference, high priority (chat calls)."""
+    global _last_chat_release
     _t0 = time.time()
     _waited = await _acquire_infer_lock_chat(_t0)
     logger.debug("[TTFT] call_llm_local_async: lock acquired — waited %.3fs", _waited)
@@ -1598,6 +1623,7 @@ async def call_llm_local_async(
             no_think, session_id, json_response, thinking_budget,
         )
     finally:
+        _last_chat_release = time.time()
         _infer_lock.release()
         if _bg_wakeup is not None:
             _bg_wakeup.set()
@@ -1847,6 +1873,8 @@ async def stream_local(
 # ── Vision model (mlx_vlm) ────────────────────────────────────────────────
 # Uses _vlm_lock, NOT _infer_lock: VLM and text inference are sequential in the
 # pipeline (describe_images runs before Qwen3.6), so they never compete for the GPU.
+# Exception : en VISION_NATIVE, le VLM partage les poids du modèle principal, et
+# toute inférence vision prend aussi _infer_lock.
 
 _vlm_model = None
 _vlm_processor = None
@@ -1864,9 +1892,48 @@ def _load_vlm() -> None:
     from mlx_vlm.utils import load_config as vlm_load_config
     logger.info("VLM: loading %s…", VISION_MODEL)
     t0 = time.time()
-    _vlm_model, _vlm_processor = vlm_load(VISION_MODEL)
+    if VISION_NATIVE:
+        _vlm_model, _vlm_processor = _graft_vision_on_primary(vlm_load)
+    else:
+        _vlm_model, _vlm_processor = vlm_load(VISION_MODEL)
     _vlm_config = vlm_load_config(VISION_MODEL)
     logger.info("VLM: loaded in %.1fs", time.time() - t0)
+
+
+def _graft_vision_on_primary(vlm_load) -> tuple:
+    """Structure mlx_vlm du modèle principal, partageant les poids déjà chargés par mlx_lm.
+
+    Chargée en lazy, seuls les tenseurs vision sont matérialisés : ceux du modèle de
+    langage sont remplacés par les objets mlx_lm, sans copie. Un seul tenseur non remplacé
+    serait chargé une seconde fois en mémoire au premier appel — d'où le refus en cas
+    d'écart de nommage entre les deux bibliothèques plutôt qu'une greffe partielle.
+    """
+    from mlx.utils import tree_flatten, tree_unflatten
+
+    lm_model, _ = _load_model(PRIMARY_MODEL)
+    vlm_model, processor = vlm_load(VISION_MODEL, lazy=True)
+    if not hasattr(vlm_model, "vision_tower"):
+        raise RuntimeError(f"{VISION_MODEL} n'a pas de tour vision — VISION_NATIVE impossible")
+    langage = [
+        (k, v) for k, v in tree_flatten(lm_model.parameters()) if k.startswith("language_model.")
+    ]
+    attendus = [
+        k for k, _ in tree_flatten(vlm_model.parameters()) if not k.startswith("vision_tower.")
+    ]
+    if sorted(k for k, _ in langage) != sorted(attendus):
+        raise RuntimeError("nommage mlx_lm/mlx_vlm divergent — greffe des poids impossible")
+    vlm_model.update(tree_unflatten(langage))
+    mx.eval(vlm_model.vision_tower.parameters())
+    # Les couches mlx_vlm sont d'autres classes que celles de mlx_lm : le pilotage
+    # posé sur le modèle principal ne les atteint pas et doit être installé à part.
+    try:
+        from steering import install as _steer_install
+
+        _steer_install(vlm_model, f"{PRIMARY_MODEL}#vision")
+    except Exception as exc:
+        logger.warning("Pilotage vision indisponible (%s) — non bloquant", exc)
+    logger.info("VLM: vision native greffée sur %s", PRIMARY_MODEL.split("/")[-1])
+    return vlm_model, processor
 
 
 def _warmup_vlm() -> None:
@@ -1888,18 +1955,15 @@ def _warmup_vlm() -> None:
     logger.info("VLM warmup OK: %s", VISION_MODEL.split("/")[-1] if VISION_MODEL else "?")
 
 
-def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
+def _decode_image_parts(image_parts: list) -> list:
+    """image_url parts (data: ou http) → images prêtes pour mlx_vlm."""
     import base64 as _b64
     import io
-    from mlx_vlm import generate as vlm_generate
-    from mlx_vlm.prompt_utils import apply_chat_template as vlm_apply_chat_template
     from mlx_vlm.utils import load_image as vlm_load_image
 
     from PIL import Image as _PIL
     from PIL import ImageOps as _ImageOps
 
-    _load_vlm()
-    mx.clear_cache()  # libère les buffers de calcul MLX avant l'inférence VLM
     images = []
     for part in image_parts:
         url = (part.get("image_url") or {}).get("url", "")
@@ -1909,9 +1973,9 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
             # Les photos iPhone stockent les pixels non tournés + un tag EXIF Orientation ;
             # sans application du tag, le VLM reçoit l'image couchée.
             pil_img = _ImageOps.exif_transpose(pil_img).convert("RGB")
-            # Resize to max 1024px — reduces visual tiles and speeds up inference significantly.
-            # iPhone photos (~12 MP) generate dozens of tiles at full resolution.
-            max_dim = 1024
+            # Resize to max 1536px — iPhone photos (~12 MP) generate dozens of tiles at full
+            # resolution; below ~1500px small printed text (documents, radios) becomes unreadable.
+            max_dim = 1536
             if max(pil_img.size) > max_dim:
                 ratio = max_dim / max(pil_img.size)
                 pil_img = pil_img.resize(
@@ -1927,9 +1991,19 @@ def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
             images.append(url)
         else:
             logger.warning(
-                "_describe_images_sync: URL dropped (not data: or http) — url=%r",
+                "_decode_image_parts: URL dropped (not data: or http) — url=%r",
                 url[:80],
             )
+    return images
+
+
+def _describe_images_sync(image_parts: list, text_prompt: str) -> str:
+    from mlx_vlm import generate as vlm_generate
+    from mlx_vlm.prompt_utils import apply_chat_template as vlm_apply_chat_template
+
+    _load_vlm()
+    mx.clear_cache()  # libère les buffers de calcul MLX avant l'inférence VLM
+    images = _decode_image_parts(image_parts)
     if not images:
         logger.warning("_describe_images_sync: no image decoded from %d part(s)", len(image_parts))
         return ""
@@ -1955,4 +2029,120 @@ async def describe_images_local(image_parts: list, text_prompt: str) -> str:
         with _vlm_lock:
             return _describe_images_sync(image_parts, text_prompt)
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_vlm_executor, _run)
+    if not VISION_NATIVE:
+        return await loop.run_in_executor(_vlm_executor, _run)
+
+    # Poids partagés avec le modèle principal : sans _infer_lock, une génération texte
+    # tournerait sur les mêmes tenseurs pendant la description. Le lock est relâché par
+    # le thread qui génère, pas par la coroutine : une annulation laisserait sinon une
+    # inférence en cours sans lock.
+    def _run_native():
+        try:
+            return _run()
+        finally:
+            _infer_lock.release()
+            _wake_bg_waiters()
+
+    await _acquire_infer_lock_chat(time.time())
+    # shield : annuler l'attente annulerait aussi le travail encore en file, qui ne
+    # s'exécuterait jamais — et son finally, seul à relâcher le lock, avec lui.
+    return await asyncio.shield(loop.run_in_executor(_vlm_executor, _run_native))
+
+
+async def stream_local_vision(
+    messages: list[dict],
+    model: str,
+    image_parts: list,
+    temperature: float | None = None,
+    max_tokens: int = MAX_TOKENS_HARD_CAP,
+    no_think: bool = False,
+    thinking_budget: int = 0,
+) -> AsyncGenerator[str, None]:
+    """Streaming d'un tour avec image(s), lues par le modèle principal (VISION_NATIVE).
+
+    Chemin distinct de stream_local parce que seul mlx_vlm calcule les positions 2D
+    (M-RoPE) des jetons d'image ; mlx_lm les numéroterait en ligne et le modèle verrait
+    l'image déformée. Même prompt (_build_prompt), même échantillonnage (_setup_gen,
+    ThinkingBudgetProcessor compris), même verrou que le chemin texte.
+    Pas de cache LRU : sa clé est faite d'ids de jetons, identiques pour deux images de
+    même taille — une entrée resservirait l'image d'un autre tour.
+    """
+    from mlx_vlm import stream_generate as vlm_stream_generate
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    stop_flag = threading.Event()
+    _t_lock_wait = time.time()
+
+    def _worker():
+        raw_chunks: list[str] = []
+        model_short = model.split("/")[-1]
+        prompt_text = ""
+        prompt_tokens = 0
+        budget = 0
+        profile = _model_profile(model)
+        try:
+            _load_vlm()
+            _, tokenizer = _load_model(model)
+            images = _decode_image_parts(image_parts)
+            if not images:
+                # Le prompt affirme au modèle qu'il voit l'image : sans elle, il l'inventerait.
+                # Zéro jeton → l'appelant répond sans l'image.
+                raise RuntimeError("aucune image décodée")
+            last = messages[-1]
+            msgs = messages[:-1] + [{
+                **last,
+                "content": [{"type": "image"} for _ in images]
+                + [{"type": "text", "text": last["content"]}],
+            }]
+            prompt_text = _build_prompt(msgs, tokenizer, model, no_think, thinking_budget)
+            sampler, procs, quant_kwargs, budget = _setup_gen(
+                profile, tokenizer, no_think, thinking_budget, temperature, max_tokens
+            )
+            with _vlm_lock:
+                for chunk in vlm_stream_generate(
+                    _vlm_model, _vlm_processor, prompt_text,
+                    image=(images[0] if len(images) == 1 else images) or None,
+                    max_tokens=budget, sampler=sampler, logits_processors=procs,
+                    **quant_kwargs,
+                ):
+                    if stop_flag.is_set():
+                        break
+                    prompt_tokens = getattr(chunk, "prompt_tokens", 0) or prompt_tokens
+                    if not chunk.text:
+                        continue
+                    text = _norm_think_close(chunk.text)
+                    raw_chunks.append(text)
+                    loop.call_soon_threadsafe(queue.put_nowait, text)
+        except Exception as exc:
+            logger.error("stream_local_vision error: %s", exc)
+        finally:
+            raw_resp = "".join(raw_chunks)
+            _debug_log(model_short, no_think, prompt_text, raw_resp)
+            _log_stats(model_short, "vision", no_think, "eos/limit",
+                       prompt_tokens, len(raw_resp) // 4, budget)
+            _detecter_boucle(raw_resp, model_short, profile)
+            mx.clear_cache()
+            _infer_lock.release()
+            _wake_bg_waiters()
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    _waited = await _acquire_infer_lock_chat(_t_lock_wait)
+    logger.debug("[TTFT] stream_local_vision: lock acquired — waited %.3fs", _waited)
+    # Exécuteur VLM plutôt qu'un thread neuf : mlx_vlm n'a jamais tourné ailleurs en
+    # production (cf. describe_images_local).
+    try:
+        _vlm_executor.submit(_worker)
+    except BaseException:
+        _infer_lock.release()
+        _wake_bg_waiters()
+        raise
+
+    try:
+        while True:
+            chunk = await queue.get()
+            if chunk is None:
+                break
+            yield chunk
+    finally:
+        stop_flag.set()  # le worker sort au jeton suivant et relâche lui-même le lock

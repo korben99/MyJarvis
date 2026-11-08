@@ -32,6 +32,11 @@ struct ChatView: View {
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .foregroundColor(.gray)
                     Spacer()
+                    if api.isRecovering {
+                        Button("Ne plus attendre") { api.cancelRecovery() }
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.jarvisAmber)
+                    }
                     if api.isProcessing {
                         ProgressView().scaleEffect(0.6).tint(Color.jarvisBlue)
                     }
@@ -234,6 +239,14 @@ struct MessageBubble: View, Equatable {
     /// inline syntax (**bold**, *italic*, `code`, etc.) is displayed correctly.
     /// Falls back to plain text if parsing fails.
     private var renderedContent: AttributedString {
+        // Avant le premier mot, l'attente peut durer une minute (réflexion, GPU occupé) :
+        // un simple « ● » se lit comme un message perdu.
+        if message.isStreaming && message.content.isEmpty {
+            var attente = AttributedString("Réponse en cours…")
+            attente.foregroundColor = .gray
+            attente.font = .system(size: 15).italic()
+            return attente
+        }
         let raw = message.content + (message.isStreaming ? " ●" : "")
         let opts = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         return (try? AttributedString(markdown: raw, options: opts)) ?? AttributedString(raw)

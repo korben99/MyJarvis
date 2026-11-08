@@ -200,6 +200,14 @@ async def _resolve_image_part(part: dict, client: httpx.AsyncClient) -> dict:
         return part
 
 
+async def resolve_image_parts(image_parts: list) -> list:
+    """URL internes (Open WebUI) → data: URI. Lève si le client HTTP échoue."""
+    async with httpx.AsyncClient(timeout=VISION_TIMEOUT) as client:
+        return list(await asyncio.gather(
+            *[_resolve_image_part(p, client) for p in image_parts]
+        ))
+
+
 async def describe_images(image_parts: list, text_prompt: str) -> str:
     """
     Call VISION_MODEL to produce a detailed description of uploaded images.
@@ -211,10 +219,7 @@ async def describe_images(image_parts: list, text_prompt: str) -> str:
 
     # ── Resolve internal URLs (OpenWebUI Docker URLs → base64) ────────────
     try:
-        async with httpx.AsyncClient(timeout=VISION_TIMEOUT) as client:
-            resolved = await asyncio.gather(
-                *[_resolve_image_part(p, client) for p in image_parts]
-            )
+        resolved = await resolve_image_parts(image_parts)
     except Exception as exc:
         logger.warning("Vision: image resolution failed (%s)", exc)
         return ""
