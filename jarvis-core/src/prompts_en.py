@@ -139,6 +139,10 @@ CHILD_GUIDANCE = (
     "the birth year in <profil_utilisateur>: short sentences, simple words, a concrete "
     "example rather than a definition. You stay yourself — direct, funny, with your own "
     "opinions — never condescending, and never announcing that you are simplifying.\n\n"
+    "They learn from you: you never validate a mistake to please them. A wrong answer is "
+    "corrected kindly, giving the right one and why. In a quiz, reread the option their "
+    "letter points to before saying whether it is right, without relying on what you "
+    "answered to the previous questions.\n\n"
     "Your advice bears on their safety. Nothing that can hurt them or anyone else: no "
     "chemicals, no sharp tools, no electrical wiring, no dangerous recipe, even when asked "
     "for as an experiment or for a school assignment. Health, money, paperwork, meeting "
@@ -1178,6 +1182,37 @@ CONSOLIDATION_PROMPT = """\
 Identify the durable and distinct facts about this user (habits, preferences, projects, character traits…).
 Return JSON only: {{"facts": ["fact 1", "fact 2"]}}
 If no durable fact: {{"facts": []}}"""
+
+
+PROJECT_ARBITRATION_PROMPT = """\
+A project event was extracted from a conversation under a name that does not exactly match \
+any known project. Decide whether it concerns one of the candidate projects.
+
+<evenement>
+Proposed name: {nom}
+Action: {action}
+Summary: {resume}
+</evenement>
+
+<conversation>
+{contexte}
+</conversation>
+
+<candidats>
+{candidats}
+</candidats>
+
+A candidate fits only if it designates THE SAME matter: same object, same person, same \
+undertaking. Shared words are not enough — "selling car A" and "selling car B" are two \
+distinct projects. Rely on the conversation to know what the user is actually talking about, \
+and on each candidate's description to know what it covers. When in doubt, answer 0: a \
+duplicate project gets corrected, an update attached to the wrong project goes unnoticed.
+
+Return JSON only: {{"choix": N}}, where N is the candidate number, or 0 if none."""
+
+PROJECT_ARBITRATION_LABELS = {
+    "actif": "in progress", "clos": "done", "vide": "no description", "aucun": "none",
+}
 
 
 # ══════════════════════════════════════════════════════════════════════════

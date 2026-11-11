@@ -75,6 +75,10 @@ logger = get_logger("jarvis-analyzer")
 ANALYSED_HISTORY_BUDGET_CHARS = 2000
 ANALYSED_HISTORY_CHARS_PER_TURN = 300
 
+# Fin de session jointe à chaque événement de projet pour l'arbitrage d'un nom inexact :
+# l'annonce qui a produit l'événement est le plus souvent dans les derniers tours.
+_CONTEXTE_ARBITRAGE_CHARS = 1500
+
 
 def _format_turns(messages: list[dict], chars_per_turn: int = 800) -> list[str]:
     """Rend des messages de chat en lignes « Rôle : contenu », du plus ancien au plus récent.
@@ -716,7 +720,13 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                     if "key" in f and "value" in f:
                         merged_facts[f["key"]] = f  # session plus récente écrase
 
-                all_projects.extend(analysis.get("project_updates", []))
+                # Chaque événement emporte sa propre session : les événements de plusieurs
+                # sessions sont appliqués ensemble, et l'arbitrage d'un nom inexact doit
+                # lire la phrase qui l'a produit, pas celle d'une autre conversation.
+                for ev in analysis.get("project_updates", []):
+                    if isinstance(ev, dict):
+                        ev["_contexte"] = conversation[-_CONTEXTE_ARBITRAGE_CHARS:]
+                    all_projects.append(ev)
 
                 for iw in analysis.get("interest_weights") or []:
                     if "term" in iw and "weight" in iw:
@@ -839,7 +849,8 @@ async def analyse_recent_conversations(user_code: str | None = None) -> None:
                 )
 
             if all_projects:
-                apply_project_updates(uc, all_projects)
+                # Hors de la boucle : un nom inexact déclenche un appel LLM synchrone.
+                await asyncio.to_thread(apply_project_updates, uc, all_projects)
 
             for iw in merged_iw.values():
                 set_interest_weight(uc, iw["term"], float(iw["weight"]))

@@ -192,6 +192,157 @@ class TestUpdateUserProjects:
         assert len(out) == 1, "une date corrompue ne doit pas supprimer le projet"
 
 
+class TestArbitrageProjets:
+    """Un nom inexact n'est rattaché à un projet connu que sur décision du modèle.
+
+    Le piège gardé ici : « vente voiture diesel » et « vente voiture sport » partagent deux
+    mots sur trois, assez pour qu'un score de mots clôture la mauvaise vente.
+    """
+
+    @staticmethod
+    def _projets():
+        return [
+            {"name": "vente voiture sport", "status": "in_progress",
+             "description": "Mise en vente, marché difficile.", "updates": []},
+            {"name": "jardin potager", "status": "in_progress",
+             "description": "Plantation des tomates.", "updates": []},
+        ]
+
+    def _applique(self, events, reponse=None, erreur=None, projets=None):
+        ecrit = {}
+        llm = MagicMock(return_value=reponse, side_effect=erreur)
+        source = projets or self._projets
+        with patch("memory.projects.get_user_projects", side_effect=lambda _u: source()), \
+             patch("memory.projects.update_user_projects",
+                   side_effect=lambda _u, p: ecrit.update({x["name"]: x for x in p})), \
+             patch("memory.projects.call_llm_bg", llm):
+            memory.apply_project_updates("ALICE1", events)
+        return ecrit, llm
+
+    def test_nom_exact_sans_appel_llm(self):
+        ecrit, llm = self._applique(
+            [{"name": "vente voiture sport", "action": "update", "summary": "Un acheteur."}]
+        )
+        llm.assert_not_called()
+        assert ecrit["vente voiture sport"]["description"] == "Un acheteur."
+
+    def test_aucun_candidat_retenu_ne_cloture_pas_le_voisin(self):
+        ecrit, llm = self._applique(
+            [{"name": "vente voiture diesel", "action": "done", "summary": "Vendue."}],
+            reponse='{"choix": 0}',
+        )
+        llm.assert_called_once()
+        voisin = ecrit["vente voiture sport"]
+        assert voisin["status"] == "in_progress", "la mauvaise vente a été clôturée"
+        assert voisin["updates"] == []
+        assert "vente voiture diesel" not in ecrit, "une clôture n'invente pas de projet"
+
+    def test_candidat_retenu_recoit_l_evenement(self):
+        ecrit, _ = self._applique(
+            [{"name": "vente voiture rouge", "action": "done", "summary": "Vendue."}],
+            reponse='{"choix": 1}',
+        )
+        assert ecrit["vente voiture sport"]["status"] == "done"
+        assert "vente voiture rouge" not in ecrit
+
+    def test_reponse_inexploitable_vaut_aucun(self):
+        ecrit, _ = self._applique(
+            [{"name": "vente voiture diesel", "action": "done", "summary": "Vendue."}],
+            erreur=RuntimeError("panne"),
+        )
+        assert ecrit["vente voiture sport"]["status"] == "in_progress"
+
+    def test_creation_sans_mot_commun_sans_appel_llm(self):
+        ecrit, llm = self._applique(
+            [{"name": "révision moto", "action": "create", "summary": "Rendez-vous pris."}]
+        )
+        llm.assert_not_called()
+        assert ecrit["révision moto"]["status"] == "in_progress"
+
+    def test_le_contexte_de_session_atteint_le_prompt(self):
+        _, llm = self._applique(
+            [{"name": "vente voiture diesel", "action": "done", "summary": "Vendue.",
+              "_contexte": "Utilisateur : la diesel est partie ce matin"}],
+            reponse='{"choix": 0}',
+        )
+        prompt = llm.call_args.args[0][0]["content"]
+        assert "la diesel est partie ce matin" in prompt
+        assert "1. vente voiture sport (en cours)" in prompt
+
+    def test_un_projet_cree_plus_tot_dans_le_lot_est_candidat(self):
+        """L'analyzer applique d'un bloc les événements de plusieurs sessions."""
+        ecrit, llm = self._applique(
+            [
+                {"name": "rénovation cuisine", "action": "create", "summary": "Devis reçu."},
+                {"name": "rénovation de la cuisine", "action": "update",
+                 "summary": "Artisan choisi."},
+            ],
+            reponse='{"choix": 1}',
+        )
+        assert "rénovation cuisine" in llm.call_args.args[0][0]["content"]
+        assert "rénovation de la cuisine" not in ecrit, "doublon créé dans le même lot"
+        assert ecrit["rénovation cuisine"]["description"] == "Artisan choisi."
+
+    def test_meme_nom_a_la_casse_pres_sans_appel_llm(self):
+        ecrit, llm = self._applique(
+            [{"name": "Vente Voiture Sport", "action": "done", "summary": "Vendue."}]
+        )
+        llm.assert_not_called()
+        assert ecrit["vente voiture sport"]["status"] == "done"
+
+    def test_variante_orthographique_d_un_mot_sans_appel_llm(self):
+        projets = lambda: [{"name": "ClaimSentry", "status": "in_progress", "updates": []}]
+        ecrit, llm = self._applique(
+            [{"name": "claimssentry", "action": "done", "summary": "Livré."}],
+            projets=projets,
+        )
+        llm.assert_not_called()
+        assert ecrit["ClaimSentry"]["status"] == "done"
+
+    def test_noms_de_plusieurs_mots_proches_restent_arbitres(self):
+        """« vente voiture sport » / « vente voiture sporte » : la similarité ne prouve rien."""
+        _, llm = self._applique(
+            [{"name": "vente voiture sporte", "action": "done", "summary": "Vendue."}],
+            reponse='{"choix": 0}',
+        )
+        llm.assert_called_once()
+
+    def test_le_projet_actif_survit_a_la_coupe_des_candidats(self):
+        projets = lambda: [
+            {"name": f"outil v{n}", "status": "done", "updates": []} for n in (7, 8, 9)
+        ] + [{"name": "outil v10", "status": "in_progress", "updates": []}]
+        _, llm = self._applique(
+            [{"name": "outil", "action": "update", "summary": "Nouvelle passe."}],
+            reponse='{"choix": 0}', projets=projets,
+        )
+        assert "outil v10 (en cours)" in llm.call_args.args[0][0]["content"]
+
+    def test_un_mot_vide_commun_ne_fait_pas_un_candidat(self):
+        projets = lambda: [{"name": "plantation de tomates", "status": "in_progress",
+                            "updates": []}]
+        _, llm = self._applique(
+            [{"name": "cours de piano", "action": "create", "summary": "Inscription."}],
+            projets=projets,
+        )
+        llm.assert_not_called()
+
+    def test_un_evenement_invalide_n_est_pas_arbitre(self):
+        _, llm = self._applique([
+            {"name": "vente voiture diesel", "action": "inconnue", "summary": "x"},
+            {"name": "vente voiture diesel", "action": "rename", "rename_to": ""},
+        ])
+        llm.assert_not_called()
+
+    def test_une_mise_a_jour_rouvre_un_projet_clos(self):
+        projets = lambda: [{"name": "travaux salle de bain", "status": "done",
+                            "updates": []}]
+        ecrit, _ = self._applique(
+            [{"name": "travaux salle de bain", "action": "update", "summary": "Reprise."}],
+            projets=projets,
+        )
+        assert ecrit["travaux salle de bain"]["status"] == "in_progress"
+
+
 # ── Marquage des souvenirs propres de Jarvis ──────────────────────────────────
 
 class TestMarquageSouvenirs:

@@ -355,6 +355,13 @@ async def _complete_after_disconnect(ctx: _SseCtx) -> None:
     On relance un appel LLM non-streaming, sauvegarde user+assistant dans Redis,
     puis push APNS pour réveiller l'app iOS.
     """
+    # Open WebUI garde sa propre copie de la conversation et ne reçoit rien après coup :
+    # une réponse terminée sans lui entrerait dans l'historique de Jarvis sans jamais
+    # s'afficher, et le message suivant serait lu comme la réponse à une question que
+    # l'utilisateur n'a pas vue. Seul iOS la récupère (historique, push).
+    if ctx.session_id.startswith("owui-"):
+        logger.info("post-disconnect: session Open WebUI — tour abandonné, rien enregistré")
+        return
     try:
         logger.info(
             "post-disconnect completion: user=%s session=%s", ctx.user_code, ctx.session_id
@@ -1075,6 +1082,8 @@ async def _handle_briefing(
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 
+_WEB_MIN_CHARS = 5
+
 # Commentaire SSE : ignoré par les deux clients (lignes sans « data: »), mais tout octet
 # reçu remet à zéro le délai iOS sans réception (60 s, timeoutIntervalForRequest).
 _SSE_ATTENTE = ": attente\n\n"
@@ -1364,6 +1373,16 @@ async def _chat(req: ChatRequest):
         use_gmail = False
         use_calendar = False
         use_memory = True
+
+    # ── Message trop court pour une recherche web ──────────────────────────
+    # Un message de quelques caractères (« A », « ok », « Monza ») répond presque
+    # toujours à la question précédente de Jarvis. Envoyé seul au moteur de recherche,
+    # il ramène des résultats hors sujet (la lettre A, le mot « ok ») injectés entre la
+    # question et la réponse. Seule la recherche décidée par le routeur est coupée :
+    # req.use_web, demandé explicitement par le client, reste honoré.
+    if use_web_auto and len(_history_user_msg.strip()) <= _WEB_MIN_CHARS:
+        logger.debug("web auto ignoré : message de %d caractères", len(_history_user_msg.strip()))
+        use_web_auto = False
 
     # ── Model selection ─────────────────────────────────────────────────────
     # Always PRIMARY infrastructure — reasoning is handled via no_think flag only.

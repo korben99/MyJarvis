@@ -393,6 +393,15 @@ def _embed_route(message: str, google_available: bool = True) -> RouterResult | 
             result.use_reasoning = True
         return result
 
+    # Réponse à un QCM (« A », « b) », « (c) ») : rien à y chercher. Routée vers le web,
+    # elle injecterait des résultats sur la lettre elle-même entre la question et la
+    # réponse. Le contexte utile est l'échange précédent, et la réflexion relit l'option.
+    if re.fullmatch(r"\(?[a-d]\)?[.!]?", msg_lower):
+        logger.debug("Embed router: réponse de QCM → historique seul + réflexion")
+        result = _build_result("small_talk", msg, google_available)
+        result.use_reasoning = True
+        return result
+
     if len(msg) <= 50 and "?" not in msg:
         _norm = msg_lower.rstrip(" !.,")
         if _norm in SMALL_TALK_EXACT:

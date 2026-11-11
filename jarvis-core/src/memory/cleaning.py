@@ -371,7 +371,7 @@ def curative_profile_cleanup(user_code: str, stable_profile: dict | None = None)
         # point qui voit à la fois le profil et les deux listes, donc leur différence :
         # l'analyzer ne voit que la conversation, et un chantier qui s'installe comme
         # contexte sans jamais être annoncé ne lui parvient pas. `apply_project_updates`
-        # rattache à l'existant sous le seuil flou plutôt que de créer un doublon.
+        # fait arbitrer un nom proche d'un projet existant plutôt que de créer un doublon.
         a_creer = parsed.get("projets_a_creer") if isinstance(parsed, dict) else None
         if not isinstance(a_creer, dict):
             a_creer = {}

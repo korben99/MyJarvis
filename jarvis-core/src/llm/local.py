@@ -443,7 +443,9 @@ async def _acquire_infer_lock_chat(t0: float) -> float:
             return
         _infer_lock.release()
         _wake_bg_waiters()
-        logger.warning("[INFER-LOCK] acquisition orpheline relâchée (annulation pendant l'attente)")
+        # INFO : sortie normale d'une déconnexion pendant l'attente du GPU, pas un défaut ;
+        # en WARNING, chaque déconnexion compterait dans les vitals.
+        logger.info("[INFER-LOCK] acquisition orpheline relâchée (annulation pendant l'attente)")
 
     global _chat_waiters, _last_chat_ts
     with _chat_waiters_lock:

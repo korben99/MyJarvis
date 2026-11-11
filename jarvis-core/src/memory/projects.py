@@ -1,5 +1,6 @@
 """Projets & tâches de l'utilisateur (liste Redis JSON) : lecture, persistance avec
-purge des projets terminés, résolution de nom (exacte + fuzzy), application des
+purge des projets terminés, résolution de nom (exacte, sinon arbitrée par le modèle
+principal), application des
 événements structurés issus de l'analyzer.
 
 Isolé du profil et de l'épisodique parce que ces sections s'appellent mutuellement
@@ -10,8 +11,26 @@ import difflib
 import re
 from datetime import datetime, timezone
 
-from config import DONE_PROJECT_TTL_DAYS, STALE_PROJECT_DAYS
-from helpers import get_logger, redis_get_json, redis_set_json, rel_time_fr
+from config import (
+    DONE_PROJECT_TTL_DAYS,
+    MAX_TOKENS_TINY,
+    PRIMARY_API_KEY,
+    PRIMARY_API_URL,
+    PRIMARY_MODEL,
+    STALE_PROJECT_DAYS,
+    llm_timeout,
+)
+from helpers import (
+    _FR_STOPWORDS,
+    call_llm_bg,
+    extract_llm_json,
+    get_logger,
+    normalize_key,
+    redis_get_json,
+    redis_set_json,
+    rel_time_fr,
+)
+from prompts import PROJECT_ARBITRATION_LABELS, get_prompt
 
 logger = get_logger("jarvis-memory")
 
@@ -20,6 +39,12 @@ logger = get_logger("jarvis-memory")
 # fusionne des projets distincts, et un rattachement abusif perd la tâche en silence, alors
 # qu'un doublon se voit et se corrige.
 _SEUIL_SIMILARITE_CARACTERE = 0.85
+
+_MAX_CANDIDATS_ARBITRAGE = 3
+
+_MOTS_VIDES = {normalize_key(m) for m in _FR_STOPWORDS} | {
+    "the", "and", "for", "with", "from", "into",
+}
 
 
 def get_user_projects(user_code: str) -> list:
@@ -190,6 +215,30 @@ def _normalize_project_name(name: str) -> str:
     return re.sub(r" {2,}", " ", normalized).strip()
 
 
+def _score_nom_projet(name: str, existing_name: str) -> float:
+    """Proximité de deux noms de projet, entre 0 et 1 (voir `_fuzzy_project_name`)."""
+    tokenize = lambda s: set(re.split(r"[\s\-—]+", s.lower()))
+    words_new = tokenize(name)
+    words_ex = tokenize(existing_name)
+    overlap = len(words_new & words_ex)
+    # Le recouvrement de mots ne voit pas une variante À L'INTÉRIEUR d'un mot : deux
+    # noms mono-mot comme « ClaimSentry » et « claimssentry » n'ont aucun token commun
+    # et marquent 0. La similarité caractère rattrape ce cas, sous un seuil séparé et
+    # strict pour ne pas fusionner des projets réellement distincts.
+    char_ratio = difflib.SequenceMatcher(
+        None, name.lower(), existing_name.lower()
+    ).ratio()
+    if overlap == 0 and char_ratio < _SEUIL_SIMILARITE_CARACTERE:
+        return 0.0
+    general = overlap / max(len(words_new), len(words_ex)) if overlap else 0.0
+    subset = (
+        1.0 if overlap and overlap == min(len(words_new), len(words_ex)) else 0.0
+    )
+    return max(
+        general, subset, char_ratio if char_ratio >= _SEUIL_SIMILARITE_CARACTERE else 0.0
+    )
+
+
 def _fuzzy_project_name(
     name: str, project_map: dict, threshold: float = 0.6
 ) -> str | None:
@@ -210,29 +259,10 @@ def _fuzzy_project_name(
     When two projects tie, in_progress beats done — avoids re-opening a closed
     project when an active one with similar words exists.
     """
-    tokenize = lambda s: set(re.split(r"[\s\-—]+", s.lower()))
-    words_new = tokenize(name)
     best_match: str | None = None
     best_score = 0.0
     for existing_name, existing_proj in project_map.items():
-        words_ex = tokenize(existing_name)
-        overlap = len(words_new & words_ex)
-        # Le recouvrement de mots ne voit pas une variante À L'INTÉRIEUR d'un mot : deux
-        # noms mono-mot comme « ClaimSentry » et « claimssentry » n'ont aucun token commun
-        # et marquent 0. La similarité caractère rattrape ce cas, sous un seuil séparé et
-        # strict pour ne pas fusionner des projets réellement distincts.
-        char_ratio = difflib.SequenceMatcher(
-            None, name.lower(), existing_name.lower()
-        ).ratio()
-        if overlap == 0 and char_ratio < _SEUIL_SIMILARITE_CARACTERE:
-            continue
-        general = overlap / max(len(words_new), len(words_ex)) if overlap else 0.0
-        subset = (
-            1.0 if overlap and overlap == min(len(words_new), len(words_ex)) else 0.0
-        )
-        score = max(
-            general, subset, char_ratio if char_ratio >= _SEUIL_SIMILARITE_CARACTERE else 0.0
-        )
+        score = _score_nom_projet(name, existing_name)
         if score < threshold:
             continue
         is_active = existing_proj.get("status") != "done"
@@ -249,6 +279,174 @@ def _fuzzy_project_name(
     return best_match
 
 
+def _mots_significatifs(nom: str) -> set[str]:
+    return {
+        m for m in normalize_key(nom).split("_")
+        if len(m) >= 3 and m not in _MOTS_VIDES
+    }
+
+
+def _candidat_plausible(name: str, existing_name: str) -> bool:
+    """Un mot porteur en commun, ou une variante orthographique du nom entier.
+
+    Un mot vide partagé (« de », « pour ») ne suffit pas : presque tout nom nouveau en
+    partage un avec un projet existant, et chaque candidat coûte un appel LLM.
+    """
+    if _mots_significatifs(name) & _mots_significatifs(existing_name):
+        return True
+    ratio = difflib.SequenceMatcher(None, name.lower(), existing_name.lower()).ratio()
+    return ratio >= _SEUIL_SIMILARITE_CARACTERE
+
+
+def _rattachement_sur(name: str, project_map: dict) -> str | None:
+    """Le projet que `name` désigne sans ambiguïté possible, sans appel LLM.
+
+    Deux cas seulement, chacun exigé UNIQUE :
+    - même nom à la casse, aux accents et aux séparateurs près ;
+    - un nom d'un seul mot, variante orthographique d'un autre nom d'un seul mot, aux
+      mêmes nombres (« claimssentry » / « ClaimSentry »).
+    La similarité caractère ne vaut pas preuve sur un nom de plusieurs mots : « vente bmw
+    m4 » et « vente bmw m5 » dépassent le seuil en ne différant que par ce qui les
+    distingue. Même raison pour les nombres, qui séparent les versions d'un projet.
+    """
+    cle = normalize_key(name)
+    egaux = [nom for nom in project_map if normalize_key(nom) == cle]
+    if len(egaux) == 1:
+        return egaux[0]
+    if "_" in cle:
+        return None
+    nombres = re.findall(r"\d+", cle)
+    variantes = [
+        nom for nom in project_map
+        if "_" not in (cle_ex := normalize_key(nom))
+        and re.findall(r"\d+", cle_ex) == nombres
+        and difflib.SequenceMatcher(None, cle, cle_ex).ratio() >= _SEUIL_SIMILARITE_CARACTERE
+    ]
+    return variantes[0] if len(variantes) == 1 else None
+
+
+def _arbitrer_nom_projet(event: dict, name: str, project_map: dict) -> str:
+    """Rattache un nom inexact à un projet connu, sur décision du modèle principal.
+
+    Le score de `_score_nom_projet` ne sert qu'à présélectionner : il ne lit que les mots
+    du nom, et deux noms qui ne diffèrent que par leur mot distinctif (« vente X » et
+    « vente Y ») partagent assez de mots pour passer tout seuil utile. Un embedding n'y
+    voit pas plus clair : il mesure le sujet, pas l'identité du dossier. Seul un modèle
+    qui lit l'événement et la description des candidats peut trancher.
+
+    Rend le nom du projet choisi, ou `name` inchangé si aucun ne convient. Une réponse
+    inexploitable vaut « aucun » : un doublon se voit et se corrige, un rattachement
+    abusif clôt ou réécrit le mauvais projet en silence.
+    """
+    sur = _rattachement_sur(name, project_map)
+    if sur is not None:
+        return sur
+
+    # À score égal, l'actif passe devant le clos : des versions closes d'un même nom
+    # (« X v7 », « X v8 ») occuperaient sinon toutes les places et masqueraient l'actif.
+    candidats = sorted(
+        (
+            (_score_nom_projet(name, nom), proj.get("status") != "done", nom)
+            for nom, proj in project_map.items()
+            if _candidat_plausible(name, nom)
+        ),
+        reverse=True,
+    )[:_MAX_CANDIDATS_ARBITRAGE]
+    if not candidats:
+        return name
+
+    libelles = PROJECT_ARBITRATION_LABELS
+    lignes = []
+    for i, (_, actif, nom) in enumerate(candidats, 1):
+        statut = libelles["actif"] if actif else libelles["clos"]
+        description = project_map[nom].get("description") or libelles["vide"]
+        lignes.append(f"{i}. {nom} ({statut}) — {description}")
+    prompt = get_prompt("PROJECT_ARBITRATION_PROMPT").format(
+        nom=name,
+        action=event.get("action", ""),
+        resume=(event.get("summary") or "").strip() or libelles["aucun"],
+        contexte=(event.get("_contexte") or "").strip() or libelles["aucun"],
+        candidats="\n".join(lignes),
+    )
+    try:
+        # Température nulle : c'est un choix dans une liste fermée, pas une rédaction, et
+        # deux passes sur le même événement doivent rendre le même rattachement.
+        content = call_llm_bg(
+            [{"role": "user", "content": prompt}],
+            model=PRIMARY_MODEL,
+            api_url=PRIMARY_API_URL,
+            api_key=PRIMARY_API_KEY,
+            temperature=0.0,
+            max_tokens=MAX_TOKENS_TINY,
+            json_response=True,
+            no_think=True,
+            timeout=llm_timeout(MAX_TOKENS_TINY),
+        )
+        choix = int(extract_llm_json(content).get("choix", 0))
+    except Exception as exc:
+        logger.warning(
+            "Arbitrage projet '%s' : %s — traité comme nouveau projet",
+            name, type(exc).__name__,
+        )
+        return name
+
+    noms = [nom for _, _, nom in candidats]
+    if 1 <= choix <= len(candidats):
+        retenu = noms[choix - 1]
+        logger.info(
+            "Arbitrage projet : '%s' (%s) → '%s' parmi %s",
+            name, event.get("action"), retenu, noms,
+        )
+        return retenu
+    logger.info(
+        "Arbitrage projet : '%s' (%s) → aucun parmi %s",
+        name, event.get("action"), noms,
+    )
+    return name
+
+
+def _resoudre_noms_projets(user_code: str, project_events: list[dict]) -> dict[str, str]:
+    """Nom brut → nom résolu, pour chaque nom d'événement absent de la liste.
+
+    Calculé AVANT la lecture qui précède l'écriture : l'arbitrage coûte un appel LLM par
+    nom inexact, et un projet écrit pendant ce temps par un autre chemin serait écrasé si
+    la liste avait été lue avant.
+
+    La liste de référence reçoit au fil de l'eau les projets que les événements précédents
+    du lot créent ou renomment : l'analyzer applique d'un bloc les événements de plusieurs
+    sessions, et un projet ouvert par la première doit être candidat pour la suivante.
+    Mêmes filtres que la boucle d'application, pour ne pas arbitrer un événement qu'elle
+    écartera.
+    """
+    project_map = {p["name"]: p for p in get_user_projects(user_code)}
+    resolus: dict[str, str] = {}
+    for event in project_events:
+        if not isinstance(event, dict):
+            continue
+        action = (event.get("action") or "").strip()
+        name = _normalize_project_name((event.get("name") or "").strip())
+        new_name = _normalize_project_name((event.get("rename_to") or "").strip())
+        if not name or action not in ("create", "update", "done", "rename"):
+            continue
+        if action == "rename" and not new_name:
+            continue
+        if name in project_map:
+            resolved = name
+        else:
+            if name not in resolus:
+                resolus[name] = _arbitrer_nom_projet(event, name, project_map)
+            resolved = resolus[name]
+        if action in ("create", "update") and resolved not in project_map:
+            project_map[resolved] = {
+                "name": resolved,
+                "status": "in_progress",
+                "description": (event.get("summary") or "").strip(),
+            }
+        elif action == "rename" and resolved in project_map:
+            project_map[new_name] = {**project_map.pop(resolved), "name": new_name}
+    return resolus
+
+
 def apply_project_updates(user_code: str, project_events: list[dict]):
     """Apply structured project events from the analyzer.
 
@@ -257,6 +455,7 @@ def apply_project_updates(user_code: str, project_events: list[dict]):
       summary : 1-sentence description of what happened (appended to updates timeline)
       rename_to : new name (rename only)
     """
+    resolus = _resoudre_noms_projets(user_code, project_events)
     projects = get_user_projects(user_code)
     now = datetime.now(timezone.utc).isoformat()
     today = now[:10]  # YYYY-MM-DD
@@ -273,17 +472,9 @@ def apply_project_updates(user_code: str, project_events: list[dict]):
         if not name or action not in ("create", "update", "done", "rename"):
             continue
 
-        # Exact match first, then fuzzy — prevents name drift duplicates
-        resolved = (
-            name
-            if name in project_map
-            else (_fuzzy_project_name(name, project_map) or name)
-        )
+        resolved = name if name in project_map else resolus.get(name, name)
 
-        if action == "create":
-            # Pas de seuil plus permissif ici que pour la résolution ci-dessus : un
-            # rattachement abusif perd la tâche en silence, alors qu'un doublon se voit
-            # et se corrige. Les reformulations sont déjà couvertes par l'inclusion.
+        if action in ("create", "update"):
             if resolved not in project_map:
                 project_map[resolved] = {
                     "name": resolved,
@@ -293,18 +484,15 @@ def apply_project_updates(user_code: str, project_events: list[dict]):
                     "updates": [],
                 }
             else:
-                project_map[resolved]["last_update"] = now
-
-        elif action == "update":
-            if resolved not in project_map:
-                project_map[resolved] = {
-                    "name": resolved,
-                    "status": "in_progress",
-                    "first_mentioned": now,
-                    "last_update": now,
-                    "updates": [],
-                }
-            else:
+                # Une activité sur un projet clos le rouvre : sinon l'événement s'ajoute
+                # à un projet que `projets_actifs` écarte de tout contexte, puis que la
+                # purge des projets terminés emporte. La clôture automatique des dormants
+                # rend ce cas courant : un chantier repris après soixante jours est clos.
+                if project_map[resolved].get("status") == "done":
+                    project_map[resolved]["status"] = "in_progress"
+                    logger.info(
+                        "Projet rouvert : %s / '%s' (%s)", user_code, resolved, action
+                    )
                 project_map[resolved]["last_update"] = now
 
         elif action == "done":
@@ -324,9 +512,7 @@ def apply_project_updates(user_code: str, project_events: list[dict]):
             if not new_name:
                 continue
             old_resolved = (
-                old_raw
-                if old_raw in project_map
-                else (_fuzzy_project_name(old_raw, project_map) or old_raw)
+                old_raw if old_raw in project_map else resolus.get(old_raw, old_raw)
             )
             if old_resolved in project_map:
                 entry = project_map.pop(old_resolved)

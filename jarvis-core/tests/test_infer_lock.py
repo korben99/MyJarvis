@@ -65,7 +65,7 @@ def test_acquisition_annulee_ne_confisque_pas_le_verrou(caplog):
         local._infer_lock.release()  # la génération en cours se termine
         await asyncio.sleep(0.3)  # laisse le rappel de fin s'exécuter
 
-    with caplog.at_level("WARNING", logger="jarvis-llm-local"):
+    with caplog.at_level("INFO", logger="jarvis-llm-local"):
         asyncio.run(scenario())
 
     assert _attendre_liberation(), (

@@ -131,6 +131,10 @@ CHILD_GUIDANCE = (
     "année de naissance dans <profil_utilisateur> : phrases courtes, mots simples, un "
     "exemple concret plutôt qu'une définition. Tu restes toi-même — direct, drôle, avec tes "
     "avis — sans jamais prendre un ton condescendant ni annoncer que tu simplifies.\n\n"
+    "Il apprend de toi : tu ne valides jamais une erreur pour lui faire plaisir. Une réponse "
+    "fausse se corrige avec gentillesse, en donnant la bonne et pourquoi. Dans un quiz, "
+    "relis l'option que désigne sa lettre avant de dire si c'est juste, sans te fier à ce "
+    "que tu as répondu aux questions précédentes.\n\n"
     "Tes conseils engagent sa sécurité. Rien de ce qui peut le blesser, lui ou quelqu'un "
     "d'autre : ni produit chimique, ni outil coupant, ni montage électrique, ni recette "
     "dangereuse, même demandés comme une expérience ou pour un exposé. Santé, argent, "
@@ -1174,6 +1178,42 @@ CONSOLIDATION_PROMPT = """\
 Identifie les faits durables et distincts sur cet utilisateur (habitudes, préférences, projets, traits de caractère…).
 Retourne uniquement du JSON : {{"facts": ["fait 1", "fait 2"]}}
 Si aucun fait durable : {{"facts": []}}"""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PROJECT ARBITRATION  —  cible : Primary
+# ══════════════════════════════════════════════════════════════════════════
+
+PROJECT_ARBITRATION_PROMPT = """\
+Un événement de projet a été extrait d'une conversation, sous un nom qui ne correspond \
+exactement à aucun projet connu. Décide s'il concerne l'un des projets candidats.
+
+<evenement>
+Nom proposé : {nom}
+Action : {action}
+Résumé : {resume}
+</evenement>
+
+<conversation>
+{contexte}
+</conversation>
+
+<candidats>
+{candidats}
+</candidats>
+
+Un candidat ne convient que s'il désigne LE MÊME dossier : même objet, même personne, même \
+démarche. Des mots en commun ne suffisent pas — « vente de la voiture A » et « vente de la \
+voiture B » sont deux projets distincts. Appuie-toi sur la conversation pour savoir de quoi \
+parle réellement l'utilisateur, et sur la description de chaque candidat pour savoir ce qu'il \
+recouvre. En cas de doute, réponds 0 : un projet en double se corrige, une mise à jour \
+rattachée au mauvais projet passe inaperçue.
+
+Retourne uniquement du JSON : {{"choix": N}}, où N est le numéro du candidat, ou 0 si aucun."""
+
+PROJECT_ARBITRATION_LABELS = {
+    "actif": "en cours", "clos": "terminé", "vide": "sans description", "aucun": "aucun",
+}
 
 
 # ══════════════════════════════════════════════════════════════════════════
