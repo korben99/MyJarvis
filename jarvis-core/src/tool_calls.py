@@ -40,12 +40,32 @@ _TOOL_CALL_RE = re.compile(
 _PARAMETER_RE = re.compile(r"<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>", re.DOTALL)
 
 
+def _type_declare(spec: dict | None) -> str:
+    """Type JSON d'un paramètre, nullable compris.
+
+    Un paramètre facultatif s'écrit souvent sans `type` direct — `{"anyOf": [{"type":
+    "array"}, {"type": "null"}]}` (Pydantic, zod) ou `"type": ["array", "null"]`. Le lire
+    comme une chaîne laisserait passer un tableau sous forme de texte, que la validation
+    côté client refuse. Le type retenu est le premier qui n'est pas `null`.
+    """
+    spec = spec or {}
+    declared = spec.get("type")
+    if isinstance(declared, str):
+        return declared
+    if isinstance(declared, list):
+        return next((t for t in declared if t != "null"), "string")
+    for variante in spec.get("anyOf") or spec.get("oneOf") or []:
+        if isinstance(variante, dict) and (t := _type_declare(variante)) != "null":
+            return t
+    return "string"
+
+
 def _param_types(tool_schema: dict) -> dict[str, str]:
     """Extrait {nom_paramètre: type JSON} du schéma d'un outil, au format OpenAI."""
     function = tool_schema.get("function") or tool_schema
     properties = (function.get("parameters") or {}).get("properties") or {}
     return {
-        name: (spec or {}).get("type", "string")
+        name: _type_declare(spec)
         for name, spec in properties.items()
         if isinstance(spec, dict) or spec is None
     }

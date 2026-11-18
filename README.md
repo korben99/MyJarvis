@@ -75,10 +75,10 @@ any of that, and nothing to maintain by hand.
 
 | To do this | Type |
 |---|---|
-| Launch a background task — **admins** | `tâche agent: <objectif>` · also `agent:`, `agent task:`, `task:` |
-| Relaunch it every week — **admins** | `tâche agent hebdo: <objectif>` · also `agent hebdo:`, `weekly:` — the first run starts at once, each later one picks up from what the previous found |
+| Launch a background task —  | `tâche agent: <objectif>` · also `agent:`, `agent task:`, `task:` |
+| Relaunch it every week —  | `tâche agent hebdo: <objectif>` · also `agent hebdo:`, `weekly:` — the first run starts at once, each later one picks up from what the previous found |
 | Follow your tasks | `tâche agent: statut` — open to everyone, for their own tasks |
-| Stop a weekly series — **admins** | `tâche agent: arrête <id de série>` — the run under way still finishes |
+| Stop a weekly series —  | `tâche agent: arrête <id de série>` — the run under way still finishes |
 | Put something in your calendar | *"ajoute un rendez-vous jeudi 14 h chez le dentiste"*, then **`confirme`** or **`annule`** (*oui* / *non* work too) |
 | Read a pending prompt rewrite | *"montre les propositions"*, then *"accepte la proposition `<id>`"* — **admins** decide |
 | Read a pending patch — **admins** | *"montre le patch"*, then *"accepte le patch `<id>`"* or *"rejette le patch `<id>`"* |

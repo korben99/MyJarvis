@@ -532,15 +532,26 @@ def apply_project_updates(user_code: str, project_events: list[dict]):
         # semaines") would be resolved against the wrong day, so it is rejected rather
         # than guessed. Logged either way — this is the signal to watch when observing
         # whether the extractor dates tasks correctly.
+        # Une échéance passée est rejetée de même : l'extracteur se trompe d'année sur un
+        # mois sans année (« en avril »), et une date dépassée ferait relancer une tâche
+        # en retard qui ne l'est pas.
         if due and action in ("create", "update") and resolved in project_map:
             try:
-                datetime.fromisoformat(due)
+                echeance = datetime.fromisoformat(due).date().isoformat()
             except (ValueError, TypeError):
                 logger.warning(
                     "Task due date ignored (not absolute ISO): %s / '%s' → %r",
                     user_code, resolved, due,
                 )
+                due = ""
             else:
+                if echeance < today:
+                    logger.warning(
+                        "Task due date ignored (in the past): %s / '%s' → %s",
+                        user_code, resolved, due,
+                    )
+                    due = ""
+            if due:
                 project_map[resolved]["due_at"] = due
                 logger.info(
                     "Task due date set: %s / '%s' → %s", user_code, resolved, due
