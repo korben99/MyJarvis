@@ -227,3 +227,29 @@ class TestListeBlanche:
             cve.subprocess, "run", _grype([_match("Critical", ["9.0"], "ffmpeg")])
         )
         assert cve._scan_target("sbom:x", "venv")["crit"] == 1
+
+
+class TestCorrectifConseille:
+    """Le correctif affiché est celui de la branche en place, jamais une rétrogradation."""
+
+    @pytest.mark.parametrize(
+        "installee,correctifs,attendu",
+        [
+            ("24.15.0", ["11.0.0", "22.23.4", "24.22.1", "26.12.1"], "24.22.1"),
+            ("1.3.2-r1", ["1.4-r0"], "1.4-r0"),
+            ("2.13.0", ["2.14.0"], "2.14.0"),
+            ("24.15.0", ["26.12.1", "24.22.1"], "24.22.1"),
+            # Rien au-dessus, ou version illisible : le premier listé, comme grype le rend.
+            ("30.0.0", ["11.0.0", "24.22.1"], "11.0.0"),
+            (None, ["11.0.0", "24.22.1"], "11.0.0"),
+            ("", ["2.0"], "2.0"),
+        ],
+    )
+    def test_plus_petit_correctif_au_dessus(self, installee, correctifs, attendu):
+        assert cve._correctif_applicable(installee, correctifs) == attendu
+
+    def test_le_detail_du_scan_porte_le_correctif_de_branche(self, monkeypatch):
+        m = _match("Critical", ["11.0.0", "22.23.4", "24.22.1"], "node")
+        m["artifact"]["version"] = "24.15.0"
+        monkeypatch.setattr(cve.subprocess, "run", _grype([m]))
+        assert cve._scan_target("image", "jarvis-webui")["details"][0]["corrige_par"] == "24.22.1"

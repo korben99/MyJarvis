@@ -50,6 +50,7 @@ Contraintes :
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -105,6 +106,28 @@ def _est_exclu(paquet: str | None, source: str) -> dict | None:
         if regle["paquet"].lower() == pl and regle.get("source") in (None, source):
             return regle
     return None
+
+
+def _segments(version: str) -> tuple[int, ...]:
+    """Segments numériques d'une version (« 1.3.2-r1 » → (1, 3, 2, 1)), assez pour ordonner
+    des versions d'un même paquet sans dépendre de son écosystème (pip, apk, deb, binaire)."""
+    return tuple(int(n) for n in re.findall(r"\d+", version or ""))
+
+
+def _correctif_applicable(installee: str | None, correctifs: list) -> str:
+    """Version corrective à conseiller pour la version installée.
+
+    grype liste un correctif par branche maintenue (« 11.0.0, 22.23.4, 24.22.1 ») : le
+    premier n'est pas forcément au-dessus de la version installée, et le conseiller
+    reviendrait à proposer une rétrogradation. Le correctif retenu est le plus petit qui
+    dépasse la version en place ; sans version installée lisible, le premier listé.
+    """
+    en_place = _segments(installee)
+    if en_place:
+        superieurs = [c for c in correctifs if _segments(c) > en_place]
+        if superieurs:
+            return min(superieurs, key=_segments)
+    return correctifs[0]
 
 
 def _persister_sbom(source: str) -> None:
@@ -254,7 +277,8 @@ def _scan_target(target: str, source: str) -> dict | None:
             continue
         crit += 1
         details.append({"source": source, "id": v.get("id"), "paquet": paquet,
-                        "version": a.get("version"), "corrige_par": fix[0]})
+                        "version": a.get("version"),
+                        "corrige_par": _correctif_applicable(a.get("version"), fix)})
     return {"crit": crit, "details": details, "exclus": exclus}
 
 
