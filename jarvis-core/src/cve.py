@@ -194,10 +194,17 @@ def _image_plus_recente_dispo(image: str) -> bool | None:
     signale « nouvelle image » en permanence. `buildx imagetools inspect` donne l'index.
     """
     try:
-        loc = subprocess.run(
-            [DOCKER_BIN, "image", "inspect", image, "--format", "{{index .RepoDigests 0}}"],
-            capture_output=True, text=True, timeout=20,
-        ).stdout.strip().rpartition("@")[2]
+        # Tous les digests, pas le premier : une image tirée sous un tag qui a été republié
+        # sans changer de contenu garde l'ancien digest à côté du nouveau, dans un ordre
+        # quelconque. Ne lire que l'index 0 peut désigner l'ancien et signaler à tort une
+        # image plus récente.
+        loc = {
+            d.rpartition("@")[2]
+            for d in json.loads(subprocess.run(
+                [DOCKER_BIN, "image", "inspect", image, "--format", "{{json .RepoDigests}}"],
+                capture_output=True, text=True, timeout=20,
+            ).stdout.strip() or "[]") or []
+        }
         if not loc:
             return None  # image construite localement : pas de digest de registre
         dist = ""
@@ -211,7 +218,7 @@ def _image_plus_recente_dispo(image: str) -> bool | None:
                 break
         if not dist:
             return None
-        return loc != dist
+        return dist not in loc
     except Exception as exc:
         logger.debug("cve: comparaison de digest impossible pour %s (%s)", image, exc)
         return None

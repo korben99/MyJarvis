@@ -1072,6 +1072,15 @@ def _load_model(model_path: str) -> tuple:
                 _steer_install(model, model_path)
             except Exception as exc:
                 logger.warning("Pilotage indisponible (%s) — non bloquant", exc)
+        # Tête de sortie réduite, désactivée sans OUTPUT_VOCAB dans .env.
+        if model_path in (PRIMARY_MODEL, REASONING_MODEL):
+            from llm.vocab import install as _vocab_install
+
+            _vocab_install(model, tokenizer, model_path)
+            # Noyaux MoE fusionnés, désactivés sans MOE_FUSED=yes dans .env.
+            from llm.moe_fusion import install as _moe_install
+
+            _moe_install(model, model_path)
 
         _model_cache[model_path] = (model, tokenizer)
         logger.info("Model ready: %s", model_path)
@@ -1916,15 +1925,26 @@ def _graft_vision_on_primary(vlm_load) -> tuple:
     vlm_model, processor = vlm_load(VISION_MODEL, lazy=True)
     if not hasattr(vlm_model, "vision_tower"):
         raise RuntimeError(f"{VISION_MODEL} n'a pas de tour vision — VISION_NATIVE impossible")
+    from llm.vocab import est_tete_reduite
+
+    # Une tête de sortie réduite (llm/vocab.py) n'a ni la forme ni les paramètres de la tête
+    # mlx_vlm : elle est exclue de la comparaison et greffée comme module, son appel étant
+    # identique. Les tokens émis en vision suivent ainsi le même sous-vocabulaire.
+    tete = getattr(getattr(lm_model, "language_model", lm_model), "lm_head", None)
+    exclu = "language_model.lm_head." if est_tete_reduite(tete) else None
     langage = [
-        (k, v) for k, v in tree_flatten(lm_model.parameters()) if k.startswith("language_model.")
+        (k, v) for k, v in tree_flatten(lm_model.parameters())
+        if k.startswith("language_model.") and not (exclu and k.startswith(exclu))
     ]
     attendus = [
-        k for k, _ in tree_flatten(vlm_model.parameters()) if not k.startswith("vision_tower.")
+        k for k, _ in tree_flatten(vlm_model.parameters())
+        if not k.startswith("vision_tower.") and not (exclu and k.startswith(exclu))
     ]
     if sorted(k for k, _ in langage) != sorted(attendus):
         raise RuntimeError("nommage mlx_lm/mlx_vlm divergent — greffe des poids impossible")
     vlm_model.update(tree_unflatten(langage))
+    if exclu:
+        vlm_model.language_model.lm_head = tete
     mx.eval(vlm_model.vision_tower.parameters())
     # Les couches mlx_vlm sont d'autres classes que celles de mlx_lm : le pilotage
     # posé sur le modèle principal ne les atteint pas et doit être installé à part.

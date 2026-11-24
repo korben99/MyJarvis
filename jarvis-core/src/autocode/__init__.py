@@ -185,6 +185,15 @@ async def _cycle(dry_run: bool, revue: bool = False, perimetre: str = "") -> dic
         logger.info("autocode: cycle déjà passé le %s", date)
         return {"lance": False, "motif": "déjà passé aujourd'hui"}
 
+    # Ici et non au démarrage seul : le serveur peut tourner des semaines sans redémarrer.
+    # Après le verrou, pour ne tourner qu'une fois par nuit. Une rotation en échec ne doit
+    # pas coûter le cycle.
+    if not dry_run:
+        try:
+            await chantier.purger_anciens()
+        except Exception as exc:
+            logger.warning("autocode: rotation des dossiers en échec (%s)", type(exc).__name__)
+
     if revue:
         retenu = _revue_du_jour(date, perimetre)
         logger.info("autocode: revue de maintenance%s",

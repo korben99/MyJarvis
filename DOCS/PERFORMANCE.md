@@ -1,6 +1,6 @@
 # Performance
 
-> TTFT measurements, KV cache design, and the map of every LLM call.
+> TTFT and decode measurements, decode optimisations, KV cache design, and the map of every LLM call.
 
 ## Implemented optimisations
 
@@ -122,6 +122,51 @@ equivalent to the others. RotorQuant should show its advantage on very large con
 | 5.4bit standard | ~55–60 |
 | RotorQuant 6bit | ~62–82 |
 | RotorQuant 5bit | **~72+** |
+
+## Decode optimisations (2026-11-22)
+
+On the 35B-A3B, decoding reads ~2 GB per token, but the MoE block ran at ~60 % of the
+bandwidth ceiling: each layer chains about twenty small dependent GPU kernels, and half of
+its time is launch overhead, not memory reads. Two optimisations, both switchable from
+`.env` and verified token-identical to the stock path on the production path (steering,
+thinking budget, JSON, LRU over two turns) and on vision:
+
+| Optimisation | Variable | Decode gain | Mechanism |
+|---|---|---|---|
+| **Fused MoE kernels** | `MOE_FUSED=yes` | **+10.4 %** at 1 k, **+10.5 %** at 8 k | unsloth-zoo: router in one Metal launch, routed experts in two (gate/up + SwiGLU, down + combine + shared expert). Self-checked bit by bit against mlx-lm on first use. `llm/moe_fusion.py` |
+| **Reduced output head** | `OUTPUT_VOCAB=…` | **+4 %** | The head (248 320 × 2 048, 17 % of the bytes read per token) scores only 141 344 Latin-script / code / emoji / byte / added tokens and writes −∞ elsewhere. 0.07 % of real FR/EN tokens fall outside, all Greek or Arabic in etymologies. `llm/vocab.py` |
+
+Bench (`RESEARCH/MOE-KERNEL/bench_e2e.py`, greedy, 256 tokens): 74.3 → 82.0 tok/s at
+1 k context, 70.2 → 77.6 at 8 k.
+
+**KV cache quantization is off** (`QUANT_KV=no`). It was enabled to save memory, but mlx-lm
+has no fused kernel for quantized attention: scores are written out, re-read for the
+softmax, re-read again against V, with 6-bit unpacking at each read. On the 10
+full-attention layers that costs +0.25 ms per token at 1 k context, +0.9 ms at 3 k,
++2.5 ms at 8 k and +5.7 ms at 16 k (`RESEARCH/MOE-KERNEL/bench_kv.py`). The memory saved is
+small on this hybrid model: an LRU entry is dominated by the GatedDeltaNet state, which
+`QUANT_KV` does not touch.
+
+**Measured through the API on real requests** (`/chat`, ~3 200-token prompts with injected
+context, 5 long answers, median of client-side decode rate):
+
+| Configuration | Decode tok/s |
+|---|---|
+| August baseline | 65.8 |
+| + fused MoE + reduced head, KV 6-bit | 73.2 (70.2–73.8) |
+| + KV cache in bf16 | **80.1 (77.8–80.3)** |
+
++22 % overall. The per-token Python work in the streaming worker (`stream_local`) is
+negligible for the Qwen3 profiles — no stop strings to scan.
+
+Tried and dropped (details in `RESEARCH/DECDEC-MLX/` and `RESEARCH/BENCH-27B/`):
+dynamic residual correction of a 3-bit base (DecDEC: at most 3–8 % in unified memory), a
+dense 27B with DWQ + MTP + reduced head (18–23 tok/s, below the 30 tok/s floor), a
+two-stage frequent-token head (at most 2–5 % more, unsafe fallback test), and unsloth-zoo's
+other decode fusions — GatedDeltaNet conv or full step (via mlx-vlm's class), residual +
+norm, vector decode attention: +1 % at best, tokens identical, but the residual-norm
+handoff swaps the decoder-layer class that activation steering patches
+(`RESEARCH/MOE-KERNEL/RESULTATS.md`).
 
 ### End-to-end TTFT (iPhone → first visible token, no_think)
 
@@ -298,15 +343,19 @@ Never use thinking_budget=0 in production
 
 ---
 
-## Speculative decoding (MLX) — not applicable
+## Speculative decoding (MLX) — not used
 
-`mlx-lm` supports native speculative decoding through
-`stream_generate(draft_model=..., num_draft_tokens=N)`, but the feature is **incompatible
-with Qwen3.6**, a hybrid Transformer + GatedDeltaNet model.
+`mlx-lm`'s generic speculative decoding (`stream_generate(draft_model=…)`) is
+**incompatible with Qwen3.6**: GatedDeltaNet layers keep a recurrent state (`ArraysCache`)
+that it cannot roll back when a draft token is rejected (`cache non-trimmable`).
 
-GatedDeltaNet layers keep a recurrent state (`ArraysCache`) that cannot be rolled back when
-a draft token is rejected — mlx-lm refuses it explicitly (`cache non-trimmable`). Tested and
-confirmed: output degenerates into noise from the first rejections.
+Native MTP (the model's own multi-token-prediction head) now handles that rollback, but
+not in the stock `mlx-lm` Jarvis runs:
+- mlx-lm PR #990 (AirRunner), still open: one draft token, ×1.57 announced on a dense 27B.
+- `mlx-vlm` ≥ 0.6.17: separate MTP drafter, 3 draft tokens. It ignores `logits_processors`
+  in speculative mode, so the thinking budget would be lost.
 
-**Blocked on**: recurrent-state rollback support in mlx-lm, or a move to a pure-attention
-primary model (dense Qwen3-30B, etc.).
+Neither is worth it here. On a MoE, verifying k draft tokens activates up to k times more
+experts, and published gains are around +5 %. On a dense 27B, measured on this machine
+(Qwen3.8-27B DWQ 4-bit + MTP + reduced head): 18–23 tok/s, against ~73 for the 35B-A3B
+(`RESEARCH/BENCH-27B/RESULTATS.md`).

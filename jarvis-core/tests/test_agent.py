@@ -137,9 +137,10 @@ class TestSandboxChemins:
         """Le refus doit porter sur le fichier, pas emporter sa racine."""
         import os
 
-        from config import JARVIS_ROOT
+        from config import AGENT_READONLY_ROOTS
 
-        voisin = os.path.join(JARVIS_ROOT, "scripts", "jarvis-status.sh")
+        scripts = next(r for r in AGENT_READONLY_ROOTS if r.endswith("/scripts"))
+        voisin = os.path.join(scripts, "jarvis-status.sh")
         assert resolve("tachetest", voisin, write=False)
 
 

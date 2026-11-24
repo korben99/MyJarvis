@@ -10,7 +10,7 @@ services:
       - qdrant_data:/qdrant/storage
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     container_name: jarvis-redis
     restart: unless-stopped
     ports:

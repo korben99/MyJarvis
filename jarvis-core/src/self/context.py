@@ -311,6 +311,16 @@ def _purger_lacunes_perimees(r) -> int:
 
 
 
+_LACUNE_CONTEXTE_MAX = 160
+
+
+def _fmt_gaps(libelles: list[str]) -> str:
+    """Une ligne par lacune : l'extrait de contexte contient des virgules."""
+    if not libelles:
+        return "aucune"
+    return "\n" + "\n".join(f"- {g}" for g in libelles) + "\n"
+
+
 def _lacunes(n: int = 5) -> tuple[list[str], int]:
     """Les lacunes récentes, et combien d'entre elles sont ACTIONNABLES.
 
@@ -340,10 +350,12 @@ def _lacunes(n: int = 5) -> tuple[list[str], int]:
     actionnables = 0
     for item in raw:
         date = ""
+        contexte = ""
         try:
             d = json.loads(item)
             topic = d.get("topic", item)
             date = (d.get("date") or "")[:10]
+            contexte = (d.get("context") or "").strip()
         except Exception:
             topic = item
         slug = slug_de_sujet(topic)
@@ -352,6 +364,12 @@ def _lacunes(n: int = 5) -> tuple[list[str], int]:
         seen_slugs.add(slug)
 
         label = f"{topic}" + (f" (signalée le {date})" if date else "")
+        # Le sujet seul est un slug, et un slug se relit de travers dix jours plus tard :
+        # c'est l'échec observé qui dit de quoi parle la lacune.
+        if contexte:
+            if len(contexte) > _LACUNE_CONTEXTE_MAX:
+                contexte = contexte[:_LACUNE_CONTEXTE_MAX].rstrip() + "…"
+            label += f" — « {contexte} »"
         if slug in en_attente:
             label += " — PROPOSITION DÉJÀ EN ATTENTE, ne pas reproposer"
         elif r.ttl(f"{_REFINE_COOLDOWN_PREFIX}:{slug}") > 0:
@@ -592,7 +610,7 @@ async def _call_global_reflection_llm(
         incidents=_fmt_incidents(context.get("incidents", [])),
         vulnerabilites=context.get("cve_conseil") or "  aucune connue",
         activity=_fmt_activity(context["user_activity"]),
-        gaps=", ".join(context["knowledge_gaps"]) or "aucune",
+        gaps=_fmt_gaps(context["knowledge_gaps"]),
         pending_proposals=context["pending_proposals"],
         last_reflection=json.dumps(
             {k: v for k, v in context["last_reflection"].items() if k != "steps"},

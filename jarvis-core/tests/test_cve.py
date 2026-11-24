@@ -253,3 +253,31 @@ class TestCorrectifConseille:
         m["artifact"]["version"] = "24.15.0"
         monkeypatch.setattr(cve.subprocess, "run", _grype([m]))
         assert cve._scan_target("image", "jarvis-webui")["details"][0]["corrige_par"] == "24.22.1"
+
+
+class TestDigestImage:
+    """Une image dont le tag a été republié à l'identique porte plusieurs digests locaux."""
+
+    @staticmethod
+    def _docker(locaux: list, distant: str):
+        def run(cmd, **kw):
+            if "imagetools" in cmd:
+                sortie = f"Name:      docker.io/library/img:tag\nDigest:    {distant}\n"
+            else:
+                sortie = json.dumps([f"img@{d}" for d in locaux])
+            return types.SimpleNamespace(returncode=0, stdout=sortie, stderr="")
+        return run
+
+    def test_le_digest_distant_parmi_les_locaux_n_est_pas_une_mise_a_jour(self, monkeypatch):
+        monkeypatch.setattr(cve.subprocess, "run",
+                            self._docker(["sha256:ancien", "sha256:actuel"], "sha256:actuel"))
+        assert cve._image_plus_recente_dispo("img:tag") is False
+
+    def test_un_digest_distant_inconnu_est_une_mise_a_jour(self, monkeypatch):
+        monkeypatch.setattr(cve.subprocess, "run",
+                            self._docker(["sha256:ancien"], "sha256:nouveau"))
+        assert cve._image_plus_recente_dispo("img:tag") is True
+
+    def test_image_locale_sans_digest_reste_indeterminee(self, monkeypatch):
+        monkeypatch.setattr(cve.subprocess, "run", self._docker([], "sha256:x"))
+        assert cve._image_plus_recente_dispo("img:tag") is None

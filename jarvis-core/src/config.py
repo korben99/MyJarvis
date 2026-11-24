@@ -645,6 +645,11 @@ AUTOCODE_MAX_DIFF_LINES = int(os.getenv("AUTOCODE_MAX_DIFF_LINES", "200"))
 # mécanisme est borné en DÉBIT, l'approbation humaine est le filtre de pertinence.
 AUTOCODE_COOLDOWN_DAYS = int(os.getenv("AUTOCODE_COOLDOWN_DAYS", "30"))
 
+# Conservation des dossiers de livraison `autocode/`. Ne touche pas Redis : le journal et
+# les cooldowns sont la mémoire de la sélection, déjà bornés, et les vider avec le dossier
+# ferait reproposer le lendemain un sujet tranché.
+AUTOCODE_RETENTION_DAYS = int(os.getenv("AUTOCODE_RETENTION_DAYS", "30"))
+
 # Lecture de contrôle : le vivier ne se remplit que de tracebacks et d'ajouts à la main,
 # donc un module qui ne tombe jamais n'est jamais relu. Le parcours ajoute le module le
 # moins récemment examiné, au rang le plus bas — un symptôme réel passe toujours devant.

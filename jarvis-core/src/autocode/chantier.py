@@ -16,13 +16,14 @@ patch sont le fait de l'orchestrateur. L'agent, lui, n'a que des fichiers.
 import asyncio
 import os
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from config import (
     AGENT_WORKSPACE,
     AUTOCODE_DIR,
     AUTOCODE_MAX_DIFF_LINES,
     AUTOCODE_MAX_STEPS,
+    AUTOCODE_RETENTION_DAYS,
     AUTOCODE_TIMEOUT_MINUTES,
     JARVIS_ROOT,
 )
@@ -204,6 +205,71 @@ async def purger_orphelins() -> int:
 
     if retires:
         logger.info("autocode: %d chantier(s) orphelin(s) purgé(s)", retires)
+    return retires
+
+
+async def purger_anciens() -> dict[str, int]:
+    """Rotation du disque : dossiers de livraison anciens, workspaces de tâches expirées.
+
+    Les deux critères sont distincts parce que les deux dossiers n'ont pas le même maître :
+
+      autocode/        daté par son nom, gardé AUTOCODE_RETENTION_DAYS ; le dossier du
+                       patch en attente est épargné, c'est lui que l'humain doit relire
+      agent_workspace  suit l'enregistrement Redis de la tâche (AGENT_TASK_TTL) : une
+                       tâche expirée n'a plus personne pour relire sa trace
+
+    Un workspace sans tâche n'est retiré qu'au-delà du même délai sur son mtime :
+    `create_task` crée le dossier avant d'écrire l'enregistrement, et une tâche en train de
+    naître ressemble alors exactement à une tâche expirée.
+
+    Une erreur Redis remonte au lieu d'être lue comme « tâche absente » : sinon une panne
+    du magasin effacerait d'un coup tous les workspaces.
+    """
+    from agent import store as agent_store
+
+    from . import store
+
+    limite = datetime.now() - timedelta(days=AUTOCODE_RETENTION_DAYS)
+    retires = {"livraisons": 0, "workspaces": 0}
+
+    en_vol = store.patch_en_attente() or {}
+    epargne = os.path.realpath(en_vol["dossier"]) if en_vol.get("dossier") else None
+    if os.path.isdir(AUTOCODE_DIR):
+        for nom in sorted(os.listdir(AUTOCODE_DIR)):
+            chemin = os.path.join(AUTOCODE_DIR, nom)
+            try:
+                jour = datetime.strptime(nom[:10], "%Y-%m-%d")
+            except ValueError:
+                continue
+            if jour >= limite or not os.path.isdir(chemin):
+                continue
+            if epargne and os.path.realpath(chemin) == epargne:
+                continue
+            shutil.rmtree(chemin, ignore_errors=True)
+            if not os.path.isdir(chemin):
+                retires["livraisons"] += 1
+
+    if os.path.isdir(AGENT_WORKSPACE):
+        for task_id in sorted(os.listdir(AGENT_WORKSPACE)):
+            workspace = os.path.join(AGENT_WORKSPACE, task_id)
+            if not os.path.isdir(workspace):
+                continue
+            if datetime.fromtimestamp(os.path.getmtime(workspace)) >= limite:
+                continue
+            if agent_store.get_task(task_id) is not None:
+                continue
+            # Désenregistre d'abord un éventuel worktree : effacé à la main, il resterait
+            # inscrit dans .git.
+            await nettoyer(workspace)
+            shutil.rmtree(workspace, ignore_errors=True)
+            if not os.path.isdir(workspace):
+                retires["workspaces"] += 1
+
+    if any(retires.values()):
+        logger.info(
+            "autocode: rotation — %d livraison(s), %d workspace(s) retiré(s)",
+            retires["livraisons"], retires["workspaces"],
+        )
     return retires
 
 

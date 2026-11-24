@@ -277,6 +277,8 @@ A **four-tier router** decides what each request should cost. The first tier use
 
 On top of that: a per-session KV cache (only new tokens are computed each turn), a no-think mode on by default for plain chat, and a thinking budget cut off at the exact token. Measured on a Mac Mini M4 Pro: **−4 s** on a routine exchange, **−1 to −3 s** from the second turn onward.
 
+Decoding itself is tuned for the mixture-of-experts model: fused Metal kernels run each MoE layer in three launches instead of about twenty (+10 %), and the output head scores only the Latin-script, code and emoji part of the vocabulary (+4 %). Both are bit-exact on the tokens they keep and switch off from `.env`. The KV cache stays in bf16: quantizing it saves little memory on this hybrid model and costs speed, because mlx-lm has no fused kernel for quantized attention. Measured through the API on real requests: **~80 tok/s**, against ~66 before.
+
 ### It speaks your tools' language
 
 The API is **OpenAI-compatible**, so anything that talks to OpenAI talks to Jarvis. Open WebUI and the bundled iOS app — voice, wake word, push notifications — plug straight in.
@@ -386,7 +388,7 @@ Tuning, if the defaults do not fit: `JARVIS_URL`, `JARVIS_UPDATE_TIMEOUT` (420 s
 | **[CONFIGURATION.md](DOCS/CONFIGURATION.md)** | Every `.env` variable, tier by tier — and the configuration page |
 | **[API.md](DOCS/API.md)** | Endpoint reference |
 | **[ROUTER.md](DOCS/ROUTER.md)** | The Tier-1 router: a LoRA whose prompt is part of the trained artefact — French-only, retraining procedure |
-| **[PERFORMANCE.md](DOCS/PERFORMANCE.md)** | TTFT measurements, KV cache, LLM call map |
+| **[PERFORMANCE.md](DOCS/PERFORMANCE.md)** | TTFT and decode measurements, decode optimisations, KV cache, LLM call map |
 | **[SECURITY.md](DOCS/SECURITY.md)** | Threat model, network exposure, agent sandbox |
 | **[OPERATIONS.md](DOCS/OPERATIONS.md)** | Logs, diagnostics, dependency upgrades |
 | **[GOOGLE.md](DOCS/GOOGLE.md)** | Connecting Gmail and Google Calendar |

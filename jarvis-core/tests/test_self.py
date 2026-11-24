@@ -13,6 +13,7 @@ raisonnement payé pour rien, et jamais dans un journal.
 """
 
 import asyncio
+import json
 from datetime import date, datetime, time, timedelta
 
 import pytest
@@ -429,3 +430,72 @@ class TestRattrapageDesRevues:
         monkeypatch.setattr(nightly, "_revue_nocturne", _tombe)
         etat["marque"] = (self._veille() - timedelta(days=2)).isoformat()
         assert asyncio.run(nightly.rattraper_revues_manquees()) == 0
+
+
+# ── Lacunes injectées dans la réflexion ──────────────────────────────────────
+
+class TestLacunesDansLaReflexion:
+    """La réflexion relit une lacune des jours plus tard. Si elle ne reçoit que le sujet,
+    elle reconstruit le sens à partir d'un slug — et peut proposer un prompt sur un tout
+    autre domaine."""
+
+    class _RedisLacunes:
+        def __init__(self, entrees: list[dict]):
+            self._entrees = [json.dumps(e, ensure_ascii=False) for e in entrees]
+
+        def zrangebyscore(self, *_a, **_k):
+            return []
+
+        def zrevrange(self, _cle, debut, fin):
+            return self._entrees[debut:fin + 1]
+
+        def ttl(self, _cle):
+            return -2
+
+    @pytest.fixture
+    def lacunes(self, monkeypatch):
+        from self import context
+
+        def poser(entrees):
+            monkeypatch.setattr(context, "get_redis", lambda: self._RedisLacunes(entrees))
+            monkeypatch.setattr(context, "list_pending_proposals", lambda: [])
+            return context._lacunes(5)
+        return poser
+
+    def test_le_contexte_de_l_echec_accompagne_le_sujet(self, lacunes):
+        libelles, _ = lacunes([{
+            "topic": "regle_hors_jeu",
+            "context": "On m'a demandé la règle du hors-jeu ; j'ai confondu deux éditions du règlement.",
+            "date": "2026-01-15T10:00:00+00:00",
+        }])
+        assert len(libelles) == 1
+        assert "regle_hors_jeu" in libelles[0]
+        assert "confondu deux éditions du règlement" in libelles[0]
+
+    def test_le_contexte_est_borne(self, lacunes):
+        from self import context
+
+        libelles, _ = lacunes([{"topic": "sujet", "context": "x" * 1000, "date": ""}])
+        assert libelles[0].count("x") == context._LACUNE_CONTEXTE_MAX
+        assert libelles[0].endswith("x… »"), "une coupe doit se voir"
+
+    def test_un_contexte_court_n_est_pas_marque_comme_coupe(self, lacunes):
+        libelles, _ = lacunes([{"topic": "sujet", "context": "échec bref", "date": ""}])
+        assert libelles[0].endswith("« échec bref »")
+
+    def test_une_lacune_sans_contexte_garde_son_libelle(self, lacunes):
+        libelles, _ = lacunes([{"topic": "sujet", "date": "2026-01-15T10:00:00+00:00"}])
+        assert libelles == ["sujet (signalée le 2026-01-15)"]
+
+    def test_le_prompt_de_reflexion_recoit_le_contexte(self, lacunes):
+        """Vérifie la sortie au bout de la chaîne, et pas le seul libellé intermédiaire : une
+        lacune bien construite mais aplatie au formatage ne servirait à rien."""
+        from self import context
+
+        libelles, _ = lacunes([
+            {"topic": "a", "context": "premier échec, avec une virgule", "date": ""},
+            {"topic": "b", "context": "second échec", "date": ""},
+        ])
+        rendu = context._fmt_gaps(libelles)
+        assert "- a — « premier échec, avec une virgule »" in rendu
+        assert "- b — « second échec »" in rendu

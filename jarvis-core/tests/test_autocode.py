@@ -1144,6 +1144,117 @@ class TestPurgeDesChantiers:
         assert (tmp_path / "humaine" / "rapport.md").is_file()
 
 
+class TestRotationDesDossiers:
+    """Le disque suit Redis : livraisons datées par leur nom, workspaces par leur tâche."""
+
+    @pytest.fixture
+    def disque(self, tmp_path, monkeypatch):
+        import os
+
+        from agent import store as agent_store
+        from autocode import chantier, store
+
+        livraisons = tmp_path / "autocode"
+        workspaces = tmp_path / "agent_workspace"
+        livraisons.mkdir()
+        workspaces.mkdir()
+        monkeypatch.setattr(chantier, "AUTOCODE_DIR", str(livraisons))
+        monkeypatch.setattr(chantier, "AGENT_WORKSPACE", str(workspaces))
+        monkeypatch.setattr(chantier, "AUTOCODE_RETENTION_DAYS", 30)
+        monkeypatch.setattr(chantier, "_git", _faux_git())
+
+        en_vol: dict = {}
+        taches: set[str] = set()
+        monkeypatch.setattr(store, "patch_en_attente", lambda: en_vol or None)
+        monkeypatch.setattr(
+            agent_store, "get_task", lambda tid: {"id": tid} if tid in taches else None
+        )
+
+        def livraison(age_jours: int, suffixe: str = "SIG-0") -> pathlib.Path:
+            jour = datetime.now() - timedelta(days=age_jours)
+            d = livraisons / f"{jour:%Y-%m-%d}-{suffixe}"
+            d.mkdir()
+            (d / "5-RAPPORT.md").write_text("x", encoding="utf-8")
+            return d
+
+        def workspace(task_id: str, age_jours: int) -> pathlib.Path:
+            d = workspaces / task_id
+            d.mkdir()
+            (d / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+            t = (datetime.now() - timedelta(days=age_jours)).timestamp()
+            os.utime(d, (t, t))
+            return d
+
+        return chantier, livraison, workspace, en_vol, taches
+
+    def _purger(self, chantier):
+        import asyncio
+        return asyncio.run(chantier.purger_anciens())
+
+    def test_une_livraison_ancienne_est_retiree_une_recente_gardee(self, disque):
+        chantier, livraison, _, _, _ = disque
+        vieille, recente = livraison(31), livraison(5)
+
+        assert self._purger(chantier)["livraisons"] == 1
+        assert not vieille.exists()
+        assert recente.is_dir()
+
+    def test_la_livraison_du_patch_en_attente_est_epargnee(self, disque):
+        """C'est celle que l'humain doit encore relire avant de trancher."""
+        chantier, livraison, _, en_vol, _ = disque
+        attente = livraison(45)
+        en_vol["dossier"] = str(attente)
+
+        assert self._purger(chantier)["livraisons"] == 0
+        assert attente.is_dir()
+
+    def test_un_nom_sans_date_n_est_pas_touche(self, disque, tmp_path):
+        chantier, *_ = disque
+        divers = tmp_path / "autocode" / "notes"
+        divers.mkdir()
+
+        self._purger(chantier)
+        assert divers.is_dir()
+
+    def test_un_workspace_de_tache_expiree_est_retire(self, disque):
+        chantier, _, workspace, _, _ = disque
+        expire = workspace("expire01", 40)
+
+        assert self._purger(chantier)["workspaces"] == 1
+        assert not expire.exists()
+
+    def test_un_workspace_de_tache_vivante_est_garde_meme_ancien(self, disque):
+        chantier, _, workspace, _, taches = disque
+        vivant = workspace("vivant01", 40)
+        taches.add("vivant01")
+
+        assert self._purger(chantier)["workspaces"] == 0
+        assert vivant.is_dir()
+
+    def test_un_workspace_recent_sans_tache_est_garde(self, disque):
+        """`create_task` crée le dossier avant l'enregistrement : une tâche qui naît n'a
+        pas encore d'entrée Redis."""
+        chantier, _, workspace, _, _ = disque
+        naissant = workspace("naissant01", 0)
+
+        assert self._purger(chantier)["workspaces"] == 0
+        assert naissant.is_dir()
+
+    def test_une_panne_redis_n_efface_rien(self, disque, monkeypatch):
+        from agent import store as agent_store
+
+        chantier, _, workspace, _, _ = disque
+        ancien = workspace("ancien01", 40)
+
+        def _panne(_tid):
+            raise ConnectionError("Connection refused")
+        monkeypatch.setattr(agent_store, "get_task", _panne)
+
+        with pytest.raises(ConnectionError):
+            self._purger(chantier)
+        assert ancien.is_dir()
+
+
 def _faux_git():
     """Doublure de `_git` : un vrai worktree demanderait un dépôt git par test.
 

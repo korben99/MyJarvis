@@ -223,6 +223,154 @@
       "version": "2.20.0"
     },
     {
+      "bom-ref": "aiohappyeyeballs==2.7.1",
+      "description": "Happy Eyeballs for asyncio",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Documentation",
+          "type": "documentation",
+          "url": "https://aiohappyeyeballs.readthedocs.io"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Bug Tracker",
+          "type": "issue-tracker",
+          "url": "https://github.com/aio-libs/aiohappyeyeballs/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Changelog",
+          "type": "release-notes",
+          "url": "https://github.com/aio-libs/aiohappyeyeballs/blob/main/CHANGELOG.md"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Repository",
+          "type": "vcs",
+          "url": "https://github.com/aio-libs/aiohappyeyeballs"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "PSF-2.0"
+          }
+        },
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "Python-2.0"
+          }
+        }
+      ],
+      "name": "aiohappyeyeballs",
+      "purl": "pkg:pypi/aiohappyeyeballs@2.7.1",
+      "type": "library",
+      "version": "2.7.1"
+    },
+    {
+      "bom-ref": "aiohttp==3.14.5",
+      "description": "Async http client/server framework (asyncio)",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Coverage: codecov",
+          "type": "other",
+          "url": "https://codecov.io/github/aio-libs/aiohttp"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Docs: RTD",
+          "type": "other",
+          "url": "https://docs.aiohttp.org"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Docs: Changelog",
+          "type": "other",
+          "url": "https://docs.aiohttp.org/en/stable/changes.html"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: GitHub: repo",
+          "type": "other",
+          "url": "https://github.com/aio-libs/aiohttp"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: CI: GitHub Actions",
+          "type": "other",
+          "url": "https://github.com/aio-libs/aiohttp/actions?query=workflow%3ACI"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: GitHub: issues",
+          "type": "other",
+          "url": "https://github.com/aio-libs/aiohttp/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Homepage",
+          "type": "website",
+          "url": "https://github.com/aio-libs/aiohttp"
+        }
+      ],
+      "licenses": [
+        {
+          "acknowledgement": "declared",
+          "expression": "Apache-2.0 AND MIT"
+        }
+      ],
+      "name": "aiohttp",
+      "purl": "pkg:pypi/aiohttp@3.14.5",
+      "type": "library",
+      "version": "3.14.5"
+    },
+    {
+      "bom-ref": "aiosignal==1.4.0",
+      "description": "aiosignal: a list of registered asynchronous callbacks",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Coverage: codecov",
+          "type": "other",
+          "url": "https://codecov.io/github/aio-libs/aiosignal"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Docs: RTD",
+          "type": "other",
+          "url": "https://docs.aiosignal.org"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: GitHub: repo",
+          "type": "other",
+          "url": "https://github.com/aio-libs/aiosignal"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: CI: GitHub Actions",
+          "type": "other",
+          "url": "https://github.com/aio-libs/aiosignal/actions"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: GitHub: issues",
+          "type": "other",
+          "url": "https://github.com/aio-libs/aiosignal/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Chat: Gitter",
+          "type": "other",
+          "url": "https://gitter.im/aio-libs/Lobby"
+        },
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/aio-libs/aiosignal"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "name": "License :: OSI Approved :: Apache Software License"
+          }
+        }
+      ],
+      "name": "aiosignal",
+      "purl": "pkg:pypi/aiosignal@1.4.0",
+      "type": "library",
+      "version": "1.4.0"
+    },
+    {
       "bom-ref": "annotated-doc==0.0.5",
       "description": "Document parameters, class attributes, return types, and variables inline, with Annotated.",
       "externalReferences": [
@@ -843,6 +991,34 @@
       "version": "11.12.0"
     },
     {
+      "bom-ref": "datasets==4.8.5",
+      "description": "HuggingFace community-driven open-source library of datasets",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata: Download-URL",
+          "type": "distribution",
+          "url": "https://github.com/huggingface/datasets/tags"
+        },
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/huggingface/datasets"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "name": "License :: OSI Approved :: Apache Software License"
+          }
+        }
+      ],
+      "name": "datasets",
+      "purl": "pkg:pypi/datasets@4.8.5",
+      "type": "library",
+      "version": "4.8.5"
+    },
+    {
       "bom-ref": "ddgs==9.14.1",
       "description": "Dux Distributed Global Search. A metasearch library that aggregates results from diverse web search services.",
       "externalReferences": [
@@ -907,6 +1083,55 @@
       "purl": "pkg:pypi/defusedxml@0.7.1",
       "type": "library",
       "version": "0.7.1"
+    },
+    {
+      "bom-ref": "dill==0.4.1",
+      "description": "serialize all of Python",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata: Download-URL",
+          "type": "distribution",
+          "url": "https://pypi.org/project/dill/#files"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Documentation",
+          "type": "documentation",
+          "url": "http://dill.rtfd.io"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Bug Tracker",
+          "type": "issue-tracker",
+          "url": "https://github.com/uqfoundation/dill/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Source Code",
+          "type": "other",
+          "url": "https://github.com/uqfoundation/dill"
+        },
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/uqfoundation/dill"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "BSD-3-Clause"
+          }
+        },
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "name": "License :: OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "dill",
+      "purl": "pkg:pypi/dill@0.4.1",
+      "type": "library",
+      "version": "0.4.1"
     },
     {
       "bom-ref": "fastapi==0.136.1",
@@ -1046,7 +1271,65 @@
       "version": "2.4.7"
     },
     {
-      "bom-ref": "fsspec==2026.7.0",
+      "bom-ref": "frozenlist==1.8.0",
+      "description": "A list-like structure which implements collections.abc.MutableSequence",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Coverage: codecov",
+          "type": "other",
+          "url": "https://codecov.io/github/aio-libs/frozenlist"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Docs: RTD",
+          "type": "other",
+          "url": "https://frozenlist.aio-libs.org"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Code of Conduct",
+          "type": "other",
+          "url": "https://github.com/aio-libs/.github/blob/master/CODE_OF_CONDUCT.md"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: GitHub: repo",
+          "type": "other",
+          "url": "https://github.com/aio-libs/frozenlist"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: CI: Github Actions",
+          "type": "other",
+          "url": "https://github.com/aio-libs/frozenlist/actions"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Docs: Changelog",
+          "type": "other",
+          "url": "https://github.com/aio-libs/frozenlist/blob/master/CHANGES.rst#changelog"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: GitHub: issues",
+          "type": "other",
+          "url": "https://github.com/aio-libs/frozenlist/issues"
+        },
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/aio-libs/frozenlist"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "frozenlist",
+      "purl": "pkg:pypi/frozenlist@1.8.0",
+      "type": "library",
+      "version": "1.8.0"
+    },
+    {
+      "bom-ref": "fsspec==2026.2.0",
       "description": "File-system specification",
       "externalReferences": [
         {
@@ -1074,9 +1357,15 @@
         }
       ],
       "name": "fsspec",
-      "purl": "pkg:pypi/fsspec@2026.7.0",
+      "properties": [
+        {
+          "name": "cdx:python:package:required-extra",
+          "value": "http"
+        }
+      ],
+      "purl": "pkg:pypi/fsspec@2026.2.0",
       "type": "library",
-      "version": "2026.7.0"
+      "version": "2026.2.0"
     },
     {
       "bom-ref": "google-api-core==2.34.0",
@@ -1368,6 +1657,26 @@
       "purl": "pkg:pypi/hf-xet@1.6.0",
       "type": "library",
       "version": "1.6.0"
+    },
+    {
+      "bom-ref": "hf_transfer==0.1.9",
+      "description": "Speed up file transfers with the Hugging Face Hub.",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Issues",
+          "type": "issue-tracker",
+          "url": "https://github.com/huggingface/hf_transfer/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Repository",
+          "type": "vcs",
+          "url": "https://github.com/huggingface/hf_transfer.git"
+        }
+      ],
+      "name": "hf_transfer",
+      "purl": "pkg:pypi/hf-transfer@0.1.9",
+      "type": "library",
+      "version": "0.1.9"
     },
     {
       "bom-ref": "hpack==4.2.0",
@@ -2042,7 +2351,7 @@
       "version": "1.71"
     },
     {
-      "bom-ref": "mlx==0.32.2",
+      "bom-ref": "mlx==0.32.4",
       "description": "A framework for machine learning on Apple silicon.",
       "externalReferences": [
         {
@@ -2074,9 +2383,9 @@
           "value": "cuda13"
         }
       ],
-      "purl": "pkg:pypi/mlx@0.32.2",
+      "purl": "pkg:pypi/mlx@0.32.4",
       "type": "library",
-      "version": "0.32.2"
+      "version": "0.32.4"
     },
     {
       "bom-ref": "mlx-audio==0.4.8",
@@ -2130,7 +2439,7 @@
       "version": "0.31.3"
     },
     {
-      "bom-ref": "mlx-metal==0.32.2",
+      "bom-ref": "mlx-metal==0.32.4",
       "description": "A framework for machine learning on Apple silicon.",
       "externalReferences": [
         {
@@ -2148,9 +2457,9 @@
         }
       ],
       "name": "mlx-metal",
-      "purl": "pkg:pypi/mlx-metal@0.32.2",
+      "purl": "pkg:pypi/mlx-metal@0.32.4",
       "type": "library",
-      "version": "0.32.2"
+      "version": "0.32.4"
     },
     {
       "bom-ref": "mlx-vlm==0.6.17",
@@ -2222,6 +2531,146 @@
       "purl": "pkg:pypi/mpmath@1.3.0",
       "type": "library",
       "version": "1.3.0"
+    },
+    {
+      "bom-ref": "msgspec==0.22.0",
+      "description": "A fast serialization and validation library, with builtin support for JSON, MessagePack, YAML, and TOML.",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Issue Tracker",
+          "type": "issue-tracker",
+          "url": "https://github.com/msgspec/msgspec/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Source",
+          "type": "other",
+          "url": "https://github.com/msgspec/msgspec"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Homepage",
+          "type": "website",
+          "url": "https://msgspec.dev"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "msgspec",
+      "purl": "pkg:pypi/msgspec@0.22.0",
+      "type": "library",
+      "version": "0.22.0"
+    },
+    {
+      "bom-ref": "multidict==7.2.1",
+      "description": "multidict implementation",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Coverage: codecov",
+          "type": "other",
+          "url": "https://codecov.io/github/aio-libs/multidict"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Code of Conduct",
+          "type": "other",
+          "url": "https://github.com/aio-libs/.github/blob/master/CODE_OF_CONDUCT.md"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: GitHub: repo",
+          "type": "other",
+          "url": "https://github.com/aio-libs/multidict"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: CI: GitHub",
+          "type": "other",
+          "url": "https://github.com/aio-libs/multidict/actions"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: GitHub: issues",
+          "type": "other",
+          "url": "https://github.com/aio-libs/multidict/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Docs: RTD",
+          "type": "other",
+          "url": "https://multidict.aio-libs.org"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Docs: Changelog",
+          "type": "other",
+          "url": "https://multidict.aio-libs.org/en/latest/changes/"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Homepage",
+          "type": "website",
+          "url": "https://github.com/aio-libs/multidict"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "multidict",
+      "purl": "pkg:pypi/multidict@7.2.1",
+      "type": "library",
+      "version": "7.2.1"
+    },
+    {
+      "bom-ref": "multiprocess==0.70.19",
+      "description": "better multiprocessing and multithreading in Python",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata: Download-URL",
+          "type": "distribution",
+          "url": "https://pypi.org/project/multiprocess/#files"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Documentation",
+          "type": "documentation",
+          "url": "http://multiprocess.rtfd.io"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Bug Tracker",
+          "type": "issue-tracker",
+          "url": "https://github.com/uqfoundation/multiprocess/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Source Code",
+          "type": "other",
+          "url": "https://github.com/uqfoundation/multiprocess"
+        },
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/uqfoundation/multiprocess"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "BSD-3-Clause"
+          }
+        },
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "name": "License :: OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "multiprocess",
+      "purl": "pkg:pypi/multiprocess@0.70.19",
+      "type": "library",
+      "version": "0.70.19"
     },
     {
       "bom-ref": "multitasking==0.0.13",
@@ -2754,6 +3203,64 @@
       "version": "1.3.1"
     },
     {
+      "bom-ref": "propcache==0.5.4",
+      "description": "Accelerated property cache",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Coverage: codecov",
+          "type": "other",
+          "url": "https://codecov.io/github/aio-libs/propcache"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Code of Conduct",
+          "type": "other",
+          "url": "https://github.com/aio-libs/.github/blob/master/CODE_OF_CONDUCT.md"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: GitHub: repo",
+          "type": "other",
+          "url": "https://github.com/aio-libs/propcache"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: CI: GitHub Workflows",
+          "type": "other",
+          "url": "https://github.com/aio-libs/propcache/actions?query=branch:master"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: GitHub: issues",
+          "type": "other",
+          "url": "https://github.com/aio-libs/propcache/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Docs: RTD",
+          "type": "other",
+          "url": "https://propcache.readthedocs.io"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Docs: Changelog",
+          "type": "other",
+          "url": "https://propcache.readthedocs.io/en/latest/changes/"
+        },
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/aio-libs/propcache"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "propcache",
+      "purl": "pkg:pypi/propcache@0.5.4",
+      "type": "library",
+      "version": "0.5.4"
+    },
+    {
       "bom-ref": "proto-plus==1.28.3",
       "description": "Beautiful, Pythonic protocol buffers",
       "externalReferences": [
@@ -2801,6 +3308,29 @@
       "version": "7.35.1"
     },
     {
+      "bom-ref": "psutil==7.2.2",
+      "description": "Cross-platform lib for process and system monitoring.",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/giampaolo/psutil"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "psutil",
+      "purl": "pkg:pypi/psutil@7.2.2",
+      "type": "library",
+      "version": "7.2.2"
+    },
+    {
       "bom-ref": "py-serializable==2.1.0",
       "description": "Library for serializing and deserializing Python Objects to and from JSON and XML.",
       "externalReferences": [
@@ -2843,6 +3373,44 @@
       "purl": "pkg:pypi/py-serializable@2.1.0",
       "type": "library",
       "version": "2.1.0"
+    },
+    {
+      "bom-ref": "pyarrow==26.0.1",
+      "description": "Python library for Apache Arrow",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Documentation",
+          "type": "documentation",
+          "url": "https://arrow.apache.org/docs/python"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Issues",
+          "type": "issue-tracker",
+          "url": "https://github.com/apache/arrow/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Repository",
+          "type": "vcs",
+          "url": "https://github.com/apache/arrow"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Homepage",
+          "type": "website",
+          "url": "https://arrow.apache.org/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "pyarrow",
+      "purl": "pkg:pypi/pyarrow@26.0.1",
+      "type": "library",
+      "version": "26.0.1"
     },
     {
       "bom-ref": "pyasn1==0.6.4",
@@ -4460,6 +5028,39 @@
       "version": "5.4.4"
     },
     {
+      "bom-ref": "unsloth_zoo==2026.11.8",
+      "description": "Utils for Unsloth",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: documentation",
+          "type": "documentation",
+          "url": "https://github.com/unslothai/unsloth"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: repository",
+          "type": "vcs",
+          "url": "https://github.com/unslothai/unsloth"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: homepage",
+          "type": "website",
+          "url": "http://www.unsloth.ai"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "LGPL-3.0-or-later"
+          }
+        }
+      ],
+      "name": "unsloth_zoo",
+      "purl": "pkg:pypi/unsloth-zoo@2026.11.8",
+      "type": "library",
+      "version": "2026.11.8"
+    },
+    {
       "bom-ref": "uri-template==1.3.0",
       "description": "RFC 6570 URI Template Processor",
       "externalReferences": [
@@ -4739,6 +5340,125 @@
       "version": "17.0.1"
     },
     {
+      "bom-ref": "wheel==0.48.0",
+      "description": "Command line tool for manipulating wheel files",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Documentation",
+          "type": "documentation",
+          "url": "https://wheel.readthedocs.io/"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Issue Tracker",
+          "type": "issue-tracker",
+          "url": "https://github.com/pypa/wheel/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Source",
+          "type": "other",
+          "url": "https://github.com/pypa/wheel"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Changelog",
+          "type": "release-notes",
+          "url": "https://wheel.readthedocs.io/en/stable/news.html"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "wheel",
+      "purl": "pkg:pypi/wheel@0.48.0",
+      "type": "library",
+      "version": "0.48.0"
+    },
+    {
+      "bom-ref": "xxhash==4.1.0",
+      "description": "Python binding for xxHash",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/ifduyue/python-xxhash"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "name": "xxhash",
+      "purl": "pkg:pypi/xxhash@4.1.0",
+      "type": "library",
+      "version": "4.1.0"
+    },
+    {
+      "bom-ref": "yarl==1.25.1",
+      "description": "Yet another URL library",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Coverage: codecov",
+          "type": "other",
+          "url": "https://codecov.io/github/aio-libs/yarl"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Code of Conduct",
+          "type": "other",
+          "url": "https://github.com/aio-libs/.github/blob/master/CODE_OF_CONDUCT.md"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: GitHub: repo",
+          "type": "other",
+          "url": "https://github.com/aio-libs/yarl"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: CI: GitHub Workflows",
+          "type": "other",
+          "url": "https://github.com/aio-libs/yarl/actions?query=branch:master"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: GitHub: issues",
+          "type": "other",
+          "url": "https://github.com/aio-libs/yarl/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Docs: RTD",
+          "type": "other",
+          "url": "https://yarl.aio-libs.org"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Docs: Changelog",
+          "type": "other",
+          "url": "https://yarl.aio-libs.org/en/latest/changes/"
+        },
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/aio-libs/yarl"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "yarl",
+      "purl": "pkg:pypi/yarl@1.25.1",
+      "type": "library",
+      "version": "1.25.1"
+    },
+    {
       "bom-ref": "yfinance==1.3.0",
       "description": "Download market data from Yahoo! Finance API",
       "externalReferences": [
@@ -4789,6 +5509,29 @@
     },
     {
       "ref": "Pygments==2.20.0"
+    },
+    {
+      "ref": "aiohappyeyeballs==2.7.1"
+    },
+    {
+      "dependsOn": [
+        "aiohappyeyeballs==2.7.1",
+        "aiosignal==1.4.0",
+        "attrs==26.1.0",
+        "frozenlist==1.8.0",
+        "multidict==7.2.1",
+        "propcache==0.5.4",
+        "typing_extensions==4.16.0",
+        "yarl==1.25.1"
+      ],
+      "ref": "aiohttp==3.14.5"
+    },
+    {
+      "dependsOn": [
+        "frozenlist==1.8.0",
+        "typing_extensions==4.16.0"
+      ],
+      "ref": "aiosignal==1.4.0"
     },
     {
       "ref": "annotated-doc==0.0.5"
@@ -4869,7 +5612,8 @@
         "rich==15.0.0",
         "typing_extensions==4.16.0",
         "uvicorn==0.46.0",
-        "websockets==17.0.1"
+        "websockets==17.0.1",
+        "wheel==0.48.0"
       ],
       "ref": "curl_cffi==0.16.0"
     },
@@ -4898,6 +5642,32 @@
     },
     {
       "dependsOn": [
+        "PyYAML==6.0.3",
+        "aiohttp==3.14.5",
+        "dill==0.4.1",
+        "filelock==3.32.3",
+        "fsspec==2026.2.0",
+        "httpx==0.28.1",
+        "huggingface_hub==1.27.0",
+        "joblib==1.5.3",
+        "multiprocess==0.70.19",
+        "numpy==2.4.4",
+        "packaging==26.3",
+        "pandas==3.0.5",
+        "pillow==13.0.0",
+        "protobuf==7.35.1",
+        "pyarrow==26.0.1",
+        "pytest==9.1.1",
+        "requests==2.34.2",
+        "torch==2.13.0",
+        "tqdm==4.70.0",
+        "transformers==5.15.0",
+        "xxhash==4.1.0"
+      ],
+      "ref": "datasets==4.8.5"
+    },
+    {
+      "dependsOn": [
         "click==8.4.2",
         "fastapi==0.136.1",
         "lxml==6.1.1",
@@ -4909,6 +5679,9 @@
     },
     {
       "ref": "defusedxml==0.7.1"
+    },
+    {
+      "ref": "dill==0.4.1"
     },
     {
       "dependsOn": [
@@ -4935,20 +5708,27 @@
       "ref": "frozendict==2.4.7"
     },
     {
+      "ref": "frozenlist==1.8.0"
+    },
+    {
       "dependsOn": [
         "Jinja2==3.1.6",
+        "aiohttp==3.14.5",
         "numpy==2.4.4",
         "pandas==3.0.5",
+        "pyarrow==26.0.1",
         "pytest-asyncio==1.4.0",
         "pytest==9.1.1",
         "requests==2.34.2",
         "tqdm==4.70.0",
-        "urllib3==2.7.0"
+        "urllib3==2.7.0",
+        "yarl==1.25.1"
       ],
-      "ref": "fsspec==2026.7.0"
+      "ref": "fsspec==2026.2.0"
     },
     {
       "dependsOn": [
+        "aiohttp==3.14.5",
         "google-auth==2.49.2",
         "googleapis-common-protos==1.75.1",
         "grpcio==1.83.0",
@@ -4985,6 +5765,7 @@
     },
     {
       "dependsOn": [
+        "aiohttp==3.14.5",
         "cryptography==50.0.0",
         "grpcio==1.83.0",
         "packaging==26.3",
@@ -5024,6 +5805,9 @@
         "pytest==9.1.1"
       ],
       "ref": "hf-xet==1.6.0"
+    },
+    {
+      "ref": "hf_transfer==0.1.9"
     },
     {
       "ref": "hpack==4.2.0"
@@ -5066,7 +5850,7 @@
         "click==8.4.2",
         "fastapi==0.136.1",
         "filelock==3.32.3",
-        "fsspec==2026.7.0",
+        "fsspec==2026.2.0",
         "hf-xet==1.6.0",
         "httpx==0.28.1",
         "numpy==2.4.4",
@@ -5157,6 +5941,7 @@
       "dependsOn": [
         "PyYAML==6.0.3",
         "mdurl==0.1.2",
+        "psutil==7.2.2",
         "pytest==9.1.1",
         "requests==2.34.2"
       ],
@@ -5177,7 +5962,7 @@
         "huggingface_hub==1.27.0",
         "miniaudio==1.71",
         "mlx-lm==0.31.3",
-        "mlx==0.32.2",
+        "mlx==0.32.4",
         "numpy==2.4.4",
         "pytest-asyncio==1.4.0",
         "pytest==9.1.1",
@@ -5196,7 +5981,8 @@
       "dependsOn": [
         "Jinja2==3.1.6",
         "PyYAML==6.0.3",
-        "mlx==0.32.2",
+        "datasets==4.8.5",
+        "mlx==0.32.4",
         "numpy==2.4.4",
         "protobuf==7.35.1",
         "sentencepiece==0.2.2",
@@ -5206,15 +5992,16 @@
       "ref": "mlx-lm==0.31.3"
     },
     {
-      "ref": "mlx-metal==0.32.2"
+      "ref": "mlx-metal==0.32.4"
     },
     {
       "dependsOn": [
+        "datasets==4.8.5",
         "fastapi==0.136.1",
         "llguidance==1.8.0",
         "miniaudio==1.71",
         "mlx-audio==0.4.8",
-        "mlx==0.32.2",
+        "mlx==0.32.4",
         "numpy==2.4.4",
         "opencv-python==5.0.0.93",
         "pillow==13.0.0",
@@ -5232,18 +6019,34 @@
     },
     {
       "dependsOn": [
-        "mlx-metal==0.32.2",
+        "mlx-metal==0.32.4",
         "numpy==2.4.4",
         "torch==2.13.0",
         "typing_extensions==4.16.0"
       ],
-      "ref": "mlx==0.32.2"
+      "ref": "mlx==0.32.4"
     },
     {
       "dependsOn": [
-        "pytest==9.1.1"
+        "pytest==9.1.1",
+        "wheel==0.48.0"
       ],
       "ref": "mpmath==1.3.0"
+    },
+    {
+      "dependsOn": [
+        "PyYAML==6.0.3"
+      ],
+      "ref": "msgspec==0.22.0"
+    },
+    {
+      "ref": "multidict==7.2.1"
+    },
+    {
+      "dependsOn": [
+        "dill==0.4.1"
+      ],
+      "ref": "multiprocess==0.70.19"
     },
     {
       "ref": "multitasking==0.0.13"
@@ -5251,7 +6054,8 @@
     {
       "dependsOn": [
         "packaging==26.3",
-        "pandas==3.0.5"
+        "pandas==3.0.5",
+        "pyarrow==26.0.1"
       ],
       "ref": "narwhals==2.24.0"
     },
@@ -5264,7 +6068,8 @@
         "pytest==9.1.1",
         "scikit-learn==1.9.0",
         "scipy==1.18.0",
-        "sympy==1.14.0"
+        "sympy==1.14.0",
+        "wheel==0.48.0"
       ],
       "ref": "networkx==3.6.1"
     },
@@ -5286,7 +6091,8 @@
     {
       "dependsOn": [
         "pytest==9.1.1",
-        "setuptools==84.0.0"
+        "setuptools==84.0.0",
+        "wheel==0.48.0"
       ],
       "ref": "packageurl-python==0.17.6"
     },
@@ -5297,9 +6103,10 @@
       "dependsOn": [
         "Jinja2==3.1.6",
         "beautifulsoup4==4.15.0",
-        "fsspec==2026.7.0",
+        "fsspec==2026.2.0",
         "lxml==6.1.1",
         "numpy==2.4.4",
+        "pyarrow==26.0.1",
         "pytest==9.1.1",
         "python-dateutil==2.9.0.post0",
         "pytz==2026.1.post1",
@@ -5315,6 +6122,8 @@
       "dependsOn": [
         "defusedxml==0.7.1",
         "packaging==26.3",
+        "psutil==7.2.2",
+        "pyarrow==26.0.1",
         "pytest==9.1.1",
         "setuptools==84.0.0"
       ],
@@ -5357,6 +6166,9 @@
       "ref": "primp==1.3.1"
     },
     {
+      "ref": "propcache==0.5.4"
+    },
+    {
       "dependsOn": [
         "google-api-core==2.34.0",
         "protobuf==7.35.1"
@@ -5368,9 +6180,22 @@
     },
     {
       "dependsOn": [
+        "packaging==26.3",
+        "pytest==9.1.1",
+        "requests==2.34.2",
+        "setuptools==84.0.0",
+        "wheel==0.48.0"
+      ],
+      "ref": "psutil==7.2.2"
+    },
+    {
+      "dependsOn": [
         "defusedxml==0.7.1"
       ],
       "ref": "py-serializable==2.1.0"
+    },
+    {
+      "ref": "pyarrow==26.0.1"
     },
     {
       "ref": "pyasn1==0.6.4"
@@ -5461,7 +6286,8 @@
     {
       "dependsOn": [
         "cryptography==50.0.0",
-        "requests==2.34.2"
+        "requests==2.34.2",
+        "xxhash==4.1.0"
       ],
       "ref": "redis==7.4.0"
     },
@@ -5521,9 +6347,9 @@
     },
     {
       "dependsOn": [
-        "fsspec==2026.7.0",
+        "fsspec==2026.2.0",
         "huggingface_hub==1.27.0",
-        "mlx==0.32.2",
+        "mlx==0.32.4",
         "numpy==2.4.4",
         "pytest==9.1.1",
         "torch==2.13.0"
@@ -5537,6 +6363,7 @@
         "numpy==2.4.4",
         "pandas==3.0.5",
         "pillow==13.0.0",
+        "pyarrow==26.0.1",
         "pytest==9.1.1",
         "rich==15.0.0",
         "scipy==1.18.0",
@@ -5557,6 +6384,7 @@
     },
     {
       "dependsOn": [
+        "datasets==4.8.5",
         "huggingface_hub==1.27.0",
         "numpy==2.4.4",
         "pytest==9.1.1",
@@ -5583,7 +6411,8 @@
         "filelock==3.32.3",
         "packaging==26.3",
         "pip==26.2.2",
-        "pytest==9.1.1"
+        "pytest==9.1.1",
+        "wheel==0.48.0"
       ],
       "ref": "setuptools==84.0.0"
     },
@@ -5629,6 +6458,7 @@
     },
     {
       "dependsOn": [
+        "datasets==4.8.5",
         "huggingface_hub==1.27.0",
         "numpy==2.4.4",
         "pytest-asyncio==1.4.0",
@@ -5642,7 +6472,7 @@
         "Jinja2==3.1.6",
         "PyYAML==6.0.3",
         "filelock==3.32.3",
-        "fsspec==2026.7.0",
+        "fsspec==2026.2.0",
         "networkx==3.6.1",
         "setuptools==84.0.0",
         "sympy==1.14.0",
@@ -5670,6 +6500,8 @@
         "Jinja2==3.1.6",
         "PyYAML==6.0.3",
         "beautifulsoup4==4.15.0",
+        "datasets==4.8.5",
+        "dill==0.4.1",
         "fastapi==0.136.1",
         "filelock==3.32.3",
         "huggingface_hub==1.27.0",
@@ -5677,6 +6509,7 @@
         "packaging==26.3",
         "pillow==13.0.0",
         "protobuf==7.35.1",
+        "psutil==7.2.2",
         "pydantic==2.13.3",
         "pytest-asyncio==1.4.0",
         "pytest==9.1.1",
@@ -5724,6 +6557,33 @@
       "ref": "tzlocal==5.4.4"
     },
     {
+      "dependsOn": [
+        "certifi==2026.10.19",
+        "datasets==4.8.5",
+        "filelock==3.32.3",
+        "hf_transfer==0.1.9",
+        "huggingface_hub==1.27.0",
+        "mlx-lm==0.31.3",
+        "mlx-vlm==0.6.17",
+        "mlx==0.32.4",
+        "msgspec==0.22.0",
+        "numpy==2.4.4",
+        "packaging==26.3",
+        "pillow==13.0.0",
+        "protobuf==7.35.1",
+        "psutil==7.2.2",
+        "regex==2026.7.19",
+        "requests==2.34.2",
+        "sentencepiece==0.2.2",
+        "torch==2.13.0",
+        "tqdm==4.70.0",
+        "transformers==5.15.0",
+        "typing_extensions==4.16.0",
+        "wheel==0.48.0"
+      ],
+      "ref": "unsloth_zoo==2026.11.8"
+    },
+    {
       "ref": "uri-template==1.3.0"
     },
     {
@@ -5751,6 +6611,8 @@
     },
     {
       "dependsOn": [
+        "aiohttp==3.14.5",
+        "psutil==7.2.2",
         "setuptools==84.0.0"
       ],
       "ref": "uvloop==0.22.1"
@@ -5766,6 +6628,23 @@
     },
     {
       "ref": "websockets==17.0.1"
+    },
+    {
+      "dependsOn": [
+        "packaging==26.3"
+      ],
+      "ref": "wheel==0.48.0"
+    },
+    {
+      "ref": "xxhash==4.1.0"
+    },
+    {
+      "dependsOn": [
+        "idna==3.18",
+        "multidict==7.2.1",
+        "propcache==0.5.4"
+      ],
+      "ref": "yarl==1.25.1"
     },
     {
       "dependsOn": [
